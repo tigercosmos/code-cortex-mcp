@@ -1,10 +1,9 @@
 /*
  * compat_regex.h — Portable regular expression API.
  *
- * POSIX: direct wrappers around <regex.h> (regcomp, regexec, regfree).
- * Windows: TODO — vendor TRE regex or use a C++ wrapper around <regex>.
- *
- * Uses our own types so callers never include <regex.h> directly.
+ * Backed by std::regex on all platforms (see compat_regex.cpp). Patterns are
+ * POSIX Extended Regular Expressions. Uses our own types so callers never
+ * include <regex> / <regex.h> directly.
  */
 #ifndef CBM_COMPAT_REGEX_H
 #define CBM_COMPAT_REGEX_H

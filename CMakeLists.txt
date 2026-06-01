@@ -203,12 +203,6 @@ cbm_add_vendored_library(cbm_zstd
     SOURCES ${CBM_INTERNAL}/vendored/zstd/zstd.c
     INCLUDES ${CBM_INTERNAL}/vendored/zstd)
 
-if(WIN32)
-    cbm_add_vendored_library(cbm_tre
-        SOURCES ${CMAKE_SOURCE_DIR}/vendored/tre/tre_all.c
-        INCLUDES ${CMAKE_SOURCE_DIR}/vendored/tre)
-endif()
-
 # Tree-sitter runtime + per-grammar shims. Grammars share static symbol
 # names (each grammar's parser.c declares `static const TSLanguage`),
 # so they cannot be unity-built — each shim is one TU.
@@ -279,10 +273,6 @@ set(CBM_VENDORED_TARGETS
     cbm_lz4 cbm_zstd
     cbm_ts_runtime cbm_grammars cbm_lsp_all
     cbm_preprocessor cbm_unixcoder)
-if(WIN32)
-    list(APPEND CBM_VENDORED_TARGETS cbm_tre)
-endif()
-
 # ────────────────────────────────────────────────────────────────
 # First-party libraries
 # ────────────────────────────────────────────────────────────────
