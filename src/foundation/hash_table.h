@@ -1,11 +1,11 @@
 /*
  * hash_table.h — String → void* hash table.
  *
- * Public API unchanged across implementation rewrites. As of v2 the
- * internals are Verstable (https://github.com/JacksonAllan/Verstable),
- * a 2024 state-of-the-art open-addressing hash table with quadratic
- * probing + per-bucket 4-bit hash fragments. The struct is opaque —
- * callers MUST go through cbm_ht_create() and the API functions.
+ * Public API unchanged across implementation rewrites. The internals are
+ * std::unordered_map<const char*, void*> with content-based hashing (the
+ * prior implementation vendored the Verstable open-addressing table). The
+ * struct is opaque — callers MUST go through cbm_ht_create() and the API
+ * functions.
  *
  * Keys are borrowed pointers — the table does not copy or free them.
  * Callers own the key strings for the lifetime of the entry.

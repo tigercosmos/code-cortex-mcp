@@ -288,11 +288,8 @@ endif()
 # ────────────────────────────────────────────────────────────────
 
 # ── Foundation: all 16 TUs C++23 ───────────────────────────────
-# hash_table.cpp instantiates verstable.h (a macro-heavy C99 header with
-# 26 _Generic sites), but the generic dispatch macros are never expanded
-# here — hash_table uses the NAME-prefixed cbm_vt_* functions directly and
-# defines its own HASH_FN/CMPR_FN, so the instantiation compiles cleanly as
-# C++23 with no perf change (verstable retained).
+# hash_table.cpp is backed by std::unordered_map (the vendored Verstable
+# header it previously instantiated has been removed — see hash_table.cpp).
 set(CBM_FOUNDATION_CXX_SRCS
     src/foundation/arena.cpp
     src/foundation/str_intern.cpp
