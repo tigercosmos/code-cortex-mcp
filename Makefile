@@ -1,0 +1,60 @@
+# Makefile — convenience wrapper over the CMake build (scripts/build.sh).
+#
+# The canonical build system is CMake (see CMakeLists.txt / scripts/build.sh).
+# This thin Makefile exists so `make` and `make install` work from a clean
+# checkout. `make install` puts the binary on the system PATH AND deploys the
+# embedded skill (plus agent MCP config) via the binary's own `install`
+# subcommand.
+#
+#   make                          # build build/c/codebase-memory-mcp
+#   make install                  # install binary -> $(BINDIR) and the skill
+#   make install PREFIX=$$HOME/.local
+#   sudo make install             # system-wide binary (see skill note below)
+#   make uninstall
+#   make clean
+#
+# The skill is per-user: it is written under $CLAUDE_CONFIG_DIR (or ~/.claude)
+# of the user who runs `make install`. Run as your normal user so the skill
+# lands in your home, not root's. With DESTDIR set (staged/packaging installs)
+# only the binary is staged; the skill step is skipped — run
+# `$(BINDIR)/codebase-memory-mcp install` yourself after the package is live.
+
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+DESTDIR ?=
+BIN       := build/c/codebase-memory-mcp
+INSTALLED := $(DESTDIR)$(BINDIR)/codebase-memory-mcp
+
+.PHONY: all build install uninstall clean test
+
+all: build
+
+build:
+	scripts/build.sh
+
+$(BIN):
+	scripts/build.sh
+
+# Install the binary onto the system PATH, then deploy the embedded skill +
+# agent configuration through the binary's own installer.
+install: $(BIN)
+	mkdir -p "$(DESTDIR)$(BINDIR)"
+	install -m 0755 "$(BIN)" "$(INSTALLED)"
+	@echo "==> Installed binary: $(INSTALLED)"
+	@if [ -z "$(DESTDIR)" ]; then \
+		echo "==> Installing skill + agent config: $(INSTALLED) install"; \
+		"$(INSTALLED)" install -y; \
+	else \
+		echo "==> DESTDIR set; staged binary only. Run '$(BINDIR)/codebase-memory-mcp install' after staging to deploy the skill."; \
+	fi
+
+uninstall:
+	-"$(INSTALLED)" uninstall -y
+	rm -f "$(INSTALLED)"
+	@echo "==> Removed $(INSTALLED)"
+
+clean:
+	rm -rf build
+
+test:
+	scripts/test.sh

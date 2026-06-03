@@ -45,8 +45,17 @@ scripts/build.sh --with-ui       # with 3D graph visualization UI
 ./build/c/codebase-memory-mcp install   # configure your installed agents
 ```
 
-`install` auto-detects your coding agents and wires up MCP server entries, instruction files,
-and hooks. Then restart your agent and say **“Index this project.”**
+Or build, place the binary on your `PATH`, and install the skill in one step:
+
+```bash
+make install                     # binary → /usr/local/bin + skill/agent config
+make install PREFIX=$HOME/.local # no sudo; binary → ~/.local/bin
+```
+
+`make install` builds the binary, installs it under `$(PREFIX)/bin`, then runs the binary's own
+`install` to deploy the embedded skill for the current user (run it as yourself, not `sudo`, so the
+skill lands in your `~/.claude`). `install` auto-detects your coding agents and wires up MCP server
+entries, instruction files, and hooks. Then restart your agent and say **“Index this project.”**
 
 Run the test suite with `scripts/test.sh` (CMake + ASan/UBSan) and the linters with
 `scripts/lint.sh`.
