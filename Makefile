@@ -13,10 +13,12 @@
 #   make uninstall
 #   make clean
 #
-# The skill is per-user: it is written under $CLAUDE_CONFIG_DIR (or ~/.claude)
-# of the user who runs `make install`. Run as your normal user so the skill
-# lands in your home, not root's. With DESTDIR set (staged/packaging installs)
-# only the binary is staged; the skill step is skipped — run
+# The skill is per-user (written under $CLAUDE_CONFIG_DIR, or ~/.claude). When
+# run under sudo, the skill step is executed as $SUDO_USER so it lands in your
+# home, not root's. A bare `make install` to /usr/local needs write access —
+# use `sudo make install` for a system prefix, or `make install PREFIX=$$HOME/.local`
+# to avoid sudo entirely. With DESTDIR set (staged/packaging installs) only the
+# binary is staged; the skill step is skipped — run
 # `$(BINDIR)/codebase-memory-mcp install` yourself after the package is live.
 
 PREFIX  ?= /usr/local
@@ -41,11 +43,14 @@ install: $(BIN)
 	mkdir -p "$(DESTDIR)$(BINDIR)"
 	install -m 0755 "$(BIN)" "$(INSTALLED)"
 	@echo "==> Installed binary: $(INSTALLED)"
-	@if [ -z "$(DESTDIR)" ]; then \
+	@if [ -n "$(DESTDIR)" ]; then \
+		echo "==> DESTDIR set; staged binary only. Run '$(BINDIR)/codebase-memory-mcp install' after staging to deploy the skill."; \
+	elif [ -n "$$SUDO_USER" ]; then \
+		echo "==> Installing skill + agent config as $$SUDO_USER (not root): $(INSTALLED) install"; \
+		sudo -u "$$SUDO_USER" "$(INSTALLED)" install -y; \
+	else \
 		echo "==> Installing skill + agent config: $(INSTALLED) install"; \
 		"$(INSTALLED)" install -y; \
-	else \
-		echo "==> DESTDIR set; staged binary only. Run '$(BINDIR)/codebase-memory-mcp install' after staging to deploy the skill."; \
 	fi
 
 uninstall:
