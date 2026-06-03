@@ -107,6 +107,15 @@ typedef struct {
     int64_t max_file_size;   /* 0 = no limit */
 } cbm_discover_opts_t;
 
+/* Default cap (bytes) for source files handed to the parser; files larger than
+ * this are skipped during discovery (0 = unlimited). A multi-MB "source" file is
+ * almost always generated, minified, or data masquerading under a code extension
+ * (e.g. MPEG-TS `.ts` video segments, bundled JS), and the tree-sitter usage walk
+ * degrades pathologically on such giant ASTs — a single one can wedge indexing
+ * for many minutes. ~2 MiB covers hand-written and most generated source.
+ * Override per run with the CBM_MAX_FILE_SIZE env var. */
+#define CBM_DEFAULT_MAX_FILE_SIZE (2 * 1024 * 1024)
+
 /* Walk a repository directory tree and discover all source files.
  * Applies hardcoded filters, gitignore patterns, and language detection.
  * Returns 0 on success, -1 on error.

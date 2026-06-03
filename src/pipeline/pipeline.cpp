@@ -929,10 +929,25 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
 
     /* Phase 1: Discover files */
     CBM_PROF_START(t_discover);
+    /* Cap the size of files handed to the parser (see CBM_DEFAULT_MAX_FILE_SIZE):
+     * giant data/generated files under a code extension otherwise wedge the
+     * tree-sitter usage walk for minutes. CBM_MAX_FILE_SIZE (bytes, 0=unlimited)
+     * overrides the default. */
+    int64_t max_file_size = CBM_DEFAULT_MAX_FILE_SIZE;
+    char fsz_env[CBM_SZ_32];
+    if (cbm_safe_getenv("CBM_MAX_FILE_SIZE", fsz_env, sizeof(fsz_env), NULL) != NULL) {
+        char *fsz_end = NULL;
+        long long fsz_n = strtoll(fsz_env, &fsz_end, CBM_DECIMAL_BASE);
+        if (fsz_end != fsz_env && fsz_n >= 0) {
+            max_file_size = (int64_t)fsz_n;
+        } else {
+            cbm_log_warn("discover.maxfilesize.env.invalid", "value", fsz_env);
+        }
+    }
     cbm_discover_opts_t opts = {
         .mode = p->mode,
         .ignore_file = NULL,
-        .max_file_size = 0,
+        .max_file_size = max_file_size,
     };
     cbm_file_info_t *files = NULL;
     int file_count = 0;

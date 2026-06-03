@@ -13,6 +13,7 @@
 
 #include "foundation/constants.h"
 #include "foundation/compat_fs.h"
+#include "foundation/log.h"
 #ifdef _WIN32
 #include "foundation/win_utf8.h"
 #endif
@@ -296,6 +297,9 @@ static bool should_skip_file(const char *entry_name, const char *rel_path,
         return true;
     }
     if (opts && opts->max_file_size > 0 && file_size > opts->max_file_size) {
+        char szbuf[CBM_SZ_32];
+        snprintf(szbuf, sizeof(szbuf), "%lld", (long long)file_size);
+        cbm_log_debug("discover.skip.large", "path", rel_path, "bytes", szbuf);
         return true;
     }
     return false;
