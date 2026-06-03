@@ -811,6 +811,225 @@ TEST(louvain_converges) {
     PASS();
 }
 
+/* ── Leiden multi-level / refinement tests ──────────────────────── */
+
+/* Count distinct community labels in a result. */
+static int leiden_count_communities(const cbm_louvain_result_t *r, int n) {
+    int *seen = malloc((size_t)n * sizeof(int));
+    int nd = 0;
+    for (int i = 0; i < n; i++) {
+        bool found = false;
+        for (int j = 0; j < nd; j++) {
+            if (seen[j] == r[i].community) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            seen[nd++] = r[i].community;
+        }
+    }
+    free(seen);
+    return nd;
+}
+
+/* Verify every community induces a connected subgraph under `edges` — the
+ * property Leiden's refinement guarantees and single-level Louvain does not. */
+static bool leiden_all_communities_connected(const cbm_louvain_result_t *r, int n,
+                                             const cbm_louvain_edge_t *edges, int ne) {
+    bool *vis = calloc((size_t)n, sizeof(bool));
+    int *stack = malloc((size_t)n * sizeof(int));
+    bool ok = true;
+    for (int s = 0; s < n && ok; s++) {
+        int comm = r[s].community;
+        bool seeded = false; /* community already verified from an earlier seed? */
+        for (int t = 0; t < s; t++) {
+            if (r[t].community == comm) {
+                seeded = true;
+                break;
+            }
+        }
+        if (seeded) {
+            continue;
+        }
+        for (int i = 0; i < n; i++) {
+            vis[i] = false;
+        }
+        int sp = 0;
+        stack[sp++] = s;
+        vis[s] = true;
+        while (sp > 0) {
+            int cur = stack[--sp];
+            int64_t cid = r[cur].node_id;
+            for (int e = 0; e < ne; e++) {
+                int64_t o = 0;
+                bool inc = false;
+                if (edges[e].src == cid) {
+                    o = edges[e].dst;
+                    inc = true;
+                } else if (edges[e].dst == cid) {
+                    o = edges[e].src;
+                    inc = true;
+                }
+                if (!inc) {
+                    continue;
+                }
+                for (int j = 0; j < n; j++) {
+                    if (r[j].node_id == o) {
+                        if (!vis[j] && r[j].community == comm) {
+                            vis[j] = true;
+                            stack[sp++] = j;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        for (int j = 0; j < n; j++) {
+            if (r[j].community == comm && !vis[j]) {
+                ok = false; /* a member was unreachable → disconnected community */
+                break;
+            }
+        }
+    }
+    free(vis);
+    free(stack);
+    return ok;
+}
+
+TEST(leiden_multilevel_collapses_noise) {
+    /* Four 8-node cliques chained by single bridge edges. Single-level Louvain
+     * tends to leave many small clusters; multi-level Leiden collapses this to
+     * roughly four well-separated, internally-connected communities. */
+    enum { CL = 4, SZ = 8, N = CL * SZ };
+    int64_t nodes[N];
+    for (int i = 0; i < N; i++) {
+        nodes[i] = i + 1;
+    }
+    cbm_louvain_edge_t edges[CL * (SZ * (SZ - 1) / 2) + CL];
+    int ne = 0;
+    for (int c = 0; c < CL; c++) {
+        int base = c * SZ + 1;
+        for (int i = 0; i < SZ; i++) {
+            for (int j = i + 1; j < SZ; j++) {
+                edges[ne++] = (cbm_louvain_edge_t){base + i, base + j};
+            }
+        }
+    }
+    for (int c = 0; c + 1 < CL; c++) {
+        edges[ne++] = (cbm_louvain_edge_t){c * SZ + 1, (c + 1) * SZ + 1};
+    }
+
+    cbm_louvain_result_t *result = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_louvain(nodes, N, edges, ne, &result, &count), CBM_STORE_OK);
+    ASSERT_EQ(count, N);
+
+    int nc = leiden_count_communities(result, N);
+    ASSERT_TRUE(nc >= 2);
+    ASSERT_TRUE(nc <= CL + 1); /* far below N=32: the noise collapsed */
+    ASSERT_TRUE(leiden_all_communities_connected(result, N, edges, ne));
+
+    /* Each clique should be (almost) entirely in one community. */
+    for (int c = 0; c < CL; c++) {
+        int base_idx = c * SZ;
+        int same = 0;
+        for (int i = 0; i < SZ; i++) {
+            if (result[base_idx + i].community == result[base_idx].community) {
+                same++;
+            }
+        }
+        ASSERT_TRUE(same >= SZ - 1);
+    }
+    free(result);
+    PASS();
+}
+
+TEST(leiden_resolution_controls_granularity) {
+    /* Path graph of 30 nodes. Low resolution favours one large community; high
+     * resolution fragments it into more, smaller communities. */
+    enum { N = 30 };
+    int64_t nodes[N];
+    for (int i = 0; i < N; i++) {
+        nodes[i] = i + 1;
+    }
+    cbm_louvain_edge_t edges[N - 1];
+    int ne = 0;
+    for (int i = 0; i + 1 < N; i++) {
+        edges[ne++] = (cbm_louvain_edge_t){i + 1, i + 2};
+    }
+
+    cbm_louvain_result_t *lo = NULL;
+    cbm_louvain_result_t *hi = NULL;
+    int lc = 0;
+    int hc = 0;
+    ASSERT_EQ(cbm_leiden(nodes, N, edges, ne, 0.1, &lo, &lc), CBM_STORE_OK);
+    ASSERT_EQ(cbm_leiden(nodes, N, edges, ne, 5.0, &hi, &hc), CBM_STORE_OK);
+    ASSERT_EQ(lc, N);
+    ASSERT_EQ(hc, N);
+
+    int n_lo = leiden_count_communities(lo, N);
+    int n_hi = leiden_count_communities(hi, N);
+    ASSERT_TRUE(n_hi > n_lo);
+    ASSERT_TRUE(leiden_all_communities_connected(lo, N, edges, ne));
+    ASSERT_TRUE(leiden_all_communities_connected(hi, N, edges, ne));
+    free(lo);
+    free(hi);
+    PASS();
+}
+
+/* get_architecture "clusters" aspect: Leiden communities surfaced compactly. */
+TEST(arch_clusters_basic) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* Two 4-function cliques in two packages, one bridge between them. */
+    int64_t id[8];
+    for (int i = 0; i < 8; i++) {
+        char nm[32];
+        char qn[64];
+        int grp = i / 4;
+        snprintf(nm, sizeof(nm), "fn%d", i);
+        snprintf(qn, sizeof(qn), "test.pkg%d.mod.fn%d", grp, i);
+        cbm_node_t node = {.project = "test",
+                           .label = "Function",
+                           .name = nm,
+                           .qualified_name = qn,
+                           .file_path = "f.go"};
+        id[i] = cbm_store_upsert_node(s, &node);
+    }
+    for (int g = 0; g < 2; g++) {
+        for (int a = 0; a < 4; a++) {
+            for (int b = a + 1; b < 4; b++) {
+                cbm_edge_t e = {.project = "test",
+                                .source_id = id[(g * 4) + a],
+                                .target_id = id[(g * 4) + b],
+                                .type = "CALLS"};
+                cbm_store_insert_edge(s, &e);
+            }
+        }
+    }
+    cbm_edge_t bridge = {
+        .project = "test", .source_id = id[0], .target_id = id[4], .type = "CALLS"};
+    cbm_store_insert_edge(s, &bridge);
+
+    cbm_architecture_info_t info;
+    memset(&info, 0, sizeof(info));
+    const char *aspects[] = {"clusters"};
+    ASSERT_EQ(cbm_store_get_architecture(s, "test", aspects, 1, &info), CBM_STORE_OK);
+    ASSERT_TRUE(info.cluster_count >= 2); /* two dense communities */
+    for (int i = 0; i < info.cluster_count; i++) {
+        ASSERT_TRUE(info.clusters[i].members >= 2);
+        ASSERT_NOT_NULL(info.clusters[i].label);
+        ASSERT_TRUE(info.clusters[i].cohesion >= 0.0 && info.clusters[i].cohesion <= 1.0);
+        ASSERT_EQ(info.clusters[i].edge_type_count, 1);
+        ASSERT_TRUE(info.clusters[i].top_node_count > 0);
+    }
+    cbm_store_architecture_free(&info);
+    cbm_store_close(s);
+    PASS();
+}
+
 /* ── Helper function tests ──────────────────────────────────────── */
 
 TEST(qn_to_package) {
@@ -1010,6 +1229,9 @@ SUITE(store_arch) {
     RUN_TEST(louvain_empty);
     RUN_TEST(louvain_single_node);
     RUN_TEST(louvain_converges);
+    RUN_TEST(leiden_multilevel_collapses_noise);
+    RUN_TEST(leiden_resolution_controls_granularity);
+    RUN_TEST(arch_clusters_basic);
 
     /* Helpers */
     RUN_TEST(qn_to_package);

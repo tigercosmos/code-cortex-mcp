@@ -952,6 +952,35 @@ TEST(cli_ensure_path_dry_run) {
     PASS();
 }
 
+/* issue #319: a fish config must get fish-native syntax, never `export PATH=`
+ * (which is a syntax error in fish and breaks config.fish). */
+TEST(cli_ensure_path_fish_syntax_issue319) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-path-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    char rcfile[512];
+    snprintf(rcfile, sizeof(rcfile), "%s/config.fish", tmpdir);
+    write_test_file(rcfile, "# existing fish config\n");
+
+    int rc = cbm_ensure_path("/usr/local/bin", rcfile, false);
+    ASSERT_EQ(rc, 0);
+
+    const char *data = read_test_file(rcfile);
+    ASSERT_NOT_NULL(data);
+    /* fish-native form, and NO sh-style export. */
+    ASSERT(strstr(data, "fish_add_path /usr/local/bin") != NULL);
+    ASSERT(strstr(data, "export PATH") == NULL);
+
+    /* Idempotent: a second call detects the existing fish line. */
+    int rc2 = cbm_ensure_path("/usr/local/bin", rcfile, false);
+    ASSERT_EQ(rc2, 1);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  *  File copy tests (port of update_test.go)
  * ═══════════════════════════════════════════════════════════════════ */
@@ -1453,6 +1482,121 @@ TEST(cli_detect_agents_finds_codex) {
     PASS();
 }
 
+/* issue #222: Cursor (~/.cursor/) must be detected so install/update registers
+ * the MCP server in ~/.cursor/mcp.json — previously it was never discovered. */
+TEST(cli_detect_agents_finds_cursor_issue222) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-detect-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/.cursor", tmpdir);
+    test_mkdirp(dir);
+
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    ASSERT_TRUE(agents.cursor);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+/* issue #388: `install --plan` must emit a machine-readable receipt of planned
+ * writes WITHOUT mutating any config (the pre-mutation trust primitive). */
+TEST(cli_install_plan_receipt_no_mutation_issue388) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-plan-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    /* Make Cursor + Codex "detected". */
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/.cursor", tmpdir);
+    test_mkdirp(dir);
+    snprintf(dir, sizeof(dir), "%s/.codex", tmpdir);
+    test_mkdirp(dir);
+
+    char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "agent.install.plan.v1") != NULL);
+    ASSERT(strstr(json, "writes_started") != NULL);
+    ASSERT(strstr(json, "next_safe_command") != NULL);
+    ASSERT(strstr(json, "cursor") != NULL);
+    ASSERT(strstr(json, ".cursor/mcp.json") != NULL);
+    ASSERT(strstr(json, ".codex/config.toml") != NULL);
+    free(json);
+
+    /* Critical: building the plan must NOT have created any config file. */
+    char cfg[512];
+    struct stat st;
+    snprintf(cfg, sizeof(cfg), "%s/.cursor/mcp.json", tmpdir);
+    ASSERT(stat(cfg, &st) != 0); /* must not exist */
+    snprintf(cfg, sizeof(cfg), "%s/.codex/config.toml", tmpdir);
+    ASSERT(stat(cfg, &st) != 0); /* must not exist */
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+/* issue #330: Codex SessionStart reminder hook in config.toml — installed,
+ * idempotent, preserves other content, and cleanly removed. */
+TEST(cli_codex_session_hook_issue330) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codexhook-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    char cfg[512];
+    snprintf(cfg, sizeof(cfg), "%s/config.toml", tmpdir);
+    write_test_file(cfg, "[mcp_servers.other]\ncommand = \"x\"\n");
+
+    ASSERT_EQ(cbm_upsert_codex_hooks(cfg), 0);
+    const char *d = read_test_file(cfg);
+    ASSERT_NOT_NULL(d);
+    ASSERT(strstr(d, "[[hooks.SessionStart]]") != NULL);
+    ASSERT(strstr(d, "[[hooks.SessionStart.hooks]]") != NULL);
+    ASSERT(strstr(d, "search_graph") != NULL);
+    ASSERT(strstr(d, "[mcp_servers.other]") != NULL); /* pre-existing content preserved */
+    /* Idempotent: a second upsert leaves exactly ONE hook block. */
+    ASSERT_EQ(cbm_upsert_codex_hooks(cfg), 0);
+    d = read_test_file(cfg);
+    const char *first = strstr(d, "[[hooks.SessionStart]]");
+    ASSERT_NOT_NULL(first);
+    ASSERT_NULL(strstr(first + 1, "[[hooks.SessionStart]]"));
+
+    ASSERT_EQ(cbm_remove_codex_hooks(cfg), 0);
+    d = read_test_file(cfg);
+    ASSERT_NULL(strstr(d, "hooks.SessionStart"));
+    ASSERT(strstr(d, "[mcp_servers.other]") != NULL); /* still preserved after removal */
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+/* Gemini/Antigravity SessionStart reminder parity (settings.json JSON path). */
+TEST(cli_gemini_session_hook_parity) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-gemhook-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    char cfg[512];
+    snprintf(cfg, sizeof(cfg), "%s/settings.json", tmpdir);
+
+    ASSERT_EQ(cbm_upsert_gemini_session_hooks(cfg), 0);
+    const char *d = read_test_file(cfg);
+    ASSERT_NOT_NULL(d);
+    ASSERT(strstr(d, "SessionStart") != NULL);
+    ASSERT(strstr(d, "search_graph") != NULL);
+
+    ASSERT_EQ(cbm_remove_gemini_session_hooks(cfg), 0);
+    d = read_test_file(cfg);
+    ASSERT_NULL(strstr(d, "SessionStart"));
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 TEST(cli_detect_agents_finds_gemini) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-detect-XXXXXX");
@@ -1500,12 +1644,13 @@ TEST(cli_detect_agents_finds_antigravity) {
         SKIP("cbm_mkdtemp failed");
 
     char dir[512];
-    snprintf(dir, sizeof(dir), "%s/.gemini/antigravity", tmpdir);
+    /* Antigravity CLI installs under ~/.gemini/antigravity-cli/ (2026). */
+    snprintf(dir, sizeof(dir), "%s/.gemini/antigravity-cli", tmpdir);
     test_mkdirp(dir);
 
     cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
     ASSERT_TRUE(agents.antigravity);
-    ASSERT_TRUE(agents.gemini); /* parent dir implies gemini too */
+    ASSERT_TRUE(agents.gemini); /* parent ~/.gemini implies gemini too */
 
     test_rmdir_r(tmpdir);
     PASS();
@@ -1522,8 +1667,8 @@ TEST(cli_detect_agents_finds_kilocode) {
     snprintf(dir, sizeof(dir),
              "%s/Library/Application Support/Code/User/globalStorage/kilocode.kilo-code", tmpdir);
 #elif defined(_WIN32)
-    snprintf(dir, sizeof(dir),
-             "%s/AppData/Roaming/Code/User/globalStorage/kilocode.kilo-code", tmpdir);
+    snprintf(dir, sizeof(dir), "%s/AppData/Roaming/Code/User/globalStorage/kilocode.kilo-code",
+             tmpdir);
 #else
     snprintf(dir, sizeof(dir), "%s/.config/Code/User/globalStorage/kilocode.kilo-code", tmpdir);
 #endif
@@ -1964,6 +2109,31 @@ TEST(cli_upsert_claude_hook_fresh) {
     ASSERT(strstr(data, "\"Grep|Glob\"") != NULL);
     ASSERT(strstr(data, "Glob|Read") == NULL);
     ASSERT(strstr(data, "cbm-code-discovery-gate") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+/* issue #384: the PreToolUse gate shim must never use a predictable /tmp
+ * filename (the old `/tmp/cbm-code-discovery-gate-$PPID` was a symlink-attack
+ * vector). The shim is now a stateless wrapper around the compiled augmenter. */
+TEST(cli_hook_gate_script_no_predictable_tmp_issue384) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-gate-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    cbm_install_hook_gate_script(tmpdir, "/usr/local/bin/codebase-memory-mcp");
+
+    char script_path[512];
+    snprintf(script_path, sizeof(script_path), "%s/.claude/hooks/cbm-code-discovery-gate", tmpdir);
+    const char *data = read_test_file(script_path);
+    ASSERT_NOT_NULL(data);
+    /* No predictable temp/state file and no PPID-derived path. */
+    ASSERT(strstr(data, "/tmp") == NULL);
+    ASSERT(strstr(data, "PPID") == NULL);
+    /* It delegates to the stateless compiled augmenter (stdout only). */
+    ASSERT(strstr(data, "hook-augment") != NULL);
 
     test_rmdir_r(tmpdir);
     PASS();
@@ -2462,6 +2632,7 @@ SUITE(cli) {
     RUN_TEST(cli_ensure_path_append);
     RUN_TEST(cli_ensure_path_already_present);
     RUN_TEST(cli_ensure_path_dry_run);
+    RUN_TEST(cli_ensure_path_fish_syntax_issue319);
 
     /* File copy (2 tests — update_test.go) */
     RUN_TEST(cli_copy_file);
@@ -2496,6 +2667,10 @@ SUITE(cli) {
     RUN_TEST(cli_detect_agents_finds_claude);
     RUN_TEST(cli_detect_agents_finds_claude_via_env);
     RUN_TEST(cli_detect_agents_finds_codex);
+    RUN_TEST(cli_detect_agents_finds_cursor_issue222);
+    RUN_TEST(cli_install_plan_receipt_no_mutation_issue388);
+    RUN_TEST(cli_codex_session_hook_issue330);
+    RUN_TEST(cli_gemini_session_hook_parity);
     RUN_TEST(cli_detect_agents_finds_gemini);
     RUN_TEST(cli_detect_agents_finds_zed);
     RUN_TEST(cli_detect_agents_finds_antigravity);
@@ -2528,6 +2703,7 @@ SUITE(cli) {
     RUN_TEST(cli_agent_instructions_content);
 
     /* Claude Code hooks (5 tests — group D) */
+    RUN_TEST(cli_hook_gate_script_no_predictable_tmp_issue384);
     RUN_TEST(cli_upsert_claude_hook_fresh);
     RUN_TEST(cli_upsert_claude_hook_existing);
     RUN_TEST(cli_upsert_claude_hook_replace);

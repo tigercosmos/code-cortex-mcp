@@ -332,6 +332,36 @@ TEST(discover_with_gitignore) {
     PASS();
 }
 
+/* issue #234: a directory listed in the root .gitignore (e.g. "vendor/") must
+ * be excluded from discovery even when untracked — Composer/PHP projects rely
+ * on this. */
+TEST(discover_gitignore_dir_excluded_issue234) {
+    char *base = th_mktempdir("cbm_disc_gi234");
+    ASSERT(base != NULL);
+
+    th_mkdir_p(TH_PATH(base, ".git"));
+    th_write_file(TH_PATH(base, ".gitignore"), "vendor/\n");
+    th_write_file(TH_PATH(base, "src/main.php"), "<?php\nfunction appmain() {}\n");
+    th_write_file(TH_PATH(base, "vendor/autoload.php"), "<?php\nfunction autoload() {}\n");
+    th_write_file(TH_PATH(base, "vendor/pkg/lib.php"), "<?php\nfunction lib() {}\n");
+
+    cbm_discover_opts_t opts = {0};
+    cbm_file_info_t *files = NULL;
+    int count = 0;
+
+    int rc = cbm_discover(base, &opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    /* Nothing under vendor/ should be discovered. */
+    for (int i = 0; i < count; i++) {
+        ASSERT_TRUE(strstr(files[i].rel_path, "vendor") == NULL);
+    }
+    ASSERT_EQ(count, 1); /* only src/main.php */
+
+    cbm_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
 TEST(discover_max_file_size) {
     char *base = th_mktempdir("cbm_disc_size");
     ASSERT(base != NULL);
@@ -748,6 +778,7 @@ SUITE(discover) {
     RUN_TEST(discover_simple);
     RUN_TEST(discover_skips_git_dir);
     RUN_TEST(discover_with_gitignore);
+    RUN_TEST(discover_gitignore_dir_excluded_issue234);
     RUN_TEST(discover_max_file_size);
     RUN_TEST(discover_null_path);
     RUN_TEST(discover_nonexistent_path);

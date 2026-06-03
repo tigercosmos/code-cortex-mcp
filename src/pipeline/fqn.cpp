@@ -331,18 +331,28 @@ char *cbm_project_name_from_path(const char *abs_path) {
     /* Normalize path separators */
     cbm_normalize_path_sep(path);
 
-    /* Replace / and : with - */
+    /* Map every character cbm_validate_project_name would reject to '-'. The
+     * validator (used by resolve_store via project_db_path) allows only
+     * [A-Za-z0-9._-], so anything else — path separators, ':', spaces, '@',
+     * '+', unicode bytes, … — must be normalized here. Otherwise a repo like
+     * "/home/u/my project" yields the name "home-u-my project": indexing
+     * creates the DB and it shows in list_projects, but resolve_store rejects
+     * the space and reports project-not-found (#349). */
     for (size_t i = 0; i < len; i++) {
-        if (path[i] == '/' || path[i] == ':') {
+        unsigned char c = (unsigned char)path[i];
+        bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                    c == '.' || c == '_' || c == '-';
+        if (!safe) {
             path[i] = '-';
         }
     }
 
-    /* Collapse consecutive dashes */
+    /* Collapse consecutive dashes, and consecutive dots (the validator also
+     * rejects any ".." sequence). */
     char *dst = path;
     char prev = 0;
     for (size_t i = 0; i < len; i++) {
-        if (path[i] == '-' && prev == '-') {
+        if ((path[i] == '-' && prev == '-') || (path[i] == '.' && prev == '.')) {
             continue;
         }
         *dst++ = path[i];
@@ -350,9 +360,9 @@ char *cbm_project_name_from_path(const char *abs_path) {
     }
     *dst = '\0';
 
-    /* Trim leading dashes */
+    /* Trim leading dashes and dots (the validator rejects a leading dot). */
     char *start = path;
-    while (*start == '-') {
+    while (*start == '-' || *start == '.') {
         start++;
     }
 

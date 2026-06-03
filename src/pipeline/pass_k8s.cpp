@@ -193,6 +193,53 @@ static void handle_k8s_manifest(cbm_pipeline_ctx_t *ctx, const char *path, const
     cbm_log_info("pass.k8s.manifest", "file", rel_path, "resources", itoa_k8s(resource_count));
 }
 
+/* ── Helm chart handler ──────────────────────────────────────────── */
+
+static bool is_helm_chart_file(const char *base) {
+    return strcmp(base, "Chart.yaml") == 0 || strcmp(base, "Chart.yml") == 0;
+}
+
+/* Emit a Chart node for a Chart.yaml and a DEPENDS_ON edge to a (shared,
+ * deduplicated) Chart node per declared dependency (#338). */
+static void handle_helm_chart(cbm_pipeline_ctx_t *ctx, const char *rel_path, const char *source) {
+    cbm_helm_chart_t hc;
+    if (cbm_parse_helm_chart(source, &hc) != 0) {
+        return;
+    }
+
+    const char *cname = hc.chart_name[0] ? hc.chart_name : k8s_basename(rel_path);
+    char *chart_qn = cbm_infra_qn(ctx->project_name, rel_path, "helm-chart", NULL);
+    if (!chart_qn) {
+        return;
+    }
+    int64_t chart_id = cbm_gbuf_upsert_node(ctx->gbuf, "Chart", cname, chart_qn, rel_path, SKIP_ONE,
+                                            0, "{\"source\":\"helm\"}");
+    free(chart_qn);
+
+    char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel_path, "__file__");
+    const cbm_gbuf_node_t *file_node = file_qn ? cbm_gbuf_find_by_qn(ctx->gbuf, file_qn) : NULL;
+    if (file_node && chart_id > 0) {
+        cbm_gbuf_insert_edge(ctx->gbuf, file_node->id, chart_id, "DEFINES", "{}");
+    }
+    free(file_qn);
+
+    int dep_edges = 0;
+    for (int i = 0; i < hc.dep_count && chart_id > 0; i++) {
+        /* Stable per-project QN so multiple charts depending on the same chart
+         * link to one shared dependency node. */
+        char dep_qn[CBM_SZ_512];
+        snprintf(dep_qn, sizeof(dep_qn), "%s.__helm_dep__.%s", ctx->project_name, hc.deps[i]);
+        int64_t dep_id =
+            cbm_gbuf_upsert_node(ctx->gbuf, "Chart", hc.deps[i], dep_qn, rel_path, SKIP_ONE, 0,
+                                 "{\"source\":\"helm\",\"external\":true}");
+        if (dep_id > 0) {
+            cbm_gbuf_insert_edge(ctx->gbuf, chart_id, dep_id, "DEPENDS_ON", "{}");
+            dep_edges++;
+        }
+    }
+    cbm_log_info("pass.k8s.helm", "file", rel_path, "deps", itoa_k8s(dep_edges));
+}
+
 /* ── Pass entry point ────────────────────────────────────────────── */
 
 int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count) {
@@ -202,6 +249,7 @@ int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
 
     int kustomize_count = 0;
     int manifest_count = 0;
+    int helm_count = 0;
 
     for (int i = 0; i < file_count; i++) {
         if (cbm_pipeline_check_cancel(ctx)) {
@@ -224,7 +272,10 @@ int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
             int src_len = 0;
             char *source = k8s_read_file(path, &src_len);
             if (source) {
-                if (cbm_is_k8s_manifest(base, source)) {
+                if (is_helm_chart_file(base)) {
+                    handle_helm_chart(ctx, rel, source);
+                    helm_count++;
+                } else if (cbm_is_k8s_manifest(base, source)) {
                     /* Always re-extract with CBM_LANG_K8S regardless of any cached
                      * result: cached results were produced during the parallel YAML
                      * pass and contain no "Resource" definitions.  Pass the already-
@@ -240,5 +291,6 @@ int cbm_pipeline_pass_k8s(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
 
     cbm_log_info("pass.done", "pass", "k8s", "kustomize", itoa_k8s(kustomize_count), "manifests",
                  itoa_k8s(manifest_count));
+    (void)helm_count;
     return 0;
 }

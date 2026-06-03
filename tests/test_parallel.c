@@ -145,15 +145,14 @@ static cbm_gbuf_t *run_parallel(const char *project, const char *repo_path, cbm_
     char **def_modules = (char **)calloc((size_t)file_count, sizeof(char *));
     int def_count = 0;
     CBMLSPDef *all_defs = def_modules
-        ? cbm_pxc_collect_all_defs(result_cache, files, file_count, ctx.project_name,
-                                   def_modules, &def_count)
-        : NULL;
+                              ? cbm_pxc_collect_all_defs(result_cache, files, file_count,
+                                                         ctx.project_name, def_modules, &def_count)
+                              : NULL;
     CBMModuleDefIndex *module_def_index =
         all_defs ? cbm_pxc_build_module_def_index(all_defs, def_count) : NULL;
 
-    cbm_parallel_resolve(&ctx, files, file_count, result_cache, &shared_ids,
-                         worker_count, all_defs, def_count, def_modules,
-                         module_def_index,
+    cbm_parallel_resolve(&ctx, files, file_count, result_cache, &shared_ids, worker_count, all_defs,
+                         def_count, def_modules, module_def_index,
                          NULL /* cross_registries — tests use per-file path */);
     cbm_gbuf_set_next_id(gbuf, atomic_load(&shared_ids));
 
@@ -513,7 +512,7 @@ TEST(parallel_python_lsp_override_emits_lsp_strategy_edges) {
     fclose(f);
 
     cbm_file_info_t files[1] = {0};
-    files[0].path     = fpath0;
+    files[0].path = fpath0;
     files[0].rel_path = (char *)"app.py";
     files[0].language = CBM_LANG_PYTHON;
 
@@ -586,10 +585,10 @@ TEST(parallel_python_lsp_override_cross_file_emits_lsp_strategy_edges) {
     fclose(af);
 
     cbm_file_info_t files[2] = {0};
-    files[0].path     = gpath;
+    files[0].path = gpath;
     files[0].rel_path = (char *)"greeter.py";
     files[0].language = CBM_LANG_PYTHON;
-    files[1].path     = apath;
+    files[1].path = apath;
     files[1].rel_path = (char *)"app.py";
     files[1].language = CBM_LANG_PYTHON;
 
@@ -615,9 +614,51 @@ TEST(parallel_python_lsp_override_cross_file_emits_lsp_strategy_edges) {
     PASS();
 }
 
+/* issue #294: gRPC service-name extraction must (a) preserve the canonical
+ * proto service name (FooServiceClient → FooService, not Foo) and (b) only
+ * match real stub/client types — ordinary receiver vars must NOT produce
+ * phantom __grpc__ Routes. */
+TEST(grpc_service_name_preserves_service_suffix_issue294) {
+    char svc[256];
+    char meth[256];
+
+    /* Generated client class keeps the "Service" part of the name. */
+    ASSERT_TRUE(extract_grpc_service_method("pb.NewFooServiceClient.GetBar", svc, sizeof(svc), meth,
+                                            sizeof(meth)));
+    ASSERT_STR_EQ(svc, "FooService");
+    ASSERT_STR_EQ(meth, "GetBar");
+
+    /* Java-style ...ServiceGrpc strips only "Grpc". */
+    ASSERT_TRUE(extract_grpc_service_method("CartServiceGrpc.getCart", svc, sizeof(svc), meth,
+                                            sizeof(meth)));
+    ASSERT_STR_EQ(svc, "CartService");
+
+    /* BlockingStub wins over Stub (longest-suffix-first). */
+    ASSERT_TRUE(extract_grpc_service_method("CartServiceBlockingStub.getCart", svc, sizeof(svc),
+                                            meth, sizeof(meth)));
+    ASSERT_STR_EQ(svc, "CartService");
+    PASS();
+}
+
+TEST(grpc_no_phantom_route_from_plain_var_issue294) {
+    char svc[256];
+    char meth[256];
+
+    /* Ordinary receiver vars carry no gRPC stub suffix → must NOT match,
+     * so no phantom __grpc__provider/... or __grpc__builder/... Route. */
+    ASSERT_FALSE(
+        extract_grpc_service_method("_provider.GetGroup", svc, sizeof(svc), meth, sizeof(meth)));
+    ASSERT_FALSE(extract_grpc_service_method("_builder.AddSomeService", svc, sizeof(svc), meth,
+                                             sizeof(meth)));
+    ASSERT_FALSE(extract_grpc_service_method("logger.Info", svc, sizeof(svc), meth, sizeof(meth)));
+    PASS();
+}
+
 /* ── Suite Registration ──────────────────────────────────────────── */
 
 SUITE(parallel) {
+    RUN_TEST(grpc_service_name_preserves_service_suffix_issue294);
+    RUN_TEST(grpc_no_phantom_route_from_plain_var_issue294);
     /* Graph buffer merge/shared-ID tests */
     RUN_TEST(gbuf_shared_ids_unique);
     RUN_TEST(gbuf_merge_nodes);

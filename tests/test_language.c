@@ -25,6 +25,18 @@ TEST(lang_ext_jsx) {
     ASSERT_EQ(cbm_language_for_extension(".jsx"), CBM_LANG_JAVASCRIPT);
     PASS();
 }
+/* Issue #197: .mjs (ES modules) / .cjs (CommonJS) were unmapped, so those
+ * files were never indexed or searchable. */
+TEST(lang_ext_mjs_cjs) {
+    ASSERT_EQ(cbm_language_for_extension(".mjs"), CBM_LANG_JAVASCRIPT);
+    ASSERT_EQ(cbm_language_for_extension(".cjs"), CBM_LANG_JAVASCRIPT);
+    PASS();
+}
+TEST(lang_ext_mts_cts) {
+    ASSERT_EQ(cbm_language_for_extension(".mts"), CBM_LANG_TYPESCRIPT);
+    ASSERT_EQ(cbm_language_for_extension(".cts"), CBM_LANG_TYPESCRIPT);
+    PASS();
+}
 TEST(lang_ext_typescript) {
     ASSERT_EQ(cbm_language_for_extension(".ts"), CBM_LANG_TYPESCRIPT);
     PASS();
@@ -501,6 +513,16 @@ TEST(lang_fn_vimrc) {
     PASS();
 }
 
+/* issue #258: .blade.php is a built-in compound extension → Blade by default
+ * (previously fell through to the single-extension lookup and was mis-typed as
+ * PHP). Plain .php still maps to PHP. */
+TEST(lang_fn_blade_php_compound_issue258) {
+    ASSERT_EQ(cbm_language_for_filename("login.blade.php"), CBM_LANG_BLADE);
+    ASSERT_EQ(cbm_language_for_filename("alert.blade.php"), CBM_LANG_BLADE);
+    ASSERT_EQ(cbm_language_for_filename("index.php"), CBM_LANG_PHP);
+    PASS();
+}
+
 /* Filename with extension falls through to extension lookup */
 TEST(lang_fn_main_go) {
     ASSERT_EQ(cbm_language_for_filename("main.go"), CBM_LANG_GO);
@@ -543,7 +565,8 @@ TEST(lang_name_unknown) {
 /* These tests need temp files with content markers */
 TEST(lang_m_objc) {
     /* Write a temp file with Objective-C markers */
-    char path[256]; snprintf(path, sizeof(path), "%s/test_lang_objc.m", cbm_tmpdir());
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_objc.m", cbm_tmpdir());
     FILE *f = fopen(path, "w");
     ASSERT_NOT_NULL(f);
     fprintf(f, "#import <Foundation/Foundation.h>\n@interface Foo : NSObject\n@end\n");
@@ -555,7 +578,8 @@ TEST(lang_m_objc) {
 }
 
 TEST(lang_m_magma) {
-    char path[256]; snprintf(path, sizeof(path), "%s/test_lang_magma.m", cbm_tmpdir());
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_magma.m", cbm_tmpdir());
     FILE *f = fopen(path, "w");
     ASSERT_NOT_NULL(f);
     fprintf(f, "function MyFunc(x)\n  return x^2;\nend function;\n");
@@ -567,7 +591,8 @@ TEST(lang_m_magma) {
 }
 
 TEST(lang_m_matlab) {
-    char path[256]; snprintf(path, sizeof(path), "%s/test_lang_matlab.m", cbm_tmpdir());
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_matlab.m", cbm_tmpdir());
     FILE *f = fopen(path, "w");
     ASSERT_NOT_NULL(f);
     fprintf(f, "function y = square(x)\n  y = x.^2;\nend\n");
@@ -720,6 +745,11 @@ TEST(lang_ext_pony) {
 
 TEST(lang_ext_luau) {
     ASSERT_EQ(cbm_language_for_extension(".luau"), CBM_LANG_LUAU);
+    PASS();
+}
+
+TEST(lang_ext_helm_tpl) {
+    ASSERT_EQ(cbm_language_for_extension(".tpl"), CBM_LANG_GOTEMPLATE);
     PASS();
 }
 
@@ -997,7 +1027,6 @@ TEST(lang_ext_sosl) {
     PASS();
 }
 
-
 /* --- Ported from lang_test.go: TestForLanguage --- */
 TEST(lang_all_have_names) {
     /* Every language enum value from 0 to CBM_LANG_COUNT-1
@@ -1018,6 +1047,8 @@ SUITE(language) {
     RUN_TEST(lang_ext_python);
     RUN_TEST(lang_ext_javascript);
     RUN_TEST(lang_ext_jsx);
+    RUN_TEST(lang_ext_mjs_cjs);
+    RUN_TEST(lang_ext_mts_cts);
     RUN_TEST(lang_ext_typescript);
     RUN_TEST(lang_ext_tsx);
     RUN_TEST(lang_ext_rust);
@@ -1144,6 +1175,7 @@ SUITE(language) {
     RUN_TEST(lang_fn_meson_opts);
     RUN_TEST(lang_fn_meson_opts_txt);
     RUN_TEST(lang_fn_vimrc);
+    RUN_TEST(lang_fn_blade_php_compound_issue258);
     RUN_TEST(lang_fn_main_go);
     RUN_TEST(lang_fn_test_py);
     RUN_TEST(lang_fn_unknown);
@@ -1189,6 +1221,7 @@ SUITE(language) {
     RUN_TEST(lang_ext_hare);
     RUN_TEST(lang_ext_pony);
     RUN_TEST(lang_ext_luau);
+    RUN_TEST(lang_ext_helm_tpl);
     RUN_TEST(lang_ext_janet);
     RUN_TEST(lang_ext_sway);
     RUN_TEST(lang_ext_nasm);

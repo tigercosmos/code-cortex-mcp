@@ -556,6 +556,44 @@ TEST(pylsp_crossfile_method_dispatch) {
     PASS();
 }
 
+/* Issue #228: a class/static method invoked directly on a CROSS-FILE imported
+ * class name — ActionRecordX.build_from_text(...) — produced no CALLS edge, so
+ * the method showed in/out degree 0 and was flagged as dead code. Distinct from
+ * pylsp_crossfile_method_dispatch (which dispatches on a typed *instance*). */
+TEST(pylsp_crossfile_classmethod_on_class_issue228) {
+    const char *source =
+        "from core.schemas import ActionRecordX\n"
+        "def run_plain_flow():\n"
+        "    return ActionRecordX.build_from_text('hello')\n";
+
+    CBMLSPDef defs[2];
+    memset(defs, 0, sizeof(defs));
+    defs[0].qualified_name = "core.schemas.ActionRecordX";
+    defs[0].short_name = "ActionRecordX";
+    defs[0].label = "Class";
+    defs[0].def_module_qn = "core.schemas";
+
+    defs[1].qualified_name = "core.schemas.ActionRecordX.build_from_text";
+    defs[1].short_name = "build_from_text";
+    defs[1].label = "Method";
+    defs[1].receiver_type = "core.schemas.ActionRecordX";
+    defs[1].def_module_qn = "core.schemas";
+
+    const char *imp_names[] = {"ActionRecordX"};
+    const char *imp_qns[] = {"core.schemas.ActionRecordX"};
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+
+    cbm_run_py_lsp_cross(&arena, source, (int)strlen(source), "test.main", defs, 2, imp_names,
+                         imp_qns, 1, NULL, &out);
+
+    ASSERT_GTE(find_resolved_arr(&out, "run_plain_flow", "build_from_text"), 0);
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 TEST(pylsp_crossfile_inheritance) {
     /* svc.py defines class Base with shared(); main.py defines class Child(Base)
      * and calls self.shared(). Caller passes ALL relevant defs (cross-file
@@ -1292,6 +1330,7 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_pep695_generic_class);
     /* Phase 9 — cross-file + batch */
     RUN_TEST(pylsp_crossfile_method_dispatch);
+    RUN_TEST(pylsp_crossfile_classmethod_on_class_issue228);
     RUN_TEST(pylsp_crossfile_inheritance);
     RUN_TEST(pylsp_batch_two_files);
     /* Phase 10 — stdlib resolution */

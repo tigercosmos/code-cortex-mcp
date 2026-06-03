@@ -49,13 +49,11 @@ enum {
     ST_MIN_INDEGREE = 3,
     ST_MAX_PATH_DEPTH = 3,
     ST_MAX_ITERATIONS = 10,
-    ST_GRAPH_SEED_MULT = 1000,
     ST_MAX_SECTIONS = 16,
     ST_METHOD_PROP_LEN = 8,
     ST_PATH_PROP_LEN = 6,
     ST_HANDLER_PROP_LEN = 9,
 };
-#define ST_WEIGHT_2 2.0
 
 #define SLEN(s) (sizeof(s) - 1)
 #include "store/store.h"
@@ -684,12 +682,16 @@ bool cbm_store_check_integrity(cbm_store_t *s) {
     sqlite3_finalize(stmt);
 
     if (ok) {
-        /* Check that root_path in projects table starts with '/' or a drive letter.
-         * Corrupt DBs often have numeric strings like "826" in root_path. */
+        /* Check that root_path in projects table starts with '/' or a drive
+         * letter. Corrupt DBs often have numeric strings like "826" in
+         * root_path. Drive letters may be upper- OR lower-case on Windows
+         * (e.g. "c:/repo", "y:/share") — rejecting lowercase here flagged
+         * valid Windows paths as corrupt and deleted the DB (#227/#367). */
         rc = sqlite3_prepare_v2(s->db,
                                 "SELECT root_path FROM projects WHERE root_path != '' "
                                 "AND NOT (substr(root_path, 1, 1) = '/' "
-                                "OR (substr(root_path, 1, 1) BETWEEN 'A' AND 'Z')) LIMIT 1;",
+                                "OR (substr(root_path, 1, 1) BETWEEN 'A' AND 'Z') "
+                                "OR (substr(root_path, 1, 1) BETWEEN 'a' AND 'z')) LIMIT 1;",
                                 CBM_NOT_FOUND, &stmt, NULL);
         if (rc == SQLITE_OK) {
             if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -2356,6 +2358,22 @@ static int search_where_basic(const cbm_search_params_t *params, char *where, in
     }
     if (params->file_pattern) {
         char *lp = cbm_glob_to_like(params->file_pattern);
+        /* A file_pattern with no glob wildcards is treated as a path-substring
+         * match (issue #200): file_pattern="offer-server" should match
+         * "src/offer-server/x.js", not only a path equal to "offer-server".
+         * Patterns that DO contain * / ? keep their explicit glob semantics. */
+        if (lp && !strchr(params->file_pattern, '*') && !strchr(params->file_pattern, '?')) {
+            size_t lplen = strlen(lp);
+            char *contains = (char *)malloc(lplen + 3);
+            if (contains) {
+                contains[0] = '%';
+                memcpy(contains + 1, lp, lplen);
+                contains[lplen + 1] = '%';
+                contains[lplen + 2] = '\0';
+                free(lp);
+                lp = contains;
+            }
+        }
         int pool_was_full = (pool->count >= ST_LIKE_POOL_MAX);
         like_pool_add(pool, lp);
         if (!pool_was_full && lp) {
@@ -4120,219 +4138,771 @@ static void louvain_build_weights(const int64_t *nodes, int n, const cbm_louvain
     *out_wn = wn;
 }
 
-/* Add a bidirectional edge to adjacency lists. */
-static void adj_add_edge(int **adj, double **adj_w, int *adj_n, int *adj_cap, int si, int di,
-                         double w) {
-    if (adj_n[si] >= adj_cap[si]) {
-        int new_cap = adj_cap[si] ? adj_cap[si] * ST_GROWTH : ST_INIT_CAP_4;
-        int *new_adj = (int *)safe_realloc(adj[si], new_cap * sizeof(int));
-        double *new_w = (double *)safe_realloc(adj_w[si], new_cap * sizeof(double));
-        /* Zero-init new slots to satisfy static analyzer */
-        for (int k = adj_cap[si]; k < new_cap; k++) {
-            new_adj[k] = 0;
-            new_w[k] = 0.0;
-        }
-        adj[si] = new_adj;
-        adj_w[si] = new_w;
-        adj_cap[si] = new_cap;
-    }
-    adj[si][adj_n[si]] = di;
-    adj_w[si][adj_n[si]] = w;
-    adj_n[si]++;
+enum { LEIDEN_MAX_LEVELS = 64, LEIDEN_MOVE_PASS_CAP = 100 };
 
-    if (adj_n[di] >= adj_cap[di]) {
-        adj_cap[di] = adj_cap[di] ? adj_cap[di] * ST_GROWTH : ST_INIT_CAP_4;
-        adj[di] = (__typeof__(adj[di]))safe_realloc(adj[di], adj_cap[di] * sizeof(int));
-        adj_w[di] = (__typeof__(adj_w[di]))safe_realloc(adj_w[di], adj_cap[di] * sizeof(double));
-    }
-    adj[di][adj_n[di]] = si;
-    adj_w[di][adj_n[di]] = w;
-    adj_n[di]++;
+/* Weighted undirected graph in CSR form. Each undirected edge is stored as
+ * two directed entries; k[i] is the weighted degree of node i. Self-loops are
+ * never materialised — an aggregate node's intra-community weight is folded
+ * into k[i] (which is preserved across levels), while nbr/w hold only
+ * inter-community edges. The modularity gain therefore uses k[] for the
+ * null-model term and nbr/w for connectivity, so intra weight affects the
+ * degree but is never mistaken for an edge to another community. */
+typedef struct {
+    int n;
+    int *off;  /* CSR offsets, length n + 1 */
+    int *nbr;  /* neighbour indices, length off[n] */
+    double *w; /* edge weights aligned with nbr */
+    double *k; /* weighted degree per node */
+} cbm_lg_t;
+
+static void lg_free(cbm_lg_t *g) {
+    free(g->off);
+    free(g->nbr);
+    free(g->w);
+    free(g->k);
+    g->off = NULL;
+    g->nbr = NULL;
+    g->w = NULL;
+    g->k = NULL;
 }
 
-/* Run one Louvain iteration. Returns true if any node moved. */
-/* Linear congruential generator (glibc constants) */
-#define LCG_MULTIPLIER 1103515245U
-#define LCG_INCREMENT 12345U
-
-static bool louvain_iteration(int n, int **adj, double **adj_w, const int *adj_n, int *community,
-                              const double *degree, double total_weight, int iter) {
-    bool improved = false;
-
-    double *comm_degree = (double *)calloc(n, sizeof(double));
+/* Build a CSR graph from a deduplicated undirected edge list. */
+static int lg_build(int n, const int *wsi, const int *wdi, const double *ww, int wn,
+                    cbm_lg_t *out) {
+    int *off = (int *)calloc((size_t)n + 1, sizeof(int));
+    double *k = (double *)calloc((size_t)n, sizeof(double));
+    int *fill = (int *)malloc((size_t)n * sizeof(int));
+    if (!off || !k || !fill) {
+        free(off);
+        free(k);
+        free(fill);
+        return CBM_NOT_FOUND;
+    }
+    for (int e = 0; e < wn; e++) {
+        off[wsi[e] + 1]++;
+        off[wdi[e] + 1]++;
+    }
     for (int i = 0; i < n; i++) {
-        comm_degree[community[i]] += degree[i];
+        off[i + 1] += off[i];
     }
+    int total = off[n];
+    int *nbr = (int *)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
+    double *w = (double *)malloc((size_t)(total > 0 ? total : 1) * sizeof(double));
+    if (!nbr || !w) {
+        free(off);
+        free(k);
+        free(fill);
+        free(nbr);
+        free(w);
+        return CBM_NOT_FOUND;
+    }
+    memcpy(fill, off, (size_t)n * sizeof(int));
+    for (int e = 0; e < wn; e++) {
+        int a = wsi[e];
+        int b = wdi[e];
+        double we = ww[e];
+        nbr[fill[a]] = b;
+        w[fill[a]] = we;
+        fill[a]++;
+        nbr[fill[b]] = a;
+        w[fill[b]] = we;
+        fill[b]++;
+        k[a] += we;
+        k[b] += we;
+    }
+    free(fill);
+    out->n = n;
+    out->off = off;
+    out->nbr = nbr;
+    out->w = w;
+    out->k = k;
+    return CBM_STORE_OK;
+}
 
-    int *order = (int *)calloc(n, sizeof(int));
+/* Local-moving phase: greedily move each node to the neighbouring community
+ * with the highest modularity gain, using a work queue seeded with every node
+ * and re-queueing only the neighbours of a node that actually moved. Mutates
+ * comm[] in place. */
+static void leiden_move(const cbm_lg_t *g, int *comm, double gamma, double twom) {
+    int n = g->n;
+    double *stot = (double *)calloc((size_t)n, sizeof(double));
+    double *acc = (double *)calloc((size_t)n, sizeof(double));
+    int *queue = (int *)malloc((size_t)n * sizeof(int));
+    int *dirty = (int *)malloc((size_t)n * sizeof(int));
+    bool *inq = (bool *)calloc((size_t)n, sizeof(bool));
+    if (!stot || !acc || !queue || !dirty || !inq) {
+        free(stot);
+        free(acc);
+        free(queue);
+        free(dirty);
+        free(inq);
+        return;
+    }
     for (int i = 0; i < n; i++) {
-        order[i] = i;
+        stot[comm[i]] += g->k[i];
+        queue[i] = i;
+        inq[i] = true;
     }
-    unsigned int seed = (unsigned int)((iter * ST_GRAPH_SEED_MULT) + n);
-    for (int i = n - SKIP_ONE; i > 0; i--) {
-        seed = (seed * LCG_MULTIPLIER) + LCG_INCREMENT;
-        int j = (int)((seed >> ST_BUF_16) % (unsigned int)(i + SKIP_ONE));
-        int tmp = order[i];
-        order[i] = order[j];
-        order[j] = tmp;
-    }
-
-    for (int oi = 0; oi < n; oi++) {
-        int i = order[oi];
-        int cur_comm = community[i];
-
-        double *nc_weight = (double *)calloc(n, sizeof(double));
-        bool *nc_seen = (bool *)calloc(n, sizeof(bool));
-        for (int j = 0; j < adj_n[i]; j++) {
-            int nc = community[adj[i][j]];
-            nc_weight[nc] += adj_w[i][j];
-            nc_seen[nc] = true;
-        }
-
-        comm_degree[cur_comm] -= degree[i];
-
-        int best_comm = cur_comm;
-        double best_gain = 0.0;
-        for (int c = 0; c < n; c++) {
-            if (!nc_seen[c]) {
+    int qhead = 0;
+    int qcount = n;
+    long cap = (long)n * LEIDEN_MOVE_PASS_CAP + LEIDEN_MAX_LEVELS;
+    while (qcount > 0 && cap-- > 0) {
+        int v = queue[qhead];
+        qhead = (qhead + 1) % n;
+        qcount--;
+        inq[v] = false;
+        int cv = comm[v];
+        int ndirty = 0;
+        for (int e = g->off[v]; e < g->off[v + 1]; e++) {
+            int u = g->nbr[e];
+            if (u == v) {
                 continue;
             }
-            double gain =
-                nc_weight[c] - (degree[i] * comm_degree[c] / (ST_WEIGHT_2 * total_weight));
+            int cu = comm[u];
+            if (acc[cu] == 0.0) {
+                dirty[ndirty++] = cu;
+            }
+            acc[cu] += g->w[e];
+        }
+        stot[cv] -= g->k[v];
+        double kv = g->k[v];
+        int best_c = cv;
+        double best_gain = acc[cv] - gamma * kv * stot[cv] / twom;
+        for (int d = 0; d < ndirty; d++) {
+            int c = dirty[d];
+            double gain = acc[c] - gamma * kv * stot[c] / twom;
             if (gain > best_gain) {
                 best_gain = gain;
-                best_comm = c;
+                best_c = c;
             }
         }
-
-        double cur_gain = nc_weight[cur_comm] -
-                          (degree[i] * comm_degree[cur_comm] / (ST_WEIGHT_2 * total_weight));
-        if (cur_gain >= best_gain) {
-            best_comm = cur_comm;
+        stot[best_c] += kv;
+        comm[v] = best_c;
+        if (best_c != cv) {
+            for (int e = g->off[v]; e < g->off[v + 1]; e++) {
+                int u = g->nbr[e];
+                if (comm[u] != best_c && !inq[u] && qcount < n) {
+                    queue[(qhead + qcount) % n] = u;
+                    qcount++;
+                    inq[u] = true;
+                }
+            }
         }
-
-        community[i] = best_comm;
-        comm_degree[best_comm] += degree[i];
-
-        if (best_comm != cur_comm) {
-            improved = true;
+        for (int d = 0; d < ndirty; d++) {
+            acc[dirty[d]] = 0.0;
         }
-
-        free(nc_weight);
-        free(nc_seen);
     }
-    free(order);
-    free(comm_degree);
-    return improved;
+    free(stot);
+    free(acc);
+    free(queue);
+    free(dirty);
+    free(inq);
 }
 
-static void louvain_free_adj(int **adj, double **adj_w, int *adj_n, int *adj_cap, int n) {
+/* Compact community labels in comm[] to the dense range [0, returned count). */
+static int leiden_relabel(int *comm, int n) {
+    int *map = (int *)malloc((size_t)n * sizeof(int));
+    if (!map) {
+        return n;
+    }
     for (int i = 0; i < n; i++) {
-        free(adj[i]);
-        free(adj_w[i]);
+        map[i] = CBM_NOT_FOUND;
     }
-    free(adj);
-    free(adj_w);
-    free(adj_n);
-    free(adj_cap);
+    int next = 0;
+    for (int i = 0; i < n; i++) {
+        int c = comm[i];
+        if (map[c] == CBM_NOT_FOUND) {
+            map[c] = next++;
+        }
+        comm[i] = map[c];
+    }
+    free(map);
+    return next;
 }
 
-int cbm_louvain(const int64_t *nodes, int node_count, const cbm_louvain_edge_t *edges,
-                int edge_count, cbm_louvain_result_t **out, int *out_count) {
+/* Refinement phase: within each move-phase community, merge singleton nodes
+ * into the best connected sub-community (positive modularity gain, edge must
+ * exist). This re-derives communities bottom-up so each one is guaranteed
+ * internally connected — the defect single-level Louvain suffers from, which
+ * fragments the graph into hundreds of tiny noisy clusters. Writes
+ * sub-community labels into refined[] and returns their count. */
+static int leiden_refine(const cbm_lg_t *g, const int *comm, double gamma, double twom,
+                         int *refined) {
+    int n = g->n;
+    double *stot = (double *)calloc((size_t)n, sizeof(double));
+    double *acc = (double *)calloc((size_t)n, sizeof(double));
+    int *rsize = (int *)malloc((size_t)n * sizeof(int));
+    int *dirty = (int *)malloc((size_t)n * sizeof(int));
+    if (!stot || !acc || !rsize || !dirty) {
+        free(stot);
+        free(acc);
+        free(rsize);
+        free(dirty);
+        for (int i = 0; i < n; i++) {
+            refined[i] = i;
+        }
+        return leiden_relabel(refined, n);
+    }
+    for (int i = 0; i < n; i++) {
+        refined[i] = i;
+        stot[i] = g->k[i];
+        rsize[i] = 1;
+    }
+    for (int v = 0; v < n; v++) {
+        if (rsize[refined[v]] != 1) {
+            continue; /* only singletons merge, per the refinement rule */
+        }
+        int cv = comm[v];
+        int ndirty = 0;
+        for (int e = g->off[v]; e < g->off[v + 1]; e++) {
+            int u = g->nbr[e];
+            if (u == v || comm[u] != cv) {
+                continue; /* stay within the move-phase community */
+            }
+            int ru = refined[u];
+            if (acc[ru] == 0.0) {
+                dirty[ndirty++] = ru;
+            }
+            acc[ru] += g->w[e];
+        }
+        int rv = refined[v];
+        double kv = g->k[v];
+        stot[rv] -= kv;
+        int best_r = rv;
+        double best_gain = 0.0;
+        for (int d = 0; d < ndirty; d++) {
+            int r = dirty[d];
+            if (r == rv) {
+                continue;
+            }
+            double gain = acc[r] - gamma * kv * stot[r] / twom;
+            if (gain > best_gain) {
+                best_gain = gain;
+                best_r = r;
+            }
+        }
+        if (best_r != rv) {
+            refined[v] = best_r;
+            stot[best_r] += kv;
+            rsize[best_r]++;
+            rsize[rv]--;
+        } else {
+            stot[rv] += kv;
+        }
+        for (int d = 0; d < ndirty; d++) {
+            acc[dirty[d]] = 0.0;
+        }
+    }
+    free(stot);
+    free(acc);
+    free(rsize);
+    free(dirty);
+    return leiden_relabel(refined, n);
+}
+
+/* Aggregation phase: collapse each refined sub-community into a single node.
+ * Builds the coarser graph in *out and records, for each aggregate node, the
+ * move-phase community it belonged to in seed[] so the next level starts from
+ * the coarse structure rather than from singletons. */
+static int leiden_aggregate(const cbm_lg_t *g, const int *refined, int r_count, const int *comm,
+                            cbm_lg_t *out, int *seed) {
+    int n = g->n;
+    double *k2 = (double *)calloc((size_t)r_count, sizeof(double));
+    int *gcount = (int *)calloc((size_t)r_count, sizeof(int));
+    int *gstart = (int *)malloc(((size_t)r_count + 1) * sizeof(int));
+    int *members = (int *)malloc((size_t)n * sizeof(int));
+    int *fill = (int *)malloc((size_t)r_count * sizeof(int));
+    double *acc = (double *)calloc((size_t)r_count, sizeof(double));
+    int *dirty = (int *)malloc((size_t)r_count * sizeof(int));
+    int *off2 = (int *)malloc(((size_t)r_count + 1) * sizeof(int));
+    if (!k2 || !gcount || !gstart || !members || !fill || !acc || !dirty || !off2) {
+        free(k2);
+        free(gcount);
+        free(gstart);
+        free(members);
+        free(fill);
+        free(acc);
+        free(dirty);
+        free(off2);
+        return CBM_NOT_FOUND;
+    }
+    for (int r = 0; r < r_count; r++) {
+        seed[r] = CBM_NOT_FOUND;
+    }
+    for (int i = 0; i < n; i++) {
+        int r = refined[i];
+        k2[r] += g->k[i];
+        gcount[r]++;
+        if (seed[r] == CBM_NOT_FOUND) {
+            seed[r] = comm[i];
+        }
+    }
+    gstart[0] = 0;
+    for (int r = 0; r < r_count; r++) {
+        gstart[r + 1] = gstart[r] + gcount[r];
+        fill[r] = gstart[r];
+    }
+    for (int i = 0; i < n; i++) {
+        members[fill[refined[i]]++] = i;
+    }
+    /* Pass 1: count distinct inter-community neighbours per aggregate node. */
+    off2[0] = 0;
+    for (int r = 0; r < r_count; r++) {
+        int nd = 0;
+        for (int m = gstart[r]; m < gstart[r + 1]; m++) {
+            int i = members[m];
+            for (int e = g->off[i]; e < g->off[i + 1]; e++) {
+                int rb = refined[g->nbr[e]];
+                if (rb == r || acc[rb] != 0.0) {
+                    continue;
+                }
+                acc[rb] = 1.0;
+                dirty[nd++] = rb;
+            }
+        }
+        off2[r + 1] = off2[r] + nd;
+        for (int d = 0; d < nd; d++) {
+            acc[dirty[d]] = 0.0;
+        }
+    }
+    int total = off2[r_count];
+    int *nbr2 = (int *)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
+    double *w2 = (double *)malloc((size_t)(total > 0 ? total : 1) * sizeof(double));
+    if (!nbr2 || !w2) {
+        free(k2);
+        free(gcount);
+        free(gstart);
+        free(members);
+        free(fill);
+        free(acc);
+        free(dirty);
+        free(off2);
+        free(nbr2);
+        free(w2);
+        return CBM_NOT_FOUND;
+    }
+    /* Pass 2: accumulate inter-community edge weights. */
+    for (int r = 0; r < r_count; r++) {
+        int nd = 0;
+        for (int m = gstart[r]; m < gstart[r + 1]; m++) {
+            int i = members[m];
+            for (int e = g->off[i]; e < g->off[i + 1]; e++) {
+                int rb = refined[g->nbr[e]];
+                if (rb == r) {
+                    continue;
+                }
+                if (acc[rb] == 0.0) {
+                    dirty[nd++] = rb;
+                }
+                acc[rb] += g->w[e];
+            }
+        }
+        int base = off2[r];
+        for (int d = 0; d < nd; d++) {
+            nbr2[base + d] = dirty[d];
+            w2[base + d] = acc[dirty[d]];
+            acc[dirty[d]] = 0.0;
+        }
+    }
+    free(gcount);
+    free(gstart);
+    free(members);
+    free(fill);
+    free(acc);
+    free(dirty);
+    out->n = r_count;
+    out->off = off2;
+    out->nbr = nbr2;
+    out->w = w2;
+    out->k = k2;
+    return CBM_STORE_OK;
+}
+
+int cbm_leiden(const int64_t *nodes, int node_count, const cbm_louvain_edge_t *edges,
+               int edge_count, double resolution, cbm_louvain_result_t **out, int *out_count) {
     if (node_count <= 0) {
         *out = NULL;
         *out_count = 0;
         return CBM_STORE_OK;
     }
-
     int n = node_count;
+    double gamma = resolution > 0.0 ? resolution : 1.0;
 
-    /* Build deduplicated edge weights */
+    cbm_louvain_result_t *result = (cbm_louvain_result_t *)malloc((size_t)n * sizeof(*result));
+    if (!result) {
+        return CBM_NOT_FOUND;
+    }
+    for (int i = 0; i < n; i++) {
+        result[i].node_id = nodes[i];
+        result[i].community = i;
+    }
+
+    /* Build deduplicated undirected edge weights, then a CSR graph. */
     int *wsi;
     int *wdi;
     double *ww;
     int wn;
     louvain_build_weights(nodes, n, edges, edge_count, &wsi, &wdi, &ww, &wn);
-
-    /* Build adjacency lists */
-    int **adj = (int **)calloc(n, sizeof(int *));
-    double **adj_w = (double **)calloc(n, sizeof(double *));
-    int *adj_n = (int *)calloc(n, sizeof(int));
-    int *adj_cap = (int *)calloc(n, sizeof(int));
-    if (!adj || !adj_w || !adj_n || !adj_cap) {
-        free(adj);
-        free(adj_w);
-        free(adj_n);
-        free(adj_cap);
-        free(wsi);
-        free(wdi);
-        free(ww);
-        return CBM_NOT_FOUND;
-    }
-
-    double total_weight = 0;
-    for (int i = 0; i < wn; i++) {
-        total_weight += ww[i];
-        adj_add_edge(adj, adj_w, adj_n, adj_cap, wsi[i], wdi[i], ww[i]);
-    }
+    cbm_lg_t g;
+    int built = (wn > 0) ? lg_build(n, wsi, wdi, ww, wn, &g) : CBM_NOT_FOUND;
     free(wsi);
     free(wdi);
     free(ww);
-
-    /* Initialize communities */
-    int *community = (int *)malloc(n * sizeof(int));
-    for (int i = 0; i < n; i++) {
-        community[i] = i;
-    }
-
-    if (total_weight == 0) {
-        cbm_louvain_result_t *result =
-            (cbm_louvain_result_t *)malloc(n * sizeof(cbm_louvain_result_t));
-        for (int i = 0; i < n; i++) {
-            result[i].node_id = nodes[i];
-            result[i].community = i;
-        }
+    if (built != CBM_STORE_OK) {
+        /* No edges (or allocation failure): every node is its own community. */
         *out = result;
         *out_count = n;
-        free(community);
-        louvain_free_adj(adj, adj_w, adj_n, adj_cap, n);
         return CBM_STORE_OK;
     }
 
-    /* Compute node degrees */
-    double *degree = (double *)calloc(n, sizeof(double));
-    if (!degree) {
-        free(community);
-        louvain_free_adj(adj, adj_w, adj_n, adj_cap, n);
-        return CBM_NOT_FOUND;
+    double twom = 0.0;
+    for (int i = 0; i < n; i++) {
+        twom += g.k[i];
+    }
+
+    int *orig = (int *)malloc((size_t)n * sizeof(int)); /* original node -> current graph node */
+    int *comm = (int *)malloc((size_t)n * sizeof(int));
+    if (twom <= 0.0 || !orig || !comm) {
+        free(orig);
+        free(comm);
+        lg_free(&g);
+        *out = result;
+        *out_count = n;
+        return CBM_STORE_OK;
     }
     for (int i = 0; i < n; i++) {
-        if (adj_w[i]) {
-            for (int j = 0; j < adj_n[i]; j++) {
-                degree[i] += adj_w[i][j];
+        orig[i] = i;
+        comm[i] = i;
+    }
+
+    for (int level = 0; level < LEIDEN_MAX_LEVELS; level++) {
+        leiden_move(&g, comm, gamma, twom);
+        int c_count = leiden_relabel(comm, g.n);
+        if (c_count >= g.n) {
+            break; /* every node already isolated — nothing to coarsen */
+        }
+        int *refined = (int *)malloc((size_t)g.n * sizeof(int));
+        if (!refined) {
+            break;
+        }
+        int r_count = leiden_refine(&g, comm, gamma, twom, refined);
+        if (r_count >= g.n) {
+            free(refined);
+            break; /* refinement cannot reduce the graph further */
+        }
+        for (int i = 0; i < n; i++) {
+            orig[i] = refined[orig[i]];
+        }
+        cbm_lg_t g2;
+        int *seed = (int *)malloc((size_t)r_count * sizeof(int));
+        if (!seed || leiden_aggregate(&g, refined, r_count, comm, &g2, seed) != CBM_STORE_OK) {
+            free(seed);
+            free(refined);
+            break;
+        }
+        free(refined);
+        lg_free(&g);
+        g = g2;
+        free(comm);
+        comm = seed;
+    }
+
+    for (int i = 0; i < n; i++) {
+        result[i].community = comm[orig[i]];
+    }
+    free(comm);
+    free(orig);
+    lg_free(&g);
+    *out = result;
+    *out_count = n;
+    return CBM_STORE_OK;
+}
+
+int cbm_louvain(const int64_t *nodes, int node_count, const cbm_louvain_edge_t *edges,
+                int edge_count, cbm_louvain_result_t **out, int *out_count) {
+    return cbm_leiden(nodes, node_count, edges, edge_count, 1.0, out, out_count);
+}
+
+/* ── Architecture: community clusters via Leiden ───────────────── */
+
+enum {
+    CBM_CLUSTER_TOP_N = 12,       /* report at most this many clusters */
+    CBM_CLUSTER_MAX_TOPNODES = 5, /* representative node names per cluster */
+    CBM_CLUSTER_MAX_PKGS = 5,     /* packages listed per cluster */
+    CBM_CLUSTER_MIN_MEMBERS = 2,  /* skip singletons */
+    CBM_CLUSTER_NODE_CAP = 8000   /* bound the work for very large graphs */
+};
+
+static int cluster_id_cmp(const void *key, const void *el) {
+    int64_t k = *(const int64_t *)key;
+    int64_t e = *(const int64_t *)el;
+    return (k > e) - (k < e);
+}
+
+/* Index of node id within the id-sorted ids[], or CBM_NOT_FOUND. */
+static int cluster_id_index(const int64_t *ids, int n, int64_t id) {
+    const int64_t *hit =
+        (const int64_t *)bsearch(&id, ids, (size_t)n, sizeof(int64_t), cluster_id_cmp);
+    return hit ? (int)(hit - ids) : CBM_NOT_FOUND;
+}
+
+/* Append `pkg` to a distinct package list (with a per-package count). */
+static void cluster_add_pkg(const char **pkgs, int *counts, int *count, int cap, const char *pkg) {
+    if (!pkg || !pkg[0]) {
+        return;
+    }
+    for (int i = 0; i < *count; i++) {
+        if (strcmp(pkgs[i], pkg) == 0) {
+            counts[i]++;
+            return;
+        }
+    }
+    if (*count < cap) {
+        pkgs[*count] = heap_strdup(pkg);
+        counts[*count] = 1;
+        (*count)++;
+    }
+}
+
+/* Build the cluster_info for one community c into *ci. */
+static void cluster_build_one(cbm_cluster_info_t *ci, int c, int n, const int *comm,
+                              const int *degree, const char **names, const char **qns, int members,
+                              double cohesion) {
+    memset(ci, 0, sizeof(*ci));
+    ci->id = c;
+    ci->members = members;
+    ci->cohesion = cohesion;
+
+    /* Top nodes by degree. */
+    int top_idx[CBM_CLUSTER_MAX_TOPNODES];
+    int top_deg[CBM_CLUSTER_MAX_TOPNODES];
+    int tn = 0;
+    for (int i = 0; i < n; i++) {
+        if (comm[i] != c) {
+            continue;
+        }
+        int d = degree[i];
+        int pos = tn;
+        while (pos > 0 && top_deg[pos - 1] < d) {
+            pos--;
+        }
+        if (pos < CBM_CLUSTER_MAX_TOPNODES) {
+            int last = (tn < CBM_CLUSTER_MAX_TOPNODES) ? tn : CBM_CLUSTER_MAX_TOPNODES - 1;
+            for (int k = last; k > pos; k--) {
+                top_idx[k] = top_idx[k - 1];
+                top_deg[k] = top_deg[k - 1];
+            }
+            top_idx[pos] = i;
+            top_deg[pos] = d;
+            if (tn < CBM_CLUSTER_MAX_TOPNODES) {
+                tn++;
             }
         }
     }
+    if (tn > 0) {
+        ci->top_nodes = (const char **)malloc((size_t)tn * sizeof(char *));
+        for (int i = 0; i < tn; i++) {
+            ci->top_nodes[i] = heap_strdup(names[top_idx[i]]);
+        }
+        ci->top_node_count = tn;
+    }
 
-    /* Main Louvain loop (10 iterations max) */
-    for (int iter = 0; iter < ST_MAX_ITERATIONS; iter++) {
-        if (!louvain_iteration(n, adj, adj_w, adj_n, community, degree, total_weight, iter)) {
-            break;
+    /* Distinct packages (+ dominant one as the label). */
+    const char *pkgs[CBM_CLUSTER_MAX_PKGS];
+    int pkg_counts[CBM_CLUSTER_MAX_PKGS];
+    int pc = 0;
+    for (int i = 0; i < n; i++) {
+        if (comm[i] == c) {
+            cluster_add_pkg(pkgs, pkg_counts, &pc, CBM_CLUSTER_MAX_PKGS,
+                            cbm_qn_to_top_package(qns[i]));
         }
     }
-
-    /* Build result */
-    cbm_louvain_result_t *result = (cbm_louvain_result_t *)malloc(n * sizeof(cbm_louvain_result_t));
-    for (int i = 0; i < n; i++) {
-        result[i].node_id = nodes[i];
-        result[i].community = community[i];
+    if (pc > 0) {
+        ci->packages = (const char **)malloc((size_t)pc * sizeof(char *));
+        int best = 0;
+        for (int i = 0; i < pc; i++) {
+            ci->packages[i] = heap_strdup(pkgs[i]);
+            if (pkg_counts[i] > pkg_counts[best]) {
+                best = i;
+            }
+        }
+        ci->package_count = pc;
+        ci->label = heap_strdup(pkgs[best]);
+        for (int i = 0; i < pc; i++) {
+            safe_str_free(&pkgs[i]);
+        }
     }
-    *out = result;
-    *out_count = n;
+    if (!ci->label) {
+        ci->label = heap_strdup(ci->top_node_count > 0 ? ci->top_nodes[0] : "cluster");
+    }
 
-    free(community);
+    ci->edge_types = (const char **)malloc(sizeof(char *));
+    ci->edge_types[0] = heap_strdup("CALLS");
+    ci->edge_type_count = 1;
+}
+
+/* Comparator for sorting community indices by descending member count. */
+typedef struct {
+    int comm;
+    int members;
+} cluster_rank_t;
+static int cluster_rank_cmp(const void *a, const void *b) {
+    const cluster_rank_t *ca = (const cluster_rank_t *)a;
+    const cluster_rank_t *cb = (const cluster_rank_t *)b;
+    return cb->members - ca->members;
+}
+
+static int arch_clusters(cbm_store_t *s, const char *project, cbm_architecture_info_t *out) {
+    /* 1. Load Function/Method/Class nodes, ordered by id for bsearch. */
+    const char *nsql = "SELECT id, name, qualified_name FROM nodes "
+                       "WHERE project=?1 AND label IN ('Function','Method','Class') "
+                       "ORDER BY id LIMIT ?2";
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(s->db, nsql, CBM_NOT_FOUND, &st, NULL) != SQLITE_OK) {
+        return CBM_STORE_OK; /* clusters are best-effort */
+    }
+    bind_text(st, SKIP_ONE, project);
+    sqlite3_bind_int(st, CBM_SZ_2, CBM_CLUSTER_NODE_CAP);
+    int cap = ST_INIT_CAP_8;
+    int n = 0;
+    int64_t *ids = (int64_t *)malloc((size_t)cap * sizeof(int64_t));
+    const char **names = (const char **)malloc((size_t)cap * sizeof(char *));
+    const char **qns = (const char **)malloc((size_t)cap * sizeof(char *));
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n >= cap) {
+            cap *= ST_GROWTH;
+            ids = (int64_t *)safe_realloc(ids, (size_t)cap * sizeof(int64_t));
+            names = (const char **)safe_realloc(names, (size_t)cap * sizeof(char *));
+            qns = (const char **)safe_realloc(qns, (size_t)cap * sizeof(char *));
+        }
+        ids[n] = sqlite3_column_int64(st, 0);
+        names[n] = heap_strdup((const char *)sqlite3_column_text(st, SKIP_ONE));
+        qns[n] = heap_strdup((const char *)sqlite3_column_text(st, CBM_SZ_2));
+        n++;
+    }
+    sqlite3_finalize(st);
+    if (n < CBM_CLUSTER_MIN_MEMBERS) {
+        for (int i = 0; i < n; i++) {
+            safe_str_free(&names[i]);
+            safe_str_free(&qns[i]);
+        }
+        free(ids);
+        free(names);
+        free(qns);
+        return CBM_STORE_OK;
+    }
+
+    /* 2. Load CALLS edges with both endpoints in the node set (store indices). */
+    cbm_louvain_edge_t *edges =
+        (cbm_louvain_edge_t *)malloc((size_t)n * sizeof(cbm_louvain_edge_t));
+    int *esrc = (int *)malloc((size_t)n * sizeof(int));
+    int *edst = (int *)malloc((size_t)n * sizeof(int));
+    int *degree = (int *)calloc((size_t)n, sizeof(int));
+    int ne = 0;
+    const char *esql = "SELECT source_id, target_id FROM edges WHERE project=?1 AND type='CALLS'";
+    if (sqlite3_prepare_v2(s->db, esql, CBM_NOT_FOUND, &st, NULL) == SQLITE_OK) {
+        int ecap = n;
+        bind_text(st, SKIP_ONE, project);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            int si = cluster_id_index(ids, n, sqlite3_column_int64(st, 0));
+            int ti = cluster_id_index(ids, n, sqlite3_column_int64(st, SKIP_ONE));
+            if (si < 0 || ti < 0 || si == ti) {
+                continue;
+            }
+            if (ne >= ecap) {
+                ecap *= ST_GROWTH;
+                edges = (cbm_louvain_edge_t *)safe_realloc(edges, (size_t)ecap *
+                                                                      sizeof(cbm_louvain_edge_t));
+                esrc = (int *)safe_realloc(esrc, (size_t)ecap * sizeof(int));
+                edst = (int *)safe_realloc(edst, (size_t)ecap * sizeof(int));
+            }
+            edges[ne].src = ids[si];
+            edges[ne].dst = ids[ti];
+            esrc[ne] = si;
+            edst[ne] = ti;
+            degree[si]++;
+            degree[ti]++;
+            ne++;
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* 3. Community detection. */
+    cbm_louvain_result_t *res = NULL;
+    int rn = 0;
+    int *comm = NULL;
+    int C = 0;
+    if (cbm_leiden(ids, n, edges, ne, 1.0, &res, &rn) == CBM_STORE_OK && res && rn == n) {
+        comm = (int *)malloc((size_t)n * sizeof(int));
+        for (int i = 0; i < n; i++) {
+            comm[i] = res[i].community;
+            if (comm[i] + 1 > C) {
+                C = comm[i] + 1;
+            }
+        }
+    }
+    free(res);
+
+    if (comm && C > 0) {
+        /* 4. Members + cohesion (internal vs boundary edges) per community. */
+        int *members = (int *)calloc((size_t)C, sizeof(int));
+        int *internal = (int *)calloc((size_t)C, sizeof(int));
+        int *boundary = (int *)calloc((size_t)C, sizeof(int));
+        for (int i = 0; i < n; i++) {
+            members[comm[i]]++;
+        }
+        for (int e = 0; e < ne; e++) {
+            int cs = comm[esrc[e]];
+            int cd = comm[edst[e]];
+            if (cs == cd) {
+                internal[cs]++;
+            } else {
+                boundary[cs]++;
+                boundary[cd]++;
+            }
+        }
+
+        /* 5. Rank communities by size, take the top N non-singletons. */
+        cluster_rank_t *rank = (cluster_rank_t *)malloc((size_t)C * sizeof(cluster_rank_t));
+        for (int c = 0; c < C; c++) {
+            rank[c] = (cluster_rank_t){c, members[c]};
+        }
+        qsort(rank, (size_t)C, sizeof(cluster_rank_t), cluster_rank_cmp);
+
+        cbm_cluster_info_t *clusters =
+            (cbm_cluster_info_t *)malloc((size_t)CBM_CLUSTER_TOP_N * sizeof(cbm_cluster_info_t));
+        int cc = 0;
+        for (int r = 0; r < C && cc < CBM_CLUSTER_TOP_N; r++) {
+            int c = rank[r].comm;
+            if (members[c] < CBM_CLUSTER_MIN_MEMBERS) {
+                break; /* sorted desc — the rest are singletons too */
+            }
+            double denom = internal[c] + boundary[c];
+            double cohesion = denom > 0 ? (double)internal[c] / denom : 0.0;
+            cluster_build_one(&clusters[cc], c, n, comm, degree, names, qns, members[c], cohesion);
+            cc++;
+        }
+        out->clusters = clusters;
+        out->cluster_count = cc;
+
+        free(members);
+        free(internal);
+        free(boundary);
+        free(rank);
+    }
+
+    free(comm);
+    for (int i = 0; i < n; i++) {
+        safe_str_free(&names[i]);
+        safe_str_free(&qns[i]);
+    }
+    free(ids);
+    free(names);
+    free(qns);
+    free(edges);
+    free(esrc);
+    free(edst);
     free(degree);
-    louvain_free_adj(adj, adj_w, adj_n, adj_cap, n);
     return CBM_STORE_OK;
 }
 
@@ -4406,6 +4976,12 @@ int cbm_store_get_architecture(cbm_store_t *s, const char *project, const char *
     }
     if (want_aspect(aspects, aspect_count, "file_tree")) {
         rc = arch_file_tree(s, project, out);
+        if (rc != CBM_STORE_OK) {
+            return rc;
+        }
+    }
+    if (want_aspect(aspects, aspect_count, "clusters")) {
+        rc = arch_clusters(s, project, out);
         if (rc != CBM_STORE_OK) {
             return rc;
         }

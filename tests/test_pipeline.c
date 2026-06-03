@@ -572,7 +572,7 @@ TEST(githistory_coupling_carries_last_co_change) {
         {files_old, 2, 1700000000LL},   /* oldest a.go/b.go co-change */
         {files_other, 2, 1750000000LL}, /* unrelated pair */
         {files_mid, 2, 1720000000LL},
-        {files_new, 2, 1800000000LL},   /* newest a.go/b.go co-change */
+        {files_new, 2, 1800000000LL}, /* newest a.go/b.go co-change */
     };
 
     cbm_change_coupling_t results[16];
@@ -581,10 +581,9 @@ TEST(githistory_coupling_carries_last_co_change) {
 
     bool found_ab = false;
     for (int i = 0; i < n; i++) {
-        bool is_ab = (strcmp(results[i].file_a, "a.go") == 0 &&
-                      strcmp(results[i].file_b, "b.go") == 0) ||
-                     (strcmp(results[i].file_a, "b.go") == 0 &&
-                      strcmp(results[i].file_b, "a.go") == 0);
+        bool is_ab =
+            (strcmp(results[i].file_a, "a.go") == 0 && strcmp(results[i].file_b, "b.go") == 0) ||
+            (strcmp(results[i].file_a, "b.go") == 0 && strcmp(results[i].file_b, "a.go") == 0);
         if (!is_ab) {
             continue;
         }
@@ -3297,6 +3296,37 @@ TEST(infra_parse_terraform_empty) {
     PASS();
 }
 
+/* ── Helm Chart.yaml dependency parsing (#338) ──────────────────── */
+
+TEST(helm_parse_chart_dependencies_issue338) {
+    const char *src = "apiVersion: v2\n"
+                      "name: mychart\n"
+                      "version: 1.0.0\n"
+                      "dependencies:\n"
+                      "  - name: postgresql\n"
+                      "    repository: https://charts.bitnami.com/bitnami\n"
+                      "    version: 12.x.x\n"
+                      "  - name: redis\n"
+                      "    repository: https://charts.bitnami.com/bitnami\n"
+                      "maintainers:\n"
+                      "  - name: alice\n"; /* not a dependency — outside the block */
+    cbm_helm_chart_t hc;
+    ASSERT_EQ(cbm_parse_helm_chart(src, &hc), 0);
+    ASSERT_STR_EQ(hc.chart_name, "mychart");
+    ASSERT_EQ(hc.dep_count, 2);
+    ASSERT_STR_EQ(hc.deps[0], "postgresql");
+    ASSERT_STR_EQ(hc.deps[1], "redis");
+    PASS();
+}
+
+TEST(helm_parse_chart_no_deps_issue338) {
+    cbm_helm_chart_t hc;
+    ASSERT_EQ(cbm_parse_helm_chart("name: solo\nversion: 0.1.0\n", &hc), 0);
+    ASSERT_STR_EQ(hc.chart_name, "solo");
+    ASSERT_EQ(hc.dep_count, 0);
+    PASS();
+}
+
 /* ── Infrascan: infra QN helper ─────────────────────────────────── */
 
 /* ── Function Registry / Resolver tests ─────────────────────────── */
@@ -5491,6 +5521,8 @@ SUITE(pipeline) {
     RUN_TEST(infra_parse_terraform_full);
     RUN_TEST(infra_parse_terraform_variables_only);
     RUN_TEST(infra_parse_terraform_empty);
+    RUN_TEST(helm_parse_chart_dependencies_issue338);
+    RUN_TEST(helm_parse_chart_no_deps_issue338);
     /* Infrascan: QN helper */
     RUN_TEST(infra_qn_helper);
     /* Infrascan: pipeline integration */

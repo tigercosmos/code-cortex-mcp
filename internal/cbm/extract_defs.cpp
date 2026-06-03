@@ -546,15 +546,25 @@ static TSNode find_cpp_template_inner_node(TSNode node, CBMLanguage lang) {
     return null_node;
 }
 
-// Try arrow_function name via parent variable_declarator (top-level resolution).
+// Try arrow_function name via parent variable_declarator (top-level resolution)
+// or object-literal property (`pair` key) — the latter covers factory functions
+// that return an object of arrow methods (the Zustand actions-slice pattern, #341).
 static TSNode resolve_toplevel_arrow_name(TSNode node, const char *kind) {
     if (strcmp(kind, "arrow_function") != 0) {
         TSNode null_node = {0};
         return null_node;
     }
     TSNode parent = ts_node_parent(node);
-    if (!ts_node_is_null(parent) && strcmp(ts_node_type(parent), "variable_declarator") == 0) {
+    if (ts_node_is_null(parent)) {
+        TSNode null_node = {0};
+        return null_node;
+    }
+    const char *pk = ts_node_type(parent);
+    if (strcmp(pk, "variable_declarator") == 0) {
         return ts_node_child_by_field_name(parent, TS_FIELD("name"));
+    }
+    if (strcmp(pk, "pair") == 0) {
+        return ts_node_child_by_field_name(parent, TS_FIELD("key"));
     }
     TSNode null_node = {0};
     return null_node;
@@ -606,6 +616,15 @@ static TSNode resolve_func_name(TSNode node, CBMLanguage lang) {
             TSNode si = cbm_find_child_by_kind(node, "simple_identifier");
             if (!ts_node_is_null(si)) {
                 return si;
+            }
+        }
+
+        // PowerShell function_statement has no `name` field; the name is a
+        // `function_name` child node (#35).
+        if (lang == CBM_LANG_POWERSHELL && strcmp(kind, "function_statement") == 0) {
+            TSNode fn = cbm_find_child_by_kind(node, "function_name");
+            if (!ts_node_is_null(fn)) {
+                return fn;
             }
         }
 
@@ -1873,10 +1892,37 @@ static char *find_ini_section_name(CBMArena *a, TSNode node, const char *source)
 // HCL: extract block name from identifier child.
 static char *find_hcl_block_name(CBMArena *a, TSNode node, const char *source) {
     TSNode id = cbm_find_child_by_kind(node, "identifier");
-    if (!ts_node_is_null(id)) {
-        return cbm_node_text(a, id, source);
+    if (ts_node_is_null(id)) {
+        return NULL;
     }
-    return NULL;
+    char *name = cbm_node_text(a, id, source);
+    if (!name || !name[0]) {
+        return NULL;
+    }
+    // Append the block's quoted labels so each block gets a distinct,
+    // query-friendly name: resource "aws_instance" "web" -> resource.aws_instance.web
+    // rather than every resource collapsing to the bare keyword "resource" (#337).
+    // HCL stores labels as string_lit -> template_literal children.
+    uint32_t cc = ts_node_named_child_count(node);
+    for (uint32_t i = 0; i < cc; i++) {
+        TSNode ch = ts_node_named_child(node, i);
+        if (strcmp(ts_node_type(ch), "string_lit") != 0) {
+            continue;
+        }
+        TSNode lit = cbm_find_child_by_kind(ch, "template_literal");
+        if (ts_node_is_null(lit)) {
+            continue;
+        }
+        char *label = cbm_node_text(a, lit, source);
+        if (!label || !label[0]) {
+            continue;
+        }
+        char *joined = cbm_arena_sprintf(a, "%s.%s", name, label);
+        if (joined) {
+            name = joined;
+        }
+    }
+    return name;
 }
 
 // Handle config language class nodes (TOML, INI, XML, Markdown, HCL).
@@ -2113,7 +2159,9 @@ static TSNode resolve_dart_method_name(TSNode child, const char *ck) {
     return null_node;
 }
 
-// Arrow function: name on parent variable_declarator/field_definition.
+// Arrow function: name on parent variable_declarator/field_definition, or the
+// key of an object-literal property — the Zustand "actions returned from a
+// factory" pattern, `{ addItem: (...) => {...} }` (#341).
 static TSNode resolve_arrow_func_name(TSNode child) {
     TSNode parent = ts_node_parent(child);
     if (!ts_node_is_null(parent)) {
@@ -2123,6 +2171,10 @@ static TSNode resolve_arrow_func_name(TSNode child) {
         }
         if (strcmp(pk, "public_field_definition") == 0 || strcmp(pk, "variable_declarator") == 0) {
             return ts_node_child_by_field_name(parent, TS_FIELD("name"));
+        }
+        if (strcmp(pk, "pair") == 0) {
+            // Object-literal property `key: () => {...}` → name is the key.
+            return ts_node_child_by_field_name(parent, TS_FIELD("key"));
         }
     }
     TSNode null_node = {0};
@@ -3245,8 +3297,69 @@ static void walk_variables_iter(CBMExtractCtx *ctx, TSNode root, const CBMLangSp
     }
 }
 
+// True if the file's basename is values.yaml / values.yml (Helm values, #338).
+static bool is_helm_values_file(const char *rel) {
+    if (!rel) {
+        return false;
+    }
+    const char *b = strrchr(rel, '/');
+    b = b ? b + 1 : rel;
+    return strcmp(b, "values.yaml") == 0 || strcmp(b, "values.yml") == 0;
+}
+
+// Extract ONLY top-level keys of a YAML document (no leaf explosion). Used for
+// Helm values.yaml so each chart's tunables surface as a handful of structured
+// Variables instead of one node per nested leaf (#338).
+static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
+    CBMArena *a = ctx->arena;
+    // Descend stream -> document -> block_node down to the first block_mapping.
+    TSNode bm = {0};
+    TSNode cur = root;
+    for (int depth = 0; depth < 6 && ts_node_is_null(bm); depth++) {
+        uint32_t n = ts_node_child_count(cur);
+        TSNode next = {0};
+        bool have_next = false;
+        for (uint32_t i = 0; i < n; i++) {
+            TSNode ch = ts_node_child(cur, i);
+            const char *ck = ts_node_type(ch);
+            if (strcmp(ck, "block_mapping") == 0) {
+                bm = ch;
+                break;
+            }
+            if (!have_next && (strcmp(ck, "document") == 0 || strcmp(ck, "block_node") == 0)) {
+                next = ch;
+                have_next = true;
+            }
+        }
+        if (!ts_node_is_null(bm) || !have_next) {
+            break;
+        }
+        cur = next;
+    }
+    if (ts_node_is_null(bm)) {
+        return;
+    }
+    uint32_t n = ts_node_named_child_count(bm);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode pair = ts_node_named_child(bm, i);
+        if (strcmp(ts_node_type(pair), "block_mapping_pair") != 0) {
+            continue;
+        }
+        TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+        if (!ts_node_is_null(key)) {
+            push_var_def(ctx, cbm_node_text(a, key, ctx->source), pair);
+        }
+    }
+}
+
 static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     if (!spec->variable_node_types || !spec->variable_node_types[0]) {
+        return;
+    }
+
+    // Helm values.yaml: only top-level keys, not the per-leaf flood.
+    if (ctx->language == CBM_LANG_YAML && is_helm_values_file(ctx->rel_path)) {
+        extract_yaml_toplevel_keys(ctx, root);
         return;
     }
 
@@ -3561,6 +3674,81 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, walk_
     }
 }
 
+// Helm / Go template named-template definition: {{ define "chart.fullname" }} ...
+// {{ end }} (#338). The name is a string-literal child of define_action. Emit a
+// Function node so `include`/`template` references resolve to it via CALLS.
+static void extract_gotemplate_define(CBMExtractCtx *ctx, TSNode node) {
+    CBMArena *a = ctx->arena;
+    TSNode s = cbm_find_child_by_kind(node, "interpreted_string_literal");
+    if (ts_node_is_null(s)) {
+        return;
+    }
+    char *raw = cbm_node_text(a, s, ctx->source);
+    if (!raw) {
+        return;
+    }
+    size_t len = strlen(raw);
+    if (len >= 2 && (raw[0] == '"' || raw[0] == '`')) {
+        raw = cbm_arena_strndup(a, raw + 1, len - 2); // strip surrounding quotes
+    }
+    if (!raw || !raw[0]) {
+        return;
+    }
+
+    CBMDefinition def;
+    memset(&def, 0, sizeof(def));
+    def.name = raw;
+    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, raw);
+    def.label = "Function";
+    def.file_path = ctx->rel_path;
+    def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
+    def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
+    def.lines = (int)(def.end_line - def.start_line + TS_LINE_OFFSET);
+    def.is_exported = true;
+    cbm_defs_push(&ctx->result->defs, a, def);
+}
+
+// Languages that use the C preprocessor and therefore have #define macros.
+static bool is_c_preprocessor_lang(CBMLanguage lang) {
+    return lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA ||
+           lang == CBM_LANG_GLSL || lang == CBM_LANG_OBJC || lang == CBM_LANG_ISPC;
+}
+
+// C/C++ preprocessor macros become Macro nodes (#375):
+//   #define SIMPLE 1          -> preproc_def
+//   #define FN(x) (2 * (x))   -> preproc_function_def
+// The name is the `name` field; a function-like macro's parameter list is kept
+// as the signature. The macro body (a preproc_arg) is not descended into.
+static void extract_c_macro_def(CBMExtractCtx *ctx, TSNode node) {
+    CBMArena *a = ctx->arena;
+    TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
+    if (ts_node_is_null(name_node)) {
+        return;
+    }
+    char *name = cbm_node_text(a, name_node, ctx->source);
+    if (!name || !name[0]) {
+        return;
+    }
+
+    CBMDefinition def;
+    memset(&def, 0, sizeof(def));
+    def.name = name;
+    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.label = "Macro";
+    def.file_path = ctx->rel_path;
+    def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
+    def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
+    def.lines = (int)(def.end_line - def.start_line + TS_LINE_OFFSET);
+    def.is_exported = true; // macros have no translation-unit scoping — globally visible
+
+    TSNode params = ts_node_child_by_field_name(node, TS_FIELD("parameters"));
+    if (!ts_node_is_null(params)) {
+        def.signature = cbm_node_text(a, params, ctx->source);
+    }
+
+    cbm_defs_push(&ctx->result->defs, a, def);
+}
+
 static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, int depth_unused) {
     (void)depth_unused;
     walk_defs_frame_t stack[CBM_WALK_DEFS_STACK_CAP];
@@ -3578,10 +3766,29 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
             continue;
         }
 
+        if (is_c_preprocessor_lang(ctx->language) &&
+            (strcmp(kind, "preproc_def") == 0 || strcmp(kind, "preproc_function_def") == 0)) {
+            extract_c_macro_def(ctx, node);
+            continue; // the macro body is a preproc_arg — nothing more to extract
+        }
+
+        if (ctx->language == CBM_LANG_GOTEMPLATE && strcmp(kind, "define_action") == 0) {
+            extract_gotemplate_define(ctx, node);
+            // fall through: descend into the body for nested defines
+        }
+
         if (cbm_kind_in_set(node, spec->function_node_types)) {
             if (!is_template_class_node(node, ctx->language)) {
                 extract_func_def(ctx, node, spec);
-                if (ctx->language != CBM_LANG_WOLFRAM) {
+                // Most languages stop here. JS/TS (and Wolfram) descend into the
+                // function body so NESTED named definitions are also captured —
+                // e.g. arrow methods of an object literal returned from a factory
+                // (the Zustand actions-slice pattern, #341). Anonymous nested
+                // arrows have no resolvable name and are skipped.
+                bool descend_into_func =
+                    (ctx->language == CBM_LANG_WOLFRAM || ctx->language == CBM_LANG_TYPESCRIPT ||
+                     ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TSX);
+                if (!descend_into_func) {
                     continue;
                 }
             }

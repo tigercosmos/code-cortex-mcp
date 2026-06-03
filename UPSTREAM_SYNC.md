@@ -7,8 +7,8 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 
 | | |
 |---|---|
-| **Upstream commit** | `d0e1e7782544effb3f5ec96dc79712b6cd1c4308` (post-v0.7.0, 2026-05-31) |
-| **Synced on** | 2026-05-31 |
+| **Upstream commit** | `64be280` (post-v0.7.0, 2026-06-02) |
+| **Synced on** | 2026-06-03 |
 
 Update both fields whenever you pull new upstream work (see the log at the bottom).
 
@@ -53,7 +53,7 @@ git fetch upstream main
 
 # 1. List upstream commits NEWER than our last-synced marker that we DON'T
 #    already have (compare by message — SHAs diverge across the fork).
-MARKER=d0e1e7782544effb3f5ec96dc79712b6cd1c4308   # <- the "Last synced" SHA above
+MARKER=64be280   # <- the "Last synced" SHA above
 git log --format='%s' "$MARKER"..upstream/main | while IFS= read -r m; do
   git log --format='%s' main | grep -qxF "$m" || echo "NEW: $m"
 done
@@ -80,5 +80,6 @@ For each genuinely-new commit:
 
 | Date | Upstream → | Ported | Skipped |
 |------|-----------|--------|---------|
+| 2026-06-03 | `64be280` (post-v0.7.0) | **~40 commits.** Cypher engine: WITH DISTINCT (`3014867`), `WHERE n:Label` (`b30e6d6`), label alternation `(n:A\|B)` (`2a5515e`), `COUNT(DISTINCT)` (`869341c`), resync-on-unsupported (`a2cd1e7`), dead-store cleanup (`3be9ace`), scalar/entity fns (`71a6c57`), string fns + fail-loud (`67a7334`), multi-arg scalar fns (`c160465`), `EXISTS{}` predicate (`08b62f0`). Arch/store: Louvain→multi-level **Leiden** (`955b87d`) + surface clusters in get_architecture (`d87cffe`), drive-letter integrity (`c1dabc9`), file_pattern path-substring #200 (`53be053`). MCP/search: JSON-RPC string ids #253 (`4abcaa4`), manage_adr→SQLite #256 (`70e3ed7`), search_code `&`/literal-`\|`/timing (`09e3f71`), `--ui` warn #350 (`6657044`). Extract: JS/TS arrow factory methods (`eb50569`), C/C++ macros→Macro nodes (`10ce652`), GDScript/PS/Luau + PS fn names (`f42d772`), HCL block labels (`2cad2fe`), R `box::use` imports (`1a636f1`). Helm: named templates + include calls (`a8fc901`), Chart.yaml DEPENDS_ON + values.yaml top-level (`1b308ec`) — both via the existing gotemplate grammar. Pipeline/discover/fqn/cli: gRPC Route stub-suffix #294 (`5f3847c`), validator-safe project names #349 (`5595ce4`), `.mjs/.cjs/.mts/.cts` #197 (`2de984b`), `.blade.php`→Blade #258 (`db6e99c`), Windows PATHEXT #221 (`0485d3f`). Install/cli: `install --plan` receipt #388 (`4c38c5a`), Cursor IDE detect #222 (`f88d031`), fish PATH #319 (`30dfa95`), Antigravity paths (`13bd108`), SessionStart reminders #330 (`6c71244`). Tests: regression guards (`7e4745d` `bf3fc71` `48a9b2c` `6840457` `f5573f1`). **Deviations:** (1) **#283 search_code invalid-regex error NOT ported** — upstream validates the user regex up front with TRE-backed `cbm_regcomp` (same dialect as `grep`); this fork backs `cbm_regcomp` with `std::regex::extended` (strict POSIX ERE, rejects `\s`/`\w`/`\d`) while the real search shells out to system `grep`, so the up-front check would falsely reject valid GNU-grep patterns. Dropped the validation + its test, kept the independent `path_regex` leak fix. (2) **CFML/QML languages deferred** (user scope decision) — ~1M lines of vendored generated grammars; `cbm.h`/`lang_specs.c`/`language.c`/`extract_defs.c`/test CFML/QML hunks intentionally not applied. Verified: g++-15 unavailable locally (Homebrew ld/SDK breakage), built+tested under Apple-clang non-sanitizer (CBM_SANITIZE=OFF) — **3703 passed, 0 failed**; clang-format-20.1.8 clean. | CFML (`1e1d408`) + QML (`f16f9dc`) languages + `600fe90` lang-count doc; `efec2ce`/`023d92c` README/landing-page (rebrand-divergent — fork README lacks the section); `64be280` vitest bump (graph-ui); `d67329e` smoke-test Antigravity; `7fad5bc` CI dry-run; `d198403`+`9dcc0e3` net-zero Windows CI repro harness; `61453e9` hooks-gate test (shell); scripts/smoke-test.sh hunks |
 | 2026-05-31 | `d0e1e77` (post-v0.7.0) | **22 commits**: c-lsp crash/eval-cap fixes (`05f0a26` `926eb7f` `d895c16`); install `$CLAUDE_CONFIG_DIR` (`dedd33d`); security/correctness hardening (`21c73b5`); store WAL checkpoint (`a6ad401`); MCP ping (`9d6e28b`); platform `CBM_WORKERS` + cgroup detection (`d952238` `a5a3d1d`); pkgmap workspace-imports + SvelteKit routes (`9bcfaab` `fcf98ac` `bcf73b2`); arena NULL-guard + vendored-skip (`9e2bb92`); extract_channels growable stack (`4d84406`); CLOCK_MONOTONIC (`2e110fc`); Windows path/git-log fixes (`2389d82` `df38e33`); tests (`7dafde4` `ba49137` `de069d1` `d848347` `34864c8`); CI bumps (`5c743e8` `694652f` `4fd6e1b`); stale-doc deletions. **Deviation:** repo-wide pkgmap manifest walk is POSIX-only (Windows no-op) — matches upstream `bcf73b2` (the unconditional walk hung Windows CI on directory-junction cycles); Windows workspace-import resolution awaits a junction-safe rewrite upstream. | `afd98bf` README rebrand-divergent; `c6c1d77`+`6c6b8c8`+`d0e1e77` net-zero temp bucket-B CI harness; pkg/version bumps |
 | (earlier) | `9a9488f`-era | full upstream history up to the "pad source read buffers / gate LSP benchmarks" era, brought in before the C++ migration | — |

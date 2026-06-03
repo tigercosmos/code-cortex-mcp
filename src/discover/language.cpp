@@ -147,6 +147,8 @@ static const ext_entry_t EXT_TABLE[] = {
     /* JavaScript */
     {".js", CBM_LANG_JAVASCRIPT},
     {".jsx", CBM_LANG_JAVASCRIPT},
+    {".mjs", CBM_LANG_JAVASCRIPT}, /* ES modules (#197) */
+    {".cjs", CBM_LANG_JAVASCRIPT}, /* CommonJS modules */
 
     /* JSON */
     {".json", CBM_LANG_JSON},
@@ -243,6 +245,8 @@ static const ext_entry_t EXT_TABLE[] = {
 
     /* TypeScript */
     {".ts", CBM_LANG_TYPESCRIPT},
+    {".mts", CBM_LANG_TYPESCRIPT}, /* TS ES modules */
+    {".cts", CBM_LANG_TYPESCRIPT}, /* TS CommonJS modules */
 
     /* VimScript */
     {".vim", CBM_LANG_VIMSCRIPT},
@@ -370,6 +374,7 @@ static const ext_entry_t EXT_TABLE[] = {
 
     /* Go Template */
     {".gotmpl", CBM_LANG_GOTEMPLATE},
+    {".tpl", CBM_LANG_GOTEMPLATE}, /* Helm _helpers.tpl named-template definitions */
 
     /* Hare */
     {".ha", CBM_LANG_HARE},
@@ -864,17 +869,31 @@ CBMLanguage cbm_language_for_filename(const char *filename) {
         return CBM_LANG_COUNT;
     }
 
-    /* Probe user config for compound extensions (e.g. ".blade.php"). */
+    /* Probe compound extensions (e.g. ".blade.php") from the first dot toward
+     * the last. Built-in compounds are checked first so e.g. Laravel Blade
+     * templates map to Blade rather than the single-extension fallback (PHP);
+     * user config can still add more (#258). */
+    static const struct {
+        const char *ext;
+        CBMLanguage lang;
+    } COMPOUND_EXT_TABLE[] = {
+        {".blade.php", CBM_LANG_BLADE},
+    };
     const cbm_userconfig_t *ucfg = cbm_get_user_lang_config();
-    if (ucfg) {
-        const char *p = strchr(filename, '.');
-        while (p && p < last_dot) {
+    const char *p = strchr(filename, '.');
+    while (p && p < last_dot) {
+        for (size_t i = 0; i < sizeof(COMPOUND_EXT_TABLE) / sizeof(COMPOUND_EXT_TABLE[0]); i++) {
+            if (strcmp(p, COMPOUND_EXT_TABLE[i].ext) == 0) {
+                return COMPOUND_EXT_TABLE[i].lang;
+            }
+        }
+        if (ucfg) {
             CBMLanguage lang = cbm_userconfig_lookup(ucfg, p);
             if (lang != CBM_LANG_COUNT) {
                 return lang;
             }
-            p = strchr(p + SKIP_ONE, '.');
         }
+        p = strchr(p + SKIP_ONE, '.');
     }
 
     /* Standard single-extension lookup (built-ins + user overrides). */

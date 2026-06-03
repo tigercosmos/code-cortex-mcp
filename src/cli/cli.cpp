@@ -262,6 +262,19 @@ static bool find_in_path(const char *name, char *out, size_t out_sz) {
         if (is_executable(out)) {
             return true;
         }
+#ifdef _WIN32
+        /* On Windows executables carry an extension (PATHEXT). A CLI like
+         * opencode is often installed as a .cmd / .ps1 / .exe shim (e.g. via
+         * mise or npm), so the bare-name probe above misses it (#221). Try the
+         * common executable extensions before moving to the next PATH entry. */
+        static const char *const win_exts[] = {".exe", ".cmd", ".bat", ".ps1", NULL};
+        for (int i = 0; win_exts[i]; i++) {
+            snprintf(out, out_sz, "%s/%s%s", dir, name, win_exts[i]);
+            if (is_executable(out)) {
+                return true;
+            }
+        }
+#endif
         dir = strtok_r(NULL, PATH_DELIM, &saveptr);
     }
     return false;
@@ -1047,10 +1060,12 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
 
     agents.opencode = cbm_find_cli("opencode", home_dir)[0] != '\0';
 
-    snprintf(path, sizeof(path), "%s/.gemini/antigravity", home_dir);
+    /* Antigravity CLI (2026 unification) installs under ~/.gemini/antigravity-cli/
+     * (brain/, mcp/, settings.json), with MCP config in the shared
+     * ~/.gemini/config/mcp_config.json. */
+    snprintf(path, sizeof(path), "%s/.gemini/antigravity-cli", home_dir);
     if (dir_exists(path)) {
         agents.antigravity = true;
-        agents.gemini = true;
     }
 
     agents.aider = cbm_find_cli("aider", home_dir)[0] != '\0';
@@ -1074,6 +1089,10 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
     snprintf(path, sizeof(path), "%s/.config/Code/User", home_dir);
 #endif
     agents.vscode = dir_exists(path);
+
+    /* Cursor stores its user MCP config in ~/.cursor/mcp.json on all platforms. */
+    snprintf(path, sizeof(path), "%s/.cursor", home_dir);
+    agents.cursor = dir_exists(path);
 
     snprintf(path, sizeof(path), "%s/.openclaw", home_dir);
     agents.openclaw = dir_exists(path);
@@ -1418,6 +1437,115 @@ int cbm_remove_codex_mcp(const char *config_path) {
     return rc;
 }
 
+/* ── SessionStart reminder hook (Codex / Gemini / Antigravity) ──────
+ * Same methodology as the Claude Code SessionStart hook: a non-blocking
+ * lifecycle hook whose stdout is injected as session context, reminding the
+ * agent to use codebase-memory-mcp graph tools first. The command is written
+ * so it is valid both inside a TOML single-quoted literal (Codex config.toml)
+ * and a JSON string (Gemini settings.json) — i.e. it contains NO single quotes
+ * and NO newlines. (issues #330 + Gemini/Antigravity parity) */
+#define CMM_SESSION_REMINDER_CMD                                                    \
+    "echo \"Code discovery: prefer codebase-memory-mcp (search_graph, trace_path, " \
+    "get_code_snippet, query_graph, search_code) over grep/file-read; run "         \
+    "index_repository first if the project is not indexed.\""
+
+/* Sentinel-delimited block so upsert/remove are robust to the nested TOML
+ * array-of-tables (which both start with '['). */
+#define CODEX_HOOK_BEGIN "# >>> codebase-memory-mcp SessionStart >>>"
+#define CODEX_HOOK_END "# <<< codebase-memory-mcp SessionStart <<<"
+
+/* Splice out an existing [CODEX_HOOK_BEGIN .. CODEX_HOOK_END] block (inclusive,
+ * plus a leading newline). Returns a newly-malloc'd string the caller frees, or
+ * NULL if no block was present (content is left untouched). */
+static char *codex_hook_strip(const char *content) {
+    char *begin = (char *)strstr(content, CODEX_HOOK_BEGIN);
+    if (!begin) {
+        return NULL;
+    }
+    char *end = strstr(begin, CODEX_HOOK_END);
+    if (!end) {
+        return NULL;
+    }
+    end += strlen(CODEX_HOOK_END);
+    if (*end == '\n') {
+        end++;
+    }
+    /* Drop one leading newline before the block, if any. */
+    char *cut = begin;
+    if (cut > content && *(cut - CLI_SKIP_ONE) == '\n') {
+        cut--;
+    }
+    size_t prefix_len = (size_t)(cut - content);
+    size_t suffix_len = strlen(end);
+    char *out = (char *)malloc(prefix_len + suffix_len + CLI_SKIP_ONE);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, content, prefix_len);
+    memcpy(out + prefix_len, end, suffix_len);
+    out[prefix_len + suffix_len] = '\0';
+    return out;
+}
+
+/* Install/update the Codex SessionStart reminder hook in config.toml. */
+int cbm_upsert_codex_hooks(const char *config_path) {
+    if (!config_path) {
+        return CLI_ERR;
+    }
+    char block[CLI_BUF_2K];
+    snprintf(block, sizeof(block),
+             "\n" CODEX_HOOK_BEGIN "\n"
+             "[[hooks.SessionStart]]\n"
+             "matcher = \"startup|resume|clear|compact\"\n\n"
+             "[[hooks.SessionStart.hooks]]\n"
+             "type = \"command\"\n"
+             "command = '%s'\n" CODEX_HOOK_END "\n",
+             CMM_SESSION_REMINDER_CMD);
+
+    size_t len = 0;
+    char *content = read_file_str(config_path, &len);
+    if (!content) {
+        return write_file_str(config_path, block + CLI_SKIP_ONE); /* skip leading newline */
+    }
+    char *stripped = codex_hook_strip(content);
+    const char *base = stripped ? stripped : content;
+    size_t base_len = strlen(base);
+    char *result = (char *)malloc(base_len + strlen(block) + CLI_SKIP_ONE);
+    if (!result) {
+        free(content);
+        free(stripped);
+        return CLI_ERR;
+    }
+    memcpy(result, base, base_len);
+    memcpy(result + base_len, block, strlen(block));
+    result[base_len + strlen(block)] = '\0';
+    int rc = write_file_str(config_path, result);
+    free(content);
+    free(stripped);
+    free(result);
+    return rc;
+}
+
+int cbm_remove_codex_hooks(const char *config_path) {
+    if (!config_path) {
+        return CLI_ERR;
+    }
+    size_t len = 0;
+    char *content = read_file_str(config_path, &len);
+    if (!content) {
+        return CLI_TRUE;
+    }
+    char *stripped = codex_hook_strip(content);
+    if (!stripped) {
+        free(content);
+        return CLI_TRUE; /* nothing to remove */
+    }
+    int rc = write_file_str(config_path, stripped);
+    free(content);
+    free(stripped);
+    return rc;
+}
+
 /* ── OpenCode MCP config (JSON with "mcp" key) ───────────────── */
 
 int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
@@ -1696,6 +1824,12 @@ static int remove_hooks_json(hooks_remove_args_t args) {
         }
     }
 
+    /* Prune the event key once its array is empty, so removing our hook leaves
+     * no stale "<Event>": [] cruft behind. */
+    if (yyjson_mut_arr_size(event_arr) == 0) {
+        yyjson_mut_obj_remove_key(hooks, hook_event);
+    }
+
     int rc = write_json_file(settings_path, mdoc);
     yyjson_mut_doc_free(mdoc);
     return rc;
@@ -1729,7 +1863,7 @@ int cbm_remove_claude_hooks(const char *settings_path) {
  * a missing/old/hung binary results in a silent exit 0 (issue #362/#288).
  * The legacy filename `cbm-code-discovery-gate` is retained so existing
  * settings.json entries and uninstall keep working with zero migration. */
-static void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
+void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
     if (!home || !binary_path) {
         return;
     }
@@ -1881,6 +2015,29 @@ int cbm_remove_gemini_hooks(const char *settings_path) {
     });
 }
 
+/* Gemini CLI / Antigravity SessionStart reminder. settings.json uses the same
+ * hooks.<Event>[].hooks[] JSON shape as Claude, so it reuses upsert_hooks_json.
+ * The SessionStart matcher is advisory in Gemini (it does not filter lifecycle
+ * sources), so a single "startup" entry fires on startup/resume/clear. The
+ * command's stdout is injected as session context. (Gemini/Antigravity parity
+ * with the Claude/Codex SessionStart reminder.) */
+int cbm_upsert_gemini_session_hooks(const char *settings_path) {
+    return upsert_hooks_json((hooks_upsert_args_t){
+        .settings_path = settings_path,
+        .hook_event = "SessionStart",
+        .matcher_str = "startup",
+        .command_str = CMM_SESSION_REMINDER_CMD,
+    });
+}
+
+int cbm_remove_gemini_session_hooks(const char *settings_path) {
+    return remove_hooks_json((hooks_remove_args_t){
+        .settings_path = settings_path,
+        .hook_event = "SessionStart",
+        .matcher_str = "startup",
+    });
+}
+
 /* ── PATH management ──────────────────────────────────────────── */
 
 int cbm_ensure_path(const char *bin_dir, const char *rc_file, bool dry_run) {
@@ -1888,8 +2045,19 @@ int cbm_ensure_path(const char *bin_dir, const char *rc_file, bool dry_run) {
         return CLI_ERR;
     }
 
+    /* fish uses a different syntax than POSIX shells: `export PATH="...:$PATH"`
+     * is a syntax error in fish and breaks config.fish (#319). When the target
+     * is a fish config, emit the fish-native `fish_add_path` (idempotent,
+     * prepends only if absent) instead. */
+    size_t rc_len = strlen(rc_file);
+    bool is_fish = rc_len >= CBM_SZ_5 && strcmp(rc_file + rc_len - CBM_SZ_5, ".fish") == 0;
+
     char line[CLI_BUF_1K];
-    snprintf(line, sizeof(line), "export PATH=\"%s:$PATH\"", bin_dir);
+    if (is_fish) {
+        snprintf(line, sizeof(line), "fish_add_path %s", bin_dir);
+    } else {
+        snprintf(line, sizeof(line), "export PATH=\"%s:$PATH\"", bin_dir);
+    }
 
     /* Check if already present in rc file */
     FILE *f = fopen(rc_file, "r");
@@ -2721,6 +2889,7 @@ static void print_detected_agents(const cbm_detected_agents_t *a) {
         {a->aider, "Aider"},
         {a->kilocode, "KiloCode"},
         {a->vscode, "VS-Code"},
+        {a->cursor, "Cursor"},
         {a->openclaw, "OpenClaw"},
         {a->kiro, "Kiro"},
     };
@@ -2739,6 +2908,45 @@ static void print_detected_agents(const cbm_detected_agents_t *a) {
 }
 
 /* Install Claude Code-specific configs (skills, MCP, hooks). */
+/* ── Install plan recorder (issue #388) ────────────────────────────
+ * When g_install_plan != NULL, the install path runs as a dry-run and each
+ * write site records its planned target HERE — at the same point it would
+ * perform the write — so the emitted plan cannot drift from actual install
+ * behavior (it is the same code path with mutations disabled). */
+typedef struct {
+    char agent[CLI_BUF_32];
+    char kind[CLI_BUF_32]; /* mcp_config | instructions | skills | hook */
+    char path[CLI_BUF_1K];
+} cbm_plan_entry_t;
+
+typedef struct {
+    cbm_plan_entry_t *items;
+    int count;
+    int cap;
+} cbm_install_plan_t;
+
+static cbm_install_plan_t *g_install_plan = NULL;
+
+static void plan_record(const char *agent, const char *kind, const char *path) {
+    if (!g_install_plan || !path || !path[0]) {
+        return;
+    }
+    cbm_install_plan_t *pl = g_install_plan;
+    if (pl->count >= pl->cap) {
+        int ncap = pl->cap ? pl->cap * 2 : CLI_BUF_16;
+        cbm_plan_entry_t *ni = (cbm_plan_entry_t *)realloc(pl->items, (size_t)ncap * sizeof(*ni));
+        if (!ni) {
+            return;
+        }
+        pl->items = ni;
+        pl->cap = ncap;
+    }
+    cbm_plan_entry_t *e = &pl->items[pl->count++];
+    snprintf(e->agent, sizeof(e->agent), "%s", agent);
+    snprintf(e->kind, sizeof(e->kind), "%s", kind);
+    snprintf(e->path, sizeof(e->path), "%s", path);
+}
+
 static void install_claude_code_config(const char *home, const char *binary_path, bool force,
                                        bool dry_run) {
     char config_dir[CLI_BUF_1K];
@@ -2748,6 +2956,24 @@ static void install_claude_code_config(const char *home, const char *binary_path
 
     char skills_dir[CLI_BUF_1K];
     snprintf(skills_dir, sizeof(skills_dir), "%s/skills", config_dir);
+
+    /* Plan mode: record the planned writes and return without mutating (#388). */
+    if (g_install_plan) {
+        char p[CLI_BUF_1K];
+        plan_record("Claude Code", "skills", skills_dir);
+        snprintf(p, sizeof(p), "%s/.mcp.json", config_dir);
+        plan_record("Claude Code", "mcp_config", p);
+        snprintf(p, sizeof(p), "%s/.claude.json", user_root);
+        plan_record("Claude Code", "mcp_config", p);
+        snprintf(p, sizeof(p), "%s/settings.json", config_dir);
+        plan_record("Claude Code", "mcp_config", p);
+        snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_HOOK_GATE_SCRIPT);
+        plan_record("Claude Code", "hook", p);
+        snprintf(p, sizeof(p), "%s/hooks/%s", config_dir, CMM_SESSION_REMINDER_SCRIPT);
+        plan_record("Claude Code", "hook", p);
+        return;
+    }
+
     printf("Claude Code:\n");
 
     int skill_count = cbm_install_skills(skills_dir, force, dry_run);
@@ -2802,6 +3028,14 @@ static void install_generic_agent_config(const char *label, const char *binary_p
                                          const char *config_path, const char *instr_path,
                                          bool dry_run,
                                          int (*install_mcp)(const char *, const char *)) {
+    /* Plan mode: record planned writes, mutate nothing (#388). */
+    if (g_install_plan) {
+        plan_record(label, "mcp_config", config_path);
+        if (instr_path) {
+            plan_record(label, "instructions", instr_path);
+        }
+        return;
+    }
     printf("%s:\n", label);
     if (!dry_run) {
         install_mcp(binary_path, config_path);
@@ -2824,10 +3058,15 @@ static void install_gemini_config(const char *home, const char *binary_path, boo
     snprintf(ip, sizeof(ip), "%s/.gemini/GEMINI.md", home);
     install_generic_agent_config("Gemini CLI", binary_path, cp, ip, dry_run,
                                  cbm_install_editor_mcp);
+    if (g_install_plan) {
+        plan_record("Gemini CLI", "hook", cp); /* BeforeTool + SessionStart in settings.json */
+        return;
+    }
     if (!dry_run) {
         cbm_upsert_gemini_hooks(cp);
+        cbm_upsert_gemini_session_hooks(cp);
     }
-    printf("  hooks: BeforeTool (grep/file search reminder)\n");
+    printf("  hooks: BeforeTool + SessionStart (codebase-memory-mcp reminder)\n");
 }
 
 static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const char *home,
@@ -2839,6 +3078,14 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
         snprintf(ip, sizeof(ip), "%s/.codex/AGENTS.md", home);
         install_generic_agent_config("Codex CLI", binary_path, cp, ip, dry_run,
                                      cbm_upsert_codex_mcp);
+        if (g_install_plan) {
+            plan_record("Codex CLI", "hook", cp);
+        } else {
+            if (!dry_run) {
+                cbm_upsert_codex_hooks(cp);
+            }
+            printf("  hooks: SessionStart (codebase-memory-mcp reminder)\n");
+        }
     }
     if (agents->gemini) {
         install_gemini_config(home, binary_path, dry_run);
@@ -2854,19 +3101,43 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
     if (agents->antigravity) {
         char cp[CLI_BUF_1K];
         char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.gemini/antigravity/mcp_config.json", home);
-        snprintf(ip, sizeof(ip), "%s/.gemini/antigravity/AGENTS.md", home);
+        /* MCP config is the SHARED Antigravity config (CLI + IDE), not a
+         * per-tool file (2026 unification). */
+        snprintf(cp, sizeof(cp), "%s/.gemini/config/mcp_config.json", home);
+        snprintf(ip, sizeof(ip), "%s/.gemini/antigravity-cli/AGENTS.md", home);
+        if (!dry_run && !g_install_plan) {
+            char cfg_dir[CLI_BUF_1K];
+            snprintf(cfg_dir, sizeof(cfg_dir), "%s/.gemini/config", home);
+            cbm_mkdir_p(cfg_dir, CLI_OCTAL_PERM);
+        }
         install_generic_agent_config("Antigravity", binary_path, cp, ip, dry_run,
                                      cbm_upsert_antigravity_mcp);
+        /* Antigravity CLI is Gemini-lineage and keeps a settings.json under
+         * ~/.gemini/antigravity-cli/; install the SessionStart reminder there
+         * using the shared Gemini hook JSON schema. */
+        char sp[CLI_BUF_1K];
+        snprintf(sp, sizeof(sp), "%s/.gemini/antigravity-cli/settings.json", home);
+        if (g_install_plan) {
+            plan_record("Antigravity", "hook", sp);
+        } else {
+            if (!dry_run) {
+                cbm_upsert_gemini_session_hooks(sp);
+            }
+            printf("  hooks: SessionStart (codebase-memory-mcp reminder)\n");
+        }
     }
     if (agents->aider) {
         char ip[CLI_BUF_1K];
         snprintf(ip, sizeof(ip), "%s/CONVENTIONS.md", home);
-        printf("Aider:\n");
-        if (!dry_run) {
-            cbm_upsert_instructions(ip, agent_instructions_content);
+        if (g_install_plan) {
+            plan_record("Aider", "instructions", ip);
+        } else {
+            printf("Aider:\n");
+            if (!dry_run) {
+                cbm_upsert_instructions(ip, agent_instructions_content);
+            }
+            printf("  instructions: %s\n", ip);
         }
-        printf("  instructions: %s\n", ip);
     }
 }
 
@@ -2911,6 +3182,12 @@ static void install_editor_agent_configs(const cbm_detected_agents_t *agents, co
         install_generic_agent_config("VS Code", binary_path, cp, NULL, dry_run,
                                      cbm_install_vscode_mcp);
     }
+    if (agents->cursor) {
+        char cp[CLI_BUF_1K];
+        snprintf(cp, sizeof(cp), "%s/.cursor/mcp.json", home);
+        install_generic_agent_config("Cursor", binary_path, cp, NULL, dry_run,
+                                     cbm_install_editor_mcp);
+    }
     if (agents->openclaw) {
         char cp[CLI_BUF_1K];
         snprintf(cp, sizeof(cp), "%s/.openclaw/openclaw.json", home);
@@ -2933,7 +3210,9 @@ static void install_editor_agent_configs(const cbm_detected_agents_t *agents, co
 static void cbm_install_agent_configs(const char *home, const char *binary_path, bool force,
                                       bool dry_run) {
     cbm_detected_agents_t agents = cbm_detect_agents(home);
-    print_detected_agents(&agents);
+    if (!g_install_plan) {
+        print_detected_agents(&agents);
+    }
 
     if (agents.claude_code) {
         install_claude_code_config(home, binary_path, force, dry_run);
@@ -2992,10 +3271,88 @@ static void cbm_detect_self_path(char *buf, size_t buf_sz, const char *home) {
     }
 }
 
+/* Build the agent.install.plan.v1 receipt (#388): a machine-readable list of
+ * the config / instruction / hook files `install` WOULD write, produced by
+ * running the real install dispatch in record-only mode (no mutation, no
+ * network). Returns a heap JSON string (caller frees) or NULL. */
+char *cbm_build_install_plan_json(const char *home, const char *binary_path) {
+    if (!home || !binary_path) {
+        return NULL;
+    }
+
+    /* Same code path as a real install, but mutations disabled and every write
+     * site records into `plan` — so the receipt cannot drift from behavior. */
+    cbm_install_plan_t plan = {0};
+    g_install_plan = &plan;
+    cbm_install_agent_configs(home, binary_path, false, true);
+    g_install_plan = NULL;
+
+    cbm_detected_agents_t det = cbm_detect_agents(home);
+    struct {
+        bool flag;
+        const char *name;
+    } names[] = {
+        {det.claude_code, "claude-code"},
+        {det.codex, "codex"},
+        {det.gemini, "gemini"},
+        {det.zed, "zed"},
+        {det.opencode, "opencode"},
+        {det.antigravity, "antigravity"},
+        {det.aider, "aider"},
+        {det.kilocode, "kilocode"},
+        {det.vscode, "vscode"},
+        {det.cursor, "cursor"},
+        {det.openclaw, "openclaw"},
+        {det.kiro, "kiro"},
+    };
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_str(doc, root, "type", "agent.install.plan.v1");
+
+    yyjson_mut_val *agents = yyjson_mut_arr(doc);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (names[i].flag) {
+            yyjson_mut_arr_add_str(doc, agents, names[i].name);
+        }
+    }
+    yyjson_mut_obj_add_val(doc, root, "agents_detected", agents);
+
+    yyjson_mut_val *configs = yyjson_mut_arr(doc);
+    yyjson_mut_val *instrs = yyjson_mut_arr(doc);
+    yyjson_mut_val *hooks = yyjson_mut_arr(doc);
+    for (int i = 0; i < plan.count; i++) {
+        cbm_plan_entry_t *e = &plan.items[i];
+        if (strcmp(e->kind, "mcp_config") == 0) {
+            yyjson_mut_arr_add_strcpy(doc, configs, e->path);
+        } else if (strcmp(e->kind, "hook") == 0) {
+            yyjson_mut_val *h = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, h, "agent", e->agent);
+            yyjson_mut_obj_add_strcpy(doc, h, "path", e->path);
+            yyjson_mut_arr_add_val(hooks, h);
+        } else {
+            yyjson_mut_arr_add_strcpy(doc, instrs, e->path);
+        }
+    }
+    yyjson_mut_obj_add_val(doc, root, "config_files_planned", configs);
+    yyjson_mut_obj_add_val(doc, root, "instruction_files_planned", instrs);
+    yyjson_mut_obj_add_val(doc, root, "hooks_planned", hooks);
+    yyjson_mut_obj_add_bool(doc, root, "writes_started", false);
+    yyjson_mut_obj_add_bool(doc, root, "network_after_install", false);
+    yyjson_mut_obj_add_str(doc, root, "next_safe_command", "codebase-memory-mcp install -y");
+
+    char *json = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY, NULL);
+    yyjson_mut_doc_free(doc);
+    free(plan.items);
+    return json; /* malloc'd; caller frees */
+}
+
 int cbm_cmd_install(int argc, char **argv) {
     parse_auto_answer(argc, argv);
     bool dry_run = false;
     bool force = false;
+    bool plan = false;
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = true;
@@ -3003,12 +3360,31 @@ int cbm_cmd_install(int argc, char **argv) {
         if (strcmp(argv[i], "--force") == 0) {
             force = true;
         }
+        if (strcmp(argv[i], "--plan") == 0) {
+            plan = true;
+        }
     }
 
     const char *home = cbm_get_home_dir();
     if (!home) {
         (void)fprintf(stderr, "error: HOME not set (use USERPROFILE on Windows)\n");
         return CLI_TRUE;
+    }
+
+    /* --plan: emit the machine-readable install receipt and exit WITHOUT
+     * mutating anything (no config writes, no index deletion, no network) so
+     * an agent can inspect exactly what install would touch first (#388). */
+    if (plan) {
+        char self_path[CLI_BUF_1K] = {0};
+        cbm_detect_self_path(self_path, sizeof(self_path), home);
+        char *json = cbm_build_install_plan_json(home, self_path);
+        if (!json) {
+            (void)fprintf(stderr, "error: failed to build install plan\n");
+            return CLI_TRUE;
+        }
+        printf("%s\n", json);
+        free(json);
+        return 0;
     }
 
     printf("codebase-memory-mcp install %s\n\n", CBM_VERSION);
@@ -3145,6 +3521,7 @@ static void uninstall_gemini_config(const char *home, bool dry_run) {
     if (!dry_run) {
         cbm_remove_editor_mcp(cp);
         cbm_remove_gemini_hooks(cp);
+        cbm_remove_gemini_session_hooks(cp);
         cbm_remove_instructions(ip);
     }
     printf("Gemini CLI: removed MCP config + hooks + instructions\n");
@@ -3159,6 +3536,9 @@ static void uninstall_cli_agents(const cbm_detected_agents_t *agents, const char
         snprintf(ip, sizeof(ip), "%s/.codex/AGENTS.md", home);
         uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Codex CLI", cp, ip}, dry_run,
                                   cbm_remove_codex_mcp);
+        if (!dry_run) {
+            cbm_remove_codex_hooks(cp);
+        }
     }
     if (agents->gemini) {
         uninstall_gemini_config(home, dry_run);
@@ -3174,10 +3554,15 @@ static void uninstall_cli_agents(const cbm_detected_agents_t *agents, const char
     if (agents->antigravity) {
         char cp[CLI_BUF_1K];
         char ip[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/.gemini/antigravity/mcp_config.json", home);
-        snprintf(ip, sizeof(ip), "%s/.gemini/antigravity/AGENTS.md", home);
+        snprintf(cp, sizeof(cp), "%s/.gemini/config/mcp_config.json", home);
+        snprintf(ip, sizeof(ip), "%s/.gemini/antigravity-cli/AGENTS.md", home);
         uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Antigravity", cp, ip}, dry_run,
                                   cbm_remove_antigravity_mcp);
+        if (!dry_run) {
+            char sp[CLI_BUF_1K];
+            snprintf(sp, sizeof(sp), "%s/.gemini/antigravity-cli/settings.json", home);
+            cbm_remove_gemini_session_hooks(sp);
+        }
     }
     if (agents->aider) {
         char ip[CLI_BUF_1K];
@@ -3230,6 +3615,12 @@ static void uninstall_editor_agents(const cbm_detected_agents_t *agents, const c
 #endif
         uninstall_agent_mcp_instr((mcp_uninstall_args_t){"VS Code", cp, NULL}, dry_run,
                                   cbm_remove_vscode_mcp);
+    }
+    if (agents->cursor) {
+        char cp[CLI_BUF_1K];
+        snprintf(cp, sizeof(cp), "%s/.cursor/mcp.json", home);
+        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"Cursor", cp, NULL}, dry_run,
+                                  cbm_remove_editor_mcp);
     }
     if (agents->openclaw) {
         char cp[CLI_BUF_1K];

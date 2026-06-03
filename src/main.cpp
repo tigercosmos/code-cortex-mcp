@@ -301,11 +301,14 @@ static int handle_subcommand(int argc, char **argv) {
 }
 
 /* Parse --ui= and --port= flags. Returns true if config was modified. */
-static bool parse_ui_flags(int argc, char **argv, cbm_ui_config_t *cfg) {
+static bool parse_ui_flags(int argc, char **argv, cbm_ui_config_t *cfg, bool *explicit_enable) {
     bool changed = false;
     for (int i = SKIP_ONE; i < argc; i++) {
         if (strncmp(argv[i], "--ui=", SLEN("--ui=")) == 0) {
             cfg->ui_enabled = (strcmp(argv[i] + MAIN_FLAG_OFF, "true") == 0);
+            if (explicit_enable && cfg->ui_enabled) {
+                *explicit_enable = true;
+            }
             changed = true;
         }
         if (strncmp(argv[i], "--port=", SLEN("--port=")) == 0) {
@@ -354,8 +357,21 @@ int main(int argc, char **argv) {
     /* Parse --ui and --port flags (persisted config) */
     cbm_ui_config_t ui_cfg;
     cbm_ui_config_load(&ui_cfg);
-    if (parse_ui_flags(argc, argv, &ui_cfg)) {
+    bool explicit_ui_enable = false;
+    if (parse_ui_flags(argc, argv, &ui_cfg, &explicit_ui_enable)) {
         cbm_ui_config_save(&ui_cfg);
+    }
+    /* If the user explicitly asked for the UI but this binary has no embedded
+     * frontend, the HTTP server can never start (see below). The warning that
+     * covers this goes to the log sink, which a user running `--ui=true` on a
+     * terminal won't see — so tell them plainly on stderr why nothing happens
+     * and which build to use (#350). */
+    if (explicit_ui_enable && CBM_EMBEDDED_FILE_COUNT == 0) {
+        (void)fprintf(stderr,
+                      "codebase-memory-mcp: --ui requested, but this binary was built without the "
+                      "embedded UI, so the HTTP server will not start.\n"
+                      "Use the UI release asset (codebase-memory-mcp-ui) or rebuild with: "
+                      "make -f Makefile.cbm cbm-with-ui\n");
     }
 
     setup_signal_handlers();

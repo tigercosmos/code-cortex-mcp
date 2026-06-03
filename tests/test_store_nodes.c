@@ -974,6 +974,18 @@ TEST(store_integrity_corrupt_bad_path) {
     PASS();
 }
 
+TEST(store_integrity_windows_lowercase_drive_issue367) {
+    /* Windows drive letters may be lower- or upper-case; a lowercase drive
+     * path must NOT be treated as corrupt. Previously the check only accepted
+     * 'A'..'Z', so "c:/repo" was flagged and the DB auto-deleted (#227/#367). */
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_store_upsert_project(s, "lc-drive", "c:/Users/dev/repo");
+    ASSERT_TRUE(cbm_store_check_integrity(s));
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(store_integrity_corrupt_too_many_rows) {
     /* Simulate corruption: >5 rows in projects table */
     cbm_store_t *s = cbm_store_open_memory();
@@ -1005,10 +1017,8 @@ TEST(store_node_null_project) {
     ASSERT_NOT_NULL(s);
 
     /* Upsert with NULL project — should fail gracefully */
-    cbm_node_t n = {.project = NULL,
-                    .label = "Function",
-                    .name = "Foo",
-                    .qualified_name = "null.Foo"};
+    cbm_node_t n = {
+        .project = NULL, .label = "Function", .name = "Foo", .qualified_name = "null.Foo"};
     int64_t id = cbm_store_upsert_node(s, &n);
     /* Either returns error or silently succeeds; must not crash */
     (void)id;
@@ -1022,10 +1032,7 @@ TEST(store_node_null_qn) {
     cbm_store_upsert_project(s, "test", "/tmp/test");
 
     /* Upsert with NULL qualified_name */
-    cbm_node_t n = {.project = "test",
-                    .label = "Function",
-                    .name = "Bar",
-                    .qualified_name = NULL};
+    cbm_node_t n = {.project = "test", .label = "Function", .name = "Bar", .qualified_name = NULL};
     int64_t id = cbm_store_upsert_node(s, &n);
     /* Must not crash regardless of return value */
     (void)id;
@@ -1085,10 +1092,8 @@ TEST(store_find_by_qn_not_found) {
     cbm_store_upsert_project(s, "test", "/tmp/test");
 
     /* Insert a node so the store is non-empty */
-    cbm_node_t n = {.project = "test",
-                    .label = "Function",
-                    .name = "Exists",
-                    .qualified_name = "test.Exists"};
+    cbm_node_t n = {
+        .project = "test", .label = "Function", .name = "Exists", .qualified_name = "test.Exists"};
     cbm_store_upsert_node(s, &n);
 
     /* Search for a non-existent QN */
@@ -1284,22 +1289,14 @@ TEST(store_delete_by_label_verify_remaining) {
     cbm_store_t *s = cbm_store_open_memory();
     cbm_store_upsert_project(s, "test", "/tmp/test");
 
-    cbm_node_t n1 = {.project = "test",
-                     .label = "Function",
-                     .name = "FuncA",
-                     .qualified_name = "test.FuncA"};
-    cbm_node_t n2 = {.project = "test",
-                     .label = "Class",
-                     .name = "ClassB",
-                     .qualified_name = "test.ClassB"};
-    cbm_node_t n3 = {.project = "test",
-                     .label = "Function",
-                     .name = "FuncC",
-                     .qualified_name = "test.FuncC"};
-    cbm_node_t n4 = {.project = "test",
-                     .label = "Method",
-                     .name = "MethodD",
-                     .qualified_name = "test.MethodD"};
+    cbm_node_t n1 = {
+        .project = "test", .label = "Function", .name = "FuncA", .qualified_name = "test.FuncA"};
+    cbm_node_t n2 = {
+        .project = "test", .label = "Class", .name = "ClassB", .qualified_name = "test.ClassB"};
+    cbm_node_t n3 = {
+        .project = "test", .label = "Function", .name = "FuncC", .qualified_name = "test.FuncC"};
+    cbm_node_t n4 = {
+        .project = "test", .label = "Method", .name = "MethodD", .qualified_name = "test.MethodD"};
     cbm_store_upsert_node(s, &n1);
     cbm_store_upsert_node(s, &n2);
     cbm_store_upsert_node(s, &n3);
@@ -1471,11 +1468,10 @@ TEST(store_node_properties_special_chars) {
     cbm_store_upsert_project(s, "test", "/tmp/test");
 
     /* JSON with quotes, backslashes, unicode, newlines */
-    const char *props =
-        "{\"desc\":\"line1\\nline2\","
-        "\"path\":\"C:\\\\Users\\\\test\","
-        "\"emoji\":\"\\u2603\","
-        "\"nested\":{\"key\":\"val with \\\"quotes\\\"\"}}";
+    const char *props = "{\"desc\":\"line1\\nline2\","
+                        "\"path\":\"C:\\\\Users\\\\test\","
+                        "\"emoji\":\"\\u2603\","
+                        "\"nested\":{\"key\":\"val with \\\"quotes\\\"\"}}";
 
     cbm_node_t n = {.project = "test",
                     .label = "Function",
@@ -1548,6 +1544,7 @@ SUITE(store_nodes) {
     RUN_TEST(store_integrity_clean);
     RUN_TEST(store_integrity_empty);
     RUN_TEST(store_integrity_corrupt_bad_path);
+    RUN_TEST(store_integrity_windows_lowercase_drive_issue367);
     RUN_TEST(store_integrity_corrupt_too_many_rows);
     RUN_TEST(store_integrity_null_check);
     RUN_TEST(store_project_crud);

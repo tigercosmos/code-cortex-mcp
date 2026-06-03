@@ -1267,8 +1267,8 @@ static void detect_url_in_args(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
 /* Extract gRPC service and method from a callee name.
  * Handles patterns like: pb.NewFooServiceClient(conn).GetBar → Foo/GetBar
  * Also: FooServiceGrpc.newBlockingStub(ch).getBar → FooService/getBar */
-static bool extract_grpc_service_method(const char *callee, char *service, size_t srv_sz,
-                                        char *method, size_t meth_sz) {
+bool extract_grpc_service_method(const char *callee, char *service, size_t srv_sz, char *method,
+                                 size_t meth_sz) {
     service[0] = '\0';
     method[0] = '\0';
     if (!callee) {
@@ -1298,20 +1298,35 @@ static bool extract_grpc_service_method(const char *callee, char *service, size_
         s += CBM_SZ_3;
     }
 
-    /* Strip common suffixes: Client, ServiceClient, ServiceGrpc, Stub */
+    /* Strip the generated-stub/client suffix, preserving the canonical
+     * proto-declared service name. The proto service is `<X>Service`; the
+     * generated client is `<X>ServiceClient` / `<X>ServiceGrpc`, so we strip
+     * only the trailing stub/client token (Client/Stub/Grpc/…), NOT "Service"
+     * itself — stripping "ServiceClient" yielded `<X>` and broke cross-repo
+     * matching against the `<X>Service` declared name (#294). Longest tokens
+     * first so e.g. BlockingStub wins over Stub.
+     *
+     * A match also serves as the gRPC stub-type signal: we ONLY emit a Route
+     * when a recognized suffix is actually present. Without this gate the
+     * fallback turned ordinary receiver vars (`_provider.GetGroup`,
+     * `_builder.AddSomeService`) into phantom `__grpc__provider/...` Routes
+     * that correspond to no .proto anywhere (#294). */
     snprintf(service, srv_sz, "%s", s);
     size_t slen = strlen(service);
-    static const char *suffixes[] = {"ServiceClient", "Client", "ServiceGrpc", "BlockingStub",
-                                     "FutureStub",    "Stub",   "Servicer",    NULL};
-    for (const char **sfx = suffixes; *sfx; sfx++) {
+    static const char *const suffixes[] = {"BlockingStub", "FutureStub", "AsyncStub",
+                                           "AsyncClient",  "Servicer",   "Client",
+                                           "Stub",         "Grpc",       NULL};
+    bool stripped = false;
+    for (const char *const *sfx = suffixes; *sfx; sfx++) {
         size_t flen = strlen(*sfx);
         if (slen > flen && strcmp(service + slen - flen, *sfx) == 0) {
             service[slen - flen] = '\0';
+            stripped = true;
             break;
         }
     }
 
-    return service[0] && method[0];
+    return stripped && service[0] && method[0];
 }
 
 /* Emit GRPC_CALLS edge via gRPC Route node. */

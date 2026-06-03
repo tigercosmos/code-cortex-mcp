@@ -1223,7 +1223,8 @@ static const char *just_import_types[] = {"import", NULL};
 static const char *just_branch_types[] = {"if_expression", NULL};
 static const char *just_assign_types[] = {"assignment", NULL};
 static const char *just_module_types[] = {"source_file", NULL};
-static const char *gotemplate_call_types[] = {"function_call", "method_call", NULL};
+static const char *gotemplate_call_types[] = {"function_call", "method_call", "template_action",
+                                               NULL};
 static const char *gotemplate_module_types[] = {"template", NULL};
 static const char *templ_func_types[] = {"function_declaration", "method_declaration",
                                          "method_elem", NULL};

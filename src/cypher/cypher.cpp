@@ -557,13 +557,30 @@ static int parse_node(parser_t *p, cbm_node_pattern_t *out) {
         out->variable = heap_strdup(advance(p)->text);
     }
 
-    /* Optional :Label */
+    /* Optional :Label, with openCypher label alternation :A|B|C (#242).
+     * Stored as a single "A|B|C" string; the matcher splits on '|'. */
     if (match(p, TOK_COLON)) {
         const cbm_token_t *label = expect(p, TOK_IDENT);
         if (!label) {
             return CBM_NOT_FOUND;
         }
-        out->label = heap_strdup(label->text);
+        char lbuf[CBM_SZ_256];
+        int ll = snprintf(lbuf, sizeof(lbuf), "%s", label->text);
+        while (match(p, TOK_PIPE)) {
+            const cbm_token_t *alt = expect(p, TOK_IDENT);
+            if (!alt) {
+                return CBM_NOT_FOUND;
+            }
+            int w = snprintf(lbuf + ll, (ll < (int)sizeof(lbuf)) ? sizeof(lbuf) - (size_t)ll : 0,
+                             "|%s", alt->text);
+            if (w > 0) {
+                ll += w;
+            }
+            if (ll >= (int)sizeof(lbuf)) {
+                break; /* buffer full */
+            }
+        }
+        out->label = heap_strdup(lbuf);
     }
 
     /* Optional {props} */
@@ -930,9 +947,75 @@ static char *parse_comparison_op(parser_t *p) {
 }
 
 /* Parse a single condition: var.prop OP value | var.prop IS [NOT] NULL | var.prop IN [...] */
+/* Free the heap fields of a standalone node pattern (not owned by a pattern). */
+static void free_one_node_pattern(cbm_node_pattern_t *n) {
+    safe_str_free(&n->variable);
+    safe_str_free(&n->label);
+    for (int j = 0; j < n->prop_count; j++) {
+        safe_str_free(&n->props[j].key);
+        safe_str_free(&n->props[j].value);
+    }
+    free(n->props);
+    memset(n, 0, sizeof(*n));
+}
+
+/* Free the heap fields of a standalone relationship pattern. */
+static void free_one_rel_pattern(cbm_rel_pattern_t *r) {
+    safe_str_free(&r->variable);
+    for (int j = 0; j < r->type_count; j++) {
+        safe_str_free(&r->types[j]);
+    }
+    free(r->types);
+    safe_str_free(&r->direction);
+    memset(r, 0, sizeof(*r));
+}
+
+/* Parse a bounded EXISTS predicate: EXISTS { (anchor)-[:TYPE]->() } — a
+ * single-hop, edge-type-specific existence check anchored on a bound variable
+ * (e.g. WHERE NOT EXISTS { (f)<-[:CALLS]-() } finds functions with no callers).
+ * Multi-hop / nested-WHERE EXISTS is intentionally unsupported. */
+static cbm_expr_t *parse_exists_predicate(parser_t *p, bool negated) {
+    advance(p); /* EXISTS */
+    if (!match(p, TOK_LBRACE)) {
+        snprintf(p->error, sizeof(p->error), "expected '{' after EXISTS at pos %d", peek(p)->pos);
+        return NULL;
+    }
+    cbm_node_pattern_t anchor = {0};
+    cbm_rel_pattern_t rel = {0};
+    cbm_node_pattern_t far = {0};
+    if (parse_node(p, &anchor) < 0 || parse_rel(p, &rel) < 0 || parse_node(p, &far) < 0) {
+        free_one_node_pattern(&anchor);
+        free_one_rel_pattern(&rel);
+        free_one_node_pattern(&far);
+        snprintf(p->error, sizeof(p->error),
+                 "unsupported EXISTS pattern — only the single-hop form "
+                 "'(var)-[:TYPE]->()' is supported");
+        return NULL;
+    }
+    expect(p, TOK_RBRACE);
+
+    cbm_condition_t c = {0};
+    c.negated = negated;
+    c.op = heap_strdup("EXISTS");
+    c.variable = heap_strdup(anchor.variable ? anchor.variable : "");
+    c.value = (rel.type_count > 0 && rel.types[0]) ? heap_strdup(rel.types[0]) : NULL;
+    c.exists_dir = (rel.direction && strcmp(rel.direction, "inbound") == 0) ? 1
+                   : (rel.direction && strcmp(rel.direction, "any") == 0)   ? 2
+                                                                            : 0;
+    free_one_node_pattern(&anchor);
+    free_one_rel_pattern(&rel);
+    free_one_node_pattern(&far);
+    return expr_leaf(c);
+}
+
 static cbm_expr_t *parse_condition_expr(parser_t *p) {
     /* Check for NOT prefix at condition level (e.g. NOT n.name CONTAINS "x") */
     bool negated = match(p, TOK_NOT);
+
+    /* EXISTS { pattern } predicate (anchored single-hop existence). */
+    if (check(p, TOK_EXISTS)) {
+        return parse_exists_predicate(p, negated);
+    }
 
     const cbm_token_t *var = expect(p, TOK_IDENT);
     if (!var) {
@@ -941,6 +1024,20 @@ static cbm_expr_t *parse_condition_expr(parser_t *p) {
 
     cbm_condition_t c = {0};
     c.negated = negated;
+
+    /* Label test: WHERE n:Label (openCypher, #241). Modelled as a leaf with
+     * op="HAS_LABEL" and value=Label, evaluated against the bound node's label. */
+    if (check(p, TOK_COLON)) {
+        advance(p);
+        const cbm_token_t *lbl = expect(p, TOK_IDENT);
+        if (!lbl) {
+            return NULL;
+        }
+        c.variable = heap_strdup(var->text);
+        c.op = heap_strdup("HAS_LABEL");
+        c.value = heap_strdup(lbl->text);
+        return expr_leaf(c);
+    }
 
     if (match(p, TOK_DOT)) {
         const cbm_token_t *prop = expect(p, TOK_IDENT);
@@ -1217,6 +1314,45 @@ static cbm_case_expr_t *parse_case_expr(parser_t *p) {
 /* Parse a single RETURN/WITH item (aggregate, string func, CASE, or plain var.prop).
  * Returns 0 on success, -1 on error. */
 /* Parse var[.prop] into item->variable and item->property. Returns -1 on error. */
+/* ASCII case-insensitive string equality. */
+static bool cyp_ci_eq(const char *a, const char *b) {
+    if (!a || !b) {
+        return false;
+    }
+    for (; *a && *b; a++, b++) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+/* Canonical name for a single-argument scalar / entity-introspection function
+ * invoked by identifier — labels/type/id/keys/properties and the numeric/bool
+ * casts toInteger/toFloat/toBoolean — or NULL if unrecognised (case-insensitive).
+ * toLower/toUpper/toString are separate keyword tokens handled elsewhere. */
+static const char *scalar_func_canonical(const char *s) {
+    static const char *const names[] = {
+        "labels", "type",   "id",   "keys",  "properties", "toInteger", "toFloat", "toBoolean",
+        "size",   "length", "trim", "ltrim", "rtrim",      "reverse",   NULL};
+    for (int i = 0; names[i]; i++) {
+        if (cyp_ci_eq(s, names[i])) {
+            return names[i];
+        }
+    }
+    return NULL;
+}
+
+/* True for single-argument functions that transform a scalar string value
+ * (vs. entity-introspection funcs that act on the bound node/edge). */
+static bool is_scalar_value_func(const char *f) {
+    return f && (strcmp(f, "toLower") == 0 || strcmp(f, "toUpper") == 0 ||
+                 strcmp(f, "toString") == 0 || strcmp(f, "toInteger") == 0 ||
+                 strcmp(f, "toFloat") == 0 || strcmp(f, "toBoolean") == 0 ||
+                 strcmp(f, "size") == 0 || strcmp(f, "length") == 0 || strcmp(f, "trim") == 0 ||
+                 strcmp(f, "ltrim") == 0 || strcmp(f, "rtrim") == 0 || strcmp(f, "reverse") == 0);
+}
+
 static int parse_var_dot_prop(parser_t *p, cbm_return_item_t *item) {
     const cbm_token_t *var = expect(p, TOK_IDENT);
     if (!var) {
@@ -1232,11 +1368,116 @@ static int parse_var_dot_prop(parser_t *p, cbm_return_item_t *item) {
     return 0;
 }
 
+/* True if the cursor is at `IDENT(` where IDENT is a supported scalar function. */
+static bool is_named_func_call(parser_t *p) {
+    if (!check(p, TOK_IDENT) || p->pos + SKIP_ONE >= p->count) {
+        return false;
+    }
+    if (p->tokens[p->pos + SKIP_ONE].type != TOK_LPAREN) {
+        return false;
+    }
+    return scalar_func_canonical(peek(p)->text) != NULL;
+}
+
+/* Parse a single-argument scalar / introspection call: labels(n), type(r),
+ * id(n), keys(n), properties(n), toInteger(n.start_line), ... */
+static int parse_named_func_item(parser_t *p, cbm_return_item_t *item) {
+    const char *canon = scalar_func_canonical(peek(p)->text);
+    advance(p); /* consume the function name */
+    expect(p, TOK_LPAREN);
+    if (parse_var_dot_prop(p, item) < 0) {
+        return CBM_NOT_FOUND;
+    }
+    expect(p, TOK_RPAREN);
+    item->func = heap_strdup(canon);
+    return 0;
+}
+
+/* Canonical name for a multi-argument scalar function, or NULL. */
+static const char *multiarg_func_canonical(const char *s) {
+    static const char *const names[] = {"coalesce", "substring", "replace", "left", "right", NULL};
+    for (int i = 0; names[i]; i++) {
+        if (cyp_ci_eq(s, names[i])) {
+            return names[i];
+        }
+    }
+    return NULL;
+}
+
+static bool is_multiarg_func_call(parser_t *p) {
+    if (!check(p, TOK_IDENT) || p->pos + SKIP_ONE >= p->count) {
+        return false;
+    }
+    if (p->tokens[p->pos + SKIP_ONE].type != TOK_LPAREN) {
+        return false;
+    }
+    return multiarg_func_canonical(peek(p)->text) != NULL;
+}
+
+/* Parse one function argument: a string/number literal or a var[.prop]. */
+static int parse_func_arg(parser_t *p, cbm_func_arg_t *arg) {
+    memset(arg, 0, sizeof(*arg));
+    if (check(p, TOK_STRING) || check(p, TOK_NUMBER)) {
+        arg->literal = heap_strdup(peek(p)->text);
+        advance(p);
+        return 0;
+    }
+    const cbm_token_t *var = expect(p, TOK_IDENT);
+    if (!var) {
+        return CBM_NOT_FOUND;
+    }
+    arg->variable = heap_strdup(var->text);
+    if (match(p, TOK_DOT)) {
+        const cbm_token_t *prop = expect(p, TOK_IDENT);
+        if (prop) {
+            arg->property = heap_strdup(prop->text);
+        }
+    }
+    return 0;
+}
+
+/* Parse a multi-argument scalar call: coalesce(a, b, ...), substring(s, i[, n]),
+ * replace(s, from, to), left(s, n), right(s, n). */
+static int parse_multiarg_func_item(parser_t *p, cbm_return_item_t *item) {
+    const char *canon = multiarg_func_canonical(peek(p)->text);
+    advance(p); /* function name */
+    expect(p, TOK_LPAREN);
+    int cap = CYP_INIT_CAP4;
+    item->args = (cbm_func_arg_t *)malloc((size_t)cap * sizeof(cbm_func_arg_t));
+    item->arg_count = 0;
+    while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
+        if (item->arg_count > 0 && !match(p, TOK_COMMA)) {
+            break;
+        }
+        if (item->arg_count >= cap) {
+            cap *= PAIR_LEN;
+            item->args = (__typeof__(item->args))safe_realloc(item->args,
+                                                              (size_t)cap * sizeof(cbm_func_arg_t));
+        }
+        if (parse_func_arg(p, &item->args[item->arg_count]) < 0) {
+            return CBM_NOT_FOUND;
+        }
+        item->arg_count++;
+    }
+    expect(p, TOK_RPAREN);
+    item->func = heap_strdup(canon);
+    /* Surface the first variable arg as variable/property for column naming. */
+    if (item->arg_count > 0 && item->args[0].variable) {
+        item->variable = heap_strdup(item->args[0].variable);
+        if (item->args[0].property) {
+            item->property = heap_strdup(item->args[0].property);
+        }
+    }
+    return 0;
+}
+
 /* Parse aggregate function call: COUNT(var.prop) */
 static int parse_aggregate_item(parser_t *p, cbm_return_item_t *item) {
     cbm_token_type_t ft = peek(p)->type;
     advance(p);
     expect(p, TOK_LPAREN);
+    /* Optional DISTINCT inside the call: COUNT(DISTINCT x) (#239). */
+    item->distinct = match(p, TOK_DISTINCT);
     if (match(p, TOK_STAR)) {
         item->variable = heap_strdup("*");
     } else {
@@ -1273,10 +1514,35 @@ static int parse_return_item(parser_t *p, cbm_return_item_t *item) {
         rc = parse_aggregate_item(p, item);
     } else if (is_string_func_tok(peek(p)->type)) {
         rc = parse_string_func_item(p, item);
+    } else if (is_multiarg_func_call(p)) {
+        rc = parse_multiarg_func_item(p, item);
+    } else if (is_named_func_call(p)) {
+        rc = parse_named_func_item(p, item);
     } else {
         rc = parse_var_dot_prop(p, item);
     }
     if (rc < 0) {
+        return CBM_NOT_FOUND;
+    }
+    /* A bare identifier followed by '(' is a function we don't recognise
+     * (recognised aggregates / string funcs / scalar funcs are handled above),
+     * and '[' begins list indexing/slicing we don't support. Rather than
+     * silently projecting an empty column — which looks like a valid but blank
+     * result and hides the real problem — fail loudly with a clear message so
+     * the caller knows the query used an unsupported feature (#373). */
+    if (!item->func && !item->kase && (check(p, TOK_LPAREN) || check(p, TOK_LBRACKET))) {
+        if (check(p, TOK_LPAREN)) {
+            snprintf(p->error, sizeof(p->error),
+                     "unsupported function '%s' (supported: count, sum, avg, min, max, collect, "
+                     "toLower, toUpper, toString, toInteger, toFloat, toBoolean, size, length, "
+                     "trim, ltrim, rtrim, reverse, labels, type, id, keys, properties)",
+                     item->variable ? item->variable : "?");
+        } else {
+            snprintf(p->error, sizeof(p->error),
+                     "unsupported expression: list indexing/slicing '[...]' is not supported");
+        }
+        safe_str_free(&item->variable);
+        safe_str_free(&item->property);
         return CBM_NOT_FOUND;
     }
     /* Optional AS alias */
@@ -1706,6 +1972,12 @@ static void free_return_clause(cbm_return_clause_t *r) {
         safe_str_free(&r->items[i].alias);
         safe_str_free(&r->items[i].func);
         free_case_expr(r->items[i].kase);
+        for (int j = 0; j < r->items[i].arg_count; j++) {
+            safe_str_free(&r->items[i].args[j].variable);
+            safe_str_free(&r->items[i].args[j].property);
+            safe_str_free(&r->items[i].args[j].literal);
+        }
+        free(r->items[i].args);
     }
     free(r->items);
     safe_str_free(&r->order_by);
@@ -2069,6 +2341,46 @@ static bool eval_comparison_op(const char *op, const char *actual, const char *e
 
 /* Evaluate a WHERE condition against a binding */
 static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
+    /* Label test: WHERE n:Label (#241) — compare the bound node's label
+     * directly rather than a property value. */
+    if (strcmp(c->op, "HAS_LABEL") == 0) {
+        cbm_node_t *n = binding_get(b, c->variable);
+        bool result = n && n->label && c->value && strcmp(n->label, c->value) == 0;
+        return c->negated ? !result : result;
+    }
+
+    /* EXISTS { (var)-[:TYPE]->() }: does the bound node have any edge of the
+     * given type in the requested direction? (dir 0=out, 1=in, 2=any) */
+    if (strcmp(c->op, "EXISTS") == 0) {
+        cbm_node_t *n = binding_get(b, c->variable);
+        bool result = false;
+        if (n && b->store) {
+            cbm_edge_t *edges = NULL;
+            int cnt = 0;
+            if (c->exists_dir != 1) { /* outbound or any */
+                if (c->value) {
+                    cbm_store_find_edges_by_source_type(b->store, n->id, c->value, &edges, &cnt);
+                } else {
+                    cbm_store_find_edges_by_source(b->store, n->id, &edges, &cnt);
+                }
+                result = cnt > 0;
+                cbm_store_free_edges(edges, cnt);
+            }
+            if (!result && c->exists_dir != 0) { /* inbound or any */
+                edges = NULL;
+                cnt = 0;
+                if (c->value) {
+                    cbm_store_find_edges_by_target_type(b->store, n->id, c->value, &edges, &cnt);
+                } else {
+                    cbm_store_find_edges_by_target(b->store, n->id, &edges, &cnt);
+                }
+                result = cnt > 0;
+                cbm_store_free_edges(edges, cnt);
+            }
+        }
+        return c->negated ? !result : result;
+    }
+
     const char *actual = resolve_condition_value(c, b);
     if (!actual) {
         return true;
@@ -2285,6 +2597,74 @@ static const char *apply_string_func(const char *func, const char *val, char *bu
     if (strcmp(func, "toString") == 0) {
         return val; /* already strings */
     }
+    if (strcmp(func, "toInteger") == 0) {
+        char *end = NULL;
+        long long v = strtoll(val, &end, CBM_DECIMAL_BASE);
+        if (end == val) {
+            /* Not an integer literal — accept a float string and truncate. */
+            char *fend = NULL;
+            double d = strtod(val, &fend);
+            if (fend == val) {
+                return ""; /* non-numeric → null */
+            }
+            v = (long long)d;
+        }
+        snprintf(buf, buf_sz, "%lld", v);
+        return buf;
+    }
+    if (strcmp(func, "toFloat") == 0) {
+        char *end = NULL;
+        double d = strtod(val, &end);
+        if (end == val) {
+            return ""; /* non-numeric → null */
+        }
+        snprintf(buf, buf_sz, "%g", d);
+        return buf;
+    }
+    if (strcmp(func, "toBoolean") == 0) {
+        if (cyp_ci_eq(val, "true")) {
+            return "true";
+        }
+        if (cyp_ci_eq(val, "false")) {
+            return "false";
+        }
+        return ""; /* not a boolean → null */
+    }
+    if (strcmp(func, "size") == 0 || strcmp(func, "length") == 0) {
+        snprintf(buf, buf_sz, "%zu", strlen(val));
+        return buf;
+    }
+    if (strcmp(func, "trim") == 0 || strcmp(func, "ltrim") == 0 || strcmp(func, "rtrim") == 0) {
+        bool do_left = (strcmp(func, "trim") == 0 || strcmp(func, "ltrim") == 0);
+        bool do_right = (strcmp(func, "trim") == 0 || strcmp(func, "rtrim") == 0);
+        const char *start = val;
+        const char *end = val + strlen(val);
+        while (do_left && (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r')) {
+            start++;
+        }
+        while (do_right && end > start &&
+               (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' || end[-1] == '\r')) {
+            end--;
+        }
+        size_t n = (size_t)(end - start);
+        if (n >= buf_sz) {
+            n = buf_sz - SKIP_ONE;
+        }
+        memcpy(buf, start, n);
+        buf[n] = '\0';
+        return buf;
+    }
+    if (strcmp(func, "reverse") == 0) {
+        size_t len = strlen(val);
+        if (len >= buf_sz) {
+            len = buf_sz - SKIP_ONE;
+        }
+        for (size_t i = 0; i < len; i++) {
+            buf[i] = val[len - SKIP_ONE - i];
+        }
+        buf[len] = '\0';
+        return buf;
+    }
     return val;
 }
 
@@ -2304,9 +2684,70 @@ static const char *eval_case_expr(const cbm_case_expr_t *k, binding_t *b) {
 
 /* ── Scan nodes for a pattern ─────────────────────────────────── */
 
+/* True if `actual` matches `pat`, where `pat` may be a '|'-alternation of
+ * labels ("A|B|C") — openCypher label alternation (#242). */
+static bool label_alt_matches(const char *actual, const char *pat) {
+    if (!pat) {
+        return true;
+    }
+    if (!actual) {
+        return false;
+    }
+    if (!strchr(pat, '|')) {
+        return strcmp(actual, pat) == 0;
+    }
+    size_t al = strlen(actual);
+    const char *seg = pat;
+    while (*seg) {
+        const char *bar = strchr(seg, '|');
+        size_t seglen = bar ? (size_t)(bar - seg) : strlen(seg);
+        if (seglen == al && strncmp(seg, actual, seglen) == 0) {
+            return true;
+        }
+        if (!bar) {
+            break;
+        }
+        seg = bar + SKIP_ONE;
+    }
+    return false;
+}
+
+/* Seed nodes for a label alternation "A|B|C": union the per-label results.
+ * Node-struct fields are moved (shallow) into out_nodes; each per-label array
+ * container is freed. */
+static void scan_alternation_labels(cbm_store_t *store, const char *project, const char *labels,
+                                    cbm_node_t **out_nodes, int *out_count) {
+    *out_nodes = NULL;
+    *out_count = 0;
+    int cap = 0;
+    char *copy = heap_strdup(labels);
+    if (!copy) {
+        return;
+    }
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, "|", &save); tok; tok = strtok_r(NULL, "|", &save)) {
+        cbm_node_t *part = NULL;
+        int pc = 0;
+        cbm_store_find_nodes_by_label(store, project, tok, &part, &pc);
+        if (pc > 0 && part) {
+            if (*out_count + pc > cap) {
+                cap = (*out_count + pc) * PAIR_LEN;
+                *out_nodes = (__typeof__(*out_nodes))safe_realloc(*out_nodes,
+                                                                  (size_t)cap * sizeof(cbm_node_t));
+            }
+            memcpy(*out_nodes + *out_count, part, (size_t)pc * sizeof(cbm_node_t));
+            *out_count += pc;
+        }
+        free(part); /* container only — node fields moved to out_nodes */
+    }
+    free(copy);
+}
+
 static void scan_pattern_nodes(cbm_store_t *store, const char *project, int max_rows,
                                cbm_node_pattern_t *first, cbm_node_t **out_nodes, int *out_count) {
-    if (first->label) {
+    if (first->label && strchr(first->label, '|')) {
+        scan_alternation_labels(store, project, first->label, out_nodes, out_count);
+    } else if (first->label) {
         cbm_store_find_nodes_by_label(store, project, first->label, out_nodes, out_count);
     } else {
         cbm_search_params_t params = {.project = project,
@@ -2359,7 +2800,7 @@ static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count,
         if (cbm_store_find_node_by_id(store, tid, &found) != CBM_STORE_OK) {
             continue;
         }
-        if (target_node->label && strcmp(found.label, target_node->label) != 0) {
+        if (target_node->label && !label_alt_matches(found.label, target_node->label)) {
             node_fields_free(&found);
             continue;
         }
@@ -2393,7 +2834,7 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
         if (hop->hop < rel->min_hops) {
             continue;
         }
-        if (target_node->label && strcmp(hop->node.label, target_node->label) != 0) {
+        if (target_node->label && !label_alt_matches(hop->node.label, target_node->label)) {
             continue;
         }
         if (!check_inline_props(&hop->node, target_node->props, target_node->prop_count, store)) {
@@ -2664,14 +3105,188 @@ static void rb_free(result_builder_t *rb) {
 
 /* ── Get projection value for a binding + return item ─────────── */
 
+/* Build a JSON list of a node's non-null property keys: keys(n). */
+static const char *node_keys_list(const cbm_node_t *n, char *buf, size_t buf_sz) {
+    const struct {
+        const char *k;
+        bool present;
+    } ks[] = {
+        {"name", n->name && n->name[0]},
+        {"qualified_name", n->qualified_name && n->qualified_name[0]},
+        {"label", n->label && n->label[0]},
+        {"file_path", n->file_path && n->file_path[0]},
+        {"start_line", n->start_line > 0},
+        {"end_line", n->end_line > 0},
+    };
+    size_t pos = 0;
+    bool first = true;
+    if (pos < buf_sz - SKIP_ONE) {
+        buf[pos++] = '[';
+    }
+    for (size_t i = 0; i < sizeof(ks) / sizeof(ks[0]) && pos < buf_sz - SKIP_ONE; i++) {
+        if (!ks[i].present) {
+            continue;
+        }
+        int w = snprintf(buf + pos, buf_sz - pos, "%s\"%s\"", first ? "" : ",", ks[i].k);
+        if (w < 0 || (size_t)w >= buf_sz - pos) {
+            break;
+        }
+        pos += (size_t)w;
+        first = false;
+    }
+    if (pos < buf_sz - SKIP_ONE) {
+        buf[pos++] = ']';
+    }
+    buf[pos] = '\0';
+    return buf;
+}
+
+/* Resolve a function argument to its string value (literal or var.prop). */
+static const char *eval_func_arg(binding_t *b, const cbm_func_arg_t *a) {
+    if (a->literal) {
+        return a->literal;
+    }
+    return binding_get_virtual(b, a->variable, a->property);
+}
+
+/* Evaluate a multi-argument scalar function into func_buf (or a direct value). */
+static const char *eval_multiarg_func(binding_t *b, const cbm_return_item_t *item, char *buf,
+                                      size_t bufsz) {
+    const char *f = item->func;
+    int n = item->arg_count;
+    if (strcmp(f, "coalesce") == 0) {
+        for (int i = 0; i < n; i++) {
+            const char *v = eval_func_arg(b, &item->args[i]);
+            if (v && v[0]) {
+                return v;
+            }
+        }
+        return "";
+    }
+    if (strcmp(f, "substring") == 0 && n >= 2) {
+        const char *s = eval_func_arg(b, &item->args[0]);
+        long start = strtol(eval_func_arg(b, &item->args[1]), NULL, CBM_DECIMAL_BASE);
+        size_t slen = strlen(s);
+        if (start < 0 || (size_t)start >= slen) {
+            return "";
+        }
+        size_t take = slen - (size_t)start;
+        if (n >= 3) {
+            long len = strtol(eval_func_arg(b, &item->args[2]), NULL, CBM_DECIMAL_BASE);
+            if (len < 0) {
+                len = 0;
+            }
+            if ((size_t)len < take) {
+                take = (size_t)len;
+            }
+        }
+        if (take >= bufsz) {
+            take = bufsz - SKIP_ONE;
+        }
+        memcpy(buf, s + start, take);
+        buf[take] = '\0';
+        return buf;
+    }
+    if ((strcmp(f, "left") == 0 || strcmp(f, "right") == 0) && n >= 2) {
+        const char *s = eval_func_arg(b, &item->args[0]);
+        long k = strtol(eval_func_arg(b, &item->args[1]), NULL, CBM_DECIMAL_BASE);
+        if (k < 0) {
+            k = 0;
+        }
+        size_t slen = strlen(s);
+        size_t take = (size_t)k < slen ? (size_t)k : slen;
+        if (take >= bufsz) {
+            take = bufsz - SKIP_ONE;
+        }
+        memcpy(buf, (strcmp(f, "left") == 0) ? s : s + (slen - take), take);
+        buf[take] = '\0';
+        return buf;
+    }
+    if (strcmp(f, "replace") == 0 && n >= 3) {
+        const char *s = eval_func_arg(b, &item->args[0]);
+        const char *from = eval_func_arg(b, &item->args[1]);
+        const char *to = eval_func_arg(b, &item->args[2]);
+        size_t fromlen = strlen(from);
+        size_t tolen = strlen(to);
+        size_t pos = 0;
+        const char *pp = s;
+        if (fromlen == 0) {
+            snprintf(buf, bufsz, "%s", s);
+            return buf;
+        }
+        while (*pp && pos < bufsz - SKIP_ONE) {
+            if (strncmp(pp, from, fromlen) == 0) {
+                size_t cpy = tolen;
+                if (pos + cpy >= bufsz) {
+                    cpy = bufsz - SKIP_ONE - pos;
+                }
+                memcpy(buf + pos, to, cpy);
+                pos += cpy;
+                pp += fromlen;
+            } else {
+                buf[pos++] = *pp++;
+            }
+        }
+        buf[pos] = '\0';
+        return buf;
+    }
+    return ""; /* wrong arity → null */
+}
+
 static const char *project_item(binding_t *b, cbm_return_item_t *item, char *func_buf,
                                 size_t buf_sz) {
     if (item->kase) {
         return eval_case_expr(item->kase, b);
     }
+    if (item->args) {
+        return eval_multiarg_func(b, item, func_buf, buf_sz);
+    }
+    /* Entity-introspection functions operate on the bound node/edge itself,
+     * not on a scalar property value. */
+    if (item->func) {
+        if (strcmp(item->func, "labels") == 0) {
+            cbm_node_t *n = binding_get(b, item->variable);
+            if (n && n->label) {
+                snprintf(func_buf, buf_sz, "[\"%s\"]", n->label);
+                return func_buf;
+            }
+            return "[]";
+        }
+        if (strcmp(item->func, "type") == 0) {
+            cbm_edge_t *e = binding_get_edge(b, item->variable);
+            return (e && e->type) ? e->type : "";
+        }
+        if (strcmp(item->func, "id") == 0) {
+            cbm_node_t *n = binding_get(b, item->variable);
+            if (n) {
+                snprintf(func_buf, buf_sz, "%lld", (long long)n->id);
+                return func_buf;
+            }
+            cbm_edge_t *e = binding_get_edge(b, item->variable);
+            if (e) {
+                snprintf(func_buf, buf_sz, "%lld", (long long)e->id);
+                return func_buf;
+            }
+            return "";
+        }
+        if (strcmp(item->func, "keys") == 0) {
+            cbm_node_t *n = binding_get(b, item->variable);
+            return n ? node_keys_list(n, func_buf, buf_sz) : "[]";
+        }
+        if (strcmp(item->func, "properties") == 0) {
+            cbm_node_t *n = binding_get(b, item->variable);
+            if (n) {
+                return n->properties_json ? n->properties_json : "{}";
+            }
+            cbm_edge_t *e = binding_get_edge(b, item->variable);
+            if (e) {
+                return e->properties_json ? e->properties_json : "{}";
+            }
+            return "{}";
+        }
+    }
     const char *raw = binding_get_virtual(b, item->variable, item->property);
-    if (item->func && (strcmp(item->func, "toLower") == 0 || strcmp(item->func, "toUpper") == 0 ||
-                       strcmp(item->func, "toString") == 0)) {
+    if (is_scalar_value_func(item->func)) {
         return apply_string_func(item->func, raw, func_buf, buf_sz);
     }
     return raw;
@@ -2682,6 +3297,19 @@ static bool is_aggregate_func(const char *func) {
     return func &&
            (strcmp(func, "COUNT") == 0 || strcmp(func, "SUM") == 0 || strcmp(func, "AVG") == 0 ||
             strcmp(func, "MIN") == 0 || strcmp(func, "MAX") == 0 || strcmp(func, "COLLECT") == 0);
+}
+
+/* Append `val` to a string list only if not already present — i.e. maintain a
+ * set of distinct values. Used by COUNT(DISTINCT x) (#239). */
+static void distinct_list_add(char ***list, int *count, const char *val) {
+    for (int i = 0; i < *count; i++) {
+        if (strcmp((*list)[i], val) == 0) {
+            return;
+        }
+    }
+    int idx = (*count)++;
+    *list = (__typeof__(*list))safe_realloc(*list, (size_t)(idx + SKIP_ONE) * sizeof(char *));
+    (*list)[idx] = heap_strdup(val);
 }
 
 /* Sort bindings by a virtual variable using bubble sort */
@@ -2758,6 +3386,8 @@ typedef struct {
     double *sums;
     int *counts;
     double *mins, *maxs;
+    char ***distinct_lists; /* per-item set of seen values for COUNT(DISTINCT) */
+    int *distinct_n;        /* per-item distinct count (#239) */
 } with_agg_t;
 
 /* Build a group key from non-aggregate WITH items */
@@ -2795,6 +3425,8 @@ static int with_agg_find_or_create(with_agg_t **aggs, int *agg_cnt, int *agg_cap
     (*aggs)[found].counts = (int *)calloc(wc->count, sizeof(int));
     (*aggs)[found].mins = (double *)calloc(wc->count, sizeof(double));
     (*aggs)[found].maxs = (double *)calloc(wc->count, sizeof(double));
+    (*aggs)[found].distinct_lists = (char ***)calloc(wc->count, sizeof(char **));
+    (*aggs)[found].distinct_n = (int *)calloc(wc->count, sizeof(int));
     for (int ci = 0; ci < wc->count; ci++) {
         (*aggs)[found].mins[ci] = CYP_DBL_MAX;
         (*aggs)[found].maxs[ci] = -CYP_DBL_MAX;
@@ -2818,6 +3450,9 @@ static void with_agg_accumulate(with_agg_t *agg, cbm_return_clause_t *wc, bindin
         }
         agg->counts[ci]++;
         const char *raw = binding_get_virtual(b, wc->items[ci].variable, wc->items[ci].property);
+        if (wc->items[ci].distinct && strcmp(wc->items[ci].func, "COUNT") == 0) {
+            distinct_list_add(&agg->distinct_lists[ci], &agg->distinct_n[ci], raw);
+        }
         double dv = strtod(raw, NULL);
         agg->sums[ci] += dv;
         if (dv < agg->mins[ci]) {
@@ -2859,12 +3494,20 @@ static void with_agg_free(with_agg_t *aggs, int agg_cnt, int item_count) {
     for (int a = 0; a < agg_cnt; a++) {
         for (int ci = 0; ci < item_count; ci++) {
             safe_str_free(&aggs[a].group_vals[ci]);
+            if (aggs[a].distinct_lists && aggs[a].distinct_lists[ci]) {
+                for (int j = 0; j < aggs[a].distinct_n[ci]; j++) {
+                    free(aggs[a].distinct_lists[ci][j]);
+                }
+                free(aggs[a].distinct_lists[ci]);
+            }
         }
         free(aggs[a].group_vals);
         free(aggs[a].sums);
         free(aggs[a].counts);
         free(aggs[a].mins);
         free(aggs[a].maxs);
+        free(aggs[a].distinct_lists);
+        free(aggs[a].distinct_n);
     }
     free(aggs);
 }
@@ -2896,7 +3539,11 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
             const char *alias = resolve_item_alias(&wc->items[ci], name_buf, sizeof(name_buf));
             if (wc->items[ci].func) {
                 char vbuf[CBM_SZ_64];
-                with_agg_format(wc->items[ci].func, &aggs[a], ci, vbuf, sizeof(vbuf));
+                if (wc->items[ci].distinct && strcmp(wc->items[ci].func, "COUNT") == 0) {
+                    snprintf(vbuf, sizeof(vbuf), "%d", aggs[a].distinct_n[ci]); /* #239 */
+                } else {
+                    with_agg_format(wc->items[ci].func, &aggs[a], ci, vbuf, sizeof(vbuf));
+                }
                 with_add_vbinding_var(&vb, alias, vbuf);
             } else {
                 with_add_vbinding_var(&vb, alias, aggs[a].group_vals[ci]);
@@ -2941,6 +3588,53 @@ static void filter_bindings_where(const cbm_where_clause_t *where, binding_t *vb
     *vcount = kept;
 }
 
+/* Build a key from a projected vbinding's value tuple (all WITH output items),
+ * used to detect duplicate rows for WITH DISTINCT (#238). */
+static void with_proj_key(cbm_return_clause_t *wc, binding_t *b, char *key, size_t key_sz) {
+    int kl = 0;
+    key[0] = '\0';
+    char name_buf[CBM_SZ_256];
+    for (int ci = 0; ci < wc->count; ci++) {
+        const char *alias = resolve_item_alias(&wc->items[ci], name_buf, sizeof(name_buf));
+        const char *v = binding_get_virtual(b, alias, NULL);
+        int w = snprintf(key + kl, (kl < (int)key_sz) ? key_sz - (size_t)kl : 0, "%s|", v ? v : "");
+        if (w > 0) {
+            kl += w;
+        }
+        if (kl >= (int)key_sz) {
+            break; /* buffer full */
+        }
+    }
+}
+
+/* Apply WITH DISTINCT: drop projected rows whose value tuple duplicates an
+ * earlier one, keeping first occurrence (#238 — previously silently ignored). */
+static void with_apply_distinct(cbm_return_clause_t *wc, binding_t *vbindings, int *vcount) {
+    int kept = 0;
+    for (int i = 0; i < *vcount; i++) {
+        char key[CBM_SZ_1K];
+        with_proj_key(wc, &vbindings[i], key, sizeof(key));
+        bool dup = false;
+        for (int j = 0; j < kept; j++) {
+            char pkey[CBM_SZ_1K];
+            with_proj_key(wc, &vbindings[j], pkey, sizeof(pkey));
+            if (strcmp(key, pkey) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) {
+            binding_free(&vbindings[i]);
+        } else {
+            if (kept != i) {
+                vbindings[kept] = vbindings[i];
+            }
+            kept++;
+        }
+    }
+    *vcount = kept;
+}
+
 static void execute_with_clause(cbm_query_t *q, binding_t **bindings_ptr, int *bind_count_ptr) {
     cbm_return_clause_t *wc = q->with_clause;
     if (!wc) {
@@ -2964,6 +3658,12 @@ static void execute_with_clause(cbm_query_t *q, binding_t **bindings_ptr, int *b
         execute_with_aggregate(wc, bindings, bind_count, &vbindings, &vcount);
     } else {
         execute_with_simple(wc, bindings, bind_count, vbindings, &vcount);
+    }
+
+    /* WITH DISTINCT: dedup projected rows (no-op for aggregation, which already
+     * collapses to one row per group). */
+    if (wc->distinct) {
+        with_apply_distinct(wc, vbindings, &vcount);
     }
 
     with_sort_skip_limit(wc, vbindings, &vcount);
@@ -3148,6 +3848,9 @@ static void ret_agg_accumulate(ret_agg_entry_t *entry, cbm_return_clause_t *ret,
             entry->collect_lists[ci] = (__typeof__(entry->collect_lists[ci]))safe_realloc(
                 entry->collect_lists[ci], (idx + SKIP_ONE) * sizeof(char *));
             entry->collect_lists[ci][idx] = heap_strdup(raw);
+        } else if (ret->items[ci].distinct && strcmp(ret->items[ci].func, "COUNT") == 0) {
+            /* COUNT(DISTINCT x): track unique values; emit the set size (#239). */
+            distinct_list_add(&entry->collect_lists[ci], &entry->collect_counts[ci], raw);
         }
     }
 }
@@ -3199,6 +3902,12 @@ static void ret_agg_emit_row(cbm_return_clause_t *ret, ret_agg_entry_t *agg, res
     for (int ci = 0; ci < ret->count; ci++) {
         if (!ret->items[ci].func) {
             row[ci] = agg->group_vals[ci];
+            continue;
+        }
+        if (ret->items[ci].distinct && strcmp(ret->items[ci].func, "COUNT") == 0) {
+            /* COUNT(DISTINCT x) — number of unique values accumulated (#239). */
+            snprintf(bufs[ci], sizeof(bufs[ci]), "%d", agg->collect_counts[ci]);
+            row[ci] = bufs[ci];
             continue;
         }
         format_agg_value(ret->items[ci].func, agg->counts[ci], agg->sums[ci], agg->mins[ci],

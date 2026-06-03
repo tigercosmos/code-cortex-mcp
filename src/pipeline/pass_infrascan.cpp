@@ -1227,3 +1227,103 @@ char *cbm_infra_qn(const char *project_name, const char *rel_path, const char *i
     free(base);
     return strdup(result);
 }
+
+/* ── Helm Chart.yaml parser (#338) ───────────────────────────────── */
+
+/* Copy the scalar value following a "key:" up to end-of-line into out,
+ * trimming surrounding whitespace, optional quotes, and trailing comments. */
+static void helm_copy_scalar(const char *s, const char *eol, char *out, size_t cap) {
+    while (s < eol && (*s == ' ' || *s == '\t')) {
+        s++;
+    }
+    char quote = 0;
+    if (s < eol && (*s == '"' || *s == '\'')) {
+        quote = *s;
+        s++;
+    }
+    const char *e = s;
+    while (e < eol) {
+        if (quote) {
+            if (*e == quote) {
+                break;
+            }
+        } else if (*e == ' ' || *e == '\t' || *e == '#' || *e == '\r') {
+            break;
+        }
+        e++;
+    }
+    size_t n = (size_t)(e - s);
+    if (n >= cap) {
+        n = cap - 1;
+    }
+    memcpy(out, s, n);
+    out[n] = '\0';
+}
+
+/* Match "key:" at the start of a content pointer; return value start or NULL. */
+static const char *helm_match_key(const char *content, const char *eol, const char *key) {
+    size_t kl = strlen(key);
+    if ((size_t)(eol - content) < kl + 1) {
+        return NULL;
+    }
+    if (strncmp(content, key, kl) != 0 || content[kl] != ':') {
+        return NULL;
+    }
+    return content + kl + 1;
+}
+
+int cbm_parse_helm_chart(const char *source, cbm_helm_chart_t *out) {
+    if (!source || !out) {
+        return -1;
+    }
+    out->chart_name[0] = '\0';
+    out->dep_count = 0;
+
+    bool in_deps = false;
+    const char *p = source;
+    while (*p) {
+        const char *eol = strchr(p, '\n');
+        if (!eol) {
+            eol = p + strlen(p);
+        }
+        int indent = 0;
+        const char *content = p;
+        while (content < eol && *content == ' ') {
+            content++;
+            indent++;
+        }
+        if (content < eol && *content != '#') {
+            if (indent == 0) {
+                /* New top-level key ends any dependencies block. */
+                in_deps = (helm_match_key(content, eol, "dependencies") != NULL);
+                const char *nv = helm_match_key(content, eol, "name");
+                if (!in_deps && nv && out->chart_name[0] == '\0') {
+                    helm_copy_scalar(nv, eol, out->chart_name, CBM_HELM_NAME_MAX);
+                }
+            } else if (in_deps) {
+                /* List item: optional leading "- ", then look for name:. */
+                const char *q = content;
+                if (*q == '-') {
+                    q++;
+                    while (q < eol && *q == ' ') {
+                        q++;
+                    }
+                }
+                const char *nv = helm_match_key(q, eol, "name");
+                if (nv && out->dep_count < CBM_HELM_MAX_DEPS) {
+                    char buf[CBM_HELM_NAME_MAX];
+                    helm_copy_scalar(nv, eol, buf, CBM_HELM_NAME_MAX);
+                    if (buf[0]) {
+                        memcpy(out->deps[out->dep_count], buf, CBM_HELM_NAME_MAX);
+                        out->dep_count++;
+                    }
+                }
+            }
+        }
+        if (*eol == '\0') {
+            break;
+        }
+        p = eol + 1;
+    }
+    return (out->chart_name[0] || out->dep_count > 0) ? 0 : -1;
+}

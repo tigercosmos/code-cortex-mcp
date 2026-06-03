@@ -369,6 +369,18 @@ int cbm_parse_shell_source(const char *source, cbm_shell_result_t *out);
 /* Parse a Terraform file from source text. Returns 0 if parsed, -1 if empty. */
 int cbm_parse_terraform_source(const char *source, cbm_terraform_result_t *out);
 
+/* Helm Chart.yaml parse result: chart name + dependency chart names (#338). */
+enum { CBM_HELM_MAX_DEPS = 128, CBM_HELM_NAME_MAX = 128 };
+typedef struct {
+    char chart_name[CBM_HELM_NAME_MAX];
+    char deps[CBM_HELM_MAX_DEPS][CBM_HELM_NAME_MAX];
+    int dep_count;
+} cbm_helm_chart_t;
+
+/* Parse a Helm Chart.yaml: top-level `name:` and `dependencies:` list names.
+ * Returns 0 if parsed (name or deps found), -1 otherwise. */
+int cbm_parse_helm_chart(const char *source, cbm_helm_chart_t *out);
+
 /* Build an infrastructure QN. Caller must free the returned string. */
 char *cbm_infra_qn(const char *project_name, const char *rel_path, const char *infra_type,
                    const char *service_name);
@@ -512,8 +524,14 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
 const char *cbm_pipeline_repo_path(const cbm_pipeline_t *p);
 atomic_int *cbm_pipeline_cancelled_ptr(cbm_pipeline_t *p);
 
+/* Parse a gRPC stub call "<service-stub>.<method>" into the canonical proto
+ * service name + method. Returns true ONLY when a recognized gRPC stub/client
+ * suffix is present (the stub-type signal that gates Route emission, #294).
+ * Exposed for testing. */
+bool extract_grpc_service_method(const char *callee, char *service, size_t srv_sz, char *method,
+                                 size_t meth_sz);
+
 #ifdef __cplusplus
 }
 #endif
-
 #endif /* CBM_PIPELINE_INTERNAL_H */

@@ -60,6 +60,7 @@ static const char *strip_quotes(CBMArena *a, const char *text) {
 static void walk_calls(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec);
 static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, CBMLanguage lang);
 static void extract_jsx_refs(CBMExtractCtx *ctx, TSNode node);
+static char *gotemplate_callee(CBMArena *a, TSNode node, const char *source);
 
 // Lean 4: check if an apply node is inside a type annotation.
 // Strategy: walk up to the nearest declaration boundary; if the apply falls
@@ -162,6 +163,23 @@ static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *so
             strcmp(fk, "member_access_expression") == 0 || strcmp(fk, "scoped_identifier") == 0 ||
             strcmp(fk, "qualified_identifier") == 0) {
             return cbm_node_text(a, func_node, source);
+        }
+        // R member call: module$fn() — function node is an extract_operator
+        // with lhs (object) and rhs (method). Emit "module.fn" so it resolves
+        // like other member calls (#219). Previously dropped → no CALLS edge.
+        if (strcmp(fk, "extract_operator") == 0) {
+            TSNode lhs = ts_node_child_by_field_name(func_node, TS_FIELD("lhs"));
+            TSNode rhs = ts_node_child_by_field_name(func_node, TS_FIELD("rhs"));
+            if (!ts_node_is_null(rhs)) {
+                char *rt = cbm_node_text(a, rhs, source);
+                if (!ts_node_is_null(lhs)) {
+                    char *lt = cbm_node_text(a, lhs, source);
+                    if (lt && lt[0] && rt && rt[0]) {
+                        return cbm_arena_sprintf(a, "%s.%s", lt, rt);
+                    }
+                }
+                return rt;
+            }
         }
     }
 
@@ -338,6 +356,15 @@ static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, C
         }
     }
 
+    // Helm / Go templates: resolve `include "x"` / `template "x"` to the
+    // referenced named template so it links to the define'd Function (#338).
+    if (lang == CBM_LANG_GOTEMPLATE) {
+        char *g = gotemplate_callee(a, node, source);
+        if (g) {
+            return g;
+        }
+    }
+
     // Try common field-based resolution first
     char *name = extract_callee_from_fields(a, node, source);
     if (name) {
@@ -392,6 +419,48 @@ static const char *extract_first_string_arg(CBMExtractCtx *ctx, TSNode args) {
             char *text = cbm_node_text(ctx->arena, arg, ctx->source);
             return strip_and_validate_string_arg(ctx->arena, text);
         }
+    }
+    return NULL;
+}
+
+// Return the (dequoted) first string-literal child of a node, or NULL.
+static char *gotemplate_string_child(CBMArena *a, TSNode parent, const char *source) {
+    TSNode s = cbm_find_child_by_kind(parent, "interpreted_string_literal");
+    if (ts_node_is_null(s)) {
+        return NULL;
+    }
+    char *text = cbm_node_text(a, s, source);
+    const char *v = strip_and_validate_string_arg(a, text);
+    return (char *)v;
+}
+
+// Resolve a Go-template / Helm call to the referenced named template:
+//   {{ template "x" . }}            -> template_action, name is a string child
+//   {{ include "x" . }}             -> function_call(include), name is first string arg
+// Returns NULL for any other node so generic resolution names the function.
+static char *gotemplate_callee(CBMArena *a, TSNode node, const char *source) {
+    const char *k = ts_node_type(node);
+    if (strcmp(k, "template_action") == 0) {
+        return gotemplate_string_child(a, node, source);
+    }
+    if (strcmp(k, "function_call") == 0) {
+        TSNode fn = cbm_find_child_by_kind(node, "identifier");
+        if (ts_node_is_null(fn)) {
+            return NULL;
+        }
+        char *fname = cbm_node_text(a, fn, source);
+        if (!fname || (strcmp(fname, "include") != 0 && strcmp(fname, "template") != 0 &&
+                       strcmp(fname, "tpl") != 0)) {
+            return NULL;
+        }
+        TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+        if (ts_node_is_null(args)) {
+            args = cbm_find_child_by_kind(node, "argument_list");
+        }
+        if (ts_node_is_null(args)) {
+            return NULL;
+        }
+        return gotemplate_string_child(a, args, source);
     }
     return NULL;
 }

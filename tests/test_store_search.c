@@ -104,6 +104,32 @@ TEST(store_search_by_file_pattern) {
     PASS();
 }
 
+/* Issue #200: a wildcard-free file_pattern must match as a path substring,
+ * not require the path to equal it. "offer-server" should match
+ * "src/offer-server/decision.js". */
+TEST(store_search_file_pattern_substring_issue200) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    cbm_node_t n = {.project = "test",
+                    .label = "Function",
+                    .name = "evaluate",
+                    .qualified_name = "test.offer.evaluate",
+                    .file_path = "src/offer-server/decision.js"};
+    cbm_store_upsert_node(s, &n);
+
+    cbm_search_params_t params = {
+        .project = "test", .file_pattern = "offer-server", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
+    ASSERT_STR_EQ(out.results[0].node.name, "evaluate");
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
 /* ── Search pagination ──────────────────────────────────────────── */
 
 TEST(store_search_pagination) {
@@ -1209,6 +1235,7 @@ SUITE(store_search) {
     RUN_TEST(store_search_by_label);
     RUN_TEST(store_search_by_name_pattern);
     RUN_TEST(store_search_by_file_pattern);
+    RUN_TEST(store_search_file_pattern_substring_issue200);
     RUN_TEST(store_search_pagination);
     RUN_TEST(store_search_degree_filter);
     RUN_TEST(store_search_all);

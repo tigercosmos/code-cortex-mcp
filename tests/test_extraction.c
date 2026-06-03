@@ -68,6 +68,197 @@ static CBMFileResult *extract(const char *src, CBMLanguage lang, const char *pro
  * Group A: OOP Languages
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* --- R: box::use imports (#218) + module$fn calls (#219) --- */
+TEST(extract_r_box_use_imports_issue218) {
+    CBMFileResult *r = extract("box::use(\n"
+                               "  shiny[moduleServer, NS],\n"
+                               "  app/logic/validation[validate_input],\n"
+                               ")\n"
+                               "library(dplyr)\n"
+                               "source(\"helpers.R\")\n",
+                               CBM_LANG_R, "t", "app.R");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* box::use specs → one IMPORTS edge per module (symbol list stripped). */
+    ASSERT(has_import(r, "shiny"));
+    ASSERT(has_import(r, "app/logic/validation"));
+    /* base-R imports work too. */
+    ASSERT(has_import(r, "dplyr"));
+    ASSERT(has_import(r, "helpers"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_r_dollar_call_issue219) {
+    CBMFileResult *r = extract("validation$validate_input(x)\n", CBM_LANG_R, "t", "app.R");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* module$fn() now produces a CALLS edge (was silently dropped). */
+    ASSERT(has_call(r, "validation.validate_input"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- TS: object-literal arrow methods from a factory (Zustand, #341) --- */
+TEST(extract_ts_factory_object_methods_issue341) {
+    CBMFileResult *r = extract("export function createItemActions(set, get) {\n"
+                               "  return {\n"
+                               "    addItem: (type, id) => { return 1; },\n"
+                               "    moveItem: (id, target) => { return 2; },\n"
+                               "    deleteItem: (id) => { return 3; },\n"
+                               "  };\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "item-actions.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* The factory itself + each returned arrow method are Function nodes. */
+    ASSERT(has_def_any(r, "createItemActions"));
+    ASSERT(has_def_any(r, "addItem"));
+    ASSERT(has_def_any(r, "moveItem"));
+    ASSERT(has_def_any(r, "deleteItem"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- C/C++ preprocessor macros become Macro nodes (#375) --- */
+TEST(extract_c_macros_issue375) {
+    CBMFileResult *r = extract("#define SIMPLE_MACRO 1\n"
+                               "#define FN_MACRO(x) (2 * (x))\n"
+                               "#define EMPTY_MACRO\n"
+                               "int main(void) { return FN_MACRO(SIMPLE_MACRO); }\n",
+                               CBM_LANG_C, "p", "macros.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Macro", "SIMPLE_MACRO"));
+    ASSERT(has_def(r, "Macro", "FN_MACRO"));
+    ASSERT(has_def(r, "Macro", "EMPTY_MACRO"));
+    ASSERT(has_def(r, "Function", "main")); /* macros don't displace function defs */
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_cpp_macros_issue375) {
+    CBMFileResult *r = extract("#define MAX(a, b) ((a) > (b) ? (a) : (b))\n"
+                               "#define PI 3.14159\n"
+                               "namespace n {\n"
+                               "int f() { return MAX(1, 2); }\n"
+                               "}\n",
+                               CBM_LANG_CPP, "p", "macros.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Macro", "MAX"));
+    ASSERT(has_def(r, "Macro", "PI"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- GDScript: AST -> graph visitor (Godot, #186) --- */
+TEST(extract_gdscript_issue186) {
+    CBMFileResult *r = extract("extends Node\n"
+                               "class_name Player\n"
+                               "\n"
+                               "var health = 100\n"
+                               "\n"
+                               "func _ready():\n"
+                               "    take_damage(10)\n"
+                               "\n"
+                               "func take_damage(amount):\n"
+                               "    health -= amount\n"
+                               "\n"
+                               "class Inner:\n"
+                               "    func helper():\n"
+                               "        pass\n",
+                               CBM_LANG_GDSCRIPT, "game", "player.gd");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "_ready"));
+    ASSERT(has_def(r, "Function", "take_damage"));
+    ASSERT(has_def(r, "Class", "Inner"));
+    ASSERT(has_call(r, "take_damage"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- PowerShell: AST -> graph visitor (#35) --- */
+TEST(extract_powershell_issue35) {
+    CBMFileResult *r = extract("function Get-Greeting {\n"
+                               "    param($Name)\n"
+                               "    Write-Output \"Hello $Name\"\n"
+                               "}\n"
+                               "\n"
+                               "function Set-Config {\n"
+                               "    Get-Greeting -Name 'World'\n"
+                               "}\n",
+                               CBM_LANG_POWERSHELL, "ops", "greet.ps1");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(count_defs_with_label(r, "Function") >= 2);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- Luau: AST -> graph visitor (Roblox, #39) --- */
+TEST(extract_luau_issue39) {
+    CBMFileResult *r = extract("local function add(a, b)\n"
+                               "    return a + b\n"
+                               "end\n"
+                               "\n"
+                               "function multiply(a, b)\n"
+                               "    return add(a, a) * b\n"
+                               "end\n",
+                               CBM_LANG_LUAU, "game", "math.luau");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(count_defs_with_label(r, "Function") >= 2);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- Helm / Go template: named templates + include calls (#338) --- */
+TEST(extract_helm_templates_issue338) {
+    CBMFileResult *r = extract("{{- define \"chart.fullname\" -}}\n"
+                               "{{- .Release.Name -}}\n"
+                               "{{- end -}}\n"
+                               "\n"
+                               "{{- define \"chart.labels\" -}}\n"
+                               "app: {{ include \"chart.fullname\" . }}\n"
+                               "chart: {{ template \"chart.fullname\" . }}\n"
+                               "{{- end -}}\n",
+                               CBM_LANG_GOTEMPLATE, "chart", "templates/_helpers.tpl");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* define -> Function nodes */
+    ASSERT(has_def(r, "Function", "chart.fullname"));
+    ASSERT(has_def(r, "Function", "chart.labels"));
+    /* include / template -> CALLS to the named template (not to "include") */
+    ASSERT(has_call(r, "chart.fullname"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- Helm values.yaml: top-level keys only, no leaf flood (#338) --- */
+TEST(extract_helm_values_toplevel_issue338) {
+    CBMFileResult *r = extract("image:\n"
+                               "  repository: nginx\n"
+                               "  tag: latest\n"
+                               "replicaCount: 3\n"
+                               "service:\n"
+                               "  port: 80\n",
+                               CBM_LANG_YAML, "chart", "values.yaml");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Variable", "image"));
+    ASSERT(has_def(r, "Variable", "replicaCount"));
+    ASSERT(has_def(r, "Variable", "service"));
+    /* Nested leaf keys must NOT explode into separate nodes. */
+    ASSERT(!has_def(r, "Variable", "repository"));
+    ASSERT(!has_def(r, "Variable", "tag"));
+    ASSERT(!has_def(r, "Variable", "port"));
+    ASSERT_EQ(count_defs_with_label(r, "Variable"), 3);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Java --- */
 TEST(java_class) {
     CBMFileResult *r = extract(
@@ -111,9 +302,9 @@ TEST(java_interface) {
  *      was emitted, the interfaces were dropped.
  *   2) the emitted name was the full field text including the keyword. */
 TEST(java_class_extends_and_implements) {
-    CBMFileResult *r = extract(
-        "public class DefaultLinkTool extends DefaultDiagramTool implements ILinkTool, Closeable { }",
-        CBM_LANG_JAVA, "t", "DefaultLinkTool.java");
+    CBMFileResult *r = extract("public class DefaultLinkTool extends DefaultDiagramTool implements "
+                               "ILinkTool, Closeable { }",
+                               CBM_LANG_JAVA, "t", "DefaultLinkTool.java");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
 
@@ -137,9 +328,12 @@ TEST(java_class_extends_and_implements) {
          * "implements ..." literally inside one of the entries. */
         ASSERT_NULL(strstr(*b, "extends"));
         ASSERT_NULL(strstr(*b, "implements"));
-        if (strcmp(*b, "DefaultDiagramTool") == 0) saw_super = true;
-        if (strcmp(*b, "ILinkTool") == 0) saw_iface_a = true;
-        if (strcmp(*b, "Closeable") == 0) saw_iface_b = true;
+        if (strcmp(*b, "DefaultDiagramTool") == 0)
+            saw_super = true;
+        if (strcmp(*b, "ILinkTool") == 0)
+            saw_iface_a = true;
+        if (strcmp(*b, "Closeable") == 0)
+            saw_iface_b = true;
     }
     ASSERT_TRUE(saw_super);
     ASSERT_TRUE(saw_iface_a);
@@ -618,11 +812,15 @@ TEST(yaml_variables) {
 /* --- HCL --- */
 TEST(hcl_blocks) {
     CBMFileResult *r = extract("resource \"aws_instance\" \"web\" {\n  ami = \"abc-123\"\n  "
-                               "instance_type = \"t2.micro\"\n}\n",
+                               "instance_type = \"t2.micro\"\n}\n"
+                               "variable \"region\" {\n  default = \"us-east-1\"\n}\n",
                                CBM_LANG_HCL, "t", "main.tf");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->defs.count, 0);
+    /* Block labels are folded into the name so blocks are distinguishable (#337). */
+    ASSERT(has_def(r, "Class", "resource.aws_instance.web"));
+    ASSERT(has_def(r, "Class", "variable.region"));
     cbm_free_result(r);
     PASS();
 }
@@ -800,8 +998,8 @@ TEST(swift_simple_call) {
 }
 
 TEST(swift_method_call) {
-    CBMFileResult *r = extract("class Foo {\n    func bar() { baz.run() }\n}\n", CBM_LANG_SWIFT,
-                               "t", "Foo.swift");
+    CBMFileResult *r =
+        extract("class Foo {\n    func bar() { baz.run() }\n}\n", CBM_LANG_SWIFT, "t", "Foo.swift");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT(has_call(r, "baz.run"));
@@ -1730,10 +1928,10 @@ TEST(go_imports) {
 }
 
 TEST(java_imports) {
-    CBMFileResult *r =
-        extract("import java.util.List;\nimport java.util.ArrayList;\nimport static java.lang.Math.PI;\n"
-                "public class Foo {}\n",
-                CBM_LANG_JAVA, "t", "Foo.java");
+    CBMFileResult *r = extract(
+        "import java.util.List;\nimport java.util.ArrayList;\nimport static java.lang.Math.PI;\n"
+        "public class Foo {}\n",
+        CBM_LANG_JAVA, "t", "Foo.java");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->imports.count, 0);
@@ -1743,10 +1941,10 @@ TEST(java_imports) {
 }
 
 TEST(rust_imports) {
-    CBMFileResult *r =
-        extract("use std::collections::HashMap;\nuse std::io::{self, Write};\nuse serde::Serialize;\n"
-                "fn main() {}\n",
-                CBM_LANG_RUST, "t", "main.rs");
+    CBMFileResult *r = extract(
+        "use std::collections::HashMap;\nuse std::io::{self, Write};\nuse serde::Serialize;\n"
+        "fn main() {}\n",
+        CBM_LANG_RUST, "t", "main.rs");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->imports.count, 0);
@@ -1756,9 +1954,9 @@ TEST(rust_imports) {
 }
 
 TEST(c_imports) {
-    CBMFileResult *r =
-        extract("#include <stdio.h>\n#include <stdlib.h>\n#include \"mylib.h\"\n\nint main() { return 0; }\n",
-                CBM_LANG_C, "t", "main.c");
+    CBMFileResult *r = extract("#include <stdio.h>\n#include <stdlib.h>\n#include "
+                               "\"mylib.h\"\n\nint main() { return 0; }\n",
+                               CBM_LANG_C, "t", "main.c");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->imports.count, 0);
@@ -1768,9 +1966,9 @@ TEST(c_imports) {
 }
 
 TEST(ruby_imports) {
-    CBMFileResult *r =
-        extract("require 'json'\nrequire 'net/http'\nrequire_relative 'helpers'\n\nclass Foo; end\n",
-                CBM_LANG_RUBY, "t", "app.rb");
+    CBMFileResult *r = extract(
+        "require 'json'\nrequire 'net/http'\nrequire_relative 'helpers'\n\nclass Foo; end\n",
+        CBM_LANG_RUBY, "t", "app.rb");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->imports.count, 0);
@@ -1780,9 +1978,9 @@ TEST(ruby_imports) {
 }
 
 TEST(lua_imports) {
-    CBMFileResult *r =
-        extract("local json = require(\"dkjson\")\nlocal http = require(\"socket.http\")\n\nlocal function greet() end\n",
-                CBM_LANG_LUA, "t", "main.lua");
+    CBMFileResult *r = extract("local json = require(\"dkjson\")\nlocal http = "
+                               "require(\"socket.http\")\n\nlocal function greet() end\n",
+                               CBM_LANG_LUA, "t", "main.lua");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GT(r->imports.count, 0);
@@ -1825,15 +2023,14 @@ TEST(import_stress_go) {
 
 TEST(svelte_imports_basic) {
     /* Default import + named imports + namespace import */
-    CBMFileResult *r = extract(
-        "<script>\n"
-        "import Foo from './Foo.svelte';\n"
-        "import { bar, baz } from '../lib/utils';\n"
-        "import * as helpers from './helpers';\n"
-        "export let value = 42;\n"
-        "</script>\n"
-        "<h1>Hello {value}</h1>\n",
-        CBM_LANG_SVELTE, "t", "Comp.svelte");
+    CBMFileResult *r = extract("<script>\n"
+                               "import Foo from './Foo.svelte';\n"
+                               "import { bar, baz } from '../lib/utils';\n"
+                               "import * as helpers from './helpers';\n"
+                               "export let value = 42;\n"
+                               "</script>\n"
+                               "<h1>Hello {value}</h1>\n",
+                               CBM_LANG_SVELTE, "t", "Comp.svelte");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GTE(r->imports.count, 3);
@@ -1846,10 +2043,9 @@ TEST(svelte_imports_basic) {
 
 TEST(svelte_imports_no_script) {
     /* .svelte with no <script> block must not crash, 0 imports */
-    CBMFileResult *r = extract(
-        "<h1>Static page</h1>\n"
-        "<p>No script here.</p>\n",
-        CBM_LANG_SVELTE, "t", "Static.svelte");
+    CBMFileResult *r = extract("<h1>Static page</h1>\n"
+                               "<p>No script here.</p>\n",
+                               CBM_LANG_SVELTE, "t", "Static.svelte");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_EQ(r->imports.count, 0);
@@ -1859,14 +2055,13 @@ TEST(svelte_imports_no_script) {
 
 TEST(vue_imports_basic) {
     /* Vue SFC: same document→script_element→raw_text AST structure */
-    CBMFileResult *r = extract(
-        "<template><div>{{ msg }}</div></template>\n"
-        "<script>\n"
-        "import MyComp from './MyComp.vue';\n"
-        "import { ref } from 'vue';\n"
-        "export default { name: 'App' };\n"
-        "</script>\n",
-        CBM_LANG_VUE, "t", "App.vue");
+    CBMFileResult *r = extract("<template><div>{{ msg }}</div></template>\n"
+                               "<script>\n"
+                               "import MyComp from './MyComp.vue';\n"
+                               "import { ref } from 'vue';\n"
+                               "export default { name: 'App' };\n"
+                               "</script>\n",
+                               CBM_LANG_VUE, "t", "App.vue");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GTE(r->imports.count, 2);
@@ -1878,15 +2073,14 @@ TEST(vue_imports_basic) {
 
 TEST(html_imports_basic) {
     /* Plain HTML with inline ES module imports — same generic walker. */
-    CBMFileResult *r = extract(
-        "<!DOCTYPE html><html><head>\n"
-        "<script type=\"module\">\n"
-        "import { renderApp } from './app.js';\n"
-        "import * as utils from './utils.js';\n"
-        "renderApp();\n"
-        "</script>\n"
-        "</head><body></body></html>\n",
-        CBM_LANG_HTML, "t", "index.html");
+    CBMFileResult *r = extract("<!DOCTYPE html><html><head>\n"
+                               "<script type=\"module\">\n"
+                               "import { renderApp } from './app.js';\n"
+                               "import * as utils from './utils.js';\n"
+                               "renderApp();\n"
+                               "</script>\n"
+                               "</head><body></body></html>\n",
+                               CBM_LANG_HTML, "t", "index.html");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GTE(r->imports.count, 2);
@@ -2260,6 +2454,68 @@ TEST(python_regular_module_qn_unchanged) {
     PASS();
 }
 
+/* Find a definition by name; returns the item or NULL. */
+static const CBMDefinition *find_def_by_name(CBMFileResult *r, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, name) == 0) {
+            return &r->defs.items[i];
+        }
+    }
+    return NULL;
+}
+
+static int decorators_contain(const CBMDefinition *d, const char *needle) {
+    if (!d || !d->decorators) {
+        return 0;
+    }
+    for (int i = 0; d->decorators[i]; i++) {
+        if (strstr(d->decorators[i], needle)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Issue #382: Java Method nodes had empty decorators / signature. */
+TEST(extract_java_method_annotations_issue382) {
+    CBMFileResult *r = extract("public class C {\n"
+                               "  @GetMapping(\"/x\")\n"
+                               "  public String cmd(String c) { return c; }\n"
+                               "}\n",
+                               CBM_LANG_JAVA, "t", "C.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *m = find_def_by_name(r, "cmd");
+    ASSERT_NOT_NULL(m);
+    ASSERT(decorators_contain(m, "GetMapping"));
+    ASSERT_NOT_NULL(m->signature);
+    ASSERT(m->signature[0] != '\0');
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Issue #213: large TS files were indexed as a File node with zero children. */
+TEST(extract_large_ts_has_functions_issue213) {
+    enum { NFUNCS = 4000 };
+    size_t cap = (size_t)NFUNCS * 80 + 64;
+    char *src = (char *)malloc(cap);
+    ASSERT_NOT_NULL(src);
+    size_t off = 0;
+    for (int i = 0; i < NFUNCS; i++) {
+        off +=
+            (size_t)snprintf(src + off, cap - off,
+                             "export function fn%d(a: number): number { return a + %d; }\n", i, i);
+    }
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)off, CBM_LANG_TYPESCRIPT, "t", "big.ts", 0, NULL, NULL);
+    ASSERT_NOT_NULL(r);
+    int fns = count_defs_with_label(r, "Function");
+    ASSERT_GT(fns, 0); /* must not silently produce zero children */
+    cbm_free_result(r);
+    free(src);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
@@ -2267,6 +2523,19 @@ TEST(python_regular_module_qn_unchanged) {
 SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
+
+    /* R box-module imports + member calls */
+    RUN_TEST(extract_r_box_use_imports_issue218);
+    RUN_TEST(extract_r_dollar_call_issue219);
+    RUN_TEST(extract_ts_factory_object_methods_issue341);
+    RUN_TEST(extract_c_macros_issue375);
+    RUN_TEST(extract_cpp_macros_issue375);
+    RUN_TEST(extract_gdscript_issue186);
+    RUN_TEST(extract_powershell_issue35);
+    RUN_TEST(extract_luau_issue39);
+
+    RUN_TEST(extract_helm_templates_issue338);
+    RUN_TEST(extract_helm_values_toplevel_issue338);
 
     /* OOP */
     RUN_TEST(java_class);
@@ -2462,6 +2731,8 @@ SUITE(extraction) {
     RUN_TEST(python_init_nested_module_qn);
     RUN_TEST(js_index_module_qn_not_collide_with_folder);
     RUN_TEST(python_regular_module_qn_unchanged);
+    RUN_TEST(extract_java_method_annotations_issue382);
+    RUN_TEST(extract_large_ts_has_functions_issue213);
 
     cbm_shutdown();
 }

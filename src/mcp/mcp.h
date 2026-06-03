@@ -26,13 +26,15 @@ struct cbm_config;                    /* from cli/cli.h */
 typedef struct {
     const char *jsonrpc;    /* "2.0" */
     const char *method;     /* e.g. "initialize", "tools/call" */
-    int64_t id;             /* request ID (-1 if notification) */
+    int64_t id;             /* request ID (numeric form; -1 if notification) */
+    const char *id_str;     /* non-NULL when id is a JSON string (issue #253) */
     bool has_id;            /* false for notifications */
     const char *params_raw; /* raw JSON string of params */
 } cbm_jsonrpc_request_t;
 
 typedef struct {
     int64_t id;
+    const char *id_str;      /* non-NULL to echo a string id verbatim (issue #253) */
     const char *result_json; /* JSON string for result (success) */
     const char *error_json;  /* JSON string for error (failure), NULL on success */
     int error_code;          /* JSON-RPC error code */
