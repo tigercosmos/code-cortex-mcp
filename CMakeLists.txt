@@ -300,6 +300,17 @@ set(CBM_FOUNDATION_CXX_SRCS
 cbm_add_cxx_library(cbm_foundation_cxx
     SOURCES ${CBM_FOUNDATION_CXX_SRCS}
     INCLUDES ${CMAKE_SOURCE_DIR}/vendored/mimalloc/include)
+# GCC 13 raises a false-positive -Wmaybe-uninitialized deep in libstdc++'s
+# <std_function.h> when std::regex's internal state machine (which stores a
+# std::function<bool(char)> per character class) is instantiated under
+# optimization. It is an optimizer-stage warning that in-source #pragma GCC
+# diagnostic cannot reliably silence, and clang does not emit it. Disable just
+# this flag for just this TU so the GCC -Werror build passes (compat_regex.cpp
+# is the only translation unit that instantiates std::regex).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(src/foundation/compat_regex.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wno-maybe-uninitialized")
+endif()
 
 # ── Internal extraction (C++23) ────────────────────────────────
 cbm_add_cxx_library(cbm_extraction
