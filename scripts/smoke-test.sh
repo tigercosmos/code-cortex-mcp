@@ -490,7 +490,7 @@ echo "=== Phase 8: agent config install E2E ==="
 FAKE_HOME=$(mktemp -d)
 mkdir -p "$FAKE_HOME/.claude"
 mkdir -p "$FAKE_HOME/.codex"
-mkdir -p "$FAKE_HOME/.gemini/antigravity"
+mkdir -p "$FAKE_HOME/.gemini/antigravity-cli"
 mkdir -p "$FAKE_HOME/.openclaw"
 mkdir -p "$FAKE_HOME/.kilocode/rules"
 mkdir -p "$FAKE_HOME/.config/opencode"
@@ -694,14 +694,15 @@ else
   echo "SKIP 8o-p: OpenCode not detected (binary not on PATH)"
 fi
 
-# 8q-r: Antigravity
-CMD=$(json_get "$FAKE_HOME/.gemini/antigravity/mcp_config.json" "d['mcpServers']['codebase-memory-mcp']['command']")
+# 8q-r: Antigravity (2026 layout: shared ~/.gemini/config/mcp_config.json,
+# instructions under ~/.gemini/antigravity-cli/)
+CMD=$(json_get "$FAKE_HOME/.gemini/config/mcp_config.json" "d['mcpServers']['codebase-memory-mcp']['command']")
 if ! path_match "$CMD" "$SELF_PATH"; then
   echo "FAIL 8q: Antigravity command='$CMD'"
   exit 1
 fi
 echo "OK 8q: Antigravity MCP"
-if [ ! -f "$FAKE_HOME/.gemini/antigravity/AGENTS.md" ]; then
+if [ ! -f "$FAKE_HOME/.gemini/antigravity-cli/AGENTS.md" ]; then
   echo "FAIL 8r: Antigravity AGENTS.md missing"
   exit 1
 fi
