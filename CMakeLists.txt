@@ -237,7 +237,11 @@ file(GLOB CBM_LSP_GENERATED_SRCS CONFIGURE_DEPENDS
 cbm_add_cxx_library(cbm_lsp_generated
     SOURCES ${CBM_LSP_GENERATED_SRCS}
     INCLUDES ${CBM_TS_SRC})
-target_compile_options(cbm_lsp_generated PRIVATE -Wno-comment)
+# Generated tables carry benign C-isms (unused stdlib-parent arrays, etc.) that
+# GCC -Werror rejects but are not real defects; the bodies are auto-generated,
+# so relax these like the rest of the generated/legacy LSP code (see cbm_lsp_tscs).
+target_compile_options(cbm_lsp_generated PRIVATE -Wno-comment
+    -Wno-unused-variable -Wno-unused-but-set-variable -Wno-write-strings)
 
 # ts_lsp / cs_lsp / java / kotlin / rust — ported to C++23 (the
 # (const CBMType*[]){...} compound literals are now arena-allocated via
@@ -251,7 +255,15 @@ cbm_add_cxx_library(cbm_lsp_tscs
             ${CBM_INTERNAL}/lsp/rust_proc_macros.cpp ${CBM_INTERNAL}/lsp/rust_rustdoc.cpp
     DEFS _DEFAULT_SOURCE _GNU_SOURCE
     INCLUDES ${CBM_TS_SRC})
-target_compile_options(cbm_lsp_tscs PRIVATE -Wno-comment)
+# These large legacy/ported resolver bodies are "not yet warning-clean as C++"
+# (see header note). The Java/Kotlin/Rust resolvers faithfully carry upstream
+# C-isms — string-literal→char* assignments, set-but-unused locals, an unused
+# smart-cast stub — that GCC -Werror rejects but that are not real defects.
+# Relax those specific diagnostics (clang already tolerates them) to keep the
+# port byte-faithful to upstream rather than diverging the sources.
+target_compile_options(cbm_lsp_tscs PRIVATE -Wno-comment
+    -Wno-write-strings -Wno-unused-function -Wno-unused-variable
+    -Wno-unused-but-set-variable)
 
 # Preprocessor (already C++, kept at C++14 to match Makefile)
 add_library(cbm_preprocessor OBJECT ${CBM_INTERNAL}/preprocessor.cpp)
