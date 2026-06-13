@@ -42,8 +42,4 @@ PRETRAINED_VECTOR_BLOB_END:
     .p2align 2
 PRETRAINED_VECTOR_BLOB_LEN:
     .long PRETRAINED_VECTOR_BLOB_END - PRETRAINED_VECTOR_BLOB
-
-    /* Data-only object: mark the stack non-executable, otherwise GNU ld warns
-     * "missing .note.GNU-stack section implies executable stack" at link time. */
-    .section .note.GNU-stack,"",@progbits
 #endif

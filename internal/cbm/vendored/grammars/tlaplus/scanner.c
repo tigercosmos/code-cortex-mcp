@@ -2036,4 +2036,3 @@
     struct NestedScanner* const scanner = (struct NestedScanner*)(payload);
     return nested_scan(scanner, lexer, valid_symbols);
   }
-

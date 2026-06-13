@@ -204,4 +204,3 @@ bool tree_sitter_teal_external_scanner_scan(void *payload, TSLexer *lexer, const
 
     return valid_symbols[COMMENT] && scan_comment(lexer);
 }
-

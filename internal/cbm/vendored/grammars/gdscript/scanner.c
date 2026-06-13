@@ -48,12 +48,15 @@ enum TokenType {
     STRING_END,
     STRING_NAME_START,
     NODE_PATH_START,
+    COMMENT,
     CLOSE_PAREN,
     CLOSE_BRACKET,
     CLOSE_BRACE,
     COMMA,
     /* COLON, // See grammar.js externals */
     BODY_END,
+    REGION_START,
+    REGION_END,
 };
 
 typedef enum {
@@ -151,75 +154,24 @@ typedef struct {
 typedef struct {
     indent_vec *indents;
     delimiter_vec *delimiters;
+    bool has_inline_comment;
 } Scanner;
 
 static inline void advance(TSLexer *lexer) { lexer->advance(lexer, false); }
 
 static inline void skip(TSLexer *lexer) { lexer->advance(lexer, true); }
 
-/**
- * Check if the current lexer position matches a specific word.
- * The lexer position is restored after checking.
- * 
- * @param lexer The lexer to check
- * @param word The word to match against
- * @return true if the word matches, false otherwise
- */
-static bool lookahead_string(TSLexer *lexer, const char *string) {
-    const char *cursor = string;
-    
-    while (*cursor && lexer->lookahead == *cursor) {
-        skip(lexer);
-        cursor++;
-    }
-    
-    bool matches = (*cursor == '\0');
-    
-    return matches;
-}
-
-/**
- * Skip whitespace characters and update indentation tracking.
- * 
- * @param lexer The lexer to advance
- * @param indent_length Pointer to current indentation length (modified in place)
- * @param found_end_of_line Pointer to end-of-line flag (set to true if newline encountered), can be NULL
- * @return true if a whitespace character was processed, false otherwise
- * 
- * Handles:
- * - ' ' (space): increments indent_length
- * - '\t' (tab): adds 8 to indent_length
- * - '\n' (newline): resets indent_length to 0, sets found_end_of_line to true (if not NULL)
- * - '\r', '\f' (carriage return, form feed): resets indent_length to 0
- */
-static inline bool skip_whitespace(TSLexer *lexer, uint32_t *indent_length, bool *found_end_of_line) {
-    if (lexer->lookahead == '\n') {
-        if (found_end_of_line) {
-            *found_end_of_line = true;
+// Helper function to check for a string from current lexer position
+// Used for matching the "region" and "endregion" keywords.
+static bool look_ahead_string(TSLexer *lexer, const char *str) {
+    for (int i = 0; str[i] != '\0'; i++) {
+        char c = str[i];
+        if (lexer->lookahead != c) {
+            return false;
         }
-
-        *indent_length = 0;
-        skip(lexer);
-
-        return true;
-    } else if (lexer->lookahead == ' ') {
-        (*indent_length)++;
-        skip(lexer);
-
-        return true;
-    } else if (lexer->lookahead == '\r' || lexer->lookahead == '\f') {
-        *indent_length = 0;
-        skip(lexer);
-
-        return true;
-    } else if (lexer->lookahead == '\t') {
-        *indent_length += 8;
-        skip(lexer);
-
-        return true;
+        advance(lexer);
     }
-
-    return false;
+    return true;
 }
 
 static inline void handle_quote(TSLexer *lexer, Delimiter *delimiter, char quote) {
@@ -302,6 +254,10 @@ bool tree_sitter_gdscript_external_scanner_scan(void *payload, TSLexer *lexer,
                 }
                 lexer->mark_end(lexer);
                 return true;
+
+            } else if (lexer->lookahead == '\n' && has_content &&
+                       !is_triple(&delimiter)) {
+                return false;
             }
             advance(lexer);
             has_content = true;
@@ -310,93 +266,75 @@ bool tree_sitter_gdscript_external_scanner_scan(void *payload, TSLexer *lexer,
 
     lexer->mark_end(lexer);
 
-
-
     bool found_end_of_line = false;
     uint32_t indent_length = 0;
-
-    // Track the indentation level of the most recent line that contained actual content
-    // (comments or code statements). This is used to prevent premature DEDENT emission
-    // when empty lines appear between content at the same indentation level, and to
-    // maintain proper scope association for comments that appear at the end of blocks.
-    uint32_t last_non_empty_indent = 0;
-
+    int32_t first_comment_indent_length = -1;
     for (;;) {
-        if (skip_whitespace(lexer, &indent_length, &found_end_of_line)) {
-            continue;
+        if (lexer->lookahead == '\n') {
+            found_end_of_line = true;
+            indent_length = 0;
+            scanner->has_inline_comment = false;
+            skip(lexer);
+        } else if (lexer->lookahead == ' ') {
+            indent_length++;
+            skip(lexer);
+        } else if (lexer->lookahead == '\r' || lexer->lookahead == '\f') {
+            indent_length = 0;
+            skip(lexer);
+        } else if (lexer->lookahead == '\t') {
+            indent_length += 8;
+            skip(lexer);
         } else if (lexer->lookahead == '#') {
-            // The current scanner can scan past a line return into a comment.
-            // In that case we want to stop processing here, since it means
-            // we're looking potentially at a comment on the next line compared
-            // to the starting point of this scan.
-            if (!found_end_of_line) {
-                break;
-            }
-
-            last_non_empty_indent = indent_length;
-
-            // Store the comment's indentation for special handling of dedented comments
-            // for example:
-            // ```
-            // func example():
-            //     # This comment is indented to the function's level
-            // # this comment is dedented to column 0 but should be associated with the function
-            //     var x = 10
-            // # This comment is dedented to column 0 but should be associated with the function
-            // ```
-            uint32_t comment_indent_length = indent_length;
-            
-            // Check if this is a region marker - they should not be adjusted
+            uint32_t comment_column = lexer->get_column(lexer);
+            // We check if the comment marker comes right after the indent to
+            // determine if it's located at the start of the line. If so it's a
+            // standalone comment. Otherwise, it's inline with code.
+            bool is_comment_at_line_start = (comment_column == indent_length);
             bool is_region_marker = false;
-            if (comment_indent_length == 0) {
-                // Check for #region or #endregion at column 0
-                skip(lexer); // skip #
-                
-                // Check if the next characters are "region" or "endregion"
-                if (lexer->lookahead == 'r') {
-                    is_region_marker = lookahead_string(lexer, "region");
-                } else if (lexer->lookahead == 'e') {
-                    is_region_marker = lookahead_string(lexer, "endregion");
-                }
-            }
-            
-            // For dedented comments, adjust indentation to ensure they are parsed within the correct scope
-            // Only adjust regular comments (not region markers) that are at column 0 when we're inside a function
-            // AND only if this appears to be a stray comment within the function scope rather than a top-level comment
-            if (!is_region_marker && scanner->indents->len > 1 && comment_indent_length == 0) {
-                // Get the function-level indentation (assuming it's the first indent)
-                uint16_t function_indent_length = scanner->indents->data[1];
-                // Only adjust if we're inside a function (function_indent_length > 0)
-                // AND this is likely a comment that belongs to the function (not a top-level docstring)
-                if (function_indent_length > 0) {
-                    // Look ahead to see what comes after this comment
-                    
-                    // Skip the comment line
-                    while (lexer->lookahead && lexer->lookahead != '\n') {
-                        skip(lexer);
-                    }
 
-                    if (lexer->lookahead == '\n') {
-                        skip(lexer);
+            // Check for #region and #endregion in priority before handling the token as a comment.
+            if (valid_symbols[REGION_START] || valid_symbols[REGION_END]) {
+                // We first walk over the # character
+                advance(lexer);
+
+                // We check if the next characters might be the start or end of a region keyword to filter out
+                // comments that are not region markers before making more checks.
+                bool is_region = (lexer->lookahead == 'r');
+                bool is_endregion = (lexer->lookahead == 'e');
+
+                // Region delimiters are always on their own line. They have an
+                // optional label after the keyword that is ignored by the
+                // GDScript parser (so the opening and closing labels don't have
+                // to match).
+                if (valid_symbols[REGION_START] && is_region && look_ahead_string(lexer, "region")) {
+                    lexer->mark_end(lexer);
+                    lexer->result_symbol = REGION_START;
+                    return true;
+                } else if (valid_symbols[REGION_END] && is_endregion && look_ahead_string(lexer, "endregion")) {
+                    // We want to capture the opening label if it is present in
+                    // case someone wants to use it for text editor outline for
+                    // example, but ignore the closing label. Here we consume
+                    // the entire line because of that.
+                    while (lexer->lookahead && lexer->lookahead != '\n' && lexer->lookahead != '\r' && !lexer->eof(lexer)) {
+                        advance(lexer);
                     }
-                    
-                    // Skip whitespace and see what's next
-                    uint32_t next_indent = 0;
-                    while (skip_whitespace(lexer, &next_indent, NULL)) {
-                        // continue
-                    }
-                    
-                    // Only adjust if the next content is NOT at the top level (indent 0)
-                    // This prevents docstring-style comments from being pulled into functions
-                    if (next_indent > 0) {
-                        // This is a dedented comment at column 0 inside a function
-                        indent_length = function_indent_length;
-                    }
+                    lexer->mark_end(lexer);
+                    lexer->result_symbol = REGION_END;
+                    return true;
                 }
             }
 
-            // Don't consume the comment - let the grammar handle it as a token
-            break;
+            // We were not looking at a region or endregion token, handle as regular comment
+            if (first_comment_indent_length == -1 && is_comment_at_line_start) {
+                first_comment_indent_length = (int32_t)indent_length;
+            } else if (!is_comment_at_line_start) {
+                scanner->has_inline_comment = true;
+            }
+            while (lexer->lookahead && lexer->lookahead != '\n') {
+                skip(lexer);
+            }
+            skip(lexer);
+            indent_length = 0;
         } else if (lexer->lookahead == '\\') {
             skip(lexer);
             if (lexer->lookahead == '\r') {
@@ -408,38 +346,10 @@ bool tree_sitter_gdscript_external_scanner_scan(void *payload, TSLexer *lexer,
                 return false;
             }
         } else if (lexer->eof(lexer)) {
-            // At EOF, use the last non-empty line's indentation if we haven't seen content
-            // this prevents dedenting to 0 at EOF if the last line is empty
-            if (last_non_empty_indent > 0) {
-                indent_length = last_non_empty_indent;
-            }
-            
-            if (scanner->indents->len > 0) {
-                uint16_t current_indent_length = VEC_BACK(scanner->indents);
-                if (indent_length != current_indent_length) {
-                    indent_length = 0;
-                }
-            } else {
-                indent_length = 0;
-            }
+            indent_length = 0;
             found_end_of_line = true;
             break;
-        } else if (lexer->lookahead == '\n') {
-            // Empty line, skip it and continue
-            skip(lexer);
-            indent_length = 0;
         } else {
-            if (indent_length == 0 && last_non_empty_indent > 0) {
-                // We're at content at level 0, but we had non-empty content at a higher level
-                // Check if we should defer DEDENT
-                if (scanner->indents->len > 0) {
-                    uint16_t current_indent_length = VEC_BACK(scanner->indents);
-                    if (last_non_empty_indent == current_indent_length ) {
-                        // We had comments at the current indent level, don't dedent immediately
-                        return false;
-                    }
-                }
-            }
             break;
         }
     }
@@ -455,7 +365,25 @@ bool tree_sitter_gdscript_external_scanner_scan(void *payload, TSLexer *lexer,
                 return true;
             }
 
-            if (valid_symbols[DEDENT] && indent_length < current_indent_length) {
+            // Check if the lexer is expecting a DEDENT token, but we're not
+            // within brackets or expecting a string.
+            bool dedent_explicitly_valid = valid_symbols[DEDENT];
+            bool not_expecting_strings_or_in_brackets = !valid_symbols[NEWLINE] &&
+                                     !valid_symbols[STRING_START] &&
+                                     !valid_symbols[STRING_NAME_START] &&
+                                     !valid_symbols[NODE_PATH_START] &&
+                                     !within_brackets;
+            bool should_generate_dedent = dedent_explicitly_valid || not_expecting_strings_or_in_brackets;
+            bool indentation_has_decreased = indent_length < current_indent_length;
+
+            // Wait to create a dedent token until we've consumed any comments
+            // whose indentation matches the current block. Also delay dedent if
+            // we have inline comments to allow them to be associated with the
+            // current scope.
+            bool comments_allow_dedent = first_comment_indent_length < (int32_t)current_indent_length &&
+                                       !scanner->has_inline_comment;
+
+            if (should_generate_dedent && indentation_has_decreased && comments_allow_dedent) {
                 VEC_POP(scanner->indents);
                 lexer->result_symbol = DEDENT;
                 return true;
@@ -499,9 +427,10 @@ bool tree_sitter_gdscript_external_scanner_scan(void *payload, TSLexer *lexer,
         }
     }
 
-    if (valid_symbols[STRING_START] ||
-        valid_symbols[STRING_NAME_START] ||
-        valid_symbols[NODE_PATH_START]) {
+    if (first_comment_indent_length == -1 &&
+            (valid_symbols[STRING_START] ||
+            valid_symbols[STRING_NAME_START] ||
+            valid_symbols[NODE_PATH_START])) {
         Delimiter delimiter = new_delimiter();
 
         bool has_flags = true;
@@ -567,6 +496,10 @@ unsigned tree_sitter_gdscript_external_scanner_serialize(void *payload,
         buffer[size++] = (char)scanner->indents->data[iter];
     }
 
+    if (size < TREE_SITTER_SERIALIZATION_BUFFER_SIZE) {
+        buffer[size++] = scanner->has_inline_comment ? 1 : 0;
+    }
+
     return size;
 }
 
@@ -578,6 +511,7 @@ void tree_sitter_gdscript_external_scanner_deserialize(void *payload,
     VEC_CLEAR(scanner->delimiters);
     VEC_CLEAR(scanner->indents);
     VEC_PUSH(scanner->indents, 0);
+    scanner->has_inline_comment = false;
 
     if (length > 0) {
         size_t size = 0;
@@ -590,9 +524,17 @@ void tree_sitter_gdscript_external_scanner_deserialize(void *payload,
             size += delimiter_count;
         }
 
-        // Deserialize the indents
-        for (; size < length; size++) {
+        // Deserialize the indents. Right now it's all except the last byte
+        // which is the has_inline_comment field.
+        for (; size < length - 1; size++) {
             VEC_PUSH(scanner->indents, (unsigned char)buffer[size]);
+        }
+
+        // Now we got all indents, deserialize the has_inline_comment field,
+        // which is the last byte in the buffer. It's a char so we need to
+        // convert it to a bool.
+        if (size < length) {
+            scanner->has_inline_comment = buffer[size++] != 0;
         }
 
         assert(size == length);

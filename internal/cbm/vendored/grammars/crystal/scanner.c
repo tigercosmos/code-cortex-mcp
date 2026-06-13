@@ -2,6 +2,7 @@
 #include "tree_sitter/array.h"
 #include "tree_sitter/parser.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,7 @@ enum Token {
     BINARY_WRAPPING_PLUS,
     BINARY_WRAPPING_MINUS,
 
+    POINTER_STAR,
     UNARY_STAR,
     BINARY_STAR,
 
@@ -67,9 +69,17 @@ enum Token {
 
     MODULO_OPERATOR,
 
+    START_OF_SYMBOL,
+    UNQUOTED_SYMBOL_CONTENT,
+
+    TYPE_FIELD_COLON,
+
     STRING_LITERAL_START,
     DELIMITED_STRING_CONTENTS,
     STRING_LITERAL_END,
+
+    COMMAND_LITERAL_START,
+    COMMAND_LITERAL_END,
 
     STRING_PERCENT_LITERAL_START,
     COMMAND_PERCENT_LITERAL_START,
@@ -88,9 +98,17 @@ enum Token {
 
     REGEX_MODIFIER,
 
+    MACRO_START,
+    MACRO_DELIMITER_END,
+    MACRO_DELIMITER_ELSE,
+    MACRO_DELIMITER_ELSIF,
+    MACRO_CONTENT,
+    MACRO_CONTENT_NESTING,
+
     // Never returned
     START_OF_PARENLESS_ARGS,
     END_OF_RANGE,
+    START_OF_MACRO_VAR_EXPS,
 
     // Only used when error recovery mode is active
     ERROR_RECOVERY,
@@ -103,7 +121,9 @@ typedef enum Token Token;
  * Helpful macros
  */
 
-#define LOG(lexer, ...) lexer->log(lexer, "[LOG] " __VA_ARGS__)
+// NOTE(margret): This is temporarily disabled as calling lexer->log
+// causes a seg fault with WASM builds. Enable locally when needed.
+#define DEBUG(...) // lexer->log(lexer, "[LOG] " __VA_ARGS__);
 
 /*
  * State types
@@ -137,6 +157,19 @@ struct Heredoc {
 };
 typedef struct Heredoc Heredoc;
 
+struct MacroState {
+    // Set to true if the macro scan is currently in a comment (the rest of the line after #).
+    // Defaults to false.
+    bool in_comment;
+    // Tracks if the regular (not modifier) versions of `if` and `unless` may
+    // be scanned in the macro text. (Also affects `while` and `until`, because
+    // they used to be modifier keywords too.)
+    bool non_modifier_keyword_can_begin;
+
+    // TODO: heredocs?
+};
+typedef struct MacroState MacroState;
+
 #define MAX_LITERAL_COUNT 16
 #define MAX_HEREDOC_COUNT 16
 // The maximum number of bytes that can be stored in the state, across all heredocs
@@ -147,6 +180,8 @@ typedef struct Heredoc Heredoc;
 struct State {
     bool has_leading_whitespace;
     bool previous_line_continued;
+
+    MacroState macro_state;
 
     // It's possible to have nested delimited literals, like
     //   %(#{%(foo)})
@@ -251,6 +286,24 @@ enum LookaheadResult {
 };
 typedef enum LookaheadResult LookaheadResult;
 
+enum ScanResult {
+    // Keep scanning to match a different external token
+    SR_CONTINUE,
+    // Stop scanning and return content
+    SR_STOP,
+    // Stop scanning and don't return content (we expect non-external tokens to match)
+    SR_STOP_NO_CONTENT,
+};
+typedef enum ScanResult ScanResult;
+
+// Reset the macro state to its defaults
+static void reset_macro_state(State *state) {
+    state->macro_state.in_comment = false;
+    state->macro_state.non_modifier_keyword_can_begin = true;
+}
+
+// Skip one character, which will not be included in the token emitted by the scanner.
+// WARNING: this will set the _start_ of the token range. Don't use this after mark_end!
 static void lex_skip(State *state, TSLexer *lexer) {
     state->has_leading_whitespace = true;
     lexer->advance(lexer, true);
@@ -270,6 +323,16 @@ static bool next_char_is_identifier(TSLexer *lexer) {
         || lookahead == '?'
         || lookahead == '!'
         || lookahead >= 0xa0;
+}
+
+static bool is_ident_part(int32_t codepoint) {
+    // identifier token characters are in the range [0-9A-Za-z_\u{00a0}-\u{10ffff}]
+    // (except for the first and last character)
+    return ('0' <= codepoint && codepoint <= '9')
+        || ('A' <= codepoint && codepoint <= 'Z')
+        || ('a' <= codepoint && codepoint <= 'z')
+        || (codepoint == '_')
+        || (0x00a0 <= codepoint && codepoint <= 0x10ffffff);
 }
 
 // Usually scan_whitespace will handle starting heredocs, but it won't be called if a heredoc is
@@ -321,6 +384,7 @@ static bool scan_whitespace(State *state, TSLexer *lexer, const bool *valid_symb
                     lex_advance(lexer);
                     lexer->mark_end(lexer);
                     crossed_newline = true;
+                    state->has_leading_whitespace = true;
                 } else {
                     lex_skip(state, lexer);
                 }
@@ -347,6 +411,18 @@ static bool scan_whitespace(State *state, TSLexer *lexer, const bool *valid_symb
                         }
                     } else if (lexer->lookahead == '#') {
                         // Comments don't interrupt line continuations
+                    } else if (lexer->lookahead == ':' && valid_symbols[TYPE_FIELD_COLON]) {
+                        // Check for a type field separator that comes after a newline, e.g.
+                        //   ( params )
+                        //   : ReturnType
+                        lex_advance(lexer);
+                        if (iswspace(lexer->lookahead)) {
+                            lex_advance(lexer);
+                            lexer->mark_end(lexer);
+                            lexer->result_symbol = TYPE_FIELD_COLON;
+                        } else {
+                            lexer->result_symbol = LINE_BREAK;
+                        }
                     } else {
                         lexer->result_symbol = LINE_BREAK;
                     }
@@ -357,7 +433,7 @@ static bool scan_whitespace(State *state, TSLexer *lexer, const bool *valid_symb
 }
 
 // Returns true if a string content token is found
-static bool scan_string_contents(State *state, TSLexer *lexer, const bool *valid_symbols) {
+static ScanResult scan_string_contents(State *state, TSLexer *lexer, const bool *valid_symbols) {
     bool found_content = false;
     LiteralType active_type;
 
@@ -366,8 +442,12 @@ static bool scan_string_contents(State *state, TSLexer *lexer, const bool *valid
 
     for (;;) {
         if (lexer->eof(lexer)) {
-            LOG(lexer, "reached EOF");
-            return found_content;
+            DEBUG("reached EOF");
+            if (found_content) {
+                return SR_STOP;
+            } else {
+                return SR_STOP_NO_CONTENT;
+            }
         }
 
         active_type = ACTIVE_LITERAL(state)->type;
@@ -377,8 +457,16 @@ static bool scan_string_contents(State *state, TSLexer *lexer, const bool *valid
                 switch (active_type) {
                     case STRING:
                     case COMMAND:
+                        if (found_content) {
+                            return SR_STOP;
+                        } else {
+                            // do the regular check for LINE_CONTINUATION
+                            return SR_CONTINUE;
+                        }
                     case REGEX:
-                        return found_content;
+                        // No special regex escapes
+                        lex_advance(lexer);
+                        break;
                     case STRING_NO_ESCAPE:
                         break;
                     case STRING_ARRAY:
@@ -389,7 +477,11 @@ static bool scan_string_contents(State *state, TSLexer *lexer, const bool *valid
                         lexer->mark_end(lexer);
                         lex_advance(lexer);
                         if (iswspace(lexer->lookahead) || ACTIVE_LITERAL(state)->closing_char == lexer->lookahead) {
-                            return found_content;
+                            if (found_content) {
+                                return SR_STOP;
+                            } else {
+                                return SR_STOP_NO_CONTENT;
+                            }
                         }
 
                         // The backslash must be part of the word contents.
@@ -407,7 +499,11 @@ static bool scan_string_contents(State *state, TSLexer *lexer, const bool *valid
                 lexer->mark_end(lexer);
                 lex_advance(lexer);
                 if (lexer->lookahead == '{') {
-                    return found_content;
+                    if (found_content) {
+                        return SR_STOP;
+                    } else {
+                        return SR_STOP_NO_CONTENT;
+                    }
                 }
 
                 found_content = true;
@@ -424,27 +520,29 @@ static bool scan_string_contents(State *state, TSLexer *lexer, const bool *valid
 
                     if (found_content) {
                         // We've already found string contents, return that.
-                        return true;
+                        return SR_STOP;
                     } else if (valid_symbols[DELIMITED_ARRAY_ELEMENT_END]) {
                         // We've reached the end of an array word.
                         lexer->result_symbol = DELIMITED_ARRAY_ELEMENT_END;
-                        return true;
+                        return SR_STOP;
                     }
                 }
                 break;
             case '"':
             case '|':
+            case '`':
                 // These delimiters can't nest
                 if (ACTIVE_LITERAL(state)->closing_char == lexer->lookahead) {
                     if (found_content) {
                         // We've already found string contents, return that.
-                        return true;
+                        return SR_STOP;
                     } else if (valid_symbols[DELIMITED_ARRAY_ELEMENT_END]) {
                         // We've reached the end of an array word.
                         lexer->result_symbol = DELIMITED_ARRAY_ELEMENT_END;
-                        return true;
+                        return SR_STOP;
                     } else {
-                        return false;
+                        // The check for PERCENT_LITERAL_END comes later.
+                        return SR_CONTINUE;
                     }
                 }
                 break;
@@ -464,13 +562,14 @@ static bool scan_string_contents(State *state, TSLexer *lexer, const bool *valid
                     if (ACTIVE_LITERAL(state)->nesting_level == 0) {
                         if (found_content) {
                             // We've already found string contents, return that.
-                            return true;
+                            return SR_STOP;
                         } else if (valid_symbols[DELIMITED_ARRAY_ELEMENT_END]) {
                             // We've reached the end of an array word.
                             lexer->result_symbol = DELIMITED_ARRAY_ELEMENT_END;
-                            return true;
+                            return SR_STOP;
                         } else {
-                            return false;
+                            // The check for PERCENT_LITERAL_END comes later.
+                            return SR_CONTINUE;
                         }
                     }
 
@@ -498,12 +597,11 @@ static bool scan_heredoc_contents(State *state, TSLexer *lexer, const bool *vali
 
     bool found_content = false;
 
-    Heredoc *active_heredoc;
+    Heredoc *active_heredoc = array_front(&state->heredocs);
     bool heredoc_pending_start;
 
-    if (array_front(&state->heredocs)->started) {
+    if (active_heredoc->started) {
         heredoc_pending_start = false;
-        active_heredoc = array_front(&state->heredocs);
     } else {
         // The first heredoc in the queue isn't started, which means it's a
         // pending nested heredoc that will begin on the next line.
@@ -587,7 +685,7 @@ static bool scan_heredoc_contents(State *state, TSLexer *lexer, const bool *vali
 
         for (;;) {
             if (lexer->eof(lexer)) {
-                LOG(lexer, "reached EOF");
+                DEBUG("reached EOF");
                 return found_content;
             }
 
@@ -637,6 +735,673 @@ static bool scan_heredoc_contents(State *state, TSLexer *lexer, const bool *vali
     }
 }
 
+// Check if a given keyword matches at the current location.
+//
+// Returns true if the keyword matches exactly.
+// Returns false if:
+// - a different identifier is matched (shorter or longer)
+// - the keyword ends in /[:?!]/
+//
+// Will consume the entire identifier even if there's only a partial match.
+static bool match_macro_keyword(TSLexer *lexer, const char keyword[]) {
+    size_t keyword_size = strlen(keyword);
+    bool found_match = true;
+
+    for (size_t i = 0; i < keyword_size; i++) {
+        if (lexer->lookahead != (int32_t)keyword[i]) {
+            found_match = false;
+            break;
+        }
+        lex_advance(lexer);
+    }
+
+    if (lexer->lookahead == ':') {
+        // Looks like a tuple keyword
+        return false;
+    }
+    if (!found_match || next_char_is_identifier(lexer)) {
+        // consume the rest of the identifier, so e.g. `beginbegin` doesn't get split in the middle
+        // and then match on the next loop
+        while (is_ident_part(lexer->lookahead)) {
+            lex_advance(lexer);
+        }
+        if (next_char_is_identifier(lexer)) {
+            lex_advance(lexer);
+        }
+        return false;
+    }
+
+    return true;
+}
+
+// Scan for macro literal content, which is treated as text instead of being parsed normally.
+// This function is modeled after Crystal::Lexer#next_macro_token. To simplify the implementation
+// here, we use grammar rules to model the nesting of different keywords.
+//
+// When scanning directly inside a `macro` definition, the MACRO_CONTENT_NESTING symbol is valid,
+// and nesting keywords are treated as a boundary. When an `end` is reached, the scanner stops
+// scanning. We rely on the grammar rules to decide if `end` terminates the macro, or just reduces
+// the nesting level.
+//
+// When scanning inside other macro expressions like `{%begin%}`/`{%end%}`, the MACRO_CONTENT
+// symbol is valid. We don't care about matching `end` or other keywords.
+//
+// This function may end up scanning some characters multiple times. First, it will scan until it
+// finds a nesting keyword like `begin`. It will return SR_STOP if any macro literal content has
+// been consumed so far, so the overall scan has a result of MACRO_CONTENT_NESTING. Then the
+// external scanner is triggered again, starting exactly at the beginning of the keyword. The
+// keyword is matched again, and this function returns SR_STOP_NO_CONTENT. The overall scan will
+// not return a token on the second scan, so the grammar rule for the `begin`
+// keyword matches instead.
+static ScanResult scan_macro_contents(State *state, TSLexer *lexer, const bool *valid_symbols) {
+    // Set to true if any content has been scanned with advance. This signals
+    // the overall scan will return MACRO_CONTENT or MACRO_CONTENT_NESTING.
+    bool found_content = false;
+    // Set to true if the scan is looking for nesting keywords.
+    bool nesting = false;
+    // Set to true if a nesting keyword may begin at this point in the scan.
+    bool keyword_can_begin = true;
+
+    // NOTE: See also the comments for MacroState.in_comment and
+    // MacroState.non_modifier_keyword_can_begin
+
+    lexer->result_symbol = MACRO_CONTENT;
+
+    if (valid_symbols[MACRO_CONTENT_NESTING]) {
+        assert(!valid_symbols[MACRO_CONTENT] || valid_symbols[ERROR_RECOVERY]);
+        nesting = true;
+        lexer->result_symbol = MACRO_CONTENT_NESTING;
+    }
+
+#define RETURN_NESTING_CONTENT                                            \
+    if (nesting && !state->macro_state.in_comment && keyword_can_begin) { \
+        if (found_content) {                                              \
+            return SR_STOP;                                               \
+        } else {                                                          \
+            return SR_STOP_NO_CONTENT;                                    \
+        }                                                                 \
+    }
+
+#define RETURN_CONTENT             \
+    if (found_content) {           \
+        return SR_STOP;            \
+    } else {                       \
+        return SR_STOP_NO_CONTENT; \
+    }
+
+    for (;;) {
+        if (lexer->eof(lexer)) {
+            DEBUG("reached EOF");
+            RETURN_CONTENT;
+        }
+
+        // keywords that decrease nesting:
+        // end
+
+        // keywords that don't change nesting:
+        // abstract def
+
+        // keywords that increase nesting:
+        // abstract class
+        // abstract struct
+        // annotation
+        // begin
+        // case
+        // class
+        // do
+        // def
+        // enum
+        // fun
+        // lib
+        // macro
+        // module
+        // select
+        // struct
+        // union
+
+        // keywords that increase nesting only at the beginning of line
+        // if
+        // unless
+        // until
+        // while
+
+        switch (lexer->lookahead) {
+            case '{':
+                lexer->mark_end(lexer);
+
+                // In a state like
+                //   %macro_var{foo}
+                //             ^
+                // let the grammar handle the rest of the macro var expressions
+                if (valid_symbols[START_OF_MACRO_VAR_EXPS] && !found_content) {
+                    return SR_STOP_NO_CONTENT;
+                }
+
+                lex_advance(lexer);
+
+                if (lexer->lookahead == '{' || lexer->lookahead == '%') {
+                    // This is the start of a macro expression. After the macro expression ends,
+                    // if/unless is a modifier.
+                    state->macro_state.non_modifier_keyword_can_begin = false;
+                    if (found_content) {
+                        return SR_STOP;
+                    }
+
+                    lex_advance(lexer);
+                    lexer->mark_end(lexer);
+
+                    // Check if next token is a special macro keyword. If we detect end/else/elsif,
+                    // return the corresponding MACRO_DELIMITER_* token for the initial `{%`.
+
+                    while (iswspace(lexer->lookahead)) {
+                        lex_advance(lexer);
+                    }
+
+                    if (lexer->lookahead == 'e') {
+                        lex_advance(lexer);
+
+                        if (lexer->lookahead == 'n') {
+                            if (match_macro_keyword(lexer, "nd")) {
+                                lexer->result_symbol = MACRO_DELIMITER_END;
+                                return SR_STOP;
+                            }
+                        } else if (lexer->lookahead == 'l') {
+                            lex_advance(lexer);
+                            if (lexer->lookahead == 's') {
+                                lex_advance(lexer);
+                                if (lexer->lookahead == 'e') {
+                                    if (match_macro_keyword(lexer, "e")) {
+                                        lexer->result_symbol = MACRO_DELIMITER_ELSE;
+                                        return SR_STOP;
+                                    }
+                                } else if (lexer->lookahead == 'i') {
+                                    if (match_macro_keyword(lexer, "if")) {
+                                        lexer->result_symbol = MACRO_DELIMITER_ELSIF;
+                                        return SR_STOP;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return SR_STOP_NO_CONTENT;
+                }
+
+                // This is the start of a tuple, brace block, etc.
+                found_content = true;
+                keyword_can_begin = true;
+                state->macro_state.non_modifier_keyword_can_begin = true;
+                lexer->mark_end(lexer);
+                continue;
+
+            case '}':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                // This might be the end of a block, hash/tuple, or macro expression. In any case,
+                // if/unless is a modifier after this point.
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (lexer->lookahead == '}') {
+                    RETURN_CONTENT;
+                }
+
+                // This is the end for a tuple, brace block, etc. Non-modifier keywords are valid.
+                found_content = true;
+                keyword_can_begin = true;
+                lexer->mark_end(lexer);
+                continue;
+
+            case '%':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                // This might be the end of a macro expression, or a macro variable, or a modulo
+                // operator. In any case, if/unless is a modifier after this point.
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (lexer->lookahead == '}') {
+                    RETURN_CONTENT;
+                } else if (lexer->lookahead == 'i'
+                    || lexer->lookahead == 'q'
+                    || lexer->lookahead == 'Q'
+                    || lexer->lookahead == 'r'
+                    || lexer->lookahead == 'w'
+                    || lexer->lookahead == 'x') {
+                    lex_advance(lexer);
+
+                    if (lexer->lookahead == '('
+                        || lexer->lookahead == '<'
+                        || lexer->lookahead == '['
+                        || lexer->lookahead == '{'
+                        || lexer->lookahead == '|') {
+                        // TODO eventually we'll return here to mark this as a delimiter
+                        // For now, just continue
+                        lex_advance(lexer);
+                    }
+                } else if (is_ident_part(lexer->lookahead)) {
+                    // This is a macro var
+                    RETURN_CONTENT;
+                }
+
+                // Keywords are not valid here: `%begin` is a macro variable
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case '"':
+                // Whether we are delegating to string rules or not, if/unless is a
+                // modifier after this point.
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (valid_symbols[STRING_LITERAL_START]) {
+                    // Delegate to string rules
+                    if (found_content) {
+                        return SR_STOP;
+                    } else {
+                        return SR_CONTINUE;
+                    }
+                }
+
+                lex_advance(lexer);
+                lexer->mark_end(lexer);
+
+                // Probably inside a string in a non-nesting context, so keywords aren't valid
+                found_content = true;
+                keyword_can_begin = false;
+                continue;
+
+            case '#':
+                lex_advance(lexer);
+                lexer->mark_end(lexer);
+
+                // Mark the rest of the line as a comment, where nesting keywords don't apply
+                state->macro_state.in_comment = true;
+                found_content = true;
+                keyword_can_begin = false;
+                state->macro_state.non_modifier_keyword_can_begin = false;
+                continue;
+
+            case 'a':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (lexer->lookahead == 'b') {
+                    if (match_macro_keyword(lexer, "bstract")) {
+                        if (iswspace(lexer->lookahead)) {
+                            lex_advance(lexer);
+
+                            switch (lexer->lookahead) {
+                                case 'c':
+                                    if (match_macro_keyword(lexer, "class")) { RETURN_NESTING_CONTENT; }
+                                    break;
+                                case 's':
+                                    if (match_macro_keyword(lexer, "struct")) { RETURN_NESTING_CONTENT; }
+                                    break;
+                                case 'd':
+                                    // fully consume "abstract def", which doesn't increase the nesting level
+                                    match_macro_keyword(lexer, "def");
+                            }
+                        }
+                    }
+                } else if (lexer->lookahead == 'n') {
+                    if (match_macro_keyword(lexer, "nnotation")) { RETURN_NESTING_CONTENT; }
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'b':
+                lexer->mark_end(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (match_macro_keyword(lexer, "begin")) { RETURN_NESTING_CONTENT; }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'c':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (lexer->lookahead == 'l') {
+                    if (match_macro_keyword(lexer, "lass")) { RETURN_NESTING_CONTENT; }
+                } else if (lexer->lookahead == 'a') {
+                    if (match_macro_keyword(lexer, "ase")) { RETURN_NESTING_CONTENT; }
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'd':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (lexer->lookahead == 'e') {
+                    if (match_macro_keyword(lexer, "ef")) { RETURN_NESTING_CONTENT; }
+                } else if (lexer->lookahead == 'o') {
+                    if (match_macro_keyword(lexer, "o")) { RETURN_NESTING_CONTENT; }
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'e':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (lexer->lookahead == 'n') {
+                    lex_advance(lexer);
+
+                    if (lexer->lookahead == 'd') {
+                        if (match_macro_keyword(lexer, "d")) { RETURN_NESTING_CONTENT; }
+                    } else if (lexer->lookahead == 'u') {
+                        if (match_macro_keyword(lexer, "um")) { RETURN_NESTING_CONTENT; }
+                    }
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'f':
+                lexer->mark_end(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (match_macro_keyword(lexer, "fun")) { RETURN_NESTING_CONTENT; }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'i':
+                lexer->mark_end(lexer);
+
+                if (state->macro_state.non_modifier_keyword_can_begin) {
+                    if (match_macro_keyword(lexer, "if")) {
+                        if (nesting && !state->macro_state.in_comment && keyword_can_begin) {
+                            if (found_content) {
+                                // Don't set non_modifier_keyword_can_begin yet, the scan is going
+                                // to re-enter at this point.
+                                return SR_STOP;
+                            } else {
+                                state->macro_state.non_modifier_keyword_can_begin = false;
+                                return SR_STOP_NO_CONTENT;
+                            }
+                        }
+                    } else {
+                        // Whatever identifier this is, if/unless is a modifier after this point
+                        state->macro_state.non_modifier_keyword_can_begin = false;
+                    }
+                } else {
+                    lex_advance(lexer);
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'l':
+                lexer->mark_end(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (match_macro_keyword(lexer, "lib")) { RETURN_NESTING_CONTENT; }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'm':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (lexer->lookahead == 'a') {
+                    if (match_macro_keyword(lexer, "acro")) { RETURN_NESTING_CONTENT; }
+                } else if (lexer->lookahead == 'o') {
+                    if (match_macro_keyword(lexer, "odule")) { RETURN_NESTING_CONTENT; }
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 's':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                // Whatever identifier this is, if/unless is a modifier after this point
+                state->macro_state.non_modifier_keyword_can_begin = false;
+
+                if (lexer->lookahead == 'e') {
+                    if (match_macro_keyword(lexer, "elect")) { RETURN_NESTING_CONTENT; }
+                } else if (lexer->lookahead == 't') {
+                    if (match_macro_keyword(lexer, "truct")) { RETURN_NESTING_CONTENT; }
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'u':
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                if (lexer->lookahead == 'n') {
+                    lex_advance(lexer);
+
+                    if (lexer->lookahead == 'i') {
+                        // Whatever identifier this is, if/unless is a modifier after this point
+                        state->macro_state.non_modifier_keyword_can_begin = false;
+                        if (match_macro_keyword(lexer, "ion")) { RETURN_NESTING_CONTENT; }
+                    } else if (lexer->lookahead == 'l') {
+                        if (state->macro_state.non_modifier_keyword_can_begin && match_macro_keyword(lexer, "less")) {
+                            if (nesting && !state->macro_state.in_comment && keyword_can_begin) {
+                                if (found_content) {
+                                    // Don't set non_modifier_keyword_can_begin yet, the scan is going
+                                    // to re-enter at this point.
+                                    return SR_STOP;
+                                } else {
+                                    state->macro_state.non_modifier_keyword_can_begin = false;
+                                    return SR_STOP_NO_CONTENT;
+                                }
+                            }
+                        }
+                    } else if (lexer->lookahead == 't') {
+                        if (state->macro_state.non_modifier_keyword_can_begin && match_macro_keyword(lexer, "til")) {
+                            if (nesting && !state->macro_state.in_comment && keyword_can_begin) {
+                                if (found_content) {
+                                    // Don't set non_modifier_keyword_can_begin yet, the scan is going
+                                    // to re-enter at this point.
+                                    return SR_STOP;
+                                } else {
+                                    state->macro_state.non_modifier_keyword_can_begin = false;
+                                    return SR_STOP_NO_CONTENT;
+                                }
+                            }
+                        }
+                    } else {
+                        // Whatever identifier this is, if/unless is a modifier after this point
+                        state->macro_state.non_modifier_keyword_can_begin = false;
+                    }
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case 'w':
+                lexer->mark_end(lexer);
+
+                if (state->macro_state.non_modifier_keyword_can_begin) {
+                    if (match_macro_keyword(lexer, "while")) {
+                        if (nesting && !state->macro_state.in_comment && keyword_can_begin) {
+                            if (found_content) {
+                                // Don't set non_modifier_keyword_can_begin yet, the scan is going
+                                // to re-enter at this point.
+                                return SR_STOP;
+                            } else {
+                                state->macro_state.non_modifier_keyword_can_begin = false;
+                                return SR_STOP_NO_CONTENT;
+                            }
+                        }
+                    } else {
+                        // Whatever identifier this is, if/unless is a modifier after this point
+                        state->macro_state.non_modifier_keyword_can_begin = false;
+                    }
+                } else {
+                    lex_advance(lexer);
+                }
+
+                // Keywords are not valid immediately after an identifier
+                found_content = true;
+                keyword_can_begin = false;
+                lexer->mark_end(lexer);
+                continue;
+
+            case '\n':
+                lex_advance(lexer);
+                lexer->mark_end(lexer);
+                found_content = true;
+                // We've reached the end of the line, no more comment
+                state->macro_state.in_comment = false;
+                // Keywords are always valid on a new line
+                keyword_can_begin = true;
+                state->macro_state.non_modifier_keyword_can_begin = true;
+                continue;
+
+            case ' ':
+            case '\t':
+            case '\f':
+            case '\v':
+            case '\r':
+                // These whitespace characters may be followed by a keyword
+                lex_advance(lexer);
+                lexer->mark_end(lexer);
+                found_content = true;
+                keyword_can_begin = true;
+                continue;
+
+            case '(':
+            case '[':
+                // These nesting characters may be followed by a keyword
+                lex_advance(lexer);
+                lexer->mark_end(lexer);
+                found_content = true;
+                keyword_can_begin = true;
+                continue;
+
+            case '=':
+                lex_advance(lexer);
+                lexer->mark_end(lexer);
+                found_content = true;
+                keyword_can_begin = false;
+
+                if (iswspace(lexer->lookahead)) {
+                    // After `= `, if/unless is treated as a regular keyword, not modifier
+                    state->macro_state.non_modifier_keyword_can_begin = true;
+                }
+                continue;
+        }
+
+        lex_advance(lexer);
+        lexer->mark_end(lexer);
+        found_content = true;
+        // We've scanned something that's not whitespace or an opening character. Most keywords
+        // are not allowed until we reach whitespace, and if/unless is treated as a modifier
+        // for the rest of the line.
+        keyword_can_begin = false;
+        state->macro_state.non_modifier_keyword_can_begin = false;
+    }
+}
+
+static ScanResult scan_symbol_content(TSLexer *lexer) {
+    int32_t lookahead = lexer->lookahead;
+
+    if (('A' <= lookahead && lookahead <= 'Z')
+        || ('a' <= lookahead && lookahead <= 'z')
+        || (lookahead == '_')
+        || (0x00a0 <= lookahead && lookahead <= 0x10ffffff)) {
+
+        lexer->result_symbol = UNQUOTED_SYMBOL_CONTENT;
+        lex_advance(lexer);
+
+        while (is_ident_part(lexer->lookahead)) {
+            lex_advance(lexer);
+        }
+
+        switch (lexer->lookahead) {
+            case '?':
+                // Symbols like `:foo?` always include the trailing character
+                lex_advance(lexer);
+                return SR_STOP;
+
+            case '!':
+            case '=':
+                // Symbols like `:foo!` or `:bar=` include the trailing character,
+                // only if the next char isn't also `=`
+                lexer->mark_end(lexer);
+                lex_advance(lexer);
+
+                if (lexer->lookahead != '=') {
+                    lexer->mark_end(lexer);
+                }
+                return SR_STOP;
+
+            default:
+                return SR_STOP;
+        }
+    }
+
+    return SR_CONTINUE;
+}
+
 static bool scan_regex_modifier(State *state, TSLexer *lexer) {
     if (!state->has_leading_whitespace) {
         bool found_modifier = false;
@@ -663,29 +1428,21 @@ static bool scan_regex_modifier(State *state, TSLexer *lexer) {
     return false;
 }
 
-static void skip_space(State *state, TSLexer *lexer) {
+// Advance while the next character is a space or tab
+static void advance_space(TSLexer *lexer) {
     while (lexer->lookahead == ' ' || lexer->lookahead == '\t') {
-        lex_skip(state, lexer);
+        lex_advance(lexer);
     }
 }
 
-static void skip_space_and_newline(State *state, TSLexer *lexer) {
+// Advance while the next character is a space, tab, or newline
+static void advance_space_and_newline(TSLexer *lexer) {
     while (lexer->lookahead == ' '
         || lexer->lookahead == '\t'
         || lexer->lookahead == '\r'
         || lexer->lookahead == '\n') {
-        lex_skip(state, lexer);
+        lex_advance(lexer);
     }
-}
-
-static bool is_ident_part(int32_t codepoint) {
-    // identifier token characters are in the range [0-9A-Za-z_\u{00a0}-\u{10ffff}]
-    // (except for the first and last character)
-    return ('0' <= codepoint && codepoint <= '9')
-        || ('A' <= codepoint && codepoint <= 'Z')
-        || ('a' <= codepoint && codepoint <= 'z')
-        || (codepoint == '_')
-        || (0x00a0 <= codepoint && codepoint <= 0x10ffffff);
 }
 
 static void consume_const(TSLexer *lexer) {
@@ -796,7 +1553,7 @@ static LookaheadResult lookahead_delimiter_or_type_suffix(State *state, TSLexer 
     switch (lexer->lookahead) {
         case '.':
             lex_advance(lexer);
-            skip_space_and_newline(state, lexer);
+            advance_space_and_newline(lexer);
             if (lexer->lookahead != 'c') { return false; }
             lex_advance(lexer);
             if (lexer->lookahead != 'l') { return false; }
@@ -911,16 +1668,16 @@ static LookaheadResult lookahead_start_of_named_tuple_entry(TSLexer *lexer, bool
 // could or could not be a type.
 static LookaheadResult lookahead_start_of_type(State *state, TSLexer *lexer) {
 
-    skip_space(state, lexer);
+    advance_space(lexer);
 
     if (lexer->eof(lexer)) {
-        LOG(lexer, "reached EOF");
+        DEBUG("reached EOF");
         return LOOKAHEAD_UNKNOWN;
     }
 
     while (lexer->lookahead == '{' || lexer->lookahead == '(') {
         lex_advance(lexer);
-        skip_space_and_newline(state, lexer);
+        advance_space_and_newline(lexer);
     }
 
     // Check for identifier
@@ -975,7 +1732,7 @@ static LookaheadResult lookahead_start_of_type(State *state, TSLexer *lexer) {
                         return lookahead_start_of_named_tuple_entry(lexer, true);
                     }
 
-                    skip_space(state, lexer);
+                    advance_space(lexer);
                     return lookahead_delimiter_or_type_suffix(state, lexer);
                 }
             }
@@ -995,14 +1752,14 @@ static LookaheadResult lookahead_start_of_type(State *state, TSLexer *lexer) {
 
             if (lexer->lookahead == ':') {
                 lex_advance(lexer);
-                skip_space_and_newline(state, lexer);
+                advance_space_and_newline(lexer);
                 // continue consuming const segments
             } else {
                 // named tuple start
                 return LOOKAHEAD_NAMED_TUPLE;
             }
         } else {
-            skip_space(state, lexer);
+            advance_space(lexer);
             return lookahead_delimiter_or_type_suffix(state, lexer);
         }
     }
@@ -1024,7 +1781,7 @@ static LookaheadResult lookahead_start_of_type(State *state, TSLexer *lexer) {
             break;
         case '*':
             lex_advance(lexer);
-            skip_space_and_newline(state, lexer);
+            advance_space_and_newline(lexer);
             if (lexer->lookahead == '*') {
                 // double splat is not a valid type operator
                 return LOOKAHEAD_UNKNOWN;
@@ -1044,7 +1801,7 @@ static LookaheadResult lookahead_start_of_type(State *state, TSLexer *lexer) {
             return lookahead_start_of_named_tuple_entry(lexer, false);
     }
 
-    LOG(lexer, "Not the start of a type");
+    DEBUG("Not the start of a type");
     return LOOKAHEAD_UNKNOWN;
 }
 
@@ -1062,12 +1819,47 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
         state->previous_line_continued = false;
     }
 
-    if (valid_symbols[DELIMITED_STRING_CONTENTS] && HAS_ACTIVE_LITERAL(state) && scan_string_contents(state, lexer, valid_symbols)) {
-        return true;
+    if (valid_symbols[DELIMITED_STRING_CONTENTS] && HAS_ACTIVE_LITERAL(state)) {
+        switch (scan_string_contents(state, lexer, valid_symbols)) {
+            case SR_STOP:
+                return true;
+            case SR_STOP_NO_CONTENT:
+                return false;
+            case SR_CONTINUE:
+                break;
+        }
     }
 
     if (valid_symbols[HEREDOC_CONTENT] && state->heredocs.size > 0 && scan_heredoc_contents(state, lexer, valid_symbols)) {
         return true;
+    }
+
+    if (valid_symbols[MACRO_START] && !valid_symbols[ERROR_RECOVERY]) {
+        reset_macro_state(state);
+        lexer->result_symbol = MACRO_START;
+        return true;
+    }
+
+    if ((valid_symbols[MACRO_CONTENT] || valid_symbols[MACRO_CONTENT_NESTING]) && !valid_symbols[ERROR_RECOVERY]) {
+        switch (scan_macro_contents(state, lexer, valid_symbols)) {
+            case SR_STOP:
+                return true;
+            case SR_STOP_NO_CONTENT:
+                return false;
+            case SR_CONTINUE:
+                break;
+        }
+    }
+
+    if (valid_symbols[UNQUOTED_SYMBOL_CONTENT] && !valid_symbols[ERROR_RECOVERY]) {
+        switch (scan_symbol_content(lexer)) {
+            case SR_STOP:
+                return true;
+            case SR_STOP_NO_CONTENT:
+                return false;
+            case SR_CONTINUE:
+                break;
+        }
     }
 
     lexer->result_symbol = NONE;
@@ -1098,6 +1890,15 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
         }
     }
 
+    if (valid_symbols[COMMAND_LITERAL_END] && HAS_ACTIVE_LITERAL(state)) {
+        if (lexer->lookahead == ACTIVE_LITERAL(state)->closing_char) {
+            lex_advance(lexer);
+            (void)POP_LITERAL(state);
+            lexer->result_symbol = COMMAND_LITERAL_END;
+            return true;
+        }
+    }
+
     if (valid_symbols[DELIMITED_ARRAY_ELEMENT_START] && HAS_ACTIVE_LITERAL(state)) {
         lexer->result_symbol = DELIMITED_ARRAY_ELEMENT_START;
         return true;
@@ -1109,14 +1910,19 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
 
     switch (lexer->lookahead) {
         case '{':
+            lex_advance(lexer);
+
+            // Start of a macro expression
+            if (lexer->lookahead == '{' || lexer->lookahead == '%') {
+                return false;
+            }
 
             // We expect these symbols to always be valid or not valid together
-            assert(valid_symbols[START_OF_HASH_OR_TUPLE] == valid_symbols[START_OF_NAMED_TUPLE]);
             assert(valid_symbols[START_OF_TUPLE_TYPE] == valid_symbols[START_OF_NAMED_TUPLE_TYPE]);
 
 #define BRACE_BLOCK (valid_symbols[START_OF_BRACE_BLOCK])
-#define BRACE_EXPR (valid_symbols[START_OF_HASH_OR_TUPLE] || valid_symbols[START_OF_NAMED_TUPLE])
-#define BRACE_TYPE (valid_symbols[START_OF_TUPLE_TYPE] || valid_symbols[START_OF_NAMED_TUPLE_TYPE])
+#define BRACE_EXPR  (valid_symbols[START_OF_HASH_OR_TUPLE] || valid_symbols[START_OF_NAMED_TUPLE])
+#define BRACE_TYPE  (valid_symbols[START_OF_TUPLE_TYPE] || valid_symbols[START_OF_NAMED_TUPLE_TYPE])
 
             if (BRACE_BLOCK || BRACE_EXPR || BRACE_TYPE) {
                 if (BRACE_BLOCK && BRACE_EXPR && BRACE_TYPE) {
@@ -1141,14 +1947,47 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                     //
                     // This means, if we see a '{' and we're in a context where a block
                     // could be valid, it must be the start of a block.
-                    assert(valid_symbols[START_OF_PARENLESS_ARGS]);
 
-                    lex_advance(lexer);
-                    lexer->result_symbol = START_OF_BRACE_BLOCK;
-                    return true;
+                    if (valid_symbols[START_OF_PARENLESS_ARGS]) {
+                        lexer->result_symbol = START_OF_BRACE_BLOCK;
+                        return true;
+                    }
+
+                    // Another edge case here is after a range operator:
+                    //   foo 1, 2, 3 .. { 4 }
+                    // Crystal always considers this as a hash or tuple, not a block
+                    if (valid_symbols[END_OF_RANGE]) {
+                        // We don't want to consume while looking ahead
+                        lexer->mark_end(lexer);
+                        advance_space_and_newline(lexer);
+
+                        // After a range operator, these symbols should only be valid together
+                        assert(valid_symbols[START_OF_NAMED_TUPLE] && valid_symbols[START_OF_HASH_OR_TUPLE]);
+
+                        switch (lookahead_start_of_named_tuple_entry(lexer, false)) {
+                            case LOOKAHEAD_NAMED_TUPLE:
+                                lexer->result_symbol = START_OF_NAMED_TUPLE;
+                                return true;
+
+                            default:
+                                lexer->result_symbol = START_OF_HASH_OR_TUPLE;
+                                return true;
+                        }
+                    }
+
+                    // This is the start of an array-like or hash-like constructor:
+                    //   MyArray { 1, 2, 3 }
+                    // Named tuples are not accepted here.
+                    if (valid_symbols[START_OF_HASH_OR_TUPLE] && !valid_symbols[START_OF_NAMED_TUPLE]) {
+                        lexer->result_symbol = START_OF_HASH_OR_TUPLE;
+                        return true;
+                    }
+
+                    // Is there anywhere else '{' could represent either a block or a hash/tuple?
+                    assert(valid_symbols[END_OF_RANGE] || valid_symbols[START_OF_PARENLESS_ARGS]);
+                    return false;
+
                 } else if (BRACE_BLOCK && BRACE_TYPE) {
-
-                    lex_advance(lexer);
                     // We don't want to consume while looking ahead
                     lexer->mark_end(lexer);
 
@@ -1179,8 +2018,6 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                     }
 
                 } else if (BRACE_EXPR && BRACE_TYPE) {
-
-                    lex_advance(lexer);
                     // We don't want to consume while looking ahead
                     lexer->mark_end(lexer);
 
@@ -1189,6 +2026,9 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                     //   def foo : ->{Char,Char}; ->{ {'a','b'} } end
                     // Or as a hash:
                     //   def foo : ->{'a'=>'b'}; ->{ nil } end
+
+                    // When distinguishing between type and expression, these symbols should only be valid together
+                    assert(valid_symbols[START_OF_NAMED_TUPLE] && valid_symbols[START_OF_HASH_OR_TUPLE]);
 
                     switch (lookahead_start_of_type(state, lexer)) {
                         case LOOKAHEAD_TYPE:
@@ -1211,28 +2051,35 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                     }
 
                 } else if (BRACE_EXPR) {
-                    lex_advance(lexer);
                     // We don't want to consume while looking ahead
                     lexer->mark_end(lexer);
-                    skip_space_and_newline(state, lexer);
+                    advance_space_and_newline(lexer);
+
+                    if (valid_symbols[START_OF_HASH_OR_TUPLE] && !valid_symbols[START_OF_NAMED_TUPLE]) {
+                        // This is possible with "array-like" or "hash-like" syntax:
+                        // Const { a => 1 }
+                        lexer->result_symbol = START_OF_HASH_OR_TUPLE;
+                        return true;
+                    } else if (valid_symbols[START_OF_NAMED_TUPLE] && !valid_symbols[START_OF_HASH_OR_TUPLE]) {
+                        // NOTE(keidax): I'm not sure if this can ever occur?
+                        lexer->result_symbol = START_OF_NAMED_TUPLE;
+                        return true;
+                    }
 
                     switch (lookahead_start_of_named_tuple_entry(lexer, false)) {
                         case LOOKAHEAD_NAMED_TUPLE:
-                            assert(valid_symbols[START_OF_NAMED_TUPLE]);
                             lexer->result_symbol = START_OF_NAMED_TUPLE;
                             return true;
 
                         default:
-                            assert(valid_symbols[START_OF_HASH_OR_TUPLE]);
                             lexer->result_symbol = START_OF_HASH_OR_TUPLE;
                             return true;
                     }
 
                 } else if (BRACE_TYPE) {
-                    lex_advance(lexer);
                     // We don't want to consume while looking ahead
                     lexer->mark_end(lexer);
-                    skip_space_and_newline(state, lexer);
+                    advance_space_and_newline(lexer);
 
                     switch (lookahead_start_of_named_tuple_entry(lexer, false)) {
                         case LOOKAHEAD_NAMED_TUPLE:
@@ -1247,7 +2094,6 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                     }
 
                 } else if (BRACE_BLOCK) {
-                    lex_advance(lexer);
                     lexer->result_symbol = START_OF_BRACE_BLOCK;
                     return true;
                 } else {
@@ -1304,7 +2150,7 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                             max_word_size = MAX_HEREDOC_WORD_SIZE;
                         }
 
-                        uint8_t word[max_word_size + 4];
+                        uint8_t word[HEREDOC_BUFFER_SIZE + 4];
                         size_t word_length = 0;
 
                         // First character must be valid in an identifier, even for a quoted heredoc
@@ -1378,7 +2224,7 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                             push_heredoc(state, heredoc);
 
                             lexer->result_symbol = HEREDOC_START;
-                            LOG(lexer, "heredoc size = %d", word_length);
+                            DEBUG("heredoc size = %d", word_length);
                             return true;
                         }
                     }
@@ -1437,8 +2283,13 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
             break;
 
         case '*':
-            if (valid_symbols[UNARY_STAR] || valid_symbols[BINARY_STAR] || valid_symbols[UNARY_DOUBLE_STAR] || valid_symbols[BINARY_DOUBLE_STAR]) {
+            if (valid_symbols[POINTER_STAR] || valid_symbols[UNARY_STAR] || valid_symbols[BINARY_STAR] || valid_symbols[UNARY_DOUBLE_STAR] || valid_symbols[BINARY_DOUBLE_STAR]) {
                 lex_advance(lexer);
+
+                if (valid_symbols[POINTER_STAR] && !valid_symbols[ERROR_RECOVERY]) {
+                    lexer->result_symbol = POINTER_STAR;
+                    return true;
+                }
 
                 if (lexer->lookahead == '=') {
                     return false;
@@ -1602,6 +2453,28 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                 lex_advance(lexer);
 
                 if (lexer->lookahead == '=') {
+                    if (valid_symbols[REGEX_START] || valid_symbols[BINARY_SLASH]) {
+                        if (valid_symbols[REGEX_START] && !valid_symbols[BINARY_SLASH]) {
+                            // This is a case like `foo = /=` or `foo(/=`.
+                            // We can unambiguously prefer a regex here.
+                            lexer->result_symbol = REGEX_START;
+                            return true;
+                        } else if (valid_symbols[BINARY_SLASH] && !valid_symbols[REGEX_START]) {
+                            // This might be a case like `@foo /=`. We assume that `@a /= b` is valid
+                            // everywhere `@a / b` is valid, but `/=` is not an external symbol so return false.
+                            return false;
+                        } else {
+                            if (valid_symbols[START_OF_PARENLESS_ARGS]) {
+                                // This is a case like `a.b /=`. The Crystal parser uses
+                                // `slash_is_not_regex!` in this scenario, so return false.
+                                return false;
+                            } else {
+                                // This could be a case like `a .. /=`. The Crystal parser doesn't
+                                // recognize the `/=` token here, so just return false.
+                                return false;
+                            }
+                        }
+                    }
                     return false;
                 }
 
@@ -1626,50 +2499,77 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                     // Both are valid
                     assert(valid_symbols[REGEX_START] && valid_symbols[BINARY_SLASH]);
 
-                    // This sort of ambiguity should only happen after an identifier without parentheses
-                    assert(valid_symbols[START_OF_PARENLESS_ARGS]);
+                    // If we've reached this point, we need to distinguish between two cases:
+                    //   foo /
+                    //       ^
+                    // and
+                    //   .. /
+                    //      ^
+                    // START_OF_PARENLESS_ARGS signals the first case, and END_OF_RANGE signals the
+                    // second. If error recovery is active, we won't know for sure which we're in,
+                    // so just prefer the first branch.
 
-                    if (state->has_leading_whitespace
-                        && !(lexer->lookahead == ' '
-                            || lexer->lookahead == '\t'
-                            || lexer->lookahead == '\n'
-                            || lexer->lookahead == '\r')) {
-                        // If we're in the state
-                        //   foo   /a
-                        //         ^
-                        // then we assume this is the start of a regex.
+                    if (valid_symbols[START_OF_PARENLESS_ARGS]) {
+                        if (state->has_leading_whitespace
+                            && !(lexer->lookahead == ' '
+                                || lexer->lookahead == '\t'
+                                || lexer->lookahead == '\n'
+                                || lexer->lookahead == '\r')) {
+                            // If we're in the state
+                            //   foo   /a
+                            //         ^
+                            // then we assume this is the start of a regex.
+                            lexer->result_symbol = REGEX_START;
+                            return true;
+                        } else {
+                            // We must be in one of these states:
+                            //   foo/a
+                            //      ^
+                            // or
+                            //   foo/ a
+                            //      ^
+                            // or
+                            //   foo / a
+                            //       ^
+                            // In each of these cases, we give the slash operator
+                            // higher precedence over a regex.
+                            lexer->result_symbol = BINARY_SLASH;
+                            return true;
+                        }
+                    } else if (valid_symbols[END_OF_RANGE]) {
+                        // We must be in this state:
+                        // <range_start> .. /
+                        //                  ^
+                        // Assume this is the start of a regex.
                         lexer->result_symbol = REGEX_START;
                         return true;
                     } else {
-                        // We must be in one of these states:
-                        //   foo/a
-                        //      ^
-                        // or
-                        //   foo/ a
-                        //      ^
-                        // or
-                        //   foo / a
-                        //       ^
-                        // In each of these cases, we give the slash operator
-                        // higher precedence over a regex.
-                        lexer->result_symbol = BINARY_SLASH;
-                        return true;
+                        // This sort of ambiguity should only happen after an identifier without
+                        // parentheses, or after a range operator.
+                        assert(valid_symbols[START_OF_PARENLESS_ARGS] || valid_symbols[END_OF_RANGE]);
                     }
                 }
             }
             break;
 
         case '%':
+            lex_advance(lexer);
+
+            // End of a macro expression
+            if (lexer->lookahead == '}') {
+                return false;
+            }
+
+            // `%=` is not an external token
+            if (lexer->lookahead == '=') {
+                return false;
+            }
+
             if (valid_symbols[STRING_PERCENT_LITERAL_START]
                 || valid_symbols[COMMAND_PERCENT_LITERAL_START]
                 || valid_symbols[STRING_ARRAY_PERCENT_LITERAL_START]
                 || valid_symbols[SYMBOL_ARRAY_PERCENT_LITERAL_START]
                 || valid_symbols[REGEX_PERCENT_LITERAL_START]) {
-                lex_advance(lexer);
-
-                if (lexer->lookahead == '=') {
-                    return false;
-                }
 
                 LiteralType type = STRING;
                 Token return_symbol = STRING_PERCENT_LITERAL_START;
@@ -1762,12 +2662,6 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                 }
 
             } else if (valid_symbols[MODULO_OPERATOR]) {
-                lex_advance(lexer);
-
-                if (lexer->lookahead == '=') {
-                    return false;
-                }
-
                 lexer->result_symbol = MODULO_OPERATOR;
                 return true;
             }
@@ -1793,12 +2687,47 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
             }
             break;
 
+        case '`':
+            if (valid_symbols[COMMAND_LITERAL_START]) {
+                lex_advance(lexer);
+
+                PUSH_LITERAL(state, ((PercentLiteral){
+                                        .opening_char = '`',
+                                        .closing_char = '`',
+                                        .type = COMMAND,
+                                        .nesting_level = 0,
+                                    }));
+
+                lexer->result_symbol = COMMAND_LITERAL_START;
+                return true;
+            } else if (valid_symbols[COMMAND_LITERAL_END]) {
+                lex_advance(lexer);
+                lexer->result_symbol = COMMAND_LITERAL_END;
+                return true;
+            }
+            break;
+
         case '\\':
             if (valid_symbols[LINE_CONTINUATION]) {
-                // Inside a string, a percent literal, or a heredoc, treat backslash + newline
-                // like other escaped string characters.
-                if (HAS_ACTIVE_LITERAL(state) || has_active_heredoc(state)) {
+                // Don't allow line continuation in a quoted heredoc
+                if (has_active_heredoc(state) && !array_get(&state->heredocs, 0)->allow_escapes) {
                     return false;
+                }
+
+                // Line continuations may be allowed in some literals
+                if (HAS_ACTIVE_LITERAL(state)) {
+                    switch (ACTIVE_LITERAL(state)->type) {
+                        case STRING_NO_ESCAPE:
+                        case REGEX:
+                        case STRING_ARRAY:
+                        case SYMBOL_ARRAY:
+                            // Line continuations aren't allowed here
+                            return false;
+                        case STRING:
+                        case COMMAND:
+                            // Continue checking for line continuation
+                            break;
+                    }
                 }
 
                 lex_advance(lexer);
@@ -1816,6 +2745,53 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
             }
             break;
 
+        case ':':
+            if (valid_symbols[START_OF_SYMBOL] || valid_symbols[TYPE_FIELD_COLON]) {
+                lex_advance(lexer);
+
+                int32_t lookahead = lexer->lookahead;
+
+                if (state->has_leading_whitespace && iswspace(lookahead) && valid_symbols[TYPE_FIELD_COLON]) {
+                    lex_advance(lexer);
+                    lexer->result_symbol = TYPE_FIELD_COLON;
+                    return true;
+                }
+
+                if (!valid_symbols[START_OF_SYMBOL]) {
+                    return false;
+                }
+
+                switch (lookahead) {
+                    case '!':
+                    case '%':
+                    case '&':
+                    case '*':
+                    case '+':
+                    case '-':
+                    case '/':
+                    case '<':
+                    case '=':
+                    case '>':
+                    case '[':
+                    case '^':
+                    case '|':
+                    case '~':
+                        // start of an operator symbol
+                        lexer->result_symbol = START_OF_SYMBOL;
+                        return true;
+                }
+
+                if (('A' <= lookahead && lookahead <= 'Z')
+                    || ('a' <= lookahead && lookahead <= 'z')
+                    || (lookahead == '_')
+                    || (0x00a0 <= lookahead && lookahead <= 0x10ffffff)) {
+
+                    // This is the start of an unquoted symbol
+                    lexer->result_symbol = START_OF_SYMBOL;
+                    return true;
+                }
+            }
+            break;
         case '.':
             if (valid_symbols[BEGINLESS_RANGE_OPERATOR] && !valid_symbols[START_OF_PARENLESS_ARGS]) {
                 lex_advance(lexer);
@@ -1995,17 +2971,37 @@ static bool inner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols)
                 return true;
             }
             break;
+
+        case '}':
+            lex_advance(lexer);
+
+            // End of a macro expression
+            if (lexer->lookahead == '}') {
+                return false;
+            }
+            break;
     }
 
     return false;
 }
 
 bool tree_sitter_crystal_external_scanner_scan(void *payload, TSLexer *lexer, const bool *valid_symbols) {
-    LOG(lexer, "starting external scan, char is '%c'", lexer->lookahead);
-    LOG(lexer, "valid symbols are:");
+    DEBUG("starting external scan");
+    if (lexer->lookahead == '\n') {
+        DEBUG("char is '\\n'");
+    } else if (lexer->lookahead == '\0') {
+        DEBUG("char is '\\0'");
+    } else if (lexer->lookahead == '\r') {
+        DEBUG("char is '\\r'");
+    } else if (lexer->lookahead == '\t') {
+        DEBUG("char is '\\t'");
+    } else {
+        DEBUG("char is '%c'", lexer->lookahead);
+    }
+    DEBUG("valid symbols are:");
 
 #define LOG_SYMBOL(sym) \
-    if (valid_symbols[sym]) { lexer->log(lexer, "      " #sym); }
+    if (valid_symbols[sym]) { DEBUG("      " #sym); }
 
     LOG_SYMBOL(LINE_BREAK);
     LOG_SYMBOL(LINE_CONTINUATION);
@@ -2043,9 +3039,14 @@ bool tree_sitter_crystal_external_scanner_scan(void *payload, TSLexer *lexer, co
     LOG_SYMBOL(REGULAR_ENSURE_KEYWORD);
     LOG_SYMBOL(MODIFIER_ENSURE_KEYWORD);
     LOG_SYMBOL(MODULO_OPERATOR);
+    LOG_SYMBOL(START_OF_SYMBOL);
+    LOG_SYMBOL(UNQUOTED_SYMBOL_CONTENT);
+    LOG_SYMBOL(TYPE_FIELD_COLON);
     LOG_SYMBOL(STRING_LITERAL_START);
     LOG_SYMBOL(DELIMITED_STRING_CONTENTS);
     LOG_SYMBOL(STRING_LITERAL_END);
+    LOG_SYMBOL(COMMAND_LITERAL_START);
+    LOG_SYMBOL(COMMAND_LITERAL_END);
     LOG_SYMBOL(STRING_PERCENT_LITERAL_START);
     LOG_SYMBOL(COMMAND_PERCENT_LITERAL_START);
     LOG_SYMBOL(STRING_ARRAY_PERCENT_LITERAL_START);
@@ -2059,16 +3060,23 @@ bool tree_sitter_crystal_external_scanner_scan(void *payload, TSLexer *lexer, co
     LOG_SYMBOL(HEREDOC_CONTENT);
     LOG_SYMBOL(HEREDOC_END);
     LOG_SYMBOL(REGEX_MODIFIER);
+    LOG_SYMBOL(MACRO_START);
+    LOG_SYMBOL(MACRO_DELIMITER_END);
+    LOG_SYMBOL(MACRO_DELIMITER_ELSE);
+    LOG_SYMBOL(MACRO_DELIMITER_ELSIF);
+    LOG_SYMBOL(MACRO_CONTENT);
+    LOG_SYMBOL(MACRO_CONTENT_NESTING);
     LOG_SYMBOL(START_OF_PARENLESS_ARGS);
     LOG_SYMBOL(END_OF_RANGE);
+    LOG_SYMBOL(START_OF_MACRO_VAR_EXPS);
     LOG_SYMBOL(ERROR_RECOVERY);
 
     bool result = inner_scan(payload, lexer, valid_symbols);
 
     if (result) {
-        LOG(lexer, "external scan got a result");
+        DEBUG("external scan got a result");
     } else {
-        LOG(lexer, "returning nothing at end");
+        DEBUG("external scan returned nothing");
     }
 
     return result;
@@ -2081,6 +3089,8 @@ void *tree_sitter_crystal_external_scanner_create(void) {
 
     state->has_leading_whitespace = false;
     state->previous_line_continued = false;
+
+    reset_macro_state(state);
 
     array_init(&state->literals);
     array_init(&state->heredocs);
@@ -2111,6 +3121,9 @@ unsigned tree_sitter_crystal_external_scanner_serialize(void *payload, char *buf
 
     buffer[offset++] = (char)state->has_leading_whitespace;
     buffer[offset++] = (char)state->previous_line_continued;
+
+    buffer[offset++] = (char)state->macro_state.in_comment;
+    buffer[offset++] = (char)state->macro_state.non_modifier_keyword_can_begin;
 
     // It's safe to cast the literal count into a char since it will always be
     // less than MAX_LITERAL_COUNT.
@@ -2145,8 +3158,10 @@ unsigned tree_sitter_crystal_external_scanner_serialize(void *payload, char *buf
     return offset;
 }
 
-_Static_assert(
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)
+static_assert(
     2                                                    // boolean variables
+            + sizeof(MacroState)                         // macro state
             + 1                                          // literals count
             + sizeof(PercentLiteral) * MAX_LITERAL_COUNT // each literal
             + 1                                          // heredocs count
@@ -2154,6 +3169,7 @@ _Static_assert(
             + HEREDOC_BUFFER_SIZE                        // heredoc buffer total
         <= TREE_SITTER_SERIALIZATION_BUFFER_SIZE,
     "Maximum serialized size is too large");
+#endif
 
 void tree_sitter_crystal_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
     State *state = (State *)payload;
@@ -2172,12 +3188,17 @@ void tree_sitter_crystal_external_scanner_deserialize(void *payload, const char 
         // case we just finish resetting the state.
         state->has_leading_whitespace = false;
         state->previous_line_continued = false;
+
+        reset_macro_state(state);
         return;
     }
 
     size_t offset = 0;
     state->has_leading_whitespace = (bool)buffer[offset++];
     state->previous_line_continued = (bool)buffer[offset++];
+
+    state->macro_state.in_comment = (bool)buffer[offset++];
+    state->macro_state.non_modifier_keyword_can_begin = (bool)buffer[offset++];
 
     // The literals array can be deserialized in one chunk.
     uint8_t literals_size = (uint8_t)buffer[offset++];

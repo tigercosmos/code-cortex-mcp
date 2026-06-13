@@ -8,16 +8,12 @@ enum TokenType {
     PAIRED_COMMENT_CONTENT_LIQ,
     RAW_CONTENT,
     FRONT_MATTER,
-    DOC_CONTENT,
-    DOC_PARAM_NAME,
-    DOC_EXAMPLE_CONTENT,
     NONE
 };
 
 const char *end = "end";
 const char *raw_tag = "raw";
 const char *comment_tag = "comment";
-const char *doc_tag = "doc";
 
 static void advance(TSLexer *lexer) {
     lexer->advance(lexer, false);
@@ -155,158 +151,6 @@ bool tree_sitter_liquid_external_scanner_scan(
         }
     }
 
-    // doc param name - matches identifier or [identifier] after @param {type}
-    // Must be checked BEFORE doc_content so it's not consumed as text
-    if (valid_symbols[DOC_PARAM_NAME]) {
-        bool bracketed = false;
-        if (lexer->lookahead == '[') {
-            bracketed = true;
-            advance(lexer);
-        }
-        // must start with letter or underscore
-        if (iswalpha(lexer->lookahead) || lexer->lookahead == '_') {
-            advance(lexer);
-            while (iswalnum(lexer->lookahead) || lexer->lookahead == '_') {
-                advance(lexer);
-            }
-            if (bracketed) {
-                if (lexer->lookahead == ']') {
-                    advance(lexer);
-                    lexer->mark_end(lexer);
-                    lexer->result_symbol = DOC_PARAM_NAME;
-                    return true;
-                }
-                return false;
-            }
-            lexer->mark_end(lexer);
-            lexer->result_symbol = DOC_PARAM_NAME;
-            return true;
-        }
-        return false;
-    }
-
-    // doc example content - consumes everything until next @ annotation or {% enddoc %}
-    // Must be checked BEFORE doc_content so it captures the full example block
-    if (valid_symbols[DOC_EXAMPLE_CONTENT]) {
-        bool has_content = false;
-
-        while (lexer->lookahead != 0) {
-
-            // stop at @ for next annotation
-            if (lexer->lookahead == '@') {
-                if (has_content) {
-                    lexer->result_symbol = DOC_EXAMPLE_CONTENT;
-                    return true;
-                }
-                return false;
-            }
-
-            if (lexer->lookahead == '{') {
-                lexer->mark_end(lexer);
-                advance(lexer);
-
-                // check for {% enddoc %}
-                if (lexer->lookahead == '%') {
-                    advance(lexer);
-                    if (lexer->lookahead == '-') {
-                        advance(lexer);
-                    }
-                    advance_ws(lexer);
-
-                    if (lexer->lookahead == 'e' && scan_str(lexer, end) && scan_str(lexer, doc_tag)) {
-                        advance_ws(lexer);
-                        if (lexer->lookahead == '-') {
-                            advance(lexer);
-                        }
-                        if (lexer->lookahead == '%') {
-                            advance(lexer);
-                            if (lexer->lookahead == '}') {
-                                advance(lexer);
-                                lexer->result_symbol = DOC_EXAMPLE_CONTENT;
-                                return has_content;
-                            }
-                        }
-                    }
-                    // not enddoc, continue (allow {%...%} in example content)
-                    has_content = true;
-                    continue;
-                }
-
-                // allow {{ and other { in example content
-                has_content = true;
-                continue;
-            }
-
-            advance(lexer);
-            has_content = true;
-            lexer->mark_end(lexer);
-        }
-
-        return false;
-    }
-
-    // doc content - stops at @annotations, {type}, or {% enddoc %}
-    if (valid_symbols[DOC_CONTENT]) {
-        bool has_content = false;
-
-        while (lexer->lookahead != 0) {
-
-            // stop at @ for annotations (@param, @description, @example)
-            if (lexer->lookahead == '@') {
-                if (has_content) {
-                    lexer->result_symbol = DOC_CONTENT;
-                    return true;
-                }
-                return false;
-            }
-
-            // stop at { for type annotations ({string}, {number}, etc.)
-            // or for {% enddoc %}
-            if (lexer->lookahead == '{') {
-                lexer->mark_end(lexer);
-                advance(lexer);
-
-                // check for {% enddoc %}
-                if (lexer->lookahead == '%') {
-                    advance(lexer);
-                    if (lexer->lookahead == '-') {
-                        advance(lexer);
-                    }
-                    advance_ws(lexer);
-
-                    if (lexer->lookahead == 'e' && scan_str(lexer, end) && scan_str(lexer, doc_tag)) {
-                        advance_ws(lexer);
-                        if (lexer->lookahead == '-') {
-                            advance(lexer);
-                        }
-                        if (lexer->lookahead == '%') {
-                            advance(lexer);
-                            if (lexer->lookahead == '}') {
-                                advance(lexer);
-                                lexer->result_symbol = DOC_CONTENT;
-                                return has_content;
-                            }
-                        }
-                    }
-                    // not enddoc, continue
-                    has_content = true;
-                    continue;
-                }
-
-                // { not followed by % — stop for doc_type
-                if (has_content) {
-                    lexer->result_symbol = DOC_CONTENT;
-                    return true;
-                }
-                return false;
-            }
-
-            advance(lexer);
-            has_content = true;
-            lexer->mark_end(lexer);
-        }
-    }
-
     // paired comment, or raw content
     if (
         valid_symbols[PAIRED_COMMENT_CONTENT]
@@ -388,4 +232,3 @@ void *tree_sitter_liquid_external_scanner_create() { return NULL; }
 void tree_sitter_liquid_external_scanner_destroy(void *payload) {}
 unsigned tree_sitter_liquid_external_scanner_serialize(void *payload, char *buffer) { return 0; }
 void tree_sitter_liquid_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {}
-

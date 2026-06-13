@@ -160993,7 +160993,7 @@ void tree_sitter_awk_external_scanner_deserialize(void *, const char *, unsigned
 #define TS_PUBLIC __attribute__((visibility("default")))
 #endif
 
-TS_PUBLIC const TSLanguage *tree_sitter_awk() {
+TS_PUBLIC const TSLanguage *tree_sitter_awk(void) {
   static const TSLanguage language = {
     .version = LANGUAGE_VERSION,
     .symbol_count = SYMBOL_COUNT,

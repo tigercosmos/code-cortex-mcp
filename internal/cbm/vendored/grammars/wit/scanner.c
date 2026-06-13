@@ -205,4 +205,3 @@ bool tree_sitter_wit_external_scanner_scan(void *payload, TSLexer *lexer, const 
 
     return false;
 }
-
