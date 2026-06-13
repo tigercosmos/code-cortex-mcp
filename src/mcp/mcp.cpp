@@ -4483,7 +4483,7 @@ static void *update_check_thread(void *arg) {
             snprintf(srv->update_notice, sizeof(srv->update_notice),
                      "Update available: %s -> %s -- run: codebase-memory-mcp update  |  "
                      "Enjoying codebase-memory-mcp? Please leave a star: "
-                     "https://github.com/DeusData/codebase-memory-mcp",
+                     "https://github.com/tigercosmos/cpp-codebase-memory-mcp",
                      current, tag_str);
             cbm_log_info("update.available", "current", current, "latest", tag_str);
         }
