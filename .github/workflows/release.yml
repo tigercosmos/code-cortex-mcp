@@ -6,6 +6,13 @@
 name: Release
 
 on:
+  # Push a version tag (e.g. `git tag v0.8.3 && git push origin v0.8.3`) to cut a
+  # release without needing workflow_dispatch (admin) rights. The version is taken
+  # from the tag name. workflow_dispatch is kept for manual runs with custom notes
+  # / replace. Jobs read `inputs.version || github.ref_name` so both paths work.
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
@@ -52,7 +59,7 @@ jobs:
     needs: [test]
     uses: ./.github/workflows/_build.yml
     with:
-      version: ${{ inputs.version }}
+      version: ${{ inputs.version || github.ref_name }}
 
   # ── 4. Smoke test every binary ──────────────────────────────────
   smoke:
@@ -67,7 +74,7 @@ jobs:
     with:
       duration_minutes: 10
       run_asan: ${{ inputs.soak_level == 'full' }}
-      version: ${{ inputs.version }}
+      version: ${{ inputs.version || github.ref_name }}
 
   # ── 6. Create DRAFT release ────────────────────────────────────
   release-draft:
@@ -104,8 +111,8 @@ jobs:
             'spdxVersion': 'SPDX-2.3',
             'dataLicense': 'CC0-1.0',
             'SPDXID': 'SPDXRef-DOCUMENT',
-            'name': 'codebase-memory-mcp-${{ inputs.version }}',
-            'documentNamespace': 'https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/${{ inputs.version }}',
+            'name': 'codebase-memory-mcp-${{ inputs.version || github.ref_name }}',
+            'documentNamespace': 'https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/${{ inputs.version || github.ref_name }}',
             'creationInfo': {
               'created': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
               'creators': ['Tool: codebase-memory-mcp-release-pipeline']
@@ -142,19 +149,19 @@ jobs:
         if: ${{ inputs.replace }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: gh release delete "$VERSION" --yes --cleanup-tag || true
 
       - name: Create tag
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           git tag -f "$VERSION"
           git push origin "$VERSION" --force
 
       - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2
         with:
-          tag_name: ${{ inputs.version }}
+          tag_name: ${{ inputs.version || github.ref_name }}
           draft: true
           files: |
             *.tar.gz
@@ -179,7 +186,7 @@ jobs:
       - name: Download and extract release binaries
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           mkdir -p assets binaries
           gh release download "$VERSION" --dir assets --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --pattern '*.zip'
@@ -226,5 +233,5 @@ jobs:
       - name: Un-draft GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: gh release edit "$VERSION" --draft=false --repo "$GITHUB_REPOSITORY"
