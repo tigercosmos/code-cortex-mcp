@@ -174,13 +174,30 @@ cp "$DLBIN" "$DEST"
 chmod 755 "$DEST"
 
 # Verify
-VERSION=$("$DEST" --version 2>&1) || {
+if ! VERSION=$("$DEST" --version 2>&1); then
     echo "error: installed binary failed to run" >&2
+    # Surface the real loader/runtime error instead of swallowing it.
+    if [ -n "$VERSION" ]; then
+        printf '%s\n' "$VERSION" | sed 's/^/  /' >&2
+    fi
     if [ "$OS" = "darwin" ]; then
-        echo "  try: xattr -cr $DEST && codesign --force --sign - $DEST" >&2
+        echo "  try: xattr -cr \"$DEST\" && codesign --force --sign - \"$DEST\"" >&2
+    elif [ "$OS" = "linux" ]; then
+        case "$VERSION" in
+            *GLIBC_*|*GLIBCXX_*|*"not found"*)
+                echo "  cause: this prebuilt binary requires a newer glibc/libstdc++ than this system has." >&2
+                if command -v ldd >/dev/null 2>&1; then
+                    echo "         this system: $(ldd --version 2>/dev/null | head -1)" >&2
+                fi
+                echo "  fix:   build from source on this machine (needs cmake + a C++23 compiler, e.g. gcc>=13):" >&2
+                echo "           git clone https://github.com/tigercosmos/cpp-codebase-memory-mcp" >&2
+                echo "           cd cpp-codebase-memory-mcp && scripts/build.sh   # -> build/c/codebase-memory-mcp" >&2
+                echo "         or install on a system with glibc >= 2.38." >&2
+                ;;
+        esac
     fi
     exit 1
-}
+fi
 echo "Installed: $VERSION"
 
 # Configure agents
