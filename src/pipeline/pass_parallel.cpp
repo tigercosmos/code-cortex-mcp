@@ -18,10 +18,19 @@ enum {
     PP_JSON_MARGIN = 10,
     PP_ESC_MARGIN = 3,
     PP_ESC_SPACE = 2,
+    /* Fixed bytes around a serialized JSON field: ,"key":"value" / ,"key":[...]
+     * -> comma + 2 key quotes + colon + 2 value quotes (resp. brackets). */
+    PP_JSON_FIELD_OVERHEAD = 6,
     PP_ARGS_MARGIN = 20,
     PP_LOG_THRESH = 24,
     PP_LOG_INTERVAL = 10,
     PP_TIMER_THRESH = 1000,
+    /* Extraction memory back-pressure: when the process is over its RSS budget,
+     * a worker reclaims + naps before pulling another file so peers can finish
+     * and return pages. Bounded spins avoid deadlock when the resident graph
+     * itself is near budget (then proceed with a soft overshoot). */
+    PP_BACKPRESSURE_MAX_SPINS = 40,
+    PP_BACKPRESSURE_NAP_NS = 3000000, /* 3 ms */
 };
 #define PP_NSEC_PER_SEC 1000000000ULL
 #define PP_USEC_PER_MS 1000000ULL
@@ -42,6 +51,7 @@ enum { PP_CSHARP_M_PREFIX_LEN = 2 };
 #include "pipeline/pipeline_internal.h"
 #include "pipeline/pass_lsp_cross.h" /* cbm_pxc_* helpers for fused cross-file LSP */
 #include "pipeline/lsp_resolve.h"
+#include "helpers.h" /* cbm_kind_in_set_free_cache — per-worker-thread cache teardown */
 #include "pipeline/worker_pool.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
@@ -137,7 +147,9 @@ static int json_escape_char(char *buf, size_t avail, char ch) {
         break;
     default:
         if (avail >= SKIP_ONE) {
-            buf[0] = ch;
+            /* Any other raw control byte (e.g. form feed) is invalid inside a
+             * JSON string — degrade to a space. */
+            buf[0] = ((unsigned char)ch < 0x20) ? ' ' : ch;
         }
         return SKIP_ONE;
     }
@@ -148,13 +160,41 @@ static int json_escape_char(char *buf, size_t avail, char ch) {
     return PP_ESC_SPACE;
 }
 
+/* Escaped length of a string under json_escape_char's rules: escaped
+ * characters expand to 2 bytes, everything else stays 1. */
+static size_t pp_json_escaped_len(const char *s) {
+    size_t n = 0;
+    for (; *s; s++) {
+        switch (*s) {
+        case '"':
+        case '\\':
+        case '\n':
+        case '\r':
+        case '\t':
+            n += PP_ESC_SPACE;
+            break;
+        default:
+            n += SKIP_ONE;
+        }
+    }
+    return n;
+}
+
+/* Appends are ATOMIC: a field is emitted only if the WHOLE serialized form
+ * fits (with PP_ESC_SPACE bytes reserved for the closing '}' + NUL). Cutting a
+ * field mid-value produced unterminated strings/arrays — malformed properties
+ * JSON that aborts every json_extract()-based consumer downstream (seen on the
+ * Linux kernel: 50-param functions truncated at the 2 KB cap). Dropping an
+ * oversized optional field whole keeps the JSON valid. Twin of
+ * pass_definitions.c — keep both in sync. */
 static void append_json_string(char *buf, size_t bufsize, size_t *pos, const char *key,
                                const char *val) {
     if (!val || val[0] == '\0') {
         return;
     }
-    if (*pos >= bufsize - PP_JSON_MARGIN) {
-        return;
+    size_t required = strlen(key) + pp_json_escaped_len(val) + PP_JSON_FIELD_OVERHEAD;
+    if (*pos + required + PP_ESC_SPACE > bufsize) {
+        return; /* whole field would not fit — skip it atomically */
     }
     size_t p = *pos;
     int w = snprintf(buf + p, bufsize - p, ",\"%s\":\"", key);
@@ -173,11 +213,20 @@ static void append_json_string(char *buf, size_t bufsize, size_t *pos, const cha
     *pos = p;
 }
 
-/* Append a JSON array of strings: ,"key":["a","b","c"] */
+/* Append a JSON array of strings: ,"key":["a","b","c"]. Atomic like
+ * append_json_string: emitted only if the whole array fits. */
 static void append_json_str_array(char *buf, size_t bufsize, size_t *pos, const char *key,
                                   const char **arr) {
     if (!arr || !arr[0] || *pos >= bufsize - PP_JSON_MARGIN) {
         return;
+    }
+    /* ,"key":[ + per item "<escaped>" + separating commas + ] */
+    size_t required = strlen(key) + PP_JSON_FIELD_OVERHEAD;
+    for (int i = 0; arr[i]; i++) {
+        required += pp_json_escaped_len(arr[i]) + PP_ESC_SPACE + (i > 0 ? SKIP_ONE : 0);
+    }
+    if (*pos + required + PP_ESC_SPACE > bufsize) {
+        return; /* whole array would not fit — skip it atomically */
     }
     size_t p = *pos;
     int n = snprintf(buf + p, bufsize - p, ",\"%s\":[", key);
@@ -192,14 +241,11 @@ static void append_json_str_array(char *buf, size_t bufsize, size_t *pos, const 
         if (p < bufsize - SKIP_ONE) {
             buf[p++] = '"';
         }
+        /* Full escaping (not just quote/backslash): items like C param types
+         * sliced from multi-line declarations carry raw \n/\t bytes, which are
+         * invalid inside JSON strings. */
         for (const char *s = arr[i]; *s && p < bufsize - PP_ESC_SPACE; s++) {
-            if (*s == '"' || *s == '\\') {
-                buf[p++] = '\\';
-                if (p >= bufsize - PP_ESC_SPACE) {
-                    break;
-                }
-            }
-            buf[p++] = *s;
+            p += (size_t)json_escape_char(buf + p, bufsize - p - PP_ESC_SPACE, *s);
         }
         if (p < bufsize - SKIP_ONE) {
             buf[p++] = '"';
@@ -213,11 +259,35 @@ static void append_json_str_array(char *buf, size_t bufsize, size_t *pos, const 
 }
 
 static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def) {
-    int n = snprintf(buf, bufsize,
-                     "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,"
-                     "\"is_test\":%s,\"is_entry_point\":%s",
+    /* Complexity/loop/recursion metrics are meaningful only for Function/Method.
+     * Gate the block so the millions of Macro/Field/Variable/Class/Enum nodes
+     * keep a lean properties blob (lossless — those fields are always zero for
+     * non-functions). Cuts RAM, gbuf-merge copy and dump volume. Mirrors
+     * pass_definitions.c::build_def_props — keep both in sync. */
+    const bool is_fn =
+        def->label && (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0);
+    int n;
+    if (is_fn) {
+        n = snprintf(buf, bufsize,
+                     "{\"complexity\":%d,\"cognitive\":%d,\"loop_count\":%d,\"loop_depth\":%d,"
+                     "\"self_recursive\":%s,\"param_count\":%d,\"max_access_depth\":%d,"
+                     "\"linear_scan_in_loop\":%d,\"alloc_in_loop\":%d,\"recursion_in_loop\":%s,"
+                     "\"unguarded_recursion\":%s,"
+                     "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s",
+                     def->complexity, def->cognitive, def->loop_count, def->loop_depth,
+                     def->is_recursive ? "true" : "false", def->param_count, def->max_access_depth,
+                     def->linear_scan_in_loop, def->alloc_in_loop,
+                     def->recursion_in_loop ? "true" : "false",
+                     def->unguarded_recursion ? "true" : "false", def->lines,
+                     def->is_exported ? "true" : "false", def->is_test ? "true" : "false",
+                     def->is_entry_point ? "true" : "false");
+    } else {
+        n = snprintf(buf, bufsize,
+                     "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
+                     "\"is_entry_point\":%s",
                      def->complexity, def->lines, def->is_exported ? "true" : "false",
                      def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false");
+    }
     if (n <= 0 || (size_t)n >= bufsize) {
         buf[0] = '\0';
         return;
@@ -433,7 +503,9 @@ static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_file_info
             cbm_gbuf_upsert_node(ws->local_gbuf, "Route", def->route_path, route_qn,
                                  def->file_path ? def->file_path : fi->rel_path, 0, 0, rprops);
         char hprops[CBM_SZ_512];
-        snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", def->qualified_name);
+        char esc_h[CBM_SZ_512];
+        cbm_json_escape(esc_h, sizeof(esc_h), def->qualified_name);
+        snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
         cbm_gbuf_insert_edge(ws->local_gbuf, func_id, route_id, "HANDLES", hprops);
     }
 }
@@ -470,6 +542,24 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
         }
         if (atomic_load_explicit(ec->cancelled, memory_order_relaxed)) {
             break;
+        }
+
+        /* Memory back-pressure (large repos): if the process is over its RSS
+         * budget, reclaim this thread's freed pages and nap so peer workers can
+         * finish their current file and return memory before this worker adds
+         * another parse working set. Caps the concurrent extraction transient
+         * near the budget instead of letting all workers parse their biggest
+         * files at once. Self-disabling when the budget is unset (tests) or RSS
+         * is under budget; bounded spins avoid deadlock when the resident graph
+         * is itself near budget (then proceed with a soft overshoot). */
+        if (cbm_mem_budget() > 0 && cbm_mem_over_budget()) {
+            cbm_mem_collect();
+            for (int bp = 0; bp < PP_BACKPRESSURE_MAX_SPINS && cbm_mem_over_budget() &&
+                             !atomic_load_explicit(ec->cancelled, memory_order_relaxed);
+                 bp++) {
+                struct timespec nap = {0, PP_BACKPRESSURE_NAP_NS};
+                cbm_nanosleep(&nap, NULL);
+            }
         }
 
         int file_idx = ec->sorted[sort_pos].idx;
@@ -585,6 +675,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
 
     /* Final cleanup (parser already destroyed in loop, just slab state) */
     cbm_slab_destroy_thread();
+    cbm_kind_in_set_free_cache(); /* free this worker thread's node-type bitset cache */
 }
 
 static void merge_pkg_entries(cbm_pipeline_ctx_t *ctx, cbm_pkg_entries_t *pkg_entries,
@@ -727,9 +818,11 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
     if (!def->name || !def->qualified_name || !def->label) {
         return 0;
     }
-    /* Register callable symbols + Interface — see pass_definitions.c for rationale. */
+    /* Register callable symbols + Interface — see pass_definitions.c for rationale.
+     * Variable/Field defs are registered too so READS/WRITES can resolve. */
     if (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
-        strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0) {
+        strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0 ||
+        strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0) {
         cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
         (*reg_entries)++;
     }
@@ -752,18 +845,22 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
 
 /* Create IMPORTS edges for one file's imports (parallel path). */
 static int create_imports_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
-                                const char *rel) {
+                                const char *rel, CBMHashTable *namespace_map) {
     int count = 0;
+    char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+    const cbm_gbuf_node_t *source_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
+    if (!source_node) {
+        free(file_qn);
+        return 0;
+    }
     for (int j = 0; j < result->imports.count; j++) {
         CBMImport *imp = &result->imports.items[j];
         if (!imp->module_path) {
             continue;
         }
-        char *target_qn = cbm_pipeline_resolve_module(ctx, rel, imp->module_path);
-        const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(ctx->gbuf, target_qn);
-        char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
-        const cbm_gbuf_node_t *source_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
-        if (source_node && target) {
+        const cbm_gbuf_node_t *target =
+            cbm_pipeline_resolve_import_node(ctx, rel, file_qn, imp, namespace_map);
+        if (target && target->id != source_node->id) {
             char esc_ln[CBM_SZ_128];
             cbm_json_escape(esc_ln, sizeof(esc_ln), imp->local_name ? imp->local_name : "");
             char imp_props[CBM_SZ_256];
@@ -771,9 +868,8 @@ static int create_imports_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *re
             cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props);
             count++;
         }
-        free(target_qn);
-        free(file_qn);
     }
+    free(file_qn);
     return count;
 }
 
@@ -829,8 +925,22 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
     int defines_edges = 0;
     int imports_edges = 0;
 
+    /* Namespace/package → File-QN map for namespace imports (C# `using`,
+     * Java/Kotlin `import`, PHP `use`). Built from the full result cache so
+     * every declaring file is visible regardless of loop order. */
+    const char **rels = (const char **)calloc((size_t)file_count, sizeof(char *));
+    if (rels) {
+        for (int i = 0; i < file_count; i++) {
+            rels[i] = files[i].rel_path;
+        }
+    }
+    CBMHashTable *namespace_map =
+        cbm_pipeline_namespace_map_build(ctx->project_name, result_cache, rels, file_count);
+    free(rels);
+
     for (int i = 0; i < file_count; i++) {
         if (cbm_pipeline_check_cancel(ctx)) {
+            cbm_pipeline_namespace_map_free(namespace_map);
             return CBM_NOT_FOUND;
         }
 
@@ -846,9 +956,11 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             defines_edges += register_and_link_def(ctx, &result->defs.items[d], rel, &reg_entries);
         }
 
-        imports_edges += create_imports_edges(ctx, result, rel);
+        imports_edges += create_imports_edges(ctx, result, rel, namespace_map);
         create_channel_edges(ctx, result, rel);
     }
+
+    cbm_pipeline_namespace_map_free(namespace_map);
 
     cbm_log_info("parallel.registry.done", "entries", itoa_log(reg_entries), "defines",
                  itoa_log(defines_edges), "imports", itoa_log(imports_edges));
@@ -1167,18 +1279,25 @@ static void emit_route_registration(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *sou
     char rp[CBM_SZ_256];
     snprintf(rp, sizeof(rp), "{\"method\":\"%s\"}", method ? method : "ANY");
     int64_t rid = cbm_gbuf_upsert_node(gbuf, "Route", route_path, rqn, "", 0, 0, rp);
-    char props[CBM_SZ_512];
+    char esc_cn[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
+    char esc_rp[CBM_SZ_512];
+    cbm_json_escape(esc_cn, sizeof(esc_cn), call->callee_name);
+    cbm_json_escape(esc_rp, sizeof(esc_rp), route_path);
+    char props[CBM_SZ_1K];
     snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"route_registration\"}",
-             call->callee_name, route_path);
+             "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"route_registration\"}", esc_cn,
+             esc_rp);
     cbm_gbuf_insert_edge(gbuf, source->id, rid, "CALLS", props);
     if (handler_ref && handler_ref[0] != '\0') {
         cbm_resolution_t hres = cbm_registry_resolve(registry, handler_ref, module_qn, ik, iv, ic);
         if (hres.qualified_name && hres.qualified_name[0] != '\0') {
             const cbm_gbuf_node_t *h = cbm_gbuf_find_by_qn(main_gbuf, hres.qualified_name);
             if (h) {
-                char hp[CBM_SZ_256];
-                snprintf(hp, sizeof(hp), "{\"handler\":\"%s\"}", hres.qualified_name);
+                char hp[CBM_SZ_1K]; /* must exceed escaped value + wrapper or snprintf cuts the
+                                       closing brace */
+                char esc_h2[CBM_SZ_512];
+                cbm_json_escape(esc_h2, sizeof(esc_h2), hres.qualified_name);
+                snprintf(hp, sizeof(hp), "{\"handler\":\"%s\"}", esc_h2);
                 cbm_gbuf_insert_edge(gbuf, h->id, rid, "HANDLES", hp);
             }
         }
@@ -1748,7 +1867,9 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
             continue;
         }
         char uprops[CBM_SZ_256];
-        snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", usage->ref_name);
+        char esc_ref[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
+        cbm_json_escape(esc_ref, sizeof(esc_ref), usage->ref_name);
+        snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
         cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id, "USAGE", uprops);
         ws->usages_resolved++;
     }
@@ -1843,17 +1964,49 @@ static void resolve_def_decorators(resolve_ctx_t *rc, resolve_worker_state_t *ws
             continue;
         }
         cbm_resolution_t res = cbm_registry_resolve(rc->registry, fn, mq, ik, iv, ic);
-        if (!res.qualified_name || res.qualified_name[0] == '\0') {
-            continue;
+        if ((!res.qualified_name || res.qualified_name[0] == '\0') && !strchr(fn, '.')) {
+            /* C# attributes are referenced by their short name (`[Log]`) but
+             * declared with an `Attribute` suffix (`class LogAttribute`). */
+            char with_suffix[CBM_SZ_256];
+            int wn = snprintf(with_suffix, sizeof(with_suffix), "%sAttribute", fn);
+            if (wn > 0 && (size_t)wn < sizeof(with_suffix)) {
+                res = cbm_registry_resolve(rc->registry, with_suffix, mq, ik, iv, ic);
+            }
         }
-        const cbm_gbuf_node_t *dn = cbm_gbuf_find_by_qn(rc->main_gbuf, res.qualified_name);
-        if (dn && node->id != dn->id) {
-            char dp[CBM_SZ_256];
-            snprintf(dp, sizeof(dp), "{\"decorator\":\"%s\"}", def->decorators[dc]);
-            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn->id, "DECORATES", dp);
+        const cbm_gbuf_node_t *dn = NULL;
+        if (res.qualified_name && res.qualified_name[0] != '\0') {
+            dn = cbm_gbuf_find_by_qn(rc->main_gbuf, res.qualified_name);
+        }
+        int64_t dn_id = 0;
+        if (dn) {
+            dn_id = dn->id;
+        } else {
+            /* External/stdlib decorator (Rust `#[derive(Debug)]`, Swift
+             * `@discardableResult`, Scala `@deprecated`, Python `@cache`,
+             * Java `@Override`, ...): no local symbol resolves.  Materialise a
+             * synthetic "Decorator" node so the DECORATES relation is recorded.
+             * The node is created in the per-worker local_edge_buf (shared-ID
+             * gbuf); the sequential merge dedupes by QN across workers, so all
+             * uses of the same decorator name collapse to one node project-wide
+             * and the edge target IDs are remapped consistently. */
+            char syn_qn[CBM_SZ_512];
+            snprintf(syn_qn, sizeof(syn_qn), "<decorator:%s>", fn);
+            dn_id =
+                cbm_gbuf_upsert_node(ws->local_edge_buf, "Decorator", fn, syn_qn, "", 0, 0, "{}");
+        }
+        if (dn_id != 0 && node->id != dn_id) {
+            /* Decorator SOURCE TEXT can contain quotes and raw newlines
+             * (e.g. @register.tag("block"), multi-line @override_settings) —
+             * interpolating it raw produced malformed properties JSON that
+             * aborts every json_extract consumer (django: 3826 such edges). */
+            char esc_dec[CBM_SZ_256];
+            cbm_json_escape(esc_dec, sizeof(esc_dec), def->decorators[dc]);
+            char dp[CBM_SZ_512];
+            snprintf(dp, sizeof(dp), "{\"decorator\":\"%s\"}", esc_dec);
+            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn_id, "DECORATES", dp);
             /* Ensure a reference-style edge exists so the decorator appears in queries
              * without being misclassified as a real call by downstream passes. */
-            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn->id, "USAGE", "{}");
+            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn_id, "USAGE", "{}");
             ws->semantic_resolved++;
         }
     }

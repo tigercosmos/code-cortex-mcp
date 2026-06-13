@@ -389,6 +389,31 @@ TEST(resolve_suffix_match) {
     PASS();
 }
 
+/* A name with more than REG_MAX_CANDIDATES (256) registered definitions is
+ * unresolvable by name alone: the candidate penalty floors its confidence to
+ * ~3/count (noise), while walking the candidate array per file dominated
+ * usage-resolution CPU on the Linux kernel ("flags"/"dev"/"list_head" have
+ * 4-7k definitions each). resolve must bail out with an empty result instead
+ * of scanning and emitting a near-zero-confidence edge. */
+TEST(resolve_caps_unresolvably_ambiguous_names) {
+    cbm_registry_t *r = cbm_registry_new();
+    for (int i = 0; i < 300; i++) {
+        char qn[64];
+        snprintf(qn, sizeof(qn), "proj.mod%d.flags", i);
+        cbm_registry_add(r, "flags", qn, "Variable");
+    }
+    cbm_resolution_t res = cbm_registry_resolve(r, "flags", "proj.other.caller", NULL, NULL, 0);
+    ASSERT_TRUE(res.qualified_name == NULL || res.qualified_name[0] == '\0');
+
+    /* Same-module resolution still wins regardless of candidate count. */
+    res = cbm_registry_resolve(r, "flags", "proj.mod7", NULL, NULL, 0);
+    ASSERT_STR_EQ(res.qualified_name, "proj.mod7.flags");
+    ASSERT_STR_EQ(res.strategy, "same_module");
+
+    cbm_registry_free(r);
+    PASS();
+}
+
 /* ── Import map suffix resolution ─────────────────────────────── */
 
 TEST(resolve_import_map_suffix) {
@@ -642,6 +667,7 @@ SUITE(registry) {
     RUN_TEST(confidence_band_speculative);
     /* Suffix match + import map suffix */
     RUN_TEST(resolve_suffix_match);
+    RUN_TEST(resolve_caps_unresolvably_ambiguous_names);
     RUN_TEST(resolve_import_map_suffix);
     /* Import reachability */
     RUN_TEST(resolve_is_import_reachable);

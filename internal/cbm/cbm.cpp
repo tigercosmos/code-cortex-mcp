@@ -9,13 +9,24 @@
 #include "lsp/py_lsp.h"
 #include "lsp/ts_lsp.h"
 #include "lsp/cs_lsp.h"
+#include "lsp/java_lsp.h"
+#include "lsp/kotlin_lsp.h"
+#include "lsp/rust_lsp.h"
 #include "preprocessor.h"
 #include "foundation/compat.h"
 #include "tree_sitter/api.h" // TSParser, TSNode, TSTree, TSInput, TSLanguage, TSPoint, TSParseOptions, TSParseState
 #include "foundation/constants.h"
+#include <mimalloc.h> // mi_malloc/mi_calloc/mi_realloc/mi_free/mi_usable_size — bind 3rd-party allocators (#424)
+#if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
+#include <sqlite3.h> // sqlite3_mem_methods, sqlite3_config, SQLITE_CONFIG_MALLOC — bind sqlite to mimalloc
+#if defined(HAVE_LIBGIT2)
+#include <git2.h> // git_allocator, git_libgit2_opts, GIT_OPT_SET_ALLOCATOR — bind libgit2 to mimalloc
+#endif
+#endif
 #include <stdint.h> // uint32_t, uint64_t, int64_t
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h> // struct timespec, CLOCK_MONOTONIC
 
 // Atomic counters for profiling parse vs extraction time (nanoseconds).
@@ -27,6 +38,20 @@ static std::atomic<uint64_t> total_lsp_ns = 0;
 static std::atomic<uint64_t> total_preprocess_ns = 0;
 static std::atomic<uint64_t> total_files_preprocessed = 0;
 static std::atomic<uint64_t> total_files = 0;
+
+// C/C++ preprocessor #define macros are extracted as Macro nodes (#375). On a
+// macro-dense codebase (e.g. the Linux kernel: ~2.4M macros, 49% of all nodes)
+// this is the dominant extraction cost, so it is gated to the full/advanced
+// index modes. Default ON to preserve behavior for direct callers/tests; the
+// pipeline sets it from the index mode before extraction. Set once pre-extract,
+// read-only during, so a relaxed atomic is sufficient.
+static std::atomic<int> g_extract_macros = 1;
+void cbm_set_macro_extraction(int enabled) {
+    atomic_store_explicit(&g_extract_macros, enabled ? 1 : 0, memory_order_relaxed);
+}
+int cbm_macro_extraction_enabled(void) {
+    return atomic_load_explicit(&g_extract_macros, memory_order_relaxed);
+}
 
 #define NSEC_PER_SEC 1000000000ULL
 #define USEC_TO_NSEC 1000ULL
@@ -214,6 +239,122 @@ static TSParser *get_thread_parser(const TSLanguage *ts_lang, CBMLanguage lang) 
     return tl_parser;
 }
 
+// --- Allocator binding (defense-in-depth, #424) ---
+
+/* Bind tree-sitter, sqlite3, and libgit2 to mimalloc explicitly so a correct
+ * binary does NOT depend on the fragile MI_OVERRIDE symbol override. Under
+ * MI_OVERRIDE=1 — particularly the Windows static-MinGW link with
+ * --allow-multiple-definition — `malloc`/`free` can resolve to DIFFERENT
+ * allocators (mimalloc vs the CRT) inside third-party libs, so a block
+ * allocated by mimalloc gets freed by the CRT (or vice-versa), corrupting the
+ * heap freelist (#424). Binding each library through one explicit allocator
+ * eliminates that mismatch class generically, on every platform.
+ *
+ * Guarded to the production build (CBM_BIND_TS_ALLOCATOR=1, which CFLAGS_PROD
+ * defines alongside MI_OVERRIDE=1). The test build is CRT + ASan, where binding
+ * to mimalloc would mismatch ASan/CRT frees — there these binds compile to
+ * no-ops and the build stays unchanged. */
+
+#if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
+#include <assert.h>
+
+/* sqlite3 mem methods backed by mimalloc. sqlite's xMalloc/xRealloc/xSize use
+ * `int` sizes; wrap with size_t casts. xRoundup rounds to an 8-byte boundary
+ * (sqlite requires 8-byte-aligned roundup, and mimalloc honors that alignment).
+ * Field order matches struct sqlite3_mem_methods exactly:
+ * xMalloc, xFree, xRealloc, xSize, xRoundup, xInit, xShutdown, pAppData. */
+static void *cbm_sqlite_malloc(int n) {
+    return mi_malloc((size_t)n);
+}
+static void cbm_sqlite_free(void *p) {
+    mi_free(p);
+}
+static void *cbm_sqlite_realloc(void *p, int n) {
+    return mi_realloc(p, (size_t)n);
+}
+static int cbm_sqlite_size(void *p) {
+    return (int)mi_usable_size(p);
+}
+static int cbm_sqlite_roundup(int n) {
+    return (n + 7) & ~7; /* round up to 8-byte boundary */
+}
+static int cbm_sqlite_meminit(void *appdata) {
+    (void)appdata;
+    return SQLITE_OK;
+}
+static void cbm_sqlite_memshutdown(void *appdata) {
+    (void)appdata;
+}
+
+#if defined(HAVE_LIBGIT2)
+/* libgit2 git_allocator backed by mimalloc. The struct (current libgit2) has
+ * exactly three members: gmalloc(size_t,file,line), grealloc(ptr,size,file,line),
+ * gfree(ptr). The file/line args are ignored. */
+static void *cbm_git_malloc(size_t n, const char *file, int line) {
+    (void)file;
+    (void)line;
+    return mi_malloc(n);
+}
+static void *cbm_git_realloc(void *ptr, size_t size, const char *file, int line) {
+    (void)file;
+    (void)line;
+    return mi_realloc(ptr, size);
+}
+static void cbm_git_free(void *ptr) {
+    mi_free(ptr);
+}
+#endif /* HAVE_LIBGIT2 */
+#endif /* CBM_BIND_TS_ALLOCATOR */
+
+void cbm_alloc_init(void) {
+#if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
+    static int alloc_bound = 0; /* single-threaded startup; plain int is fine */
+    if (alloc_bound) {
+        return;
+    }
+    alloc_bound = 1;
+
+    /* tree-sitter runtime (was previously bound in cbm_init; consolidated here). */
+    ts_set_allocator(mi_malloc, mi_calloc, mi_realloc, mi_free);
+
+    /* sqlite3. SQLITE_CONFIG_MALLOC MUST run before sqlite3_initialize / the
+     * first sqlite3_open* — otherwise sqlite3_config returns SQLITE_MISUSE
+     * silently and the binding is ignored. cbm_alloc_init() runs as the very
+     * first statement of main(), before cbm_mcp_server_new → cbm_store_open*. */
+    static sqlite3_mem_methods cbm_sqlite_mem = {
+        cbm_sqlite_malloc,      /* xMalloc */
+        cbm_sqlite_free,        /* xFree */
+        cbm_sqlite_realloc,     /* xRealloc */
+        cbm_sqlite_size,        /* xSize */
+        cbm_sqlite_roundup,     /* xRoundup */
+        cbm_sqlite_meminit,     /* xInit */
+        cbm_sqlite_memshutdown, /* xShutdown */
+        NULL,                   /* pAppData */
+    };
+    int sqlite_rc = sqlite3_config(SQLITE_CONFIG_MALLOC, &cbm_sqlite_mem);
+    assert(sqlite_rc == SQLITE_OK && "SQLITE_CONFIG_MALLOC must run before sqlite3_initialize");
+    (void)sqlite_rc;
+
+#if defined(HAVE_LIBGIT2)
+    /* libgit2. GIT_OPT_SET_ALLOCATOR MUST be set BEFORE git_libgit2_init():
+     * libgit2's git_allocator_global_init (run during init) installs the default
+     * stdalloc only if no custom allocator is set yet
+     * (`if (git__allocator.gmalloc != git_failalloc_malloc) return 0;`), and the
+     * pre-init global is the fail-allocator. There is no allocator-reset on
+     * git_libgit2_shutdown, so binding once here — before pass_githistory's
+     * per-call git_libgit2_init/shutdown pairs ever run — persists for the whole
+     * process. git_libgit2_opts(GIT_OPT_SET_ALLOCATOR,...) itself does not
+     * allocate, so calling it before init is safe. */
+    static git_allocator cbm_git_alloc = {
+        cbm_git_malloc,  /* gmalloc */
+        cbm_git_realloc, /* grealloc */
+        cbm_git_free,    /* gfree */
+    };
+    git_libgit2_opts(GIT_OPT_SET_ALLOCATOR, &cbm_git_alloc);
+#endif /* HAVE_LIBGIT2 */
+#endif /* CBM_BIND_TS_ALLOCATOR */
+}
+
 // --- Init/Shutdown ---
 
 static int cbm_initialized = 0;
@@ -224,6 +365,12 @@ int cbm_init(void) {
     }
     enum { CBM_INIT_DONE = 1 };
     cbm_initialized = CBM_INIT_DONE;
+    /* Defense-in-depth allocator binds (idempotent). main() calls cbm_alloc_init
+     * first; this covers non-main entry points (pipeline passes call cbm_init).
+     * For sqlite the SQLITE_CONFIG_MALLOC bind only takes effect if it runs
+     * before sqlite initializes — main() guarantees that ordering; here it is a
+     * best-effort idempotent re-assert for paths that never hit main(). */
+    cbm_alloc_init();
     return 0;
 }
 
@@ -250,6 +397,100 @@ void cbm_shutdown(void) {
     // Note: other threads' TLS parsers are freed when those threads exit.
     cbm_destroy_thread_parser();
     cbm_initialized = 0;
+}
+
+// --- Bottleneck call-name classification (language-agnostic heuristics) ---
+
+// Case-insensitive equality for short callee names.
+static bool name_ieq(const char *a, const char *b) {
+    for (; *a && *b; a++, b++) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return false;
+        }
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static bool name_in_set(const char *name, const char *const *set) {
+    for (const char *const *s = set; *s; s++) {
+        if (name_ieq(name, *s)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Linear-scan / membership calls: a hit inside a loop is the textbook hidden
+// O(n^2) (cf. Olivo et al., PLDI'15) that syntactic loop-depth alone misses.
+static bool is_linear_scan_name(const char *n) {
+    static const char *const set[] = {"find",    "indexof",   "contains", "includes", "search",
+                                      "lookup",  "strstr",    "strchr",   "strrchr",  "memchr",
+                                      "find_if", "findindex", "count",    "index",    NULL};
+    return name_in_set(n, set);
+}
+
+// Allocation / growable-append calls: repeated inside a loop is the classic
+// accidental reallocation / string-concat O(n^2). Names are deliberately
+// conservative; meaningless in some languages → simply never matches there.
+static bool is_alloc_name(const char *n) {
+    static const char *const set[] = {"malloc",  "calloc",    "realloc",      "strdup", "strndup",
+                                      "append",  "push_back", "emplace_back", "concat", "strcat",
+                                      "strncat", "push",      "pushback",     NULL};
+    return name_in_set(n, set);
+}
+
+// Count parameters from a signature string like "(int a, Foo* b, cb (*)(int,int))".
+// Fallback for languages where param_names isn't populated (e.g. C keeps only the
+// signature text). Counts commas at the top paren level; treats "()"/"(void)" as 0.
+// Approximate by design (a structural smell, not an exact arity).
+static int count_params_from_signature(const char *sig) {
+    if (!sig) {
+        return 0;
+    }
+    const char *p = sig;
+    while (*p && *p != '(') {
+        p++;
+    }
+    if (*p != '(') {
+        return 0;
+    }
+    p++;
+    const char *list = p;
+    int depth = 0;
+    int commas = 0;
+    bool any = false;
+    for (; *p; p++) {
+        char ch = *p;
+        if (ch == '(' || ch == '[' || ch == '{' || ch == '<') {
+            depth++;
+        } else if (ch == ')') {
+            if (depth == 0) {
+                break;
+            }
+            depth--;
+        } else if (ch == ']' || ch == '}' || ch == '>') {
+            if (depth > 0) {
+                depth--;
+            }
+        } else if (ch == ',' && depth == 0) {
+            commas++;
+        } else if (!isspace((unsigned char)ch)) {
+            any = true;
+        }
+    }
+    if (!any) {
+        return 0; /* "()" */
+    }
+    if (commas == 0) {
+        while (*list == ' ' || *list == '\t') {
+            list++;
+        }
+        if (strncmp(list, "void", 4) == 0 &&
+            (list[4] == ')' || list[4] == ' ' || list[4] == '\0')) {
+            return 0; /* C "(void)" */
+        }
+    }
+    return commas + 1;
 }
 
 // --- Main extraction function ---
@@ -395,7 +636,22 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
             cbm_run_cs_lsp(a, result, source, source_len, root);
         }
     }
+    if (language == CBM_LANG_JAVA) {
+        cbm_run_java_lsp(a, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_KOTLIN) {
+        cbm_run_kotlin_lsp(a, result, source, source_len, root);
+    }
+    if (language == CBM_LANG_RUST) {
+        cbm_run_rust_lsp(a, result, source, source_len, root);
+    }
     atomic_fetch_add(&total_lsp_ns, now_ns() - lsp_start);
+
+    // Calls extracted so far all carry ORIGINAL-source line numbers; the C/C++
+    // preprocessor second pass below appends calls with EXPANDED-source lines,
+    // which must not be used for the def line-range attribution of the bottleneck
+    // metrics. Remember the boundary.
+    int orig_calls_count = result->calls.count;
 
     // Second pass: preprocess C/C++/CUDA and extract additional macro-hidden calls.
     // Defs keep original-source line numbers; only CALLS are extracted from expanded source.
@@ -457,6 +713,97 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
         }
         atomic_fetch_add(&total_preprocess_ns, now_ns() - pp_start);
     }
+
+    // Bottleneck call-context metrics. Each call is attributed to the INNERMOST
+    // enclosing Function/Method def by source-line range (defs and calls in one
+    // CBMFileResult share the same file). Range matching is used instead of
+    // enclosing_func_qn string matching because some grammars (notably C, whose
+    // function_definition has no "name" field) attribute the call's scope to the
+    // module rather than the function — line ranges are unambiguous and
+    // language-agnostic. Bounded per file (defs x calls), not a repo-scale scan.
+    int def_count = result->defs.count;
+    bool *has_self = def_count > 0 ? (bool *)calloc((size_t)def_count, sizeof(bool)) : NULL;
+    bool *has_guarded = def_count > 0 ? (bool *)calloc((size_t)def_count, sizeof(bool)) : NULL;
+
+    // param_count is a standalone structural smell (independent of calls). Prefer
+    // the parsed param_names array; fall back to counting from the signature text
+    // for languages (e.g. C) that populate only the signature.
+    for (int di = 0; di < def_count; di++) {
+        CBMDefinition *d = &result->defs.items[di];
+        int pc = 0;
+        if (d->param_names) {
+            while (d->param_names[pc]) {
+                pc++;
+            }
+        }
+        if (pc == 0 && d->signature) {
+            pc = count_params_from_signature(d->signature);
+        }
+        d->param_count = pc;
+    }
+
+    for (int ci = 0; ci < orig_calls_count; ci++) {
+        const CBMCall *c = &result->calls.items[ci];
+        if (!c->callee_name || c->start_line <= 0) {
+            continue;
+        }
+        // Innermost enclosing Function/Method def by line range (smallest span).
+        int best = -1;
+        int best_span = -1;
+        for (int di = 0; di < def_count; di++) {
+            const CBMDefinition *d = &result->defs.items[di];
+            if (!d->name || !d->label ||
+                (strcmp(d->label, "Function") != 0 && strcmp(d->label, "Method") != 0)) {
+                continue;
+            }
+            if ((int)d->start_line <= c->start_line && c->start_line <= (int)d->end_line) {
+                int span = (int)d->end_line - (int)d->start_line;
+                if (best < 0 || span < best_span) {
+                    best_span = span;
+                    best = di;
+                }
+            }
+        }
+        if (best < 0) {
+            continue;
+        }
+        CBMDefinition *d = &result->defs.items[best];
+        // callee_name may be bare ("recur") or qualified ("pkg.recur", "self.recur")
+        const char *dot = strrchr(c->callee_name, '.');
+        const char *callee_short = dot ? dot + 1 : c->callee_name;
+        bool in_loop = c->loop_depth > 0;
+
+        if (strcmp(callee_short, d->name) == 0) {
+            // Direct self-recursion. The call graph omits self-edges (pass_calls
+            // skips source==target), so detect it here; seeds "recursive".
+            d->is_recursive = true;
+            if (has_self) {
+                has_self[best] = true;
+            }
+            if (in_loop) {
+                d->recursion_in_loop = true; // recursion compounded by a loop
+            }
+            if (c->branch_depth > 0 && has_guarded) {
+                has_guarded[best] = true; // a self-call guarded by some conditional
+            }
+        }
+        if (in_loop && is_linear_scan_name(callee_short)) {
+            d->linear_scan_in_loop++; // hidden O(n^2): linear scan inside a loop
+        }
+        if (in_loop && is_alloc_name(callee_short)) {
+            d->alloc_in_loop++; // repeated allocation/append inside a loop
+        }
+    }
+
+    // Recursive with no self-call guarded by any conditional → no obvious base
+    // case on the recursive path: a stronger "potentially unbounded" signal.
+    for (int di = 0; di < def_count; di++) {
+        if (has_self && has_self[di] && !(has_guarded && has_guarded[di])) {
+            result->defs.items[di].unguarded_recursion = true;
+        }
+    }
+    free(has_self);
+    free(has_guarded);
 
     uint64_t t2 = now_ns();
 

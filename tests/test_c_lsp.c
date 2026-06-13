@@ -606,19 +606,19 @@ TEST(clsp_calls_attributed_to_function_issue220) {
 TEST(clsp_nocrash_issue355_xxhash_header) {
     FILE *fp = fopen("vendored/xxhash/xxhash.h", "rb");
     if (!fp) {
-        SKIP("vendored/xxhash/xxhash.h not found (run from repo root)");
+        FAIL("vendored/xxhash/xxhash.h not found (run from repo root)");
     }
     fseek(fp, 0, SEEK_END);
     long n = ftell(fp);
     fseek(fp, 0, SEEK_SET);
     if (n <= 0) {
         fclose(fp);
-        SKIP("xxhash.h unreadable");
+        FAIL("xxhash.h unreadable");
     }
     char *buf = (char *)malloc((size_t)n + 1);
     if (!buf) {
         fclose(fp);
-        SKIP("oom");
+        FAIL("oom");
     }
     size_t rd = fread(buf, 1, (size_t)n, fp);
     fclose(fp);

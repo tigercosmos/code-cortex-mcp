@@ -1919,6 +1919,56 @@ static void py_walk_if_statement(PyLSPContext* ctx, TSNode if_node) {
     }
 }
 
+/* Map a Python infix operator token to its dunder method name. */
+static const char* py_binop_dunder(const char* op_text) {
+    if (!op_text) return NULL;
+    if (strcmp(op_text, "+") == 0) return "__add__";
+    if (strcmp(op_text, "-") == 0) return "__sub__";
+    if (strcmp(op_text, "*") == 0) return "__mul__";
+    if (strcmp(op_text, "/") == 0) return "__truediv__";
+    if (strcmp(op_text, "//") == 0) return "__floordiv__";
+    if (strcmp(op_text, "%") == 0) return "__mod__";
+    if (strcmp(op_text, "**") == 0) return "__pow__";
+    if (strcmp(op_text, "<<") == 0) return "__lshift__";
+    if (strcmp(op_text, ">>") == 0) return "__rshift__";
+    if (strcmp(op_text, "&") == 0) return "__and__";
+    if (strcmp(op_text, "|") == 0) return "__or__";
+    if (strcmp(op_text, "^") == 0) return "__xor__";
+    if (strcmp(op_text, "@") == 0) return "__matmul__";
+    return NULL;
+}
+
+/* If `recv` is a user-defined NAMED type that defines `dunder`, emit a CALLS
+ * edge to that dunder method (operator-overload / subscript desugaring).  This
+ * models `a + b` → T.__add__ and `s[k]` → T.__getitem__ as calls.
+ *
+ * Requires a typed receiver.  An UNTYPED receiver (e.g. the unannotated
+ * parameter in `def run(s): return s[0]`) is intentionally left unresolved:
+ * guessing the sole class that declares the dunder would mis-resolve ordinary
+ * built-in subscripts/operators (`some_list[0]`, `a + b` on ints) onto an
+ * unrelated user class, so we only resolve when the receiver type is known. */
+static void py_emit_dunder_call(PyLSPContext* ctx, const CBMType* recv, const char* dunder) {
+    if (!recv || recv->kind != CBM_TYPE_NAMED || !dunder) return;
+    const CBMRegisteredFunc* f = py_lookup_attribute(ctx, recv->data.named.qualified_name, dunder);
+    if (f && f->qualified_name) {
+        py_emit_resolved_call(ctx, f->qualified_name, "lsp_operator_dunder", 0.85f);
+        /* A subscript (`s[k]`) / binary_operator (`a + b`) is not a syntactic
+         * `call` node, so the extractor produced no CBMCall for it and the
+         * resolved_call above would never be matched into a CALLS edge. Inject
+         * a synthetic CBMCall keyed on (enclosing_func_qn, short dunder name)
+         * so resolve_file_calls can pair it with the resolved entry. The
+         * resolved callee QN ends in the dunder, so its short name == dunder.
+         * Mirrors rust_inject_syn_call. */
+        if (ctx->syn_calls && ctx->arena && ctx->enclosing_func_qn) {
+            CBMCall call;
+            memset(&call, 0, sizeof(call));
+            call.callee_name = cbm_arena_strdup(ctx->arena, dunder);
+            call.enclosing_func_qn = ctx->enclosing_func_qn;
+            cbm_calls_push(ctx->syn_calls, ctx->arena, call);
+        }
+    }
+}
+
 static void py_resolve_calls_in(PyLSPContext* ctx, TSNode node) {
     if (!ctx || ts_node_is_null(node)) return;
     const char* k = ts_node_type(node);
@@ -1929,6 +1979,26 @@ static void py_resolve_calls_in(PyLSPContext* ctx, TSNode node) {
     // Emit call entry if applicable.
     if (strcmp(k, "call") == 0) {
         py_emit_call_for(ctx, node);
+    }
+
+    // Operator-overload desugaring: `a + b` calls type(a).__add__,
+    // `s[k]` calls type(s).__getitem__.  Only emit when the receiver is a
+    // user-defined type that actually declares the dunder (built-ins resolve
+    // to typeshed and would create noisy edges).
+    if (strcmp(k, "binary_operator") == 0) {
+        TSNode left = ts_node_child_by_field_name(node, "left", 4);
+        TSNode op = ts_node_child_by_field_name(node, "operator", 8);
+        if (!ts_node_is_null(left) && !ts_node_is_null(op)) {
+            const char* dunder = py_binop_dunder(py_node_text(ctx, op));
+            if (dunder) {
+                py_emit_dunder_call(ctx, py_eval_expr_type(ctx, left), dunder);
+            }
+        }
+    } else if (strcmp(k, "subscript") == 0) {
+        TSNode value = ts_node_child_by_field_name(node, "value", 5);
+        if (!ts_node_is_null(value)) {
+            py_emit_dunder_call(ctx, py_eval_expr_type(ctx, value), "__getitem__");
+        }
     }
 
     // if_statement gets special-case narrowing.
@@ -2981,6 +3051,9 @@ void cbm_run_py_lsp(CBMArena* arena, CBMFileResult* result,
 
     PyLSPContext ctx;
     py_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, &result->resolved_calls);
+    /* Let the resolver inject synthetic syntactic calls for operator/subscript
+     * dunder desugaring so those recovered calls reach the CALLS-edge pipeline. */
+    ctx.syn_calls = &result->calls;
 
     for (int i = 0; i < result->imports.count; i++) {
         CBMImport* imp = &result->imports.items[i];

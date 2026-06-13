@@ -429,6 +429,11 @@ int cbm_deduplicate_hops(const cbm_node_hop_t *hops, int hop_count, cbm_node_hop
 
 int cbm_store_get_schema(cbm_store_t *s, const char *project, cbm_schema_info_t *out);
 
+/* Like cbm_store_get_schema but skips per-label/per-type JSON property-key
+ * discovery (json_each scans over every row) — for callers that only need
+ * label/type counts, e.g. get_architecture. */
+int cbm_store_get_schema_counts(cbm_store_t *s, const char *project, cbm_schema_info_t *out);
+
 /* Free a schema info's allocated memory. */
 void cbm_store_schema_free(cbm_schema_info_t *out);
 

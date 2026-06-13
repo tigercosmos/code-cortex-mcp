@@ -1105,9 +1105,27 @@ static const char* builtin_wrapper_class(const char* builtin_name) {
     return NULL;
 }
 
+static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType* recv,
+                                               const char* name);
+
+#define TS_LSP_MAX_MEMBER_DEPTH 64
+
+/* Depth-guarded entry: member lookup recurses through wrapper classes, union
+ * members and registered-type expansion; cyclic type graphs in real-world TS
+ * (microsoft/TypeScript reallyLargeFile.ts) recursed without bound — SIGBUS
+ * stack overflow under endless lookup_member_type frames. Past the cap the
+ * member resolves as unknown — graceful degradation, not a crash. */
+static const CBMType* lookup_member_type(TSLSPContext* ctx, const CBMType* recv, const char* name) {
+    if (!ctx || ctx->member_depth >= TS_LSP_MAX_MEMBER_DEPTH) return cbm_type_unknown();
+    ctx->member_depth++;
+    const CBMType* r = lookup_member_type_inner(ctx, recv, name);
+    ctx->member_depth--;
+    return r;
+}
+
 // Look up a property `name` on a receiver type. Returns the property type or UNKNOWN.
-static const CBMType* lookup_member_type(TSLSPContext* ctx, const CBMType* recv,
-                                         const char* name) {
+static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType* recv,
+                                               const char* name) {
     if (!ctx || !recv || !name) return cbm_type_unknown();
     const CBMType* base = simplify_type(ctx, recv);
     if (!base) return cbm_type_unknown();

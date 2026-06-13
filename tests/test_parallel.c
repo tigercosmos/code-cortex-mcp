@@ -225,7 +225,7 @@ static void parity_teardown(void) {
 /* Node count parity */
 TEST(parallel_node_count) {
     if (ensure_parity_setup() != 0)
-        SKIP("setup failed");
+        FAIL("setup failed");
     int seq = cbm_gbuf_node_count(g_seq_gbuf);
     int par = cbm_gbuf_node_count(g_par_gbuf);
     ASSERT_GT(seq, 0);
@@ -249,7 +249,7 @@ static int assert_edge_type_parity(const char *type) {
 TEST(parallel_calls_parity) {
     int rc = assert_edge_type_parity("CALLS");
     if (rc == -1)
-        SKIP("setup failed");
+        FAIL("setup failed");
     ASSERT_EQ(rc, 0);
     PASS();
 }
@@ -257,7 +257,7 @@ TEST(parallel_calls_parity) {
 TEST(parallel_defines_parity) {
     int rc = assert_edge_type_parity("DEFINES");
     if (rc == -1)
-        SKIP("setup failed");
+        FAIL("setup failed");
     ASSERT_EQ(rc, 0);
     PASS();
 }
@@ -265,7 +265,7 @@ TEST(parallel_defines_parity) {
 TEST(parallel_defines_method_parity) {
     int rc = assert_edge_type_parity("DEFINES_METHOD");
     if (rc == -1)
-        SKIP("setup failed");
+        FAIL("setup failed");
     ASSERT_EQ(rc, 0);
     PASS();
 }
@@ -273,7 +273,7 @@ TEST(parallel_defines_method_parity) {
 TEST(parallel_imports_parity) {
     int rc = assert_edge_type_parity("IMPORTS");
     if (rc == -1)
-        SKIP("setup failed");
+        FAIL("setup failed");
     ASSERT_EQ(rc, 0);
     PASS();
 }
@@ -281,7 +281,7 @@ TEST(parallel_imports_parity) {
 TEST(parallel_usage_parity) {
     int rc = assert_edge_type_parity("USAGE");
     if (rc == -1)
-        SKIP("setup failed");
+        FAIL("setup failed");
     ASSERT_EQ(rc, 0);
     PASS();
 }
@@ -289,7 +289,7 @@ TEST(parallel_usage_parity) {
 TEST(parallel_inherits_parity) {
     int rc = assert_edge_type_parity("INHERITS");
     if (rc == -1)
-        SKIP("setup failed");
+        FAIL("setup failed");
     ASSERT_EQ(rc, 0);
     PASS();
 }
@@ -297,14 +297,14 @@ TEST(parallel_inherits_parity) {
 TEST(parallel_implements_parity) {
     int rc = assert_edge_type_parity("IMPLEMENTS");
     if (rc == -1)
-        SKIP("setup failed");
+        FAIL("setup failed");
     ASSERT_EQ(rc, 0);
     PASS();
 }
 
 TEST(parallel_total_edges) {
     if (ensure_parity_setup() != 0)
-        SKIP("setup failed");
+        FAIL("setup failed");
     int seq = cbm_gbuf_edge_count(g_seq_gbuf);
     int par = cbm_gbuf_edge_count(g_par_gbuf);
     ASSERT_GT(seq, 0);
@@ -485,7 +485,7 @@ TEST(parallel_python_lsp_override_emits_lsp_strategy_edges) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_par_pylsp_XXXXXX");
     if (!cbm_mkdtemp(tmpdir)) {
-        SKIP("mkdtemp failed");
+        FAIL("mkdtemp failed");
     }
 
     /* Single-file scenario: pins the in-file LSP path where py_lsp
@@ -500,7 +500,7 @@ TEST(parallel_python_lsp_override_emits_lsp_strategy_edges) {
     snprintf(fpath0, sizeof(fpath0), "%s/app.py", tmpdir);
     FILE *f = fopen(fpath0, "w");
     if (!f) {
-        SKIP("fopen app.py failed");
+        FAIL("fopen app.py failed");
     }
     fprintf(f, "class Greeter:\n"
                "    def hello(self):\n"
@@ -555,14 +555,14 @@ TEST(parallel_python_lsp_override_cross_file_emits_lsp_strategy_edges) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_par_pylsp_xf_XXXXXX");
     if (!cbm_mkdtemp(tmpdir)) {
-        SKIP("mkdtemp failed");
+        FAIL("mkdtemp failed");
     }
 
     char gpath[512];
     snprintf(gpath, sizeof(gpath), "%s/greeter.py", tmpdir);
     FILE *gf = fopen(gpath, "w");
     if (!gf) {
-        SKIP("fopen greeter.py failed");
+        FAIL("fopen greeter.py failed");
     }
     fprintf(gf, "class Greeter:\n"
                 "    def hello(self):\n"
@@ -575,7 +575,7 @@ TEST(parallel_python_lsp_override_cross_file_emits_lsp_strategy_edges) {
     if (!af) {
         unlink(gpath);
         rmdir(tmpdir);
-        SKIP("fopen app.py failed");
+        FAIL("fopen app.py failed");
     }
     fprintf(af, "from greeter import Greeter\n"
                 "\n"

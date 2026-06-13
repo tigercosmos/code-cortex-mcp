@@ -20,6 +20,8 @@
 #include "lsp/py_lsp.h"
 #include "lsp/ts_lsp.h"
 #include "lsp/php_lsp.h"
+#include "lsp/java_lsp.h"
+#include "lsp/kotlin_lsp.h"
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/constants.h"
 #include "foundation/hash_table.h"
@@ -287,44 +289,55 @@ bool cbm_pxc_has_cross_lsp(CBMLanguage lang) {
     case CBM_LANG_TYPESCRIPT:
     case CBM_LANG_TSX:
     case CBM_LANG_PHP:
+    case CBM_LANG_CSHARP: /* tier-2 prebuilt registry path (pass_parallel.c) */
+    case CBM_LANG_JAVA:   /* fallback cbm_pxc_run_one path */
+    case CBM_LANG_KOTLIN: /* fallback cbm_pxc_run_one path */
         return true;
     default:
         return false;
     }
 }
 
-/* True when (caller_qn, callee_qn) is already present in arr. Mirrors the
- * intra-LSP dedup in py_emit_resolved_call / ts_emit_resolved_call so that
- * cross-file entries duplicating per-file output get dropped at append. */
-static bool pxc_already_resolved(const CBMResolvedCallArray *arr, const char *caller_qn,
-                                 const char *callee_qn) {
-    if (!arr || !caller_qn || !callee_qn)
-        return false;
-    for (int i = 0; i < arr->count; i++) {
-        const CBMResolvedCall *rc = &arr->items[i];
-        if (rc->caller_qn && rc->callee_qn && strcmp(rc->caller_qn, caller_qn) == 0 &&
-            strcmp(rc->callee_qn, callee_qn) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /* Append cross-file results from `src_out` (allocated in a scratch arena
  * about to be destroyed) into `dst_calls` (lives in cache_entry->arena),
  * copying every string field into dst_arena. Skips entries whose
- * (caller_qn, callee_qn) is already in dst_calls — avoids inflating the
- * array with cross-file duplicates of per-file LSP output. */
+ * (caller_qn, callee_qn) is already present — avoids inflating the array with
+ * cross-file duplicates of per-file LSP output.
+ *
+ * Dedup uses a hash set keyed on "caller\x1fcallee", giving O(1) membership.
+ * The previous linear strcmp scan made each append O(n), so a file that
+ * resolved very many cross-calls turned the whole append into O(n^2) and could
+ * peg a core for minutes (observed: an index hung in pxc_append_results/strcmp).
+ * The key strings live in a scratch arena that is destroyed after the table. */
 static void pxc_append_results(CBMArena *dst_arena, CBMResolvedCallArray *dst_calls,
                                const CBMResolvedCallArray *src_out) {
     if (!dst_calls || !src_out)
         return;
+
+    CBMArena keys;
+    cbm_arena_init(&keys);
+    CBMHashTable *seen = cbm_ht_create((uint32_t)(dst_calls->count + src_out->count + 1));
+
+    for (int i = 0; i < dst_calls->count; i++) {
+        const CBMResolvedCall *rc = &dst_calls->items[i];
+        if (rc->caller_qn && rc->callee_qn) {
+            char *k = cbm_arena_sprintf(&keys, "%s\x1f%s", rc->caller_qn, rc->callee_qn);
+            if (k) {
+                cbm_ht_set(seen, k, (void *)(uintptr_t)1);
+            }
+        }
+    }
+
     for (int j = 0; j < src_out->count; j++) {
         const CBMResolvedCall *src = &src_out->items[j];
         if (!src->caller_qn || !src->callee_qn)
             continue;
-        if (pxc_already_resolved(dst_calls, src->caller_qn, src->callee_qn))
+        char *k = cbm_arena_sprintf(&keys, "%s\x1f%s", src->caller_qn, src->callee_qn);
+        if (k && cbm_ht_has(seen, k))
             continue;
+        if (k) {
+            cbm_ht_set(seen, k, (void *)(uintptr_t)1);
+        }
         CBMResolvedCall dst;
         memset(&dst, 0, sizeof(dst));
         dst.caller_qn = cbm_arena_strdup(dst_arena, src->caller_qn);
@@ -334,6 +347,9 @@ static void pxc_append_results(CBMArena *dst_arena, CBMResolvedCallArray *dst_ca
         dst.reason = src->reason ? cbm_arena_strdup(dst_arena, src->reason) : NULL;
         cbm_resolvedcall_push(dst_calls, dst_arena, dst);
     }
+
+    cbm_ht_free(seen);
+    cbm_arena_destroy(&keys);
 }
 
 /* Run cross-file LSP for a single file inside a scratch arena that gets
@@ -377,6 +393,14 @@ void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int
     case CBM_LANG_PHP:
         cbm_run_php_lsp_cross(&scratch, source, source_len, module_qn, defs, def_count, imp_names,
                               imp_qns, imp_count, tree, &out);
+        break;
+    case CBM_LANG_JAVA:
+        cbm_run_java_lsp_cross(&scratch, source, source_len, module_qn, defs, def_count, imp_names,
+                               imp_qns, imp_count, tree, &out);
+        break;
+    case CBM_LANG_KOTLIN:
+        cbm_run_kotlin_lsp_cross(&scratch, source, source_len, module_qn, defs, def_count,
+                                 imp_names, imp_qns, imp_count, tree, &out);
         break;
     default:
         break;

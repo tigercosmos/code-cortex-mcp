@@ -43,6 +43,16 @@ enum { CBM_SEM_SPARSE_NNZE = 8 };
 /* Co-occurrence window half-width. */
 enum { CBM_SEM_WINDOW = 5 };
 
+/* Frequent-token subsampling cap for co-occurrence enrichment. Code token
+ * frequencies are Zipfian — a handful of tokens (int, static, return, …) occur
+ * in 10^4–10^5 functions and dominate the O(occurrences × window × dim) corpus
+ * finalize cost. When a token has more than this many occurrences, we stride-
+ * sample down to ~this count: the enriched vector is L2-normalized afterward, so
+ * an evenly-spaced subsample preserves its *direction* while bounding the work.
+ * Rare/high-IDF (discriminative) tokens fall under the cap and are untouched.
+ * Mirrors word2vec/GloVe frequent-word subsampling. */
+enum { CBM_SEM_MAX_OCCUR = 512 };
+
 /* Default score threshold for SEMANTICALLY_RELATED edge emission.
  * 0.75 balances recall with precision: validated ~95% precision on
  * Linux kernel (0.80 = 100% but only 90 edges, 0.70 = 2047 edges

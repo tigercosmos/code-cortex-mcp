@@ -569,7 +569,7 @@ TEST(parallel_extract_with_slab) {
     cbm_mem_init(0.5);
 
     if (setup_mem_test_repo() != 0) {
-        SKIP("tmpdir setup failed");
+        FAIL("tmpdir setup failed");
     }
 
     cbm_discover_opts_t opts = {.mode = CBM_MODE_FULL};
@@ -577,7 +577,7 @@ TEST(parallel_extract_with_slab) {
     int file_count = 0;
     if (cbm_discover(g_mem_tmpdir, &opts, &files, &file_count) != 0) {
         teardown_mem_test_repo();
-        SKIP("discover failed");
+        FAIL("discover failed");
     }
 
     ASSERT_GTE(file_count, 5);

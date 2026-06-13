@@ -123,8 +123,23 @@ typedef struct {
 int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
                  int *count);
 
+/* Like cbm_discover(), but also reports the directory subtrees that were
+ * skipped during the walk (hardcoded ALWAYS_SKIP/FAST_SKIP dirs + gitignore
+ * matches), so callers can surface which subtrees were dropped (#411).
+ * On success, *excluded_out receives a heap-allocated array of strdup'd
+ * relative directory paths and *excluded_count_out its length; the caller
+ * owns it and must free via cbm_discover_free_excluded(). Pass NULL for
+ * excluded_out (and/or excluded_count_out) to discard the list — the internal
+ * accumulator is freed in that case (no leak).
+ * Returns 0 on success, -1 on error. */
+int cbm_discover_ex(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
+                    int *count, char ***excluded_out, int *excluded_count_out);
+
 /* Free an array of file info results. NULL-safe. */
 void cbm_discover_free(cbm_file_info_t *files, int count);
+
+/* Free the excluded-directory list returned by cbm_discover_ex(). NULL-safe. */
+void cbm_discover_free_excluded(char **excluded, int count);
 
 #ifdef __cplusplus
 }

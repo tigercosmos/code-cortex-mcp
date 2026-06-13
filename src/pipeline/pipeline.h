@@ -70,6 +70,12 @@ const char *cbm_pipeline_project_name(const cbm_pipeline_t *p);
 /* Get the index mode (CBM_MODE_FULL, CBM_MODE_MODERATE, CBM_MODE_FAST). */
 int cbm_pipeline_get_mode(const cbm_pipeline_t *p);
 
+/* Get the list of directory subtrees skipped during discovery (#411).
+ * *out receives a borrowed array of rel-path strings (owned by the pipeline,
+ * valid until cbm_pipeline_free()); *count receives its length. Both are set
+ * to NULL/0 when p is NULL or nothing was excluded. Do not free. */
+void cbm_pipeline_get_excluded(const cbm_pipeline_t *p, char ***out, int *count);
+
 /* ── Index lock (prevents concurrent pipeline runs on same DB) ──── */
 
 /* Try to acquire the global index lock. Returns true if acquired,

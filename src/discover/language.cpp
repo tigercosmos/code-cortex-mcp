@@ -85,6 +85,9 @@ static const ext_entry_t EXT_TABLE[] = {
     {".ex", CBM_LANG_ELIXIR},
     {".exs", CBM_LANG_ELIXIR},
 
+    /* DotEnv */
+    {".env", CBM_LANG_DOTENV},
+
     /* Elm */
     {".elm", CBM_LANG_ELM},
 
@@ -254,6 +257,7 @@ static const ext_entry_t EXT_TABLE[] = {
     {"justfile", CBM_LANG_JUST},
     {"Justfile", CBM_LANG_JUST},
     {".justfile", CBM_LANG_JUST},
+    {".just", CBM_LANG_JUST}, /* `import 'common.just'` target files */
     {"hyprland.conf", CBM_LANG_HYPRLANG},
     {"ssh_config", CBM_LANG_SSHCONFIG},
     {"sshd_config", CBM_LANG_SSHCONFIG},
@@ -261,6 +265,9 @@ static const ext_entry_t EXT_TABLE[] = {
     {"BUILD.bazel", CBM_LANG_STARLARK},
     {"WORKSPACE", CBM_LANG_STARLARK},
     {"WORKSPACE.bazel", CBM_LANG_STARLARK},
+
+    /* BitBake include fragments — `require/include foo.inc` target files. */
+    {".inc", CBM_LANG_BITBAKE},
 
     /* Vue */
     {".vue", CBM_LANG_VUE},
@@ -449,10 +456,8 @@ static const ext_entry_t EXT_TABLE[] = {
     {".ncl", CBM_LANG_NICKEL},
 
     /* Nim */
-    {".nim", CBM_LANG_NIM},
 
     /* Nim */
-    {".nims", CBM_LANG_NIM},
 
     /* Squirrel */
     {".nut", CBM_LANG_SQUIRREL},
@@ -510,6 +515,9 @@ static const ext_entry_t EXT_TABLE[] = {
 
     /* ReScript */
     {".resi", CBM_LANG_RESCRIPT},
+
+    /* Regex */
+    {".re", CBM_LANG_REGEX},
 
     /* Racket */
     {".rkt", CBM_LANG_RACKET},
@@ -651,6 +659,9 @@ static const filename_entry_t FILENAME_TABLE[] = {
     {"requirements-test.txt", CBM_LANG_REQUIREMENTS},
     {"Kconfig", CBM_LANG_KCONFIG},
     {"go.mod", CBM_LANG_GOMOD},
+    {".env", CBM_LANG_DOTENV},
+    {".env.local", CBM_LANG_DOTENV},
+    {".gitattributes", CBM_LANG_GITATTRIBUTES},
 
 };
 
@@ -858,6 +869,15 @@ CBMLanguage cbm_language_for_filename(const char *filename) {
         if (strcmp(FILENAME_TABLE[i].filename, filename) == 0) {
             return FILENAME_TABLE[i].language;
         }
+    }
+
+    /* DotEnv variant filenames (".env.local", ".env.production", …): the
+     * filename starts with ".env." but its last "extension" (e.g. ".local")
+     * is not a real language extension.  Match the dotenv convention used by
+     * pass_envscan/pass_infrascan (".env" exact, ".env." prefix, "*.env"
+     * suffix) so file-index routing agrees with direct extraction. */
+    if (strncmp(filename, ".env.", SLEN(".env.")) == 0) {
+        return CBM_LANG_DOTENV;
     }
 
     /* Fall back to extension-based lookup.

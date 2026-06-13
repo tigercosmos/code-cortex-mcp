@@ -13,6 +13,7 @@
  * Watcher runs in a background thread, polling for git changes.
  * HTTP UI server (optional) runs in a background thread on localhost.
  */
+#include "cbm.h" // cbm_alloc_init — bind 3rd-party allocators to mimalloc before any sqlite/git init
 #include "mcp/mcp.h"
 #include "watcher/watcher.h"
 #include "pipeline/pipeline.h"
@@ -27,6 +28,7 @@ enum {
     MAIN_FLAG_OFF = 5, /* strlen("--ui=") */
     MAIN_PORT_OFF = 7, /* strlen("--port=") */
     MAIN_MAX_PORT = 65536,
+    PARENT_WATCHDOG_STACK_SIZE = 64 * CBM_SZ_1K, /* watchdog only polls — tiny stack suffices */
 };
 #define MAIN_RAM_FRACTION 0.5
 
@@ -34,6 +36,7 @@ enum {
 #include "foundation/log.h"
 #include "foundation/diagnostics.h"
 #include "foundation/platform.h"
+#include "foundation/compat.h"
 #include "foundation/compat_thread.h"
 #include "foundation/mem.h"
 #include "foundation/profile.h"
@@ -58,9 +61,15 @@ static cbm_mcp_server_t *g_server = NULL;
 static cbm_http_server_t *g_http_server = NULL;
 static atomic_int g_shutdown = 0;
 
-static void signal_handler(int sig) {
-    (void)sig;
-    atomic_store(&g_shutdown, 1);
+/* Idempotent shutdown: cancels the active pipeline, stops background servers,
+ * and closes stdin to unblock the MCP read loop. Invoked from the signal
+ * handler and from the parent-death watchdog, hence the atomic_exchange guard
+ * so the body runs at most once. Body is async-signal-safe (only atomic stores
+ * and stop calls that themselves only set atomics). */
+static void request_shutdown(void) {
+    if (atomic_exchange(&g_shutdown, 1)) {
+        return; /* already shutting down */
+    }
 
     /* Cancel any in-progress pipeline (async-signal-safe: only does atomic_store) */
     if (g_server) {
@@ -81,6 +90,43 @@ static void signal_handler(int sig) {
     /* Close stdin to unblock getline in the MCP server loop */
     (void)fclose(stdin);
 }
+
+static void signal_handler(int sig) {
+    (void)sig;
+    request_shutdown();
+}
+
+/* ── Parent-process watchdog ────────────────────────────────────── */
+/* parent-death watchdog — distilled from #407 (fixes #406, thanks @nvt-pankajsharma).
+ *
+ * When this stdio MCP server is launched by an agent that later dies without a
+ * clean SIGTERM (e.g. the editor is force-killed), the orphaned server would
+ * otherwise linger forever blocked on stdin. POSIX has no portable "notify on
+ * parent death" primitive (PR_SET_PDEATHSIG is Linux-only), so we poll getppid:
+ * once the parent dies the process is reparented (ppid changes, typically to 1)
+ * and we shut down. Windows is unaffected (job objects handle this) — #ifndef. */
+
+#ifndef _WIN32
+static void *parent_watchdog_thread(void *arg) {
+    pid_t initial_ppid = *(pid_t *)arg;
+    const unsigned int poll_interval_us = 500000; /* 500ms */
+
+    while (!atomic_load(&g_shutdown)) {
+        cbm_usleep(poll_interval_us);
+        if (atomic_load(&g_shutdown)) {
+            break;
+        }
+        /* initial_ppid > 1 guards against an already-orphaned start (ppid==1),
+         * where a changing ppid carries no signal. */
+        if (initial_ppid > 1 && getppid() != initial_ppid) {
+            cbm_log_warn("parent.exited", "reason", "ppid_changed");
+            request_shutdown();
+            exit(0);
+        }
+    }
+    return NULL;
+}
+#endif
 
 /* ── Watcher background thread ──────────────────────────────────── */
 
@@ -338,11 +384,43 @@ static void setup_signal_handlers(void) {
 }
 
 int main(int argc, char **argv) {
+    /* Defense-in-depth: bind tree-sitter, sqlite3, and libgit2 to mimalloc so a
+     * correct binary does not rely on the fragile MI_OVERRIDE symbol override
+     * (#424). MUST be the VERY FIRST statement: SQLITE_CONFIG_MALLOC has to run
+     * before the first sqlite3_open* (cbm_mcp_server_new → cbm_store_open_memory
+     * below opens sqlite early), else sqlite3_config returns SQLITE_MISUSE and
+     * the bind is silently ignored. No-op in the test build. */
+    cbm_alloc_init();
     cbm_profile_init(); /* reads CBM_PROFILE env var, gates all prof macros */
+    /* CBM_LOG_LEVEL support — distilled from #414 (closes #413). Apply before
+     * the first log statement so the configured level governs all output. */
+    cbm_log_init_from_env();
     int subcmd = handle_subcommand(argc, argv);
     if (subcmd >= 0) {
         return subcmd;
     }
+
+    /* parent-death watchdog — distilled from #407 (fixes #406). Start it early so
+     * an orphaned server exits even if it dies before reaching the MCP loop. A
+     * thread-create failure (or ppid<=1) is non-fatal: the server still runs, it
+     * just won't auto-exit on parent death — same policy as the watcher/HTTP
+     * threads below. We deliberately do NOT exit at startup when ppid<=1 (the PR's
+     * original behaviour): a legitimately-launched server can transiently show
+     * ppid==1 (early reparent races, double-fork/container launchers), and the
+     * watchdog already no-ops safely in that case via its initial_ppid>1 guard. */
+#ifndef _WIN32
+    /* main() outlives the watchdog (it joins before returning), so a stack
+     * local is a valid lifetime for the thread's argument. */
+    pid_t initial_ppid = getppid();
+    cbm_thread_t parent_watchdog_tid;
+    bool parent_watchdog_started = false;
+    if (cbm_thread_create(&parent_watchdog_tid, PARENT_WATCHDOG_STACK_SIZE, parent_watchdog_thread,
+                          &initial_ppid) == 0) {
+        parent_watchdog_started = true;
+    } else {
+        cbm_log_warn("parent.watchdog.unavailable", "reason", "thread_create_failed");
+    }
+#endif
 
     /* Default: MCP server on stdio */
     cbm_mem_init(MAIN_RAM_FRACTION); /* 50% of RAM — safe now because mimalloc tracks ALL
@@ -390,6 +468,12 @@ int main(int argc, char **argv) {
     if (!g_server) {
         cbm_log_error("server.err", "msg", "failed to create server");
         cbm_config_close(runtime_config);
+#ifndef _WIN32
+        if (parent_watchdog_started) {
+            atomic_store(&g_shutdown, 1);
+            cbm_thread_join(&parent_watchdog_tid);
+        }
+#endif
         return SKIP_ONE;
     }
 
@@ -429,9 +513,16 @@ int main(int argc, char **argv) {
 
     /* Run MCP event loop (blocks until EOF or signal) */
     int rc = cbm_mcp_server_run(g_server, stdin, stdout);
+    atomic_store(&g_shutdown, 1); /* unblock the watchdog poll loop */
 
     /* Shutdown */
     cbm_log_info("server.shutdown");
+
+#ifndef _WIN32
+    if (parent_watchdog_started) {
+        cbm_thread_join(&parent_watchdog_tid);
+    }
+#endif
 
     if (http_started) {
         cbm_http_server_stop(g_http_server);

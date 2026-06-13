@@ -343,6 +343,49 @@ TEST(java_class_extends_and_implements) {
     PASS();
 }
 
+/* REPRODUCTION (RED until fixed) — Python `class Animal(Base):` must extract the
+ * BARE base name "Base", but extract_base_classes captures the whole
+ * `superclasses` argument_list text "(Base)" instead: collect_bases_from_field
+ * (internal/cbm/extract_defs.c) matches only type_identifier / generic_type /
+ * qualified_name / scoped_type_identifier / user_type, while tree-sitter-python
+ * uses a plain `identifier` node for the base — so no child matches and the
+ * raw-field fallback grabs the argument_list text "(Base)" (parens included).
+ * DOWNSTREAM SYMPTOM: that malformed name never resolves to the Base class node,
+ * so EVERY Python subclass yields ZERO INHERITS edges (observed in the P6
+ * graph-contract suite). Fix: have collect_bases_from_field accept `identifier`
+ * (or strip the argument_list parens). This test stays RED as the regression
+ * guard / reproduction until the fix lands — see CLAUDE.md "Bug Fixing —
+ * Reproduce-First". */
+TEST(python_class_base_extracted_bare) {
+    CBMFileResult *r = extract("class Base:\n    pass\n\n\nclass Animal(Base):\n    pass\n",
+                               CBM_LANG_PYTHON, "t", "models.py");
+    ASSERT_NOT_NULL(r);
+
+    CBMDefinition *cls = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].label && strcmp(r->defs.items[i].label, "Class") == 0 &&
+            r->defs.items[i].name && strcmp(r->defs.items[i].name, "Animal") == 0) {
+            cls = &r->defs.items[i];
+            break;
+        }
+    }
+    ASSERT_NOT_NULL(cls);
+    ASSERT_NOT_NULL(cls->base_classes); /* a subclass must record at least one base */
+
+    bool saw_bare_base = false;
+    for (const char **b = cls->base_classes; *b; b++) {
+        if (strcmp(*b, "Base") == 0) {
+            saw_bare_base = true;
+        }
+    }
+    /* CURRENTLY FAILS: base_classes holds "(Base)" (argument_list text), not the
+     * bare "Base" needed for INHERITS resolution. */
+    ASSERT_TRUE(saw_bare_base);
+
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- PHP --- */
 TEST(php_class) {
     CBMFileResult *r = extract("<?php\nclass User { public string $name; public function "
@@ -1094,6 +1137,37 @@ TEST(cpp_function) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GTE(r->defs.count, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* --- C++ out-of-line method definitions (#428) ---
+ * A .cpp defining methods of a class declared elsewhere (not in this TU).
+ * Pre-fix these were recorded as free Functions (label "Function", no
+ * parent_class); they must be Methods linked to their enclosing class via
+ * parent_class. (The helper also descends nested scopes `ns::Class::method` to
+ * the immediate class, but tree-sitter-cpp parses a synthetic doubly-qualified
+ * out-of-line def in isolation as an ERROR node, so that path is exercised by
+ * real codebases rather than this isolated unit fixture.) */
+TEST(cpp_out_of_line_method_issue428) {
+    CBMFileResult *r = extract("void Foo::bar() {}\n"
+                               "int Foo::baz() { return 0; }\n",
+                               CBM_LANG_CPP, "t", "foo.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_def(r, "Method", "bar"));
+    ASSERT(has_def(r, "Method", "baz"));
+    ASSERT(!has_def(r, "Function", "bar")); /* not a free function */
+    /* parent_class links to the enclosing class QN */
+    int checked = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->name, "bar") == 0 && strcmp(d->label, "Method") == 0) {
+            ASSERT_NOT_NULL(d->parent_class);
+            ASSERT(strstr(d->parent_class, "Foo") != NULL);
+            checked = 1;
+        }
+    }
+    ASSERT(checked);
     cbm_free_result(r);
     PASS();
 }
@@ -2517,6 +2591,167 @@ TEST(extract_large_ts_has_functions_issue213) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+ * Group: per-function complexity metrics (Tier A — local AST metrics)
+ *
+ * cbm_compute_complexity stamps each Function/Method with cyclomatic,
+ * cognitive, loop_count and loop_depth in the same tree-sitter walk that
+ * extracts the definition. loop_depth (max nested-loop depth) is the
+ * polynomial-degree proxy used as a queryable bottleneck signal.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Return the first definition with the given name, or NULL. */
+static const CBMDefinition *find_def(CBMFileResult *r, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, name) == 0)
+            return &r->defs.items[i];
+    }
+    return NULL;
+}
+
+TEST(complexity_nested_loops_depth) {
+    CBMFileResult *r = extract("package p\n"
+                               "func deepLoops() {\n"
+                               "    for i := 0; i < 10; i++ {\n"
+                               "        for j := 0; j < 10; j++ {\n"
+                               "            for k := 0; k < 10; k++ {\n"
+                               "                doWork()\n"
+                               "            }\n"
+                               "        }\n"
+                               "    }\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "deep.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *d = find_def(r, "deepLoops");
+    ASSERT_NOT_NULL(d);
+    ASSERT_EQ(d->loop_depth, 3); /* three nested for-loops */
+    ASSERT_EQ(d->loop_count, 3);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(complexity_loop_with_branch) {
+    CBMFileResult *r = extract("package p\n"
+                               "func single() {\n"
+                               "    for i := 0; i < 10; i++ {\n"
+                               "        if i > 5 {\n"
+                               "            doWork()\n"
+                               "        }\n"
+                               "    }\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "single.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *d = find_def(r, "single");
+    ASSERT_NOT_NULL(d);
+    ASSERT_EQ(d->loop_depth, 1);
+    ASSERT_EQ(d->loop_count, 1);
+    /* the nested `if` contributes a branch, so cyclomatic > 1 and the
+     * nesting-weighted cognitive score is non-zero. */
+    ASSERT_GT(d->complexity, 1);
+    ASSERT_GT(d->cognitive, 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(complexity_flat_no_loops) {
+    CBMFileResult *r = extract("package p\n"
+                               "func flat() {\n"
+                               "    doWork()\n"
+                               "    doMore()\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "flat.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *d = find_def(r, "flat");
+    ASSERT_NOT_NULL(d);
+    ASSERT_EQ(d->loop_depth, 0);
+    ASSERT_EQ(d->loop_count, 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A linear-scan call (contains) inside a loop → hidden O(n^2) signal. */
+TEST(complexity_linear_scan_in_loop) {
+    CBMFileResult *r = extract("package p\n"
+                               "func scanInLoop(xs []int, t int) bool {\n"
+                               "    for i := 0; i < len(xs); i++ {\n"
+                               "        if contains(xs, t) {\n"
+                               "            return true\n"
+                               "        }\n"
+                               "    }\n"
+                               "    return false\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "scan.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *d = find_def(r, "scanInLoop");
+    ASSERT_NOT_NULL(d);
+    ASSERT_GT(d->linear_scan_in_loop, 0); /* contains() called inside the for-loop */
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Self-call inside a loop, not guarded by any conditional → recursion_in_loop
+ * and unguarded_recursion both set. */
+TEST(complexity_recursion_in_loop_unguarded) {
+    CBMFileResult *r = extract("package p\n"
+                               "func recurInLoop(n int) {\n"
+                               "    for i := 0; i < n; i++ {\n"
+                               "        recurInLoop(n - 1)\n"
+                               "    }\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "recur.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *d = find_def(r, "recurInLoop");
+    ASSERT_NOT_NULL(d);
+    ASSERT_TRUE(d->is_recursive);
+    ASSERT_TRUE(d->recursion_in_loop);
+    ASSERT_TRUE(d->unguarded_recursion); /* no self-call inside a conditional */
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Self-call inside an `if` (a base-case guard) → recursive but NOT unguarded. */
+TEST(complexity_guarded_recursion) {
+    CBMFileResult *r = extract("package p\n"
+                               "func guarded(n int) int {\n"
+                               "    if n > 0 {\n"
+                               "        return guarded(n - 1)\n"
+                               "    }\n"
+                               "    return 0\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "guarded.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *d = find_def(r, "guarded");
+    ASSERT_NOT_NULL(d);
+    ASSERT_TRUE(d->is_recursive);
+    ASSERT_FALSE(d->recursion_in_loop);
+    ASSERT_FALSE(d->unguarded_recursion); /* self-call is guarded by `if n > 0` */
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Deep chained member access + parameter count structure smells. */
+TEST(complexity_access_depth_and_params) {
+    CBMFileResult *r = extract("package p\n"
+                               "func deepAccess(x Foo, a int, b int, c int) int {\n"
+                               "    return x.alpha.beta.gamma.delta\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "access.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *d = find_def(r, "deepAccess");
+    ASSERT_NOT_NULL(d);
+    ASSERT_GT(d->max_access_depth, 2); /* x.alpha.beta.gamma.delta */
+    ASSERT_GTE(d->param_count, 3);     /* x, a, b, c (grouping may vary) */
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -2542,6 +2777,7 @@ SUITE(extraction) {
     RUN_TEST(java_method);
     RUN_TEST(java_interface);
     RUN_TEST(java_class_extends_and_implements);
+    RUN_TEST(python_class_base_extracted_bare);
     RUN_TEST(php_class);
     RUN_TEST(php_function);
     RUN_TEST(ruby_class);
@@ -2617,6 +2853,7 @@ SUITE(extraction) {
     RUN_TEST(rust_enum);
     RUN_TEST(zig_struct);
     RUN_TEST(cpp_function);
+    RUN_TEST(cpp_out_of_line_method_issue428);
     RUN_TEST(cobol_paragraph);
     RUN_TEST(verilog_module);
     RUN_TEST(cuda_kernel);
@@ -2733,6 +2970,15 @@ SUITE(extraction) {
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(extract_large_ts_has_functions_issue213);
+
+    /* Per-function complexity metrics (Tier A) */
+    RUN_TEST(complexity_nested_loops_depth);
+    RUN_TEST(complexity_loop_with_branch);
+    RUN_TEST(complexity_flat_no_loops);
+    RUN_TEST(complexity_linear_scan_in_loop);
+    RUN_TEST(complexity_recursion_in_loop_unguarded);
+    RUN_TEST(complexity_guarded_recursion);
+    RUN_TEST(complexity_access_depth_and_params);
 
     cbm_shutdown();
 }

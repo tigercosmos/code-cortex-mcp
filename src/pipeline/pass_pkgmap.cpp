@@ -14,16 +14,17 @@
 #include "pipeline/pipeline_internal.h"
 #include "discover/discover.h"
 #include "foundation/compat.h"
+#include "foundation/compat_fs.h"
 #include "foundation/constants.h"
 #include "foundation/hash_table.h"
 #include "foundation/log.h"
 #include "foundation/platform.h"
 #include "foundation/str_util.h"
+#include "foundation/win_utf8.h"
 #include "foundation/yaml.h"
 
 #include <yyjson/yyjson.h>
 
-#include <dirent.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,6 +64,13 @@ enum {
     PKGMAP_LINE_BUF = 512,
     PKGMAP_HT_INIT = 64,
     PKGMAP_ITOA_BUF = 16,
+    /* Hard ceiling on recursive directory descent. This is the
+     * non-negotiable termination guarantee for the manifest walk: even
+     * if the filesystem contains directory junctions / symlink cycles
+     * (the documented reason the walk was once disabled on Windows),
+     * descent stops at this depth so the walk can never hang. 64 is far
+     * deeper than any real source tree. */
+    PKGMAP_WALK_MAX_DEPTH = 64,
     /* String lengths for manifest parsing (avoid magic numbers in memcmp) */
     TOML_NAME_LEN = 4,      /* strlen("name") */
     TOML_NAME_SP = 5,       /* strlen("name ") */
@@ -768,6 +776,60 @@ static bool is_pkgmap_manifest_basename(const char *basename) {
     return ends_with(basename, ".gemspec");
 }
 
+/* Stat a path, skipping symlinks. Returns 0 on success, -1 to skip.
+ * On POSIX, lstat + S_ISLNK avoids following symlink cycles. On Windows
+ * we use the UTF-8-safe wide stat (mirroring discover.c's wide_stat);
+ * reparse points (junctions/symlinks) are detected separately by
+ * pkgmap_is_reparse_point below before we descend. Mirrors discover.c's
+ * safe_stat. */
+static int pkgmap_safe_stat(const char *abs_path, struct stat *st) {
+#ifdef _WIN32
+    wchar_t *wpath = cbm_utf8_to_wide(abs_path);
+    if (!wpath) {
+        return CBM_NOT_FOUND;
+    }
+    struct _stat64 wst;
+    int ret = _wstat64(wpath, &wst);
+    free(wpath);
+    if (ret != 0) {
+        return CBM_NOT_FOUND;
+    }
+    st->st_mode = wst.st_mode;
+    st->st_size = wst.st_size;
+    st->st_mtime = wst.st_mtime;
+    return 0;
+#else
+    if (lstat(abs_path, st) != 0) {
+        return CBM_NOT_FOUND;
+    }
+    if (S_ISLNK(st->st_mode)) {
+        return CBM_NOT_FOUND;
+    }
+    return 0;
+#endif
+}
+
+/* True if abs_path is a Windows reparse point (directory junction or
+ * symlink). Following these is the documented cause of the historic CI
+ * hang, so we skip them before recursing. On POSIX this is a no-op
+ * (symlinks are already filtered by pkgmap_safe_stat's S_ISLNK check).
+ * Note: the PKGMAP_WALK_MAX_DEPTH bound below is the hard termination
+ * guarantee; this check is a best-effort early skip on top of it. */
+#ifdef _WIN32
+static bool pkgmap_is_reparse_point(const char *abs_path) {
+    wchar_t *wpath = cbm_utf8_to_wide(abs_path);
+    if (!wpath) {
+        return false;
+    }
+    DWORD attrs = GetFileAttributesW(wpath);
+    free(wpath);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+    return (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+#endif
+
 /* Recursive filesystem walker that finds and parses package manifest
  * files independently of the main discovery filter. The main discovery
  * filter intentionally hides package.json / composer.json etc. from
@@ -777,19 +839,26 @@ static bool is_pkgmap_manifest_basename(const char *basename) {
  * node_modules, .git, build, etc. Returns the number of manifests
  * parsed, accumulated across the whole walk.
  *
- * POSIX-only: lstat + S_ISLNK skipping avoids following symlink cycles.
- * The Windows port (junction-safe descent) is a follow-up; cbm_pkgmap_scan_repo
- * is a no-op on Windows so this is never reached there. */
-#ifndef _WIN32
-static int pkgmap_walk_dir(const char *abs_dir, const char *rel_dir, cbm_pkg_entries_t *entries) {
-    DIR *dir = opendir(abs_dir);
+ * Cross-platform: uses the portable cbm_opendir/cbm_readdir/cbm_closedir
+ * API (same as src/discover/discover.c) and the symlink-skipping
+ * pkgmap_safe_stat. Termination is guaranteed by the PKGMAP_WALK_MAX_DEPTH
+ * recursion bound — even directory junctions / symlink cycles cannot make
+ * it hang. On Windows we additionally skip reparse points before
+ * descending as a best-effort early-out. */
+static int pkgmap_walk_dir(const char *abs_dir, const char *rel_dir, cbm_pkg_entries_t *entries,
+                           int depth) {
+    if (depth >= PKGMAP_WALK_MAX_DEPTH) {
+        cbm_log_info("pkgmap.walk", "depth_cap", rel_dir && rel_dir[0] ? rel_dir : ".");
+        return 0;
+    }
+    cbm_dir_t *dir = cbm_opendir(abs_dir);
     if (!dir) {
         return 0;
     }
     int parsed = 0;
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        const char *name = entry->d_name;
+    cbm_dirent_t *entry;
+    while ((entry = cbm_readdir(dir)) != NULL) {
+        const char *name = entry->name;
         if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'))) {
             continue;
         }
@@ -802,25 +871,23 @@ static int pkgmap_walk_dir(const char *abs_dir, const char *rel_dir, cbm_pkg_ent
             snprintf(rel_path, sizeof(rel_path), "%s", name);
         }
         struct stat st;
-#ifdef _WIN32
-        /* Windows has no lstat/S_ISLNK; symlinks aren't a concern for the
-         * MSYS2 build, so a plain stat is sufficient here. */
-        if (stat(abs_path, &st) != 0) {
+        if (pkgmap_safe_stat(abs_path, &st) != 0) {
             continue;
         }
-#else
-        if (lstat(abs_path, &st) != 0) {
-            continue;
-        }
-        if (S_ISLNK(st.st_mode)) {
-            continue;
-        }
-#endif
         if (S_ISDIR(st.st_mode)) {
             if (cbm_should_skip_dir(name, CBM_MODE_FULL)) {
                 continue;
             }
-            parsed += pkgmap_walk_dir(abs_path, rel_path, entries);
+#ifdef _WIN32
+            /* Don't follow Windows directory junctions — they can form
+             * cycles. The depth bound is the hard guarantee; this just
+             * avoids wasted descent. (POSIX symlinks are already skipped by
+             * pkgmap_safe_stat's S_ISLNK check.) */
+            if (pkgmap_is_reparse_point(abs_path)) {
+                continue;
+            }
+#endif
+            parsed += pkgmap_walk_dir(abs_path, rel_path, entries, depth + 1);
             continue;
         }
         if (!S_ISREG(st.st_mode)) {
@@ -839,35 +906,28 @@ static int pkgmap_walk_dir(const char *abs_dir, const char *rel_dir, cbm_pkg_ent
         }
         free(source);
     }
-    closedir(dir);
+    cbm_closedir(dir);
     return parsed;
 }
-#endif /* !_WIN32 */
 
 /* Scan a repository for package manifest files via the filesystem
  * walker above. Always-available companion to the parallel path's
  * per-worker manifest parsing, which is bound to whatever `files[]`
  * the discoverer produces and therefore misses ignored manifests like
- * package.json. NULL-safe; returns 0 entries when repo_path is unset. */
+ * package.json. NULL-safe; returns 0 entries when repo_path is unset.
+ *
+ * Cross-platform: the walk runs on every platform via pkgmap_walk_dir,
+ * which is depth-bounded (PKGMAP_WALK_MAX_DEPTH) and skips symlinks /
+ * Windows reparse points, so it cannot hang on directory junctions.
+ * This is what lets bare workspace imports (e.g. "@org/pkg" declared in
+ * an ignored package.json) resolve on Windows as well as POSIX. */
 int cbm_pkgmap_scan_repo(const char *repo_path, cbm_pkg_entries_t *entries) {
     if (!repo_path || !entries) {
         return 0;
     }
-#ifdef _WIN32
-    /* The repo-wide manifest walk is POSIX-only for now: on Windows the
-     * recursive descent has hung in CI (no lstat/reparse-point skipping, so
-     * directory junctions can be followed into cycles). Fall back to the
-     * files[]-based pkgmap (baseline behavior) until the walk is made
-     * junction-safe on Windows. Workspace-import resolution from ignored
-     * manifests (package.json) is therefore Linux/macOS-only for now. */
-    (void)entries;
-    cbm_log_info("pkgmap.scan_repo", "skipped", "win32");
-    return 0;
-#else
-    int parsed = pkgmap_walk_dir(repo_path, "", entries);
+    int parsed = pkgmap_walk_dir(repo_path, "", entries, 0);
     cbm_log_info("pkgmap.scan_repo", "manifests", pkgmap_itoa(parsed));
     return parsed;
-#endif
 }
 
 /* Build pkgmap for sequential path (reads manifest files directly) */
@@ -1106,4 +1166,502 @@ char *cbm_pipeline_resolve_module(const cbm_pipeline_ctx_t *ctx, const char *sou
 
     /* 5. Fallthrough to default resolution */
     return cbm_pipeline_fqn_module(ctx->project_name, module_path);
+}
+
+/* ── Import-target node resolver ─────────────────────────────────── */
+
+/* Return the last path segment of an import string, recognizing the separators
+ * used across languages: '.', '/', '\\', and "::".  Returns a pointer into
+ * `path` (no allocation). */
+static const char *import_last_segment(const char *path) {
+    const char *seg = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '.' || *p == '/' || *p == '\\' || *p == ':') {
+            seg = p + 1;
+        }
+    }
+    return seg;
+}
+
+/* Derive a representative imported symbol name from a raw module/use path,
+ * stripping language decorations so it can be matched against an in-graph node:
+ *   - trailing alias " as X"      (Rust/Kotlin)
+ *   - trailing glob "::*" / ".*"  (Rust/Kotlin/Java wildcard)
+ *   - brace groups "{a, b, ...}"  (Rust grouped use) → first member
+ * Writes the result into `out` (size `outsz`) and returns it, or NULL if none.
+ * For grouped/braced forms the first listed symbol is used as the representative
+ * (the tests only require at least one resolved IMPORTS edge per statement). */
+static const char *import_candidate_symbol(const char *module_path, char *out, size_t outsz) {
+    if (!module_path || !module_path[0]) {
+        return NULL;
+    }
+    char buf[1024];
+    snprintf(buf, sizeof(buf), "%s", module_path);
+
+    /* Brace group: `prefix::{a, b}` → take first member `a`. */
+    char *brace = strchr(buf, '{');
+    if (brace) {
+        char *first = brace + 1;
+        char *end = first;
+        while (*end && *end != ',' && *end != '}') {
+            end++;
+        }
+        *end = '\0';
+        /* Trim whitespace. */
+        while (*first == ' ' || *first == '\t') {
+            first++;
+        }
+        char *t = first + strlen(first);
+        while (t > first && (t[-1] == ' ' || t[-1] == '\t')) {
+            *--t = '\0';
+        }
+        if (first[0] && strcmp(first, "self") != 0) {
+            snprintf(out, outsz, "%s", first);
+            return out;
+        }
+        /* `{self, ...}` → fall back to the path before the brace group. */
+        *brace = '\0';
+    }
+
+    /* Strip trailing " as <alias>". */
+    char *as = strstr(buf, " as ");
+    if (as) {
+        *as = '\0';
+    }
+
+    /* Strip trailing glob and separator noise. */
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '*' || buf[len - 1] == ':' || buf[len - 1] == '.' ||
+                       buf[len - 1] == '/' || buf[len - 1] == '\\' || buf[len - 1] == ' ')) {
+        buf[--len] = '\0';
+    }
+    if (!buf[0]) {
+        return NULL;
+    }
+    const char *seg = import_last_segment(buf);
+    if (!seg || !seg[0] || strcmp(seg, "*") == 0) {
+        return NULL;
+    }
+    snprintf(out, outsz, "%s", seg);
+    return out;
+}
+
+/* True for node labels that represent an importable definition (so a symbol-name
+ * fallback does not link to, e.g., a Variable or Field). */
+static bool import_targetable_label(const char *label) {
+    if (!label) {
+        return false;
+    }
+    static const char *ok[] = {"Class", "Interface", "Function", "Method", "Module", "Struct",
+                               "Enum",  "Trait",     "Type",     "File",   NULL};
+    for (const char **l = ok; *l; l++) {
+        if (strcmp(*l, label) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Resolve a sibling-file import: a bare path/name (no leading "./") that names
+ * a file relative to the importer's directory.  This covers build/markup
+ * grammars whose import string is a sibling filename or directory rather than a
+ * dotted module path:
+ *   - SCSS  `@use 'vars'`              → sibling `_vars.scss` (partial underscore)
+ *   - Just  `import 'common.just'`     → sibling `common.just`
+ *   - BitBake `require mypackage.inc`  → sibling `mypackage.inc`
+ *   - Meson `subdir('lib')`            → `lib/meson.build`
+ *   - func  `#include "utils.fc"`      → sibling `utils.fc`
+ *   - Pony  `use "util"`               → sibling `util.pony`
+ * Builds a path relative to source_rel's directory, then looks up the resulting
+ * File/Module-node QN (extension is stripped by fqn_module).  Returns a borrowed
+ * node or NULL.  Several filename conventions are tried in turn. */
+static const cbm_gbuf_node_t *resolve_sibling_file(const cbm_pipeline_ctx_t *ctx,
+                                                   const char *source_rel,
+                                                   const char *source_file_qn,
+                                                   const char *module_path) {
+    if (!module_path || !module_path[0]) {
+        return NULL;
+    }
+    /* Directory of the importing file (empty for repo-root files). */
+    char *dir = path_dirname(source_rel ? source_rel : "");
+    if (!dir) {
+        return NULL;
+    }
+
+    /* Candidate relative paths, in priority order. */
+    char cands[5][PKGMAP_PATH_BUF];
+    int ncand = 0;
+    const char *base = module_path;
+    /* Skip a leading "./". */
+    if (base[0] == '.' && base[1] == '/') {
+        base += 2;
+    }
+    /* 1. Direct sibling: dir/<module_path>. */
+    snprintf(cands[ncand++], PKGMAP_PATH_BUF, "%s%s%s", dir, dir[0] ? "/" : "", base);
+    /* 2. SCSS partial: dir/[subdir/]_<basename>.scss (underscore-prefixed). */
+    {
+        const char *slash = strrchr(base, '/');
+        const char *bn = slash ? slash + 1 : base;
+        char *dpart = slash ? cbm_strndup(base, (size_t)(slash - base)) : strdup("");
+        if (dpart && bn[0] != '_') {
+            snprintf(cands[ncand++], PKGMAP_PATH_BUF, "%s%s%s%s_%s.scss", dir, dir[0] ? "/" : "",
+                     dpart[0] ? dpart : "", dpart[0] ? "/" : "", bn);
+        }
+        free(dpart);
+    }
+    /* 3. Meson subdir: dir/<module_path>/meson.build. */
+    snprintf(cands[ncand++], PKGMAP_PATH_BUF, "%s%s%s/meson.build", dir, dir[0] ? "/" : "", base);
+    /* 4. Basename sibling: dir/<basename(module_path)>.  Covers include paths
+     *    that carry a non-relative prefix (Hyprlang `source = ~/.config/.../x.conf`,
+     *    absolute include paths) but reference a file sitting beside the importer. */
+    {
+        const char *slash = strrchr(base, '/');
+        if (slash && slash[1]) {
+            snprintf(cands[ncand++], PKGMAP_PATH_BUF, "%s%s%s", dir, dir[0] ? "/" : "", slash + 1);
+        }
+    }
+
+    const cbm_gbuf_node_t *found = NULL;
+    for (int i = 0; i < ncand; i++) {
+        char *qn = cbm_pipeline_fqn_module(ctx->project_name, cands[i]);
+        if (!qn) {
+            continue;
+        }
+        const cbm_gbuf_node_t *n = cbm_gbuf_find_by_qn(ctx->gbuf, qn);
+        free(qn);
+        if (n && (!source_file_qn || !n->qualified_name ||
+                  strcmp(n->qualified_name, source_file_qn) != 0)) {
+            found = n;
+            break;
+        }
+    }
+    free(dir);
+    return found;
+}
+
+const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t *ctx,
+                                                        const char *source_rel,
+                                                        const char *source_file_qn,
+                                                        const CBMImport *imp,
+                                                        CBMHashTable *namespace_map) {
+    if (!ctx || !imp || !imp->module_path) {
+        return NULL;
+    }
+
+    /* Strategy 1: module-path resolution → existing node (Python/TS/Go). */
+    char *target_qn = cbm_pipeline_resolve_module(ctx, source_rel, imp->module_path);
+    const cbm_gbuf_node_t *target = target_qn ? cbm_gbuf_find_by_qn(ctx->gbuf, target_qn) : NULL;
+    free(target_qn);
+    if (target) {
+        return target;
+    }
+
+    /* Strategy 1b: sibling-file resolution for build/markup grammars whose
+     * import string is a sibling filename or directory (SCSS partials, Just/
+     * BitBake/func includes, Meson subdir, Pony use). */
+    {
+        const cbm_gbuf_node_t *sib =
+            resolve_sibling_file(ctx, source_rel, source_file_qn, imp->module_path);
+        if (sib) {
+            return sib;
+        }
+    }
+
+    /* Strategy 2: namespace map.  `using App.Utils`, `import com.example.Foo`,
+     * `use App\Utils\Helper` name a NAMESPACE (or a member of it) that the
+     * path-based QN cannot express.  Try the full module path and progressively
+     * shorter prefixes (dropping the trailing member segment) so both a bare
+     * namespace import and a member import resolve to the declaring file. */
+    if (namespace_map) {
+        /* Normalize separators to '.' for namespace keys (PHP uses '\\').
+         * Strip decorations first so `com.example.Util as U`, `crate::ops::*`
+         * and `App\Utils\{A, B}` reduce to a clean dotted path. */
+        char norm[1024];
+        snprintf(norm, sizeof(norm), "%s", imp->module_path);
+        char *brace = strchr(norm, '{');
+        if (brace) {
+            *brace = '\0'; /* drop the group; the prefix is the namespace */
+        }
+        char *as = strstr(norm, " as ");
+        if (as) {
+            *as = '\0';
+        }
+        for (char *p = norm; *p; p++) {
+            if (*p == '\\' || *p == ':' || *p == '/') {
+                *p = '.';
+            }
+        }
+        /* Strip trailing glob/separator noise. */
+        size_t nl = strlen(norm);
+        while (nl > 0 && (norm[nl - 1] == '*' || norm[nl - 1] == '.' || norm[nl - 1] == ' ')) {
+            norm[--nl] = '\0';
+        }
+        /* Collapse any "::"-induced empty segments ("a..b" → "a.b"). */
+        for (;;) {
+            char *dd = strstr(norm, "..");
+            if (!dd) {
+                break;
+            }
+            memmove(dd, dd + 1, strlen(dd + 1) + 1);
+        }
+        for (;;) {
+            /* The map value is a '\n'-delimited list of __file__ QNs declaring
+             * this namespace. Return the FIRST that is not the importing file,
+             * so a same-package wildcard import (`import com.example.*` from a
+             * file that is itself in com.example) resolves to a sibling — and
+             * deterministically, independent of file-iteration order across
+             * platforms (amd64 vs arm64). */
+            const char *list = (const char *)cbm_ht_get(namespace_map, norm);
+            for (const char *seg = list; seg && *seg;) {
+                const char *eol = strchr(seg, '\n');
+                size_t len = eol ? (size_t)(eol - seg) : strlen(seg);
+                char qbuf[1024];
+                if (len > 0 && len < sizeof(qbuf)) {
+                    memcpy(qbuf, seg, len);
+                    qbuf[len] = '\0';
+                    const cbm_gbuf_node_t *n = cbm_gbuf_find_by_qn(ctx->gbuf, qbuf);
+                    if (n && (!source_file_qn || strcmp(n->qualified_name, source_file_qn) != 0)) {
+                        return n;
+                    }
+                }
+                seg = eol ? eol + 1 : NULL;
+            }
+            char *dot = strrchr(norm, '.');
+            if (!dot) {
+                break;
+            }
+            *dot = '\0';
+        }
+    }
+
+    /* Strategy 3: symbol-name fallback.  Derive a representative imported
+     * symbol (handling alias / glob / grouped forms) and match it against an
+     * in-graph definition of the same simple name in another file
+     * (Rust `helper`, Java `Util`, Kotlin grouped, ...). */
+    char symbuf[256];
+    /* Prefer the clean candidate from the module path; the local_name may be an
+     * alias (Rust `as h`, Kotlin `as U`) that names no real symbol. */
+    const char *seg = import_candidate_symbol(imp->module_path, symbuf, sizeof(symbuf));
+    if (!seg && imp->local_name && imp->local_name[0] && strcmp(imp->local_name, "*") != 0) {
+        seg = imp->local_name;
+    }
+    /* Build the candidate symbol list: the derived symbol plus, when the import
+     * is a dotted member path like `com.example.Config.DEFAULT`, the enclosing
+     * type segments (`Config`).  This resolves object/class-member imports to
+     * the declaring type when the leaf member isn't an importable node. */
+    const char *cands[8];
+    int ncands = 0;
+    if (seg && seg[0] && strcmp(seg, "*") != 0) {
+        cands[ncands++] = seg;
+    }
+    {
+        /* Strip decorations, normalize separators to '.', and collect the
+         * trailing path segments (last first) as fallback candidates. */
+        char mp[1024];
+        snprintf(mp, sizeof(mp), "%s", imp->module_path);
+        char *br = strchr(mp, '{');
+        if (br) {
+            *br = '\0';
+        }
+        char *as3 = strstr(mp, " as ");
+        if (as3) {
+            *as3 = '\0';
+        }
+        for (char *p = mp; *p; p++) {
+            if (*p == '\\' || *p == ':' || *p == '/') {
+                *p = '.';
+            }
+        }
+        /* Walk segments from the end. */
+        char *end = mp + strlen(mp);
+        while (end > mp && ncands < 8) {
+            char *dot = NULL;
+            for (char *p = end - 1; p >= mp; p--) {
+                if (*p == '.') {
+                    dot = p;
+                    break;
+                }
+            }
+            const char *s = dot ? dot + 1 : mp;
+            if (s[0] && strcmp(s, "*") != 0) {
+                bool dup = false;
+                for (int k = 0; k < ncands; k++) {
+                    if (strcmp(cands[k], s) == 0) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    cands[ncands++] = s;
+                }
+            }
+            if (!dot) {
+                break;
+            }
+            *dot = '\0';
+            end = dot;
+        }
+        for (int ci = 0; ci < ncands; ci++) {
+            const cbm_gbuf_node_t **hits = NULL;
+            int n = 0;
+            if (cbm_gbuf_find_by_name(ctx->gbuf, cands[ci], &hits, &n) == 0 && hits) {
+                for (int i = 0; i < n; i++) {
+                    const cbm_gbuf_node_t *cand = hits[i];
+                    if (!cand || !import_targetable_label(cand->label)) {
+                        continue;
+                    }
+                    if (source_file_qn && cand->qualified_name &&
+                        strcmp(cand->qualified_name, source_file_qn) == 0) {
+                        continue; /* self */
+                    }
+                    return cand;
+                }
+            }
+        }
+    }
+
+    /* Strategy 4: crate-relative module path → File/Module node.  Rust glob
+     * `use crate::ops::*` names a module, not a symbol; strip the glob and the
+     * `crate::`/`self::`/`super::` prefix, convert `::`→`/`, then resolve the
+     * remaining path (and successive prefixes) to a Module/File node. */
+    {
+        char mp[1024];
+        snprintf(mp, sizeof(mp), "%s", imp->module_path);
+        char *brace = strchr(mp, '{');
+        if (brace) {
+            *brace = '\0';
+        }
+        char *as2 = strstr(mp, " as ");
+        if (as2) {
+            *as2 = '\0';
+        }
+        /* Convert "::" → "/" (drop the doubled colon cleanly). */
+        char clean[1024];
+        size_t ci = 0;
+        for (const char *p = mp; *p && ci + 1 < sizeof(clean); p++) {
+            if (*p == ':') {
+                if (ci > 0 && clean[ci - 1] == '/') {
+                    continue; /* collapse "::" → single "/" */
+                }
+                clean[ci++] = '/';
+            } else if (*p == '*' || *p == ' ') {
+                continue;
+            } else {
+                clean[ci++] = *p;
+            }
+        }
+        clean[ci] = '\0';
+        /* Drop trailing slashes. */
+        while (ci > 0 && clean[ci - 1] == '/') {
+            clean[--ci] = '\0';
+        }
+        /* Strip a leading crate-relative prefix. */
+        const char *body = clean;
+        static const char *prefixes[] = {"crate/", "self/", "super/", NULL};
+        for (const char **pf = prefixes; *pf; pf++) {
+            size_t pl = strlen(*pf);
+            if (strncmp(body, *pf, pl) == 0) {
+                body += pl;
+                break;
+            }
+        }
+        if (body[0]) {
+            char work[1024];
+            snprintf(work, sizeof(work), "%s", body);
+            for (;;) {
+                char *rqn = cbm_pipeline_resolve_module(ctx, source_rel, work);
+                const cbm_gbuf_node_t *n = rqn ? cbm_gbuf_find_by_qn(ctx->gbuf, rqn) : NULL;
+                free(rqn);
+                if (n && (!source_file_qn || !n->qualified_name ||
+                          strcmp(n->qualified_name, source_file_qn) != 0)) {
+                    return n;
+                }
+                char *sl = strrchr(work, '/');
+                if (!sl) {
+                    break;
+                }
+                *sl = '\0';
+            }
+        }
+    }
+
+    return NULL;
+}
+
+/* ── Namespace map ───────────────────────────────────────────────── */
+
+CBMHashTable *cbm_pipeline_namespace_map_build(const char *project_name,
+                                               CBMFileResult *const *results,
+                                               const char *const *rels, int count) {
+    CBMHashTable *map = NULL;
+    for (int i = 0; i < count; i++) {
+        const CBMFileResult *r = results[i];
+        if (!r || !r->namespace_name || !r->namespace_name[0] || !rels[i]) {
+            continue;
+        }
+        if (!map) {
+            map = cbm_ht_create(CBM_SZ_64);
+            if (!map) {
+                return NULL;
+            }
+        }
+        char *file_qn = cbm_pipeline_fqn_compute(project_name, rels[i], "__file__");
+        if (!file_qn) {
+            continue;
+        }
+        /* Normalize the namespace key to dot-separated form so it matches the
+         * dot-normalized lookups in cbm_pipeline_resolve_import_node (PHP uses
+         * '\\', some grammars '::' or '/'). */
+        char *key = strdup(r->namespace_name);
+        if (!key) {
+            free(file_qn);
+            continue;
+        }
+        for (char *p = key; *p; p++) {
+            if (*p == '\\' || *p == ':' || *p == '/') {
+                *p = '.';
+            }
+        }
+        /* Store ALL files declaring a namespace as a '\n'-delimited list so the
+         * resolver can pick a non-importer sibling (see resolve loop). The hash
+         * table does not copy keys, so the strdup'd key is owned by the map and
+         * freed in ns_map_free_entry. */
+        if (!cbm_ht_has(map, key)) {
+            cbm_ht_set(map, key, file_qn); /* map owns key + file_qn */
+        } else {
+            /* Append to the existing list. Re-key with the STORED key pointer
+             * (not our fresh strdup) so the map's key pointer never changes —
+             * otherwise Verstable would adopt the new key and our free(key)
+             * below would free the live key (use-after-free). */
+            const char *stored_key = cbm_ht_get_key(map, key);
+            const char *cur = (const char *)cbm_ht_get(map, key);
+            char *combined = NULL;
+            if (stored_key && cur) {
+                size_t need = strlen(cur) + 1 + strlen(file_qn) + 1;
+                combined = (char *)malloc(need);
+                if (combined) {
+                    snprintf(combined, need, "%s\n%s", cur, file_qn);
+                    void *prev = cbm_ht_set(map, stored_key, combined);
+                    free(prev); /* old value string */
+                }
+            }
+            free(key);     /* our fresh strdup — never stored */
+            free(file_qn); /* content copied into combined */
+        }
+    }
+    return map;
+}
+
+static void ns_map_free_entry(const char *key, void *value, void *ud) {
+    (void)ud;
+    free((void *)key); /* strdup'd in cbm_pipeline_namespace_map_build */
+    free(value);
+}
+
+void cbm_pipeline_namespace_map_free(CBMHashTable *map) {
+    if (!map) {
+        return;
+    }
+    cbm_ht_foreach(map, ns_map_free_entry, NULL);
+    cbm_ht_free(map);
 }

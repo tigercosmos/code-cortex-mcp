@@ -11,6 +11,22 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Canonicalize a Windows drive letter to upper-case in place: "c:/x" -> "C:/x".
+ * Windows drive letters are case-insensitive, but a lowercase one (as agent
+ * CWDs often report, e.g. Claude Code's "c:\...") otherwise produces a distinct
+ * project key ("c-..." vs "C-...") and, on a case-insensitive FS, a colliding
+ * cache file that clobbers the good index (#227/#367/#394). Folding to a single
+ * canonical form here — at the one path-normalization choke point — keeps the
+ * project key, cache file and integrity check consistent regardless of case.
+ * Only the strict drive-root form `X:/` or bare `X:` is touched, so ordinary
+ * POSIX paths (which never start that way) are unaffected. */
+static void cbm_canonicalize_drive(char *path) {
+    if (path && path[0] >= 'a' && path[0] <= 'z' && path[1] == ':' &&
+        (path[2] == '/' || path[2] == '\0')) {
+        path[0] = (char)(path[0] - 'a' + 'A');
+    }
+}
+
 #ifdef _WIN32
 
 /* ── Windows implementation ───────────────────────────────────── */
@@ -133,6 +149,7 @@ char *cbm_normalize_path_sep(char *path) {
                 *p = '/';
             }
         }
+        cbm_canonicalize_drive(path);
     }
     return path;
 }
@@ -262,6 +279,7 @@ char *cbm_normalize_path_sep(char *path) {
                 *p = '/';
             }
         }
+        cbm_canonicalize_drive(path);
     }
     return path;
 }

@@ -209,7 +209,33 @@ typedef struct {
     cbm_file_info_t *files;
     int count;
     int capacity;
+    /* Directories skipped during the walk (rel paths), so callers can surface
+     * which subtrees were dropped (#411). strdup'd; freed by the caller via
+     * cbm_discover_free_excluded or internally when not requested. */
+    char **excluded;
+    int excluded_count;
+    int excluded_cap;
 } file_list_t;
+
+static void file_list_add_excluded(file_list_t *fl, const char *rel_path) {
+    if (!rel_path || rel_path[0] == '\0') {
+        return;
+    }
+    if (fl->excluded_count >= fl->excluded_cap) {
+        int new_cap = fl->excluded_cap ? fl->excluded_cap * PAIR_LEN : CBM_SZ_64;
+        char **grown = (char **)realloc(fl->excluded, new_cap * sizeof(char *));
+        if (!grown) {
+            return;
+        }
+        fl->excluded = grown;
+        fl->excluded_cap = new_cap;
+    }
+    char *copy = strdup(rel_path);
+    if (!copy) {
+        return;
+    }
+    fl->excluded[fl->excluded_count++] = copy;
+}
 
 static void fl_add(file_list_t *fl, const char *abs_path, const char *rel_path, CBMLanguage lang,
                    int64_t size) {
@@ -434,6 +460,9 @@ static void walk_dir_process_entry(cbm_dirent_t *entry, const walk_frame_t *fram
         if (!should_skip_directory(entry->name, rel_path, opts, gitignore, cbmignore,
                                    frame->local_gi, frame->local_gi_prefix)) {
             walk_push_subdir(stack, top, abs_path, rel_path, frame);
+        } else {
+            /* Record the excluded subtree root so callers can report it (#411). */
+            file_list_add_excluded(out, rel_path);
         }
     } else if (S_ISREG(st.st_mode)) {
         walk_dir_process_file(abs_path, rel_path, entry->name, opts, gitignore, cbmignore,
@@ -493,6 +522,17 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
 
 int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
                  int *count) {
+    return cbm_discover_ex(repo_path, opts, out, count, NULL, NULL);
+}
+
+int cbm_discover_ex(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
+                    int *count, char ***excluded_out, int *excluded_count_out) {
+    if (excluded_out) {
+        *excluded_out = NULL;
+    }
+    if (excluded_count_out) {
+        *excluded_count_out = 0;
+    }
     if (!repo_path || !out || !count) {
         return CBM_NOT_FOUND;
     }
@@ -535,6 +575,16 @@ int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_fil
 
     *out = fl.files;
     *count = fl.count;
+
+    /* Hand the excluded-dir list to the caller, or free it if not requested. */
+    if (excluded_out) {
+        *excluded_out = fl.excluded;
+        if (excluded_count_out) {
+            *excluded_count_out = fl.excluded_count;
+        }
+    } else {
+        cbm_discover_free_excluded(fl.excluded, fl.excluded_count);
+    }
     return 0;
 }
 
@@ -547,4 +597,14 @@ void cbm_discover_free(cbm_file_info_t *files, int count) {
         free(files[i].rel_path);
     }
     free(files);
+}
+
+void cbm_discover_free_excluded(char **excluded, int count) {
+    if (!excluded) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        free(excluded[i]);
+    }
+    free(excluded);
 }

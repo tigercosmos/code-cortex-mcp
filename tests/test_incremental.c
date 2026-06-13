@@ -2829,10 +2829,6 @@ SUITE(incremental) {
         return;
     }
 
-    int skip_perf = (getenv("CBM_SKIP_PERF") != NULL &&
-                     getenv("CBM_SKIP_PERF")[0] != '0' &&
-                     getenv("CBM_SKIP_PERF")[0] != '\0');
-
     /* Phase 1: Full index baseline (needed for tool tests below) */
     RUN_TEST(incr_full_index);
     RUN_TEST(incr_full_has_functions);
@@ -2860,39 +2856,35 @@ SUITE(incremental) {
         g_full_imports = get_edge_count_by_type("IMPORTS");
     }
 
-    if (!skip_perf) {
-        /* Phase 2: Noop */
-        RUN_TEST(incr_noop_reindex);
+    /* Phase 2: Noop */
+    RUN_TEST(incr_noop_reindex);
 
-        /* Phase 3: Incremental deltas */
-        RUN_TEST(incr_modify_file);
-        RUN_TEST(incr_formatter_run);
-        RUN_TEST(incr_add_file);
-        RUN_TEST(incr_delete_file);
-        RUN_TEST(incr_simultaneous_changes);
+    /* Phase 3: Incremental deltas */
+    RUN_TEST(incr_modify_file);
+    RUN_TEST(incr_formatter_run);
+    RUN_TEST(incr_add_file);
+    RUN_TEST(incr_delete_file);
+    RUN_TEST(incr_simultaneous_changes);
 
-        /* Phase 4: Adversarial */
-        RUN_TEST(incr_empty_file);
-        RUN_TEST(incr_syntax_error);
-        RUN_TEST(incr_huge_single_function);
-        RUN_TEST(incr_binary_content);
-        RUN_TEST(incr_large_generated);
-        RUN_TEST(incr_new_subdir);
+    /* Phase 4: Adversarial */
+    RUN_TEST(incr_empty_file);
+    RUN_TEST(incr_syntax_error);
+    RUN_TEST(incr_huge_single_function);
+    RUN_TEST(incr_binary_content);
+    RUN_TEST(incr_large_generated);
+    RUN_TEST(incr_new_subdir);
 
-        /* Phase 5: Stress */
-        RUN_TEST(incr_rapid_reindex);
-        RUN_TEST(incr_replace_file_content);
-        RUN_TEST(incr_batch_add_delete);
+    /* Phase 5: Stress */
+    RUN_TEST(incr_rapid_reindex);
+    RUN_TEST(incr_replace_file_content);
+    RUN_TEST(incr_batch_add_delete);
 
-        /* Phase 6: Recovery + accuracy */
-        RUN_TEST(incr_db_deleted_recovery);
-        RUN_TEST(incr_accuracy_vs_full);
+    /* Phase 6: Recovery + accuracy */
+    RUN_TEST(incr_db_deleted_recovery);
+    RUN_TEST(incr_accuracy_vs_full);
 
-        /* Phase 7: Performance regression */
-        RUN_TEST(incr_perf_single_file_fast);
-    } else {
-        printf("  [phases 2-7 SKIPPED — CBM_SKIP_PERF=1]\n");
-    }
+    /* Phase 7: Performance regression */
+    RUN_TEST(incr_perf_single_file_fast);
 
     /* Phase 8: list_projects + index_status + schema */
     RUN_TEST(tool_list_projects_basic);

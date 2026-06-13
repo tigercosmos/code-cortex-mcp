@@ -7,6 +7,8 @@
 #include "extract_node_stack.h"
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include <stdint.h>          // uint32_t
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 
@@ -147,6 +149,79 @@ static char *resolve_chained_selector(CBMArena *a, TSNode sel, const char *sourc
     return method;
 }
 
+// Strip a trailing generic argument list ("<...>" / "[...]") from a type name,
+// returning the bare type identifier. Mutates an arena-owned copy in place.
+static char *strip_generic_args(char *t) {
+    if (!t) {
+        return NULL;
+    }
+    char *angle = strchr(t, '<');
+    if (angle) {
+        *angle = '\0';
+    }
+    char *brack = strchr(t, '[');
+    if (brack) {
+        *brack = '\0';
+    }
+    return t;
+}
+
+// Pull the constructed type name out of a constructor/instantiation node:
+//   new_expression               (TS/JS)  -> `constructor`/`type` field or first type child
+//   object_creation_expression   (Java/C#/PHP) -> `type` field or first type child
+//   instance_expression          (Scala)  -> nested type in the wrapped type/call
+// Returns the bare type name (generic args stripped) or NULL if not a
+// constructor node / no type found. Constructor calls resolve to the class's
+// constructor (or the class node) downstream, producing a CALLS edge.
+static char *extract_constructor_callee(CBMArena *a, TSNode node, const char *source,
+                                        const char *nk) {
+    if (strcmp(nk, "new_expression") != 0 && strcmp(nk, "object_creation_expression") != 0 &&
+        strcmp(nk, "instance_expression") != 0) {
+        return NULL;
+    }
+
+    // Preferred: explicit fields used by the various grammars.
+    static const char *type_fields[] = {"constructor", "type", "name", NULL};
+    for (const char **f = type_fields; *f; f++) {
+        TSNode tn = ts_node_child_by_field_name(node, *f, (uint32_t)strlen(*f));
+        if (!ts_node_is_null(tn)) {
+            const char *tk = ts_node_type(tn);
+            // For a generic_type wrapper, descend to the bare name child.
+            if (strcmp(tk, "generic_type") == 0 && ts_node_named_child_count(tn) > 0) {
+                tn = ts_node_named_child(tn, 0);
+            }
+            char *t = strip_generic_args(cbm_node_text(a, tn, source));
+            if (t && t[0]) {
+                return t;
+            }
+        }
+    }
+
+    // Fallback: first type-like named child (covers grammars that don't expose
+    // a field, e.g. Scala's instance_expression wraps the type directly).
+    uint32_t nc = ts_node_named_child_count(node);
+    for (uint32_t i = 0; i < nc; i++) {
+        TSNode child = ts_node_named_child(node, i);
+        const char *ck = ts_node_type(child);
+        if (strcmp(ck, "type_identifier") == 0 || strcmp(ck, "identifier") == 0 ||
+            strcmp(ck, "qualified_name") == 0 || strcmp(ck, "scoped_type_identifier") == 0 ||
+            strcmp(ck, "qualified_identifier") == 0 || strcmp(ck, "name") == 0 ||
+            strcmp(ck, "type") == 0 || strcmp(ck, "generic_type") == 0 ||
+            strcmp(ck, "simple_type") == 0 || strcmp(ck, "stable_type_identifier") == 0 ||
+            strcmp(ck, "user_type") == 0) {
+            // Descend through a generic_type wrapper to the bare name.
+            if (strcmp(ck, "generic_type") == 0 && ts_node_named_child_count(child) > 0) {
+                child = ts_node_named_child(child, 0);
+            }
+            char *t = strip_generic_args(cbm_node_text(a, child, source));
+            if (t && t[0]) {
+                return t;
+            }
+        }
+    }
+    return NULL;
+}
+
 // Try common field-based callee resolution (function, name, method fields).
 static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *source) {
     // Try "function" field
@@ -161,7 +236,10 @@ static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *so
             strcmp(fk, "field_expression") == 0 || strcmp(fk, "dot") == 0 ||
             strcmp(fk, "function") == 0 || strcmp(fk, "dotted_identifier") == 0 ||
             strcmp(fk, "member_access_expression") == 0 || strcmp(fk, "scoped_identifier") == 0 ||
-            strcmp(fk, "qualified_identifier") == 0) {
+            strcmp(fk, "qualified_identifier") == 0 ||
+            /* ReScript: call_expression `function` field is a value_identifier
+             * (or value_identifier_path for module-qualified calls). */
+            strcmp(fk, "value_identifier") == 0 || strcmp(fk, "value_identifier_path") == 0) {
             return cbm_node_text(a, func_node, source);
         }
         // R member call: module$fn() — function node is an extract_operator
@@ -324,10 +402,181 @@ static char *extract_erlang_callee(CBMArena *a, TSNode node, const char *source,
     return cbm_node_text(a, ts_node_child(node, 0), source);
 }
 
+// Lisp dialects: a call is a list (`list` / `list_lit`) whose head (first named
+// child) is the function symbol (`symbol` / `sym_lit`). Generic field/first-child
+// extraction misses it because the head is not an `identifier` node.
+static char *extract_lisp_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
+    if (strcmp(nk, "list") != 0 && strcmp(nk, "list_lit") != 0) {
+        return NULL;
+    }
+    if (ts_node_named_child_count(node) > 0) {
+        TSNode head = ts_node_named_child(node, 0);
+        const char *hk = ts_node_type(head);
+        if (strcmp(hk, "symbol") == 0 || strcmp(hk, "sym_lit") == 0 ||
+            strcmp(hk, "identifier") == 0) {
+            return cbm_node_text(a, head, source);
+        }
+    }
+    return NULL;
+}
+
+// F#: application_expression head is a long_identifier_or_op wrapper, not a bare
+// identifier, so extract_fp_callee's accepted-type list would miss it.
+static char *extract_fsharp_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
+    if (strcmp(nk, "application_expression") != 0 || ts_node_named_child_count(node) == 0) {
+        return NULL;
+    }
+    TSNode head = ts_node_named_child(node, 0);
+    const char *hk = ts_node_type(head);
+    if (strcmp(hk, "long_identifier_or_op") == 0 || strcmp(hk, "long_identifier") == 0 ||
+        strcmp(hk, "identifier") == 0) {
+        return cbm_node_text(a, head, source);
+    }
+    return NULL;
+}
+
+// PowerShell: a `command` node's callee is its `command_name` child.
+static char *extract_powershell_callee(CBMArena *a, TSNode node, const char *source,
+                                       const char *nk) {
+    if (strcmp(nk, "command") != 0) {
+        return NULL;
+    }
+    uint32_t n = ts_node_named_child_count(node);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode c = ts_node_named_child(node, i);
+        if (strcmp(ts_node_type(c), "command_name") == 0) {
+            return cbm_node_text(a, c, source);
+        }
+    }
+    return NULL;
+}
+
+// Ada: procedure_call_statement / function_call carry the callee in a `name` field.
+static char *extract_ada_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
+    if (strcmp(nk, "procedure_call_statement") != 0 && strcmp(nk, "function_call") != 0) {
+        return NULL;
+    }
+    TSNode name = ts_node_child_by_field_name(node, TS_FIELD("name"));
+    if (!ts_node_is_null(name)) {
+        return cbm_node_text(a, name, source);
+    }
+    if (ts_node_named_child_count(node) > 0) {
+        TSNode head = ts_node_named_child(node, 0);
+        const char *hk = ts_node_type(head);
+        if (strcmp(hk, "name") == 0 || strcmp(hk, "identifier") == 0) {
+            return cbm_node_text(a, head, source);
+        }
+    }
+    return NULL;
+}
+
+// Solidity: a call_expression's callee is on the `function` field, wrapped in an
+// `expression` node (call_expression -> function:expression -> identifier). Descend
+// left-most through expression wrappers until we reach the identifier/member.
+static char *extract_solidity_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
+    if (strcmp(nk, "call_expression") != 0 && strcmp(nk, "call") != 0) {
+        return NULL;
+    }
+    TSNode head = ts_node_child_by_field_name(node, TS_FIELD("function"));
+    if (ts_node_is_null(head) && ts_node_named_child_count(node) > 0) {
+        head = ts_node_named_child(node, 0);
+    }
+    // Unwrap nested `expression` wrappers down to the callee identifier/member.
+    for (int depth = 0; depth < 4 && !ts_node_is_null(head); depth++) {
+        const char *hk = ts_node_type(head);
+        if (strcmp(hk, "identifier") == 0 || strcmp(hk, "member_expression") == 0 ||
+            strcmp(hk, "member_access") == 0) {
+            return cbm_node_text(a, head, source);
+        }
+        if (strcmp(hk, "expression") == 0 && ts_node_named_child_count(head) > 0) {
+            head = ts_node_named_child(head, 0);
+            continue;
+        }
+        break;
+    }
+    return NULL;
+}
+
+// Groovy: function_call's first named child is the callee identifier (the generic
+// first-child fallback misses it because child 0 is anonymous).
+static char *extract_groovy_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
+    if (strcmp(nk, "function_call") != 0 && strcmp(nk, "juxt_function_call") != 0) {
+        return NULL;
+    }
+    if (ts_node_named_child_count(node) > 0) {
+        TSNode head = ts_node_named_child(node, 0);
+        if (!ts_node_is_null(head) && strcmp(ts_node_type(head), "identifier") == 0) {
+            return cbm_node_text(a, head, source);
+        }
+    }
+    return NULL;
+}
+
+// WGSL: callee is nested type_constructor_or_function_call_expression ->
+// type_declaration -> identifier. Descend left-most until an identifier.
+static char *extract_wgsl_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
+    if (strcmp(nk, "type_constructor_or_function_call_expression") != 0) {
+        return NULL;
+    }
+    TSNode head = node;
+    while (ts_node_named_child_count(head) > 0 && strcmp(ts_node_type(head), "identifier") != 0) {
+        head = ts_node_named_child(head, 0);
+    }
+    if (strcmp(ts_node_type(head), "identifier") == 0) {
+        return cbm_node_text(a, head, source);
+    }
+    return NULL;
+}
+
+// Dart: the invocation `selector` (the `(...)` part) follows the callee
+// identifier as a sibling; `new_expression`'s first named child is the type.
+static char *extract_dart_callee(CBMArena *a, TSNode node, const char *source, const char *nk) {
+    if (strcmp(nk, "selector") == 0) {
+        TSNode prev = ts_node_prev_named_sibling(node);
+        if (!ts_node_is_null(prev) && strcmp(ts_node_type(prev), "identifier") == 0) {
+            return cbm_node_text(a, prev, source);
+        }
+        return NULL;
+    }
+    if (strcmp(nk, "new_expression") == 0 && ts_node_named_child_count(node) > 0) {
+        TSNode head = ts_node_named_child(node, 0);
+        const char *hk = ts_node_type(head);
+        if (strcmp(hk, "identifier") == 0 || strcmp(hk, "type_identifier") == 0) {
+            return cbm_node_text(a, head, source);
+        }
+    }
+    return NULL;
+}
+
 static char *extract_callee_lang_specific(CBMArena *a, TSNode node, const char *source,
                                           CBMLanguage lang) {
     const char *nk = ts_node_type(node);
 
+    if (lang == CBM_LANG_CLOJURE || lang == CBM_LANG_COMMONLISP || lang == CBM_LANG_SCHEME ||
+        lang == CBM_LANG_FENNEL || lang == CBM_LANG_RACKET || lang == CBM_LANG_EMACSLISP) {
+        return extract_lisp_callee(a, node, source, nk);
+    }
+    if (lang == CBM_LANG_FSHARP) {
+        return extract_fsharp_callee(a, node, source, nk);
+    }
+    if (lang == CBM_LANG_POWERSHELL) {
+        return extract_powershell_callee(a, node, source, nk);
+    }
+    if (lang == CBM_LANG_ADA) {
+        return extract_ada_callee(a, node, source, nk);
+    }
+    if (lang == CBM_LANG_SOLIDITY) {
+        return extract_solidity_callee(a, node, source, nk);
+    }
+    if (lang == CBM_LANG_GROOVY) {
+        return extract_groovy_callee(a, node, source, nk);
+    }
+    if (lang == CBM_LANG_WGSL) {
+        return extract_wgsl_callee(a, node, source, nk);
+    }
+    if (lang == CBM_LANG_DART) {
+        return extract_dart_callee(a, node, source, nk);
+    }
     if (lang == CBM_LANG_OBJC) {
         return extract_objc_callee(a, node, source, nk);
     }
@@ -362,6 +611,32 @@ static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, C
         char *g = gotemplate_callee(a, node, source);
         if (g) {
             return g;
+        }
+    }
+
+    // Constructor / instantiation nodes (new T(), object_creation, instance_expression):
+    // resolve to the constructed type so a CALLS edge links to the class/constructor.
+    char *ctor = extract_constructor_callee(a, node, source, ts_node_type(node));
+    if (ctor) {
+        return ctor;
+    }
+
+    // Ruby: `Widget.new(...)` is a method call on a constant receiver whose
+    // method is `new`.  The constructor body lives in `initialize`, so a callee
+    // of "new" never resolves.  Redirect to the receiver type name so the call
+    // links to the class/constructor like every other language's `new T()`.
+    if (lang == CBM_LANG_RUBY) {
+        TSNode m = ts_node_child_by_field_name(node, TS_FIELD("method"));
+        TSNode recv = ts_node_child_by_field_name(node, TS_FIELD("receiver"));
+        if (!ts_node_is_null(m) && !ts_node_is_null(recv) &&
+            strcmp(ts_node_type(recv), "constant") == 0) {
+            char *mt = cbm_node_text(a, m, source);
+            if (mt && strcmp(mt, "new") == 0) {
+                char *rt = cbm_node_text(a, recv, source);
+                if (rt && rt[0]) {
+                    return rt;
+                }
+            }
         }
     }
 
@@ -605,6 +880,24 @@ static bool is_url_or_topic_keyword(const char *key) {
     return false;
 }
 
+// Check if a struct-field name identifies a queue/topic target.  Cloud SDKs pass
+// the destination via a composite-literal input struct rather than a bare string
+// arg (e.g. Go `SendMessageInput{QueueUrl: ...}`, `PublishInput{TopicArn: ...}`).
+// Case-insensitive so QueueUrl/QueueURL/queue_url all match.
+static bool is_queue_topic_field(const char *key) {
+    static const char *fields[] = {"QueueUrl",  "QueueURL", "TopicArn", "TopicARN",    "QueueName",
+                                   "TopicName", "QueueArn", "QueueARN", "Destination", NULL};
+    if (!key || !key[0]) {
+        return false;
+    }
+    for (int i = 0; fields[i]; i++) {
+        if (strcasecmp(key, fields[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Extract string value from a node (literal or constant reference).
 static const char *extract_string_value(CBMExtractCtx *ctx, TSNode val_node) {
     const char *vk = ts_node_type(val_node);
@@ -617,6 +910,73 @@ static const char *extract_string_value(CBMExtractCtx *ctx, TSNode val_node) {
         char *const_name = cbm_node_text(ctx->arena, val_node, ctx->source);
         if (const_name) {
             return lookup_string_constant(ctx, const_name);
+        }
+    }
+    return NULL;
+}
+
+// Recover a queue/topic identity from a Go composite-literal input struct, e.g.
+//   &sqs.SendMessageInput{QueueUrl: queueUrl, MessageBody: body}
+//   sns.PublishInput{TopicArn: "arn:aws:sns:..."}
+// The dispatch target is carried by a struct field (QueueUrl/TopicArn/...), not a
+// bare string arg, so the async edge would otherwise degrade to a plain CALLS.
+// Returns the field's value: the string-literal content when present, else the
+// referenced identifier text (which still names the queue/topic for edge formation).
+static const char *extract_composite_queue_field(CBMExtractCtx *ctx, TSNode node) {
+    // Unwrap a pointer-of-composite: `&Type{...}` is a unary_expression whose
+    // operand is the composite_literal.
+    if (strcmp(ts_node_type(node), "unary_expression") == 0) {
+        TSNode operand = ts_node_child_by_field_name(node, TS_FIELD("operand"));
+        if (ts_node_is_null(operand)) {
+            return NULL;
+        }
+        node = operand;
+    }
+    if (strcmp(ts_node_type(node), "composite_literal") != 0) {
+        return NULL;
+    }
+    TSNode body = ts_node_child_by_field_name(node, TS_FIELD("body"));
+    if (ts_node_is_null(body)) {
+        body = cbm_find_child_by_kind(node, "literal_value");
+    }
+    if (ts_node_is_null(body)) {
+        return NULL;
+    }
+    uint32_t nc = ts_node_named_child_count(body);
+    for (uint32_t i = 0; i < nc; i++) {
+        TSNode el = ts_node_named_child(body, i);
+        if (strcmp(ts_node_type(el), "keyed_element") != 0) {
+            continue;
+        }
+        // keyed_element children: key then value. Each side may be wrapped in a
+        // literal_element; unwrap to the underlying identifier/literal.
+        uint32_t ec = ts_node_named_child_count(el);
+        if (ec < PAIR_LEN) {
+            continue;
+        }
+        TSNode key_n = ts_node_named_child(el, 0);
+        TSNode val_n = ts_node_named_child(el, 1);
+        if (strcmp(ts_node_type(key_n), "literal_element") == 0 &&
+            ts_node_named_child_count(key_n) > 0) {
+            key_n = ts_node_named_child(key_n, 0);
+        }
+        if (strcmp(ts_node_type(val_n), "literal_element") == 0 &&
+            ts_node_named_child_count(val_n) > 0) {
+            val_n = ts_node_named_child(val_n, 0);
+        }
+        char *key = cbm_node_text(ctx->arena, key_n, ctx->source);
+        if (!is_queue_topic_field(key)) {
+            continue;
+        }
+        const char *resolved = extract_string_value(ctx, val_n);
+        if (resolved && resolved[0]) {
+            return resolved;
+        }
+        // Value is a variable/expression (no constant value); use its source text
+        // as the queue/topic identity so the async edge still forms.
+        char *raw = cbm_node_text(ctx->arena, val_n, ctx->source);
+        if (raw && raw[0]) {
+            return raw;
         }
     }
     return NULL;
@@ -662,6 +1022,11 @@ static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args) {
     uint32_t nc = ts_node_named_child_count(args);
     for (uint32_t ai = 0; ai < nc; ai++) {
         TSNode arg = ts_node_named_child(args, ai);
+        /* PHP and C# wrap each positional argument in an `argument` node;
+         * unwrap to the underlying value so the URL string is reachable. */
+        if (strcmp(ts_node_type(arg), "argument") == 0 && ts_node_named_child_count(arg) > 0) {
+            arg = ts_node_named_child(arg, 0);
+        }
         const char *ak = ts_node_type(arg);
 
         if (strcmp(ak, "keyword_argument") == 0 || strcmp(ak, "pair") == 0) {
@@ -670,6 +1035,16 @@ static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args) {
                 return val;
             }
             continue;
+        }
+
+        /* Cloud SDK dispatch via input struct: the queue/topic target is a field
+         * of a composite literal (Go `&sqs.SendMessageInput{QueueUrl: ...}`), not
+         * a bare string arg. Recover it so the async edge forms. */
+        if (strcmp(ak, "composite_literal") == 0 || strcmp(ak, "unary_expression") == 0) {
+            const char *val = extract_composite_queue_field(ctx, arg);
+            if (val) {
+                return val;
+            }
         }
 
         if (ai < MAX_POSITIONAL_SCAN) {
@@ -683,15 +1058,44 @@ static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args) {
 }
 
 // Extract second argument name (handler ref for route registrations).
+/* Normalize a string-form route handler to a resolvable handler name.
+ *   'showUsers'              → showUsers
+ *   'UserController@show'    → show   (Laravel "Controller@method")
+ * The method segment after '@' is the resolvable function/method name. */
+static const char *normalize_string_handler(CBMArena *a, const char *raw) {
+    const char *unq = strip_quotes(a, raw);
+    if (!unq || !unq[0]) {
+        return NULL;
+    }
+    const char *at = strchr(unq, '@');
+    if (at && at[1]) {
+        return cbm_arena_strdup(a, at + 1);
+    }
+    return unq;
+}
+
 static const char *extract_handler_arg(CBMExtractCtx *ctx, TSNode args) {
     uint32_t nc = ts_node_named_child_count(args);
     for (uint32_t ai = HANDLER_START_IDX; ai < nc && ai < MAX_HANDLER_SCAN; ai++) {
         TSNode arg2 = ts_node_named_child(args, ai);
+        /* PHP wraps each argument in an `argument` node — unwrap to the value. */
+        if (strcmp(ts_node_type(arg2), "argument") == 0 && ts_node_named_child_count(arg2) > 0) {
+            arg2 = ts_node_named_child(arg2, 0);
+        }
         const char *ak2 = ts_node_type(arg2);
+        /* `name` = PHP bare identifier handler; string = Laravel string handler
+         * ('showUsers' or 'Controller@method'). */
         if (strcmp(ak2, "identifier") == 0 || strcmp(ak2, "member_expression") == 0 ||
             strcmp(ak2, "selector_expression") == 0 || strcmp(ak2, "attribute") == 0 ||
-            strcmp(ak2, "field_expression") == 0) {
+            strcmp(ak2, "field_expression") == 0 || strcmp(ak2, "name") == 0) {
             return cbm_node_text(ctx->arena, arg2, ctx->source);
+        }
+        if (is_string_like(ak2)) {
+            const char *h =
+                normalize_string_handler(ctx->arena, cbm_node_text(ctx->arena, arg2, ctx->source));
+            if (h && h[0]) {
+                return h;
+            }
         }
     }
     return NULL;
@@ -727,6 +1131,9 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             CBMCall call = {0};
             call.callee_name = callee;
             call.enclosing_func_qn = state->enclosing_func_qn;
+            call.loop_depth = state->loop_depth;     // enclosing loop nesting at this call
+            call.branch_depth = state->branch_depth; // enclosing branch nesting at this call
+            call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
 
             TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
             if (!ts_node_is_null(args)) {

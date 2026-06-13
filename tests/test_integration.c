@@ -587,16 +587,66 @@ TEST(integ_store_bfs_traversal) {
     PASS();
 }
 
+/* #411: index_repository silently drops entire subtrees with no record.
+ * Moderate/fast mode applies FAST_SKIP_DIRS (tools/scripts/bin/docs/...) and ALL
+ * modes apply ALWAYS_SKIP_DIRS (node_modules/...), so files are excluded from the
+ * graph — but the response only reports nodes/edges/status, giving the user no
+ * way to know which subtrees were dropped (the reporter lost a 47-file tools/).
+ * Desired (maintainer): a COMPACT per-directory summary of excluded files (dir +
+ * count, not a verbose per-file list) surfaced in the index result for any mode.
+ * RED until the index response reports excluded subtrees. Self-contained. */
+TEST(index_reports_excluded_subtrees_issue411) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_excl_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+
+    char path[512];
+    /* one real source file ... */
+    snprintf(path, sizeof(path), "%s/app.py", tmp);
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("def app():\n    return 1\n", f);
+    fclose(f);
+    /* ... and a node_modules subtree that is excluded in EVERY mode. */
+    snprintf(path, sizeof(path), "%s/node_modules", tmp);
+    cbm_mkdir_p(path, 0755);
+    snprintf(path, sizeof(path), "%s/node_modules/dep.js", tmp);
+    f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("export function dep() { return 2; }\n", f);
+    fclose(f);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char args[600];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "index_repository", args);
+    ASSERT_NOT_NULL(resp);
+
+    /* The dropped node_modules/dep.js must be reported somewhere compact in the
+     * response so the user knows it wasn't indexed. Today the response carries no
+     * excluded/skipped summary at all → this fails (reproduces the silent drop). */
+    bool reports_excluded = strstr(resp, "excluded") != NULL || strstr(resp, "skipped") != NULL;
+    free(resp);
+    cbm_mcp_server_free(srv);
+    th_rmtree(tmp);
+    ASSERT_TRUE(reports_excluded);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
 
 SUITE(integration) {
+    RUN_TEST(index_reports_excluded_subtrees_issue411);
     /* Set up: create temp project and index it */
     if (integration_setup() != 0) {
-        printf("  %-50s", "integration_setup");
-        printf("SKIP (setup failed)\n");
-        tf_skip_count += 16; /* skip all integration tests */
+        /* A suite that cannot establish its preconditions has FAILED, not
+         * "skipped" — surface it as a single red failure (no-skips policy). */
+        printf("  %sFAIL%s %s:%d: %s\n", tf_red(), tf_reset(), __FILE__, __LINE__,
+               "integration_setup failed");
+        tf_fail_count++;
         integration_teardown();
         return;
     }

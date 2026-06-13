@@ -1,17 +1,20 @@
 /*
- * http_server.c — Mongoose-based HTTP server for graph UI.
+ * http_server.c — Routing + endpoint handlers for the graph UI.
  *
- * Routes:
+ * Transport (sockets, parsing, limits) lives in httpd.c; this file owns
+ * the routes and their handlers:
  *   GET /             → embedded index.html
  *   GET /assets/...   → embedded JS/CSS
  *   POST /rpc         → JSON-RPC dispatch via own cbm_mcp_server_t
  *   OPTIONS /rpc      → CORS preflight (for vite dev on :5173)
+ *   GET/POST /api/... → UI support endpoints (layout, index, browse, …)
  *   *                 → 404
  *
- * Runs in a background pthread. Binds to 127.0.0.1 only.
+ * Runs in a background pthread. Binds to 127.0.0.1 only (see httpd.c).
  * Has its own cbm_mcp_server_t with a separate SQLite connection (WAL reader).
  */
 #include "ui/http_server.h"
+#include "ui/httpd.h"
 #include "ui/embedded_assets.h"
 #include "ui/layout3d.h"
 #include "mcp/mcp.h"
@@ -23,7 +26,6 @@
 #include "foundation/str_util.h"
 #include "foundation/compat_thread.h"
 
-#include <mongoose/mongoose.h>
 #include <sqlite3/sqlite3.h>
 #include <yyjson/yyjson.h>
 
@@ -46,29 +48,28 @@
 
 /* ── Constants ────────────────────────────────────────────────── */
 
-/* Max JSON-RPC request body size (1 MB) */
-#define MAX_BODY_SIZE (1024 * 1024)
+/* Max JSON-RPC request body size (1 MB) — transport enforces the same cap. */
+#define MAX_BODY_SIZE CBM_HTTP_MAX_BODY
 
 /* ── CORS: only allow localhost origins (blocks remote website attacks) ────── */
 
-/* Per-request CORS header buffers. Updated at the start of each HTTP handler
- * call by update_cors(). Single-threaded mongoose event loop makes statics safe. */
+/* Per-request CORS header buffers. Updated at the start of each dispatch.
+ * The server handles requests sequentially on one thread (see httpd.h),
+ * which makes these statics safe. */
 static char g_cors[256];      /* CORS headers only */
 static char g_cors_json[512]; /* CORS + Content-Type: application/json */
 
 /* Inspect the Origin header and only reflect it if it's a localhost URL.
  * This prevents remote websites from making cross-origin requests to the
  * local graph-ui server (the key defense against CORS-based data exfil). */
-static void update_cors(struct mg_http_message *hm) {
-    struct mg_str *origin = mg_http_get_header(hm, "Origin");
-    if (origin && origin->len > 0 &&
-        (mg_match(*origin, mg_str("http://localhost:*"), NULL) ||
-         mg_match(*origin, mg_str("http://127.0.0.1:*"), NULL))) {
+static void update_cors(const cbm_http_req_t *req) {
+    if (req->origin[0] != '\0' && (cbm_http_path_match(req->origin, "http://localhost:*") ||
+                                   cbm_http_path_match(req->origin, "http://127.0.0.1:*"))) {
         snprintf(g_cors, sizeof(g_cors),
-                 "Access-Control-Allow-Origin: %.*s\r\n"
+                 "Access-Control-Allow-Origin: %s\r\n"
                  "Access-Control-Allow-Methods: POST, GET, DELETE, OPTIONS\r\n"
                  "Access-Control-Allow-Headers: Content-Type\r\n",
-                 (int)origin->len, origin->buf);
+                 req->origin);
     } else {
         /* No Access-Control-Allow-Origin → browser blocks cross-origin access */
         snprintf(g_cors, sizeof(g_cors),
@@ -81,7 +82,7 @@ static void update_cors(struct mg_http_message *hm) {
 /* ── Server state ─────────────────────────────────────────────── */
 
 struct cbm_http_server {
-    struct mg_mgr mgr;
+    cbm_httpd_t *listener;
     cbm_mcp_server_t *mcp; /* own MCP server instance (read-only) */
     atomic_int stop_flag;
     int port;
@@ -106,7 +107,7 @@ static index_job_t g_index_jobs[MAX_INDEX_JOBS];
 
 /* ── Serve embedded asset ─────────────────────────────────────── */
 
-static bool serve_embedded(struct mg_connection *c, const char *path) {
+static bool serve_embedded(cbm_http_conn_t *c, const char *path) {
     const cbm_embedded_file_t *f = cbm_embedded_lookup(path);
     if (!f)
         return false;
@@ -118,12 +119,9 @@ static bool serve_embedded(struct mg_connection *c, const char *path) {
              "Cache-Control: public, max-age=31536000, immutable\r\n",
              g_cors, f->content_type);
 
-    mg_http_reply(c, 200, hdrs, "%.*s", (int)f->size, (const char *)f->data);
+    cbm_http_reply_buf(c, 200, hdrs, f->data, (size_t)f->size);
     return true;
 }
-
-/* Forward declaration */
-static bool get_query_param(struct mg_str query, const char *name, char *buf, int bufsz);
 
 /* Build DB path for a project: <cache_dir>/<project>.db */
 static void db_path_for_project(const char *project, char *buf, size_t bufsz) {
@@ -148,11 +146,7 @@ static int g_log_head = 0;
 static int g_log_count = 0;
 static cbm_mutex_t g_log_mutex;
 
-enum {
-    CBM_LOG_MUTEX_UNINIT = 0,
-    CBM_LOG_MUTEX_INITING = 1,
-    CBM_LOG_MUTEX_INITED = 2
-};
+enum { CBM_LOG_MUTEX_UNINIT = 0, CBM_LOG_MUTEX_INITING = 1, CBM_LOG_MUTEX_INITED = 2 };
 static atomic_int g_log_mutex_init = CBM_LOG_MUTEX_UNINIT;
 
 /* Safe for concurrent callers: only publishes INITED after cbm_mutex_init()
@@ -191,10 +185,10 @@ void cbm_ui_log_append(const char *line) {
 }
 
 /* GET /api/logs?lines=N — returns last N log lines */
-static void handle_logs(struct mg_connection *c, struct mg_http_message *hm) {
+static void handle_logs(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char lines_str[16] = {0};
     int max_lines = 100;
-    if (get_query_param(hm->query, "lines", lines_str, (int)sizeof(lines_str))) {
+    if (cbm_http_query_param(req->query, "lines", lines_str, (int)sizeof(lines_str))) {
         int v = atoi(lines_str);
         if (v > 0 && v <= LOG_RING_SIZE)
             max_lines = v;
@@ -210,7 +204,7 @@ static void handle_logs(struct mg_connection *c, struct mg_http_message *hm) {
     char *buf = (char *)malloc(buf_size);
     if (!buf) {
         cbm_mutex_unlock(&g_log_mutex);
-        mg_http_reply(c, 500, g_cors, "oom");
+        cbm_http_replyf(c, 500, g_cors, "oom");
         return;
     }
 
@@ -242,7 +236,7 @@ static void handle_logs(struct mg_connection *c, struct mg_http_message *hm) {
     cbm_mutex_unlock(&g_log_mutex);
     pos += snprintf(buf + pos, buf_size - (size_t)pos, "],\"total\":%d}", total);
 
-    mg_http_reply(c, 200, g_cors_json, "%s", buf);
+    cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
     free(buf);
 }
 
@@ -254,7 +248,7 @@ static void handle_logs(struct mg_connection *c, struct mg_http_message *hm) {
 #include <signal.h>
 
 /* GET /api/processes — list codebase-memory-mcp processes via ps */
-static void handle_processes(struct mg_connection *c) {
+static void handle_processes(cbm_http_conn_t *c) {
     char buf[8192];
     int pos = 0;
 
@@ -325,30 +319,26 @@ static void handle_processes(struct mg_connection *c) {
     pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "]}");
 #endif
 
-    mg_http_reply(c, 200, g_cors_json, "%s", buf);
+    cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
 }
 
 /* POST /api/process-kill — kill a process by PID */
-static void handle_process_kill(struct mg_connection *c, struct mg_http_message *hm) {
-    if (hm->body.len == 0 || hm->body.len > 256) {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"invalid body\"}");
+static void handle_process_kill(cbm_http_conn_t *c, const cbm_http_req_t *req) {
+    if (req->body_len == 0 || req->body_len > 256) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid body\"}");
         return;
     }
 
-    char body[257];
-    memcpy(body, hm->body.buf, hm->body.len);
-    body[hm->body.len] = '\0';
-
-    yyjson_doc *doc = yyjson_read(body, hm->body.len, 0);
+    yyjson_doc *doc = yyjson_read(req->body, req->body_len, 0);
     if (!doc) {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"invalid json\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid json\"}");
         return;
     }
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *v_pid = yyjson_obj_get(root, "pid");
     if (!v_pid || !yyjson_is_int(v_pid)) {
         yyjson_doc_free(doc);
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"missing pid\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing pid\"}");
         return;
     }
     int target_pid = (int)yyjson_get_int(v_pid);
@@ -359,8 +349,8 @@ static void handle_process_kill(struct mg_connection *c, struct mg_http_message 
 #else
     if (target_pid == (int)getpid()) {
 #endif
-        mg_http_reply(c, 400, g_cors_json,
-                      "{\"error\":\"cannot kill self (use the UI server's own shutdown)\"}");
+        cbm_http_replyf(c, 400, g_cors_json,
+                        "{\"error\":\"cannot kill self (use the UI server's own shutdown)\"}");
         return;
     }
 
@@ -376,8 +366,8 @@ static void handle_process_kill(struct mg_connection *c, struct mg_http_message 
             }
         }
         if (!pid_is_ours) {
-            mg_http_reply(c, 403, g_cors_json,
-                          "{\"error\":\"can only kill server-spawned processes\"}");
+            cbm_http_replyf(c, 403, g_cors_json,
+                            "{\"error\":\"can only kill server-spawned processes\"}");
             return;
         }
     }
@@ -388,18 +378,18 @@ static void handle_process_kill(struct mg_connection *c, struct mg_http_message 
     if (!hproc || !TerminateProcess(hproc, 1)) {
         if (hproc)
             CloseHandle(hproc);
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"kill failed\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"kill failed\"}");
         return;
     }
     CloseHandle(hproc);
 #else
     if (kill(target_pid, SIGTERM) != 0) {
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"kill failed\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"kill failed\"}");
         return;
     }
 #endif
 
-    mg_http_reply(c, 200, g_cors_json, "{\"killed\":%d}", target_pid);
+    cbm_http_replyf(c, 200, g_cors_json, "{\"killed\":%d}", target_pid);
 }
 
 /* ── Directory browser ────────────────────────────────────────── */
@@ -407,10 +397,10 @@ static void handle_process_kill(struct mg_connection *c, struct mg_http_message 
 #include <dirent.h>
 
 /* GET /api/browse?path=/some/dir — list subdirectories for file picker */
-static void handle_browse(struct mg_connection *c, struct mg_http_message *hm) {
+static void handle_browse(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char path[1024] = {0};
     const char *home = cbm_get_home_dir();
-    if (!get_query_param(hm->query, "path", path, (int)sizeof(path)) || path[0] == '\0') {
+    if (!cbm_http_query_param(req->query, "path", path, (int)sizeof(path)) || path[0] == '\0') {
         /* Default to home directory */
         if (home)
             snprintf(path, sizeof(path), "%s", home);
@@ -419,13 +409,13 @@ static void handle_browse(struct mg_connection *c, struct mg_http_message *hm) {
     }
 
     if (!cbm_is_dir(path)) {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"not a directory\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"not a directory\"}");
         return;
     }
 
     DIR *dir = opendir(path);
     if (!dir) {
-        mg_http_reply(c, 403, g_cors_json, "{\"error\":\"cannot open directory\"}");
+        cbm_http_replyf(c, 403, g_cors_json, "{\"error\":\"cannot open directory\"}");
         return;
     }
 
@@ -479,16 +469,16 @@ static void handle_browse(struct mg_connection *c, struct mg_http_message *hm) {
         cbm_json_escape(esc_parent, (int)sizeof(esc_parent), parent);
         pos += snprintf(buf + pos, sizeof(buf) - (size_t)pos, "],\"parent\":\"%s\"}", esc_parent);
     }
-    mg_http_reply(c, 200, g_cors_json, "%s", buf);
+    cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
 }
 
 /* ── ADR endpoints ────────────────────────────────────────────── */
 
 /* GET /api/adr?project=X — get ADR content for a project */
-static void handle_adr_get(struct mg_connection *c, struct mg_http_message *hm) {
+static void handle_adr_get(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char name[256] = {0};
-    if (!get_query_param(hm->query, "project", name, (int)sizeof(name)) || name[0] == '\0') {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"missing project\"}");
+    if (!cbm_http_query_param(req->query, "project", name, (int)sizeof(name)) || name[0] == '\0') {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing project\"}");
         return;
     }
 
@@ -497,7 +487,7 @@ static void handle_adr_get(struct mg_connection *c, struct mg_http_message *hm) 
 
     cbm_store_t *store = cbm_store_open_path(db_path);
     if (!store) {
-        mg_http_reply(c, 200, g_cors_json, "{\"has_adr\":false}");
+        cbm_http_replyf(c, 200, g_cors_json, "{\"has_adr\":false}");
         return;
     }
 
@@ -531,37 +521,28 @@ static void handle_adr_get(struct mg_connection *c, struct mg_http_message *hm) 
             }
             pos += snprintf(buf + pos, buf_size - (size_t)pos, "\",\"updated_at\":\"%s\"}",
                             adr.updated_at ? adr.updated_at : "");
-            mg_http_reply(c, 200, g_cors_json, "%s", buf);
+            cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
             free(buf);
         } else {
-            mg_http_reply(c, 500, g_cors, "oom");
+            cbm_http_replyf(c, 500, g_cors, "oom");
         }
         cbm_store_adr_free(&adr);
     } else {
-        mg_http_reply(c, 200, g_cors_json, "{\"has_adr\":false}");
+        cbm_http_replyf(c, 200, g_cors_json, "{\"has_adr\":false}");
     }
     cbm_store_close(store);
 }
 
 /* POST /api/adr — save ADR content. Body: {"project":"...","content":"..."} */
-static void handle_adr_save(struct mg_connection *c, struct mg_http_message *hm) {
-    if (hm->body.len == 0 || hm->body.len > 16384) {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"invalid body\"}");
+static void handle_adr_save(cbm_http_conn_t *c, const cbm_http_req_t *req) {
+    if (req->body_len == 0 || req->body_len > 16384) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid body\"}");
         return;
     }
 
-    char *body = (char *)malloc(hm->body.len + 1);
-    if (!body) {
-        mg_http_reply(c, 500, g_cors, "oom");
-        return;
-    }
-    memcpy(body, hm->body.buf, hm->body.len);
-    body[hm->body.len] = '\0';
-
-    yyjson_doc *doc = yyjson_read(body, hm->body.len, 0);
-    free(body);
+    yyjson_doc *doc = yyjson_read(req->body, req->body_len, 0);
     if (!doc) {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"invalid json\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid json\"}");
         return;
     }
 
@@ -570,7 +551,7 @@ static void handle_adr_save(struct mg_connection *c, struct mg_http_message *hm)
     yyjson_val *v_content = yyjson_obj_get(root, "content");
     if (!v_proj || !yyjson_is_str(v_proj) || !v_content || !yyjson_is_str(v_content)) {
         yyjson_doc_free(doc);
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"missing project or content\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing project or content\"}");
         return;
     }
 
@@ -583,7 +564,7 @@ static void handle_adr_save(struct mg_connection *c, struct mg_http_message *hm)
     cbm_store_t *store = cbm_store_open_path(db_path);
     yyjson_doc_free(doc);
     if (!store) {
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"cannot open store\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"cannot open store\"}");
         return;
     }
 
@@ -591,9 +572,9 @@ static void handle_adr_save(struct mg_connection *c, struct mg_http_message *hm)
     cbm_store_close(store);
 
     if (rc == CBM_STORE_OK) {
-        mg_http_reply(c, 200, g_cors_json, "{\"saved\":true}");
+        cbm_http_replyf(c, 200, g_cors_json, "{\"saved\":true}");
     } else {
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"save failed\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"save failed\"}");
     }
 }
 
@@ -772,26 +753,22 @@ static void *index_thread_fn(void *arg) {
 }
 
 /* POST /api/index — body: {"root_path": "/abs/path"} → starts background indexing */
-static void handle_index_start(struct mg_connection *c, struct mg_http_message *hm) {
-    if (hm->body.len == 0 || hm->body.len > 4096) {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"invalid body\"}");
+static void handle_index_start(cbm_http_conn_t *c, const cbm_http_req_t *req) {
+    if (req->body_len == 0 || req->body_len > 4096) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid body\"}");
         return;
     }
 
-    char body_buf[4097];
-    memcpy(body_buf, hm->body.buf, hm->body.len);
-    body_buf[hm->body.len] = '\0';
-
-    yyjson_doc *doc = yyjson_read(body_buf, hm->body.len, 0);
+    yyjson_doc *doc = yyjson_read(req->body, req->body_len, 0);
     if (!doc) {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"invalid json\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid json\"}");
         return;
     }
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *v_path = yyjson_obj_get(root, "root_path");
     if (!v_path || !yyjson_is_str(v_path)) {
         yyjson_doc_free(doc);
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"missing root_path\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing root_path\"}");
         return;
     }
     const char *rpath = yyjson_get_str(v_path);
@@ -799,7 +776,7 @@ static void handle_index_start(struct mg_connection *c, struct mg_http_message *
     /* Check path exists */
     if (!cbm_is_dir(rpath)) {
         yyjson_doc_free(doc);
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"directory not found\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"directory not found\"}");
         return;
     }
 
@@ -814,7 +791,7 @@ static void handle_index_start(struct mg_connection *c, struct mg_http_message *
     }
     if (slot < 0) {
         yyjson_doc_free(doc);
-        mg_http_reply(c, 429, g_cors_json, "{\"error\":\"all index slots busy\"}");
+        cbm_http_replyf(c, 429, g_cors_json, "{\"error\":\"all index slots busy\"}");
         return;
     }
 
@@ -829,17 +806,17 @@ static void handle_index_start(struct mg_connection *c, struct mg_http_message *
     if (cbm_thread_create(&tid, 0, index_thread_fn, job) != 0) {
         atomic_store(&job->status, 3);
         snprintf(job->error_msg, sizeof(job->error_msg), "thread creation failed");
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"thread creation failed\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"thread creation failed\"}");
         return;
     }
     cbm_thread_detach(&tid); /* Don't leak thread handle */
 
-    mg_http_reply(c, 202, g_cors_json, "{\"status\":\"indexing\",\"slot\":%d,\"path\":\"%s\"}",
-                  slot, job->root_path);
+    cbm_http_replyf(c, 202, g_cors_json, "{\"status\":\"indexing\",\"slot\":%d,\"path\":\"%s\"}",
+                    slot, job->root_path);
 }
 
 /* GET /api/index-status — returns status of all index jobs */
-static void handle_index_status(struct mg_connection *c) {
+static void handle_index_status(cbm_http_conn_t *c) {
     char buf[2048] = "[";
     int pos = 1;
     for (int i = 0; i < MAX_INDEX_JOBS; i++) {
@@ -855,14 +832,14 @@ static void handle_index_status(struct mg_connection *c) {
     }
     buf[pos++] = ']';
     buf[pos] = '\0';
-    mg_http_reply(c, 200, g_cors_json, "%s", buf);
+    cbm_http_replyf(c, 200, g_cors_json, "%s", buf);
 }
 
 /* DELETE /api/project?name=X — deletes the .db file */
-static void handle_delete_project(struct mg_connection *c, struct mg_http_message *hm) {
+static void handle_delete_project(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char name[256] = {0};
-    if (!get_query_param(hm->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"missing name\"}");
+    if (!cbm_http_query_param(req->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing name\"}");
         return;
     }
 
@@ -870,12 +847,12 @@ static void handle_delete_project(struct mg_connection *c, struct mg_http_messag
     db_path_for_project(name, db_path, sizeof(db_path));
 
     if (!cbm_file_exists(db_path)) {
-        mg_http_reply(c, 404, g_cors_json, "{\"error\":\"project not found\"}");
+        cbm_http_replyf(c, 404, g_cors_json, "{\"error\":\"project not found\"}");
         return;
     }
 
     if (unlink(db_path) != 0) {
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"failed to delete\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"failed to delete\"}");
         return;
     }
 
@@ -887,14 +864,14 @@ static void handle_delete_project(struct mg_connection *c, struct mg_http_messag
     (void)unlink(shm_path);
 
     cbm_log_info("ui.project.deleted", "name", name);
-    mg_http_reply(c, 200, g_cors_json, "{\"deleted\":true}");
+    cbm_http_replyf(c, 200, g_cors_json, "{\"deleted\":true}");
 }
 
 /* GET /api/project-health?name=X — checks db integrity */
-static void handle_project_health(struct mg_connection *c, struct mg_http_message *hm) {
+static void handle_project_health(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char name[256] = {0};
-    if (!get_query_param(hm->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"missing name\"}");
+    if (!cbm_http_query_param(req->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing name\"}");
         return;
     }
 
@@ -902,13 +879,13 @@ static void handle_project_health(struct mg_connection *c, struct mg_http_messag
     db_path_for_project(name, db_path, sizeof(db_path));
 
     if (!cbm_file_exists(db_path)) {
-        mg_http_reply(c, 200, g_cors_json, "{\"status\":\"missing\"}");
+        cbm_http_replyf(c, 200, g_cors_json, "{\"status\":\"missing\"}");
         return;
     }
 
     cbm_store_t *store = cbm_store_open_path(db_path);
     if (!store) {
-        mg_http_reply(c, 200, g_cors_json, "{\"status\":\"corrupt\",\"reason\":\"cannot open\"}");
+        cbm_http_replyf(c, 200, g_cors_json, "{\"status\":\"corrupt\",\"reason\":\"cannot open\"}");
         return;
     }
 
@@ -918,16 +895,9 @@ static void handle_project_health(struct mg_connection *c, struct mg_http_messag
 
     int64_t size = cbm_file_size(db_path);
 
-    mg_http_reply(c, 200, g_cors_json,
-                  "{\"status\":\"healthy\",\"nodes\":%d,\"edges\":%d,\"size_bytes\":%lld}",
-                  node_count, edge_count, (long long)size);
-}
-
-/* ── Extract query parameter from URI ─────────────────────────── */
-
-static bool get_query_param(struct mg_str query, const char *name, char *buf, int bufsz) {
-    int n = mg_http_get_var(&query, name, buf, (size_t)bufsz);
-    return n > 0;
+    cbm_http_replyf(c, 200, g_cors_json,
+                    "{\"status\":\"healthy\",\"nodes\":%d,\"edges\":%d,\"size_bytes\":%lld}",
+                    node_count, edge_count, (long long)size);
 }
 
 /* ── Handle GET /api/layout ───────────────────────────────────── */
@@ -989,18 +959,18 @@ static double layout_radius(const cbm_layout_result_t *r) {
     return sqrt(max_r2);
 }
 
-static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
+static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char project[256] = {0};
     char max_str[32] = {0};
 
-    if (!get_query_param(hm->query, "project", project, (int)sizeof(project)) ||
+    if (!cbm_http_query_param(req->query, "project", project, (int)sizeof(project)) ||
         project[0] == '\0') {
-        mg_http_reply(c, 400, g_cors_json, "{\"error\":\"missing project parameter\"}");
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing project parameter\"}");
         return;
     }
 
     int max_nodes = 50000;
-    if (get_query_param(hm->query, "max_nodes", max_str, (int)sizeof(max_str))) {
+    if (cbm_http_query_param(req->query, "max_nodes", max_str, (int)sizeof(max_str))) {
         int v = atoi(max_str);
         if (v > 0)
             max_nodes = v;
@@ -1010,13 +980,13 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
     db_path_for_project(project, db_path, sizeof(db_path));
 
     if (!cbm_file_exists(db_path)) {
-        mg_http_reply(c, 404, g_cors_json, "{\"error\":\"project not found\"}");
+        cbm_http_replyf(c, 404, g_cors_json, "{\"error\":\"project not found\"}");
         return;
     }
 
     cbm_store_t *store = cbm_store_open_path(db_path);
     if (!store) {
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"cannot open store\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"cannot open store\"}");
         return;
     }
 
@@ -1031,7 +1001,7 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
 
     if (!layout) {
         cbm_store_close(store);
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"layout computation failed\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"layout computation failed\"}");
         return;
     }
 
@@ -1043,13 +1013,13 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
     cbm_layout_free(layout);
     if (!primary_json) {
         cbm_store_close(store);
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"JSON serialization failed\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"JSON serialization failed\"}");
         return;
     }
 
     if (linked_count == 0) {
         cbm_store_close(store);
-        mg_http_reply(c, 200, g_cors_json, "%s", primary_json);
+        cbm_http_replyf(c, 200, g_cors_json, "%s", primary_json);
         free(primary_json);
         return;
     }
@@ -1059,7 +1029,7 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
     free(primary_json);
     if (!pdoc) {
         cbm_store_close(store);
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"JSON parse failed\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"JSON parse failed\"}");
         return;
     }
 
@@ -1157,22 +1127,20 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
         struct sqlite3 *lp_db = cbm_store_get_db(lp_store);
         if (src_db && lp_db) {
             sqlite3_stmt *eq = NULL;
-            if (sqlite3_prepare_v2(
-                    src_db,
-                    "SELECT e.source_id, e.type, n.qualified_name "
-                    "FROM edges e JOIN nodes n "
-                    "  ON n.id = e.target_id AND n.project = e.project "
-                    "WHERE e.project = ?1 AND e.type LIKE 'CROSS_%' "
-                    "  AND json_extract(e.properties, '$.target_project') = ?2 "
-                    "  AND n.qualified_name IS NOT NULL",
-                    -1, &eq, NULL) == SQLITE_OK) {
+            if (sqlite3_prepare_v2(src_db,
+                                   "SELECT e.source_id, e.type, n.qualified_name "
+                                   "FROM edges e JOIN nodes n "
+                                   "  ON n.id = e.target_id AND n.project = e.project "
+                                   "WHERE e.project = ?1 AND e.type LIKE 'CROSS_%' "
+                                   "  AND json_extract(e.properties, '$.target_project') = ?2 "
+                                   "  AND n.qualified_name IS NOT NULL",
+                                   -1, &eq, NULL) == SQLITE_OK) {
                 sqlite3_bind_text(eq, 1, project, -1, SQLITE_STATIC);
                 sqlite3_bind_text(eq, 2, linked[li], -1, SQLITE_STATIC);
 
                 sqlite3_stmt *lookup = NULL;
-                sqlite3_prepare_v2(
-                    lp_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1", -1, &lookup,
-                    NULL);
+                sqlite3_prepare_v2(lp_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1",
+                                   -1, &lookup, NULL);
 
                 while (sqlite3_step(eq) == SQLITE_ROW) {
                     int64_t src_id = sqlite3_column_int64(eq, 0);
@@ -1215,188 +1183,142 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
     yyjson_mut_doc_free(mdoc);
 
     if (final_json) {
-        mg_http_reply(c, 200, g_cors_json, "%s", final_json);
+        cbm_http_replyf(c, 200, g_cors_json, "%s", final_json);
         free(final_json);
     } else {
-        mg_http_reply(c, 500, g_cors_json, "{\"error\":\"JSON write failed\"}");
+        cbm_http_replyf(c, 500, g_cors_json, "{\"error\":\"JSON write failed\"}");
     }
 }
 
 /* ── Handle JSON-RPC request ──────────────────────────────────── */
 
-static void handle_rpc(struct mg_connection *c, struct mg_http_message *hm, cbm_mcp_server_t *mcp) {
-    if (hm->body.len == 0 || hm->body.len > MAX_BODY_SIZE) {
-        mg_http_reply(c, 400, g_cors_json,
-                      "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,"
-                      "\"message\":\"invalid request size\"},\"id\":null}");
+static void handle_rpc(cbm_http_conn_t *c, const cbm_http_req_t *req, cbm_mcp_server_t *mcp) {
+    if (req->body_len == 0 || req->body_len > MAX_BODY_SIZE || !req->body) {
+        cbm_http_replyf(c, 400, g_cors_json,
+                        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,"
+                        "\"message\":\"invalid request size\"},\"id\":null}");
         return;
     }
 
-    /* NUL-terminate the body for cbm_mcp_server_handle */
-    char *body = (char *)malloc(hm->body.len + 1);
-    if (!body) {
-        mg_http_reply(c, 500, g_cors, "out of memory");
-        return;
-    }
-    memcpy(body, hm->body.buf, hm->body.len);
-    body[hm->body.len] = '\0';
-
-    char *response = cbm_mcp_server_handle(mcp, body);
-    free(body);
+    /* req->body is NUL-terminated by the transport */
+    char *response = cbm_mcp_server_handle(mcp, req->body);
 
     if (response) {
-        mg_http_reply(c, 200, g_cors_json, "%s", response);
+        cbm_http_replyf(c, 200, g_cors_json, "%s", response);
         free(response);
     } else {
-        mg_http_reply(c, 204, g_cors, "");
+        cbm_http_replyf(c, 204, g_cors, "%s", "");
     }
 }
 
-/* ── HTTP event handler ───────────────────────────────────────── */
+/* ── Request dispatch ─────────────────────────────────────────── */
 
-static void http_handler(struct mg_connection *c, int ev, void *ev_data) {
-    if (ev != MG_EV_HTTP_MSG)
-        return;
-
-    struct mg_http_message *hm = (mg_http_message*)ev_data;
-    cbm_http_server_t *srv = (cbm_http_server_t*)c->fn_data;
-
+static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
+                             const cbm_http_req_t *req) {
     /* Build per-request CORS headers (only reflects localhost origins) */
-    update_cors(hm);
+    update_cors(req);
+
+    bool is_get = strcmp(req->method, "GET") == 0;
+    bool is_post = strcmp(req->method, "POST") == 0;
+    bool is_delete = strcmp(req->method, "DELETE") == 0;
 
     /* OPTIONS preflight for CORS */
-    if (mg_strcmp(hm->method, mg_str("OPTIONS")) == 0) {
-        char opt_hdrs[512];
-        snprintf(opt_hdrs, sizeof(opt_hdrs), "%sContent-Length: 0\r\n", g_cors);
-        mg_http_reply(c, 204, opt_hdrs, "");
+    if (strcmp(req->method, "OPTIONS") == 0) {
+        cbm_http_replyf(c, 204, g_cors, "%s", "");
         return;
     }
 
     /* POST /rpc → JSON-RPC dispatch (reuses existing MCP tools) */
-    if (mg_strcmp(hm->method, mg_str("POST")) == 0 && mg_match(hm->uri, mg_str("/rpc"), NULL)) {
-        handle_rpc(c, hm, srv->mcp);
+    if (is_post && cbm_http_path_match(req->path, "/rpc")) {
+        handle_rpc(c, req, srv->mcp);
         return;
     }
 
     /* GET /api/layout → 3D graph layout */
-    if (mg_strcmp(hm->method, mg_str("GET")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/layout*"), NULL)) {
-        handle_layout(c, hm);
+    if (is_get && cbm_http_path_match(req->path, "/api/layout*")) {
+        handle_layout(c, req);
         return;
     }
 
     /* POST /api/index → start background indexing */
-    if (mg_strcmp(hm->method, mg_str("POST")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/index"), NULL)) {
-        handle_index_start(c, hm);
+    if (is_post && cbm_http_path_match(req->path, "/api/index")) {
+        handle_index_start(c, req);
         return;
     }
 
     /* GET /api/index-status → check indexing progress */
-    if (mg_strcmp(hm->method, mg_str("GET")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/index-status"), NULL)) {
+    if (is_get && cbm_http_path_match(req->path, "/api/index-status")) {
         handle_index_status(c);
         return;
     }
 
     /* DELETE /api/project → delete a project's .db file */
-    if (mg_strcmp(hm->method, mg_str("DELETE")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/project*"), NULL)) {
-        handle_delete_project(c, hm);
+    if (is_delete && cbm_http_path_match(req->path, "/api/project*")) {
+        handle_delete_project(c, req);
         return;
     }
 
     /* GET /api/browse → directory browser for file picker */
-    if (mg_strcmp(hm->method, mg_str("GET")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/browse*"), NULL)) {
-        handle_browse(c, hm);
+    if (is_get && cbm_http_path_match(req->path, "/api/browse*")) {
+        handle_browse(c, req);
         return;
     }
 
     /* GET /api/adr → get ADR for project */
-    if (mg_strcmp(hm->method, mg_str("GET")) == 0 && mg_match(hm->uri, mg_str("/api/adr*"), NULL)) {
-        handle_adr_get(c, hm);
+    if (is_get && cbm_http_path_match(req->path, "/api/adr*")) {
+        handle_adr_get(c, req);
         return;
     }
 
     /* POST /api/adr → save ADR for project */
-    if (mg_strcmp(hm->method, mg_str("POST")) == 0 && mg_match(hm->uri, mg_str("/api/adr"), NULL)) {
-        handle_adr_save(c, hm);
+    if (is_post && cbm_http_path_match(req->path, "/api/adr")) {
+        handle_adr_save(c, req);
         return;
     }
 
     /* GET /api/project-health → check db integrity */
-    if (mg_strcmp(hm->method, mg_str("GET")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/project-health*"), NULL)) {
-        handle_project_health(c, hm);
+    if (is_get && cbm_http_path_match(req->path, "/api/project-health*")) {
+        handle_project_health(c, req);
         return;
     }
 
     /* GET /api/processes → list running codebase-memory-mcp processes */
-    if (mg_strcmp(hm->method, mg_str("GET")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/processes"), NULL)) {
+    if (is_get && cbm_http_path_match(req->path, "/api/processes")) {
         handle_processes(c);
         return;
     }
 
     /* GET /api/logs → recent log lines */
-    if (mg_strcmp(hm->method, mg_str("GET")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/logs*"), NULL)) {
-        handle_logs(c, hm);
+    if (is_get && cbm_http_path_match(req->path, "/api/logs*")) {
+        handle_logs(c, req);
         return;
     }
 
     /* POST /api/process-kill → kill a process */
-    if (mg_strcmp(hm->method, mg_str("POST")) == 0 &&
-        mg_match(hm->uri, mg_str("/api/process-kill"), NULL)) {
-        handle_process_kill(c, hm);
+    if (is_post && cbm_http_path_match(req->path, "/api/process-kill")) {
+        handle_process_kill(c, req);
         return;
     }
 
     /* GET / → index.html (no-cache so browser always gets latest) */
-    if (mg_match(hm->uri, mg_str("/"), NULL)) {
+    if (cbm_http_path_match(req->path, "/")) {
         const cbm_embedded_file_t *f = cbm_embedded_lookup("/index.html");
         if (f) {
             char html_hdrs[512];
             snprintf(html_hdrs, sizeof(html_hdrs),
                      "%sContent-Type: text/html\r\nCache-Control: no-cache\r\n", g_cors);
-            mg_http_reply(c, 200, html_hdrs, "%.*s", (int)f->size, (const char *)f->data);
+            cbm_http_reply_buf(c, 200, html_hdrs, f->data, (size_t)f->size);
             return;
         }
-        mg_http_reply(c, 404, g_cors, "no frontend embedded");
+        cbm_http_replyf(c, 404, g_cors, "no frontend embedded");
         return;
     }
 
-    /* GET /assets/... → embedded assets */
-    if (mg_match(hm->uri, mg_str("/assets/*"), NULL)) {
-        /* Build path string from mg_str */
-        char path[256];
-        int len = (int)hm->uri.len;
-        if (len >= (int)sizeof(path))
-            len = (int)sizeof(path) - 1;
-        memcpy(path, hm->uri.buf, (size_t)len);
-        path[len] = '\0';
-
-        if (serve_embedded(c, path))
-            return;
-        mg_http_reply(c, 404, g_cors, "not found");
+    /* GET /assets/... → embedded assets, then generic embedded fallback */
+    if (serve_embedded(c, req->path))
         return;
-    }
 
-    /* Fallback: try as embedded path, then 404 */
-    {
-        char path[256];
-        int len = (int)hm->uri.len;
-        if (len >= (int)sizeof(path))
-            len = (int)sizeof(path) - 1;
-        memcpy(path, hm->uri.buf, (size_t)len);
-        path[len] = '\0';
-
-        if (serve_embedded(c, path))
-            return;
-    }
-
-    mg_http_reply(c, 404, g_cors, "not found");
+    cbm_http_replyf(c, 404, g_cors, "not found");
 }
 
 /* ── Public API ───────────────────────────────────────────────── */
@@ -1417,30 +1339,25 @@ cbm_http_server_t *cbm_http_server_new(int port) {
         return NULL;
     }
 
-    /* Initialize Mongoose */
-    mg_mgr_init(&srv->mgr);
-    srv->mgr.userdata = srv;
-
-    /* Bind to localhost only */
-    char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d", port);
-
-    struct mg_connection *listener = mg_http_listen(&srv->mgr, url, http_handler, srv);
-    if (!listener) {
+    /* Bind to localhost only (httpd refuses anything else by construction) */
+    srv->listener = cbm_httpd_listen(port);
+    if (!srv->listener) {
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%d", port);
         cbm_log_warn("ui.unavailable", "port", port_str, "reason", "in_use", "hint",
                      "use --port=N to override");
         cbm_mcp_server_free(srv->mcp);
-        mg_mgr_free(&srv->mgr);
         free(srv);
         return NULL;
     }
 
+    srv->port = cbm_httpd_port(srv->listener);
     srv->listener_ok = true;
 
     char port_str[16];
-    snprintf(port_str, sizeof(port_str), "%d", port);
+    snprintf(port_str, sizeof(port_str), "%d", srv->port);
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", srv->port);
     cbm_log_info("ui.serving", "url", url, "port", port_str);
 
     return srv;
@@ -1449,7 +1366,7 @@ cbm_http_server_t *cbm_http_server_new(int port) {
 void cbm_http_server_free(cbm_http_server_t *srv) {
     if (!srv)
         return;
-    mg_mgr_free(&srv->mgr);
+    cbm_httpd_close(srv->listener);
     cbm_mcp_server_free(srv->mcp);
     free(srv);
 }
@@ -1465,10 +1382,34 @@ void cbm_http_server_run(cbm_http_server_t *srv) {
         return;
 
     while (!atomic_load(&srv->stop_flag)) {
-        mg_mgr_poll(&srv->mgr, 200); /* 200ms poll interval */
+        cbm_http_conn_t *conn = cbm_httpd_accept(srv->listener, 200);
+        if (!conn)
+            continue; /* timeout — re-check stop flag */
+
+        cbm_http_req_t req;
+        int rc = cbm_httpd_read_request(conn, &req);
+        if (rc == 0) {
+            dispatch_request(srv, conn, &req);
+            cbm_http_req_free(&req);
+        } else if (rc > 0) {
+            /* Parse/transport error with a known HTTP status (400/408/411/413/431).
+             * No CORS reflection here — the request was never parsed. */
+            cbm_http_replyf(conn, rc, "", "bad request");
+        }
+        cbm_httpd_conn_close(conn);
     }
 }
 
 bool cbm_http_server_is_running(const cbm_http_server_t *srv) {
     return srv && srv->listener_ok;
+}
+
+int cbm_http_server_port(const cbm_http_server_t *srv) {
+    return (srv && srv->listener_ok) ? srv->port : -1;
+}
+
+void cbm_http_server_set_recv_deadline_ms(cbm_http_server_t *srv, int ms) {
+    if (srv && srv->listener_ok) {
+        cbm_httpd_set_recv_deadline_ms(srv->listener, ms);
+    }
 }

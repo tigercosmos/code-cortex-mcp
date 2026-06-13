@@ -12,6 +12,7 @@
  * Depends on: pass_definitions having populated the registry and graph buffer
  */
 #include "foundation/constants.h"
+#include "foundation/str_util.h" // cbm_json_escape
 #include "pipeline/pipeline.h"
 #include <stdint.h>
 #include "pipeline/pipeline_internal.h"
@@ -180,19 +181,35 @@ static const char *resolve_as_class(const cbm_registry_t *reg, const char *name,
     return res.qualified_name;
 }
 
-/* Extract decorator function name: "@app.route('/api')" → "app.route" */
+/* Extract decorator function name from the raw attribute/annotation text.
+ * Handles the per-language surface syntaxes:
+ *   Python/TS:  "@app.route('/api')"   → "app.route"
+ *   Java/Kotlin:"@Override"             → "Override"
+ *   C#:         "[Log]" / "[Log(...)]"  → "Log"
+ *   Rust:       "#[derive(Debug)]"      → "derive"
+ *               "#[allow(dead_code)]"   → "allow"
+ *   PHP 8:      "#[Route('/users')]"    → "Route"
+ *   Swift:      "@discardableResult"    → "discardableResult"
+ *   Scala:      "@deprecated(...)"      → "deprecated"
+ * Returns the leading identifier path, stopping at the first '(' or '['
+ * argument list and trimming any wrapping bracket/`@`/`#` punctuation. */
 static void extract_decorator_func(const char *dec, char *out, size_t outsz) {
     out[0] = '\0';
     if (!dec) {
         return;
     }
     const char *start = dec;
-    if (*start == '@') {
+    /* Strip leading sigils: '@' (Py/TS/JVM/Swift/Scala), '#' + '[' (Rust/PHP8),
+     * or a bare '[' (C# attribute). */
+    while (*start == '@' || *start == '#' || *start == '[' || *start == ' ') {
         start++;
     }
-    /* Find opening paren */
-    const char *paren = strchr(start, '(');
-    size_t len = paren ? (size_t)(paren - start) : strlen(start);
+    /* The name ends at the first argument list ('(' or '[') or wrapper ']'. */
+    size_t len = 0;
+    while (start[len] && start[len] != '(' && start[len] != '[' && start[len] != ']' &&
+           start[len] != ' ' && start[len] != ',') {
+        len++;
+    }
     if (len == 0 || len >= outsz) {
         return;
     }
@@ -228,25 +245,50 @@ static int check_go_class_implements(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_nod
     if (!fp_ends_with(cls->file_path, ".go")) {
         return 0;
     }
+    /* Resolve the struct's methods two ways and use whichever finds them:
+     *   (a) the struct's DEFINES_METHOD edges, matched by method NAME — the real
+     *       pipeline path, where Go receiver methods carry a flat QN (e.g.
+     *       "pkg.Area" rather than "pkg.Circle.Area"), so QN-string
+     *       reconstruction would miss; and
+     *   (b) the reconstructed QN "<ClassQN>.<methodName>" — used by tests and any
+     *       extractor that does emit class-qualified method QNs without
+     *       DEFINES_METHOD edges from the class. */
+    const cbm_gbuf_edge_t **cls_dm = NULL;
+    int cls_dm_count = 0;
+    cbm_gbuf_find_edges_by_source_type(ctx->gbuf, cls->id, "DEFINES_METHOD", &cls_dm,
+                                       &cls_dm_count);
+
     char prefix[CBM_SZ_512];
     snprintf(prefix, sizeof(prefix), "%s.", cls->qualified_name);
+
+    /* For each interface method, find the matching struct method node. */
+    const cbm_gbuf_node_t *matched[CBM_SZ_128];
     for (int m = 0; m < im_count; m++) {
-        char method_qn[CBM_SZ_512];
-        snprintf(method_qn, sizeof(method_qn), "%s%s", prefix, imethods[m].name);
-        if (!cbm_gbuf_find_by_qn(ctx->gbuf, method_qn)) {
-            return 0;
+        const cbm_gbuf_node_t *found = NULL;
+        /* (a) DEFINES_METHOD edge by name */
+        for (int d = 0; d < cls_dm_count; d++) {
+            const cbm_gbuf_node_t *cm = cbm_gbuf_find_by_id(ctx->gbuf, cls_dm[d]->target_id);
+            if (cm && cm->name && strcmp(cm->name, imethods[m].name) == 0) {
+                found = cm;
+                break;
+            }
         }
+        /* (b) reconstructed "<ClassQN>.<methodName>" */
+        if (!found) {
+            char method_qn[CBM_SZ_512];
+            snprintf(method_qn, sizeof(method_qn), "%s%s", prefix, imethods[m].name);
+            found = cbm_gbuf_find_by_qn(ctx->gbuf, method_qn);
+        }
+        if (!found) {
+            return 0; /* struct does not satisfy the interface */
+        }
+        matched[m] = found;
     }
     cbm_gbuf_insert_edge(ctx->gbuf, cls->id, iface->id, "IMPLEMENTS", "{}");
     int edges = SKIP_ONE;
     for (int m = 0; m < im_count; m++) {
-        char method_qn[CBM_SZ_512];
-        snprintf(method_qn, sizeof(method_qn), "%s%s", prefix, imethods[m].name);
-        const cbm_gbuf_node_t *cm = cbm_gbuf_find_by_qn(ctx->gbuf, method_qn);
-        if (cm) {
-            cbm_gbuf_insert_edge(ctx->gbuf, cm->id, imethods[m].id, "OVERRIDE", "{}");
-            edges++;
-        }
+        cbm_gbuf_insert_edge(ctx->gbuf, matched[m]->id, imethods[m].id, "OVERRIDE", "{}");
+        edges++;
     }
     return edges;
 }
@@ -305,6 +347,16 @@ int cbm_pipeline_implements_go(cbm_pipeline_ctx_t *ctx) {
     return edge_count;
 }
 
+/* Build the QN of the synthetic node that stands in for an external/stdlib
+ * decorator whose target is not a local symbol (Rust `#[derive(Debug)]`, Swift
+ * `@discardableResult`, Scala `@deprecated`, Python `@cache`, Java `@Override`,
+ * ...).  Namespaced with `<decorator:` so it can never collide with a real
+ * symbol and so all uses of the same decorator name across a project dedupe to
+ * one node by QN. */
+static void synth_decorator_qn(const char *func_name, char *out, size_t outsz) {
+    snprintf(out, outsz, "<decorator:%s>", func_name);
+}
+
 /* Process INHERITS + DECORATES edges for one definition. */
 /* Resolve one decorator and create DECORATES edge. */
 static void resolve_decorator(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *node,
@@ -317,13 +369,45 @@ static void resolve_decorator(cbm_pipeline_ctx_t *ctx, const cbm_gbuf_node_t *no
     }
     cbm_resolution_t res =
         cbm_registry_resolve(ctx->registry, func_name, module_qn, imp_keys, imp_vals, imp_count);
-    if (!res.qualified_name || res.qualified_name[0] == '\0') {
-        return;
+    if ((!res.qualified_name || res.qualified_name[0] == '\0') && !strchr(func_name, '.')) {
+        /* C# attributes are referenced by their short name (`[Log]`) but declared
+         * with the conventional `Attribute` suffix (`class LogAttribute`).  Retry
+         * with the suffix appended so the declaration resolves. */
+        char with_suffix[CBM_SZ_256];
+        int wn = snprintf(with_suffix, sizeof(with_suffix), "%sAttribute", func_name);
+        if (wn > 0 && (size_t)wn < sizeof(with_suffix)) {
+            res = cbm_registry_resolve(ctx->registry, with_suffix, module_qn, imp_keys, imp_vals,
+                                       imp_count);
+        }
     }
-    const cbm_gbuf_node_t *dec = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
+    const cbm_gbuf_node_t *dec = NULL;
+    if (res.qualified_name && res.qualified_name[0] != '\0') {
+        dec = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
+    }
+    if (!dec) {
+        /* The decorator target is not a local symbol (external attribute /
+         * stdlib annotation / proc-macro derive).  Materialise a synthetic
+         * "Decorator" node so the DECORATES relation is still recorded.
+         * Upsert dedupes by QN, so every use of the same decorator name shares
+         * one node (one extra node per distinct external decorator, project-
+         * wide).  Created in the single-threaded semantic pass, so direct
+         * ctx->gbuf mutation is safe here (mirrors pass_route_nodes). */
+        char syn_qn[CBM_SZ_512];
+        synth_decorator_qn(func_name, syn_qn, sizeof(syn_qn));
+        int64_t syn_id =
+            cbm_gbuf_upsert_node(ctx->gbuf, "Decorator", func_name, syn_qn, "", 0, 0, "{}");
+        if (syn_id != 0) {
+            dec = cbm_gbuf_find_by_qn(ctx->gbuf, syn_qn);
+        }
+    }
     if (dec && node->id != dec->id) {
-        char props[CBM_SZ_256];
-        snprintf(props, sizeof(props), "{\"decorator\":\"%s\"}", decorator);
+        /* Decorator source text can contain quotes and raw newlines — escape
+         * it or the edge properties JSON is malformed (twin of the parallel
+         * path in pass_parallel.c). */
+        char esc_dec[CBM_SZ_256];
+        cbm_json_escape(esc_dec, sizeof(esc_dec), decorator);
+        char props[CBM_SZ_512];
+        snprintf(props, sizeof(props), "{\"decorator\":\"%s\"}", esc_dec);
         cbm_gbuf_insert_edge(ctx->gbuf, node->id, dec->id, "DECORATES", props);
         /* Ensure a reference edge exists so the decorator appears in usage queries
          * without being misclassified as a real call by downstream passes. */
@@ -352,7 +436,14 @@ static void sem_process_def_edges(cbm_pipeline_ctx_t *ctx, const CBMDefinition *
             }
             const cbm_gbuf_node_t *base_node = cbm_gbuf_find_by_qn(ctx->gbuf, base_qn);
             if (base_node && node->id != base_node->id) {
-                cbm_gbuf_insert_edge(ctx->gbuf, node->id, base_node->id, "INHERITS", "{}");
+                /* A base that resolves to an Interface is an IMPLEMENTS relation
+                 * (Java `implements`, C# `: IFace`, TS `implements`); a Class/
+                 * Type/Enum base is plain INHERITS. */
+                const char *base_label = cbm_registry_label_of(ctx->registry, base_qn);
+                const char *edge_type = (base_label && strcmp(base_label, "Interface") == 0)
+                                            ? "IMPLEMENTS"
+                                            : "INHERITS";
+                cbm_gbuf_insert_edge(ctx->gbuf, node->id, base_node->id, edge_type, "{}");
                 (*inherits_count)++;
             }
         }

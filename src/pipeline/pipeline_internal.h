@@ -92,6 +92,35 @@ void cbm_pipeline_set_pkgmap(CBMHashTable *map);
 char *cbm_pipeline_resolve_module(const cbm_pipeline_ctx_t *ctx, const char *source_rel,
                                   const char *module_path);
 
+/* Resolve an import to its in-graph target node, or NULL if unresolvable.
+ *
+ * Resolution order (first hit wins):
+ *   1. Module-path resolution (relative / pkgmap / fqn_module) → existing node.
+ *      This preserves the behavior for Python/TS/Go whose module path maps
+ *      directly to a sibling Module/File QN.
+ *   2. namespace_map[module_path-prefix] → File node QN (Java/Kotlin/C#/PHP
+ *      `using`/`import` of a NAMESPACE that the path-based QN cannot express).
+ *   3. Symbol-name fallback: the import's last path segment matched against an
+ *      in-graph definition node of the same simple name in a different file
+ *      (Rust `use crate::util::helper`, Java `import com.example.Util`, ...).
+ *
+ * `namespace_map` may be NULL (skips step 2).  `source_file_qn` is the importing
+ * file's __file__ QN, used to avoid self-imports in step 3. */
+const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t *ctx,
+                                                        const char *source_rel,
+                                                        const char *source_file_qn,
+                                                        const CBMImport *imp,
+                                                        CBMHashTable *namespace_map);
+
+/* Build a namespace → File-node-QN map from a set of extraction results.
+ * Each result that declared a namespace/package contributes one entry keyed by
+ * the namespace string (e.g. "App.Utils", "com.example").  Returns NULL when no
+ * results declared a namespace.  Caller frees via cbm_pipeline_namespace_map_free. */
+CBMHashTable *cbm_pipeline_namespace_map_build(const char *project_name,
+                                               CBMFileResult *const *results,
+                                               const char *const *rels, int count);
+void cbm_pipeline_namespace_map_free(CBMHashTable *map);
+
 /* Parse a manifest file and collect pkg entries. Returns true if basename matched. */
 bool cbm_pkgmap_try_parse(const char *basename, const char *rel_path, const char *source,
                           int source_len, cbm_pkg_entries_t *entries);
@@ -497,6 +526,12 @@ int cbm_pipeline_pass_similarity(cbm_pipeline_ctx_t *ctx);
 /* Pre-dump pass: SEMANTICALLY_RELATED edges via algorithmic embeddings.
  * Opt-in: only runs when CBM_SEMANTIC_ENABLED=1. */
 int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx);
+
+/* Pre-dump pass: interprocedural complexity propagation (Tier B).
+ * Propagates per-function loop_depth along CALLS edges into a transitive
+ * worst-case nested-loop estimate (transitive_loop_depth) and flags call-graph
+ * cycles (recursive). Runs on the graph buffer before the dump. */
+void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx);
 
 /* ── Env URL scanner (pass_envscan.c) ────────────────────────────── */
 

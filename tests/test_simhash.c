@@ -879,7 +879,7 @@ static void teardown_sim_test_repo(void) {
 
 TEST(pipeline_minhash_end_to_end) {
     if (setup_sim_test_repo() != 0) {
-        SKIP("failed to create temp dir");
+        FAIL("failed to create temp dir");
     }
 
     char db_path[512];
@@ -930,7 +930,7 @@ TEST(pipeline_minhash_end_to_end) {
 TEST(pipeline_minhash_no_false_positives) {
     snprintf(g_sim_tmpdir, sizeof(g_sim_tmpdir), "/tmp/cbm_sim_nofp_XXXXXX");
     if (!cbm_mkdtemp(g_sim_tmpdir)) {
-        SKIP("failed to create temp dir");
+        FAIL("failed to create temp dir");
     }
 
     /* 5 diverse functions — no clones */
@@ -1003,7 +1003,7 @@ TEST(pipeline_minhash_no_false_positives) {
 
 TEST(pipeline_minhash_incremental) {
     if (setup_sim_test_repo() != 0) {
-        SKIP("failed to create temp dir");
+        FAIL("failed to create temp dir");
     }
 
     char db_path[512];
@@ -1066,7 +1066,7 @@ TEST(pipeline_minhash_incremental) {
 
 TEST(pipeline_minhash_incremental_new_clone) {
     if (setup_sim_test_repo() != 0) {
-        SKIP("failed to create temp dir");
+        FAIL("failed to create temp dir");
     }
 
     char db_path[512];

@@ -889,7 +889,10 @@ const CBMType* c_parse_type_node(CLSPContext* ctx, TSNode node) {
             }
 
             // Parse template arguments
-            const CBMType* targs[16];
+            const CBMType* targs[16] = {
+                NULL}; /* zero-fill: cbm_type_substitute requires NULL-terminated args
+                          (uninitialized tail bound T to stack garbage -> corrupt type graph,
+                          bitcoin serialize.h) */
             int targ_count = 0;
             if (!ts_node_is_null(tmpl_args)) {
                 uint32_t nc = ts_node_named_child_count(tmpl_args);
@@ -979,7 +982,9 @@ const CBMType* c_parse_type_node(CLSPContext* ctx, TSNode node) {
         }
 
         // Parse template arguments
-        const CBMType* targs[16];
+        const CBMType* targs[16] = {
+            NULL}; /* zero-fill: cbm_type_substitute requires NULL-terminated args (uninitialized
+                      tail bound T to stack garbage -> corrupt type graph, bitcoin serialize.h) */
         int targ_count = 0;
         if (!ts_node_is_null(args_node)) {
             uint32_t nc = ts_node_named_child_count(args_node);
@@ -1445,7 +1450,10 @@ static const CBMType* c_eval_expr_type_inner(CLSPContext* ctx, TSNode node) {
                 f->signature->data.func.return_types &&
                 f->signature->data.func.return_types[0]) {
                 const CBMType* base_ret = f->signature->data.func.return_types[0];
-                const CBMType* targs[16];
+                const CBMType* targs[16] = {
+                    NULL}; /* zero-fill: cbm_type_substitute requires NULL-terminated args
+                              (uninitialized tail bound T to stack garbage -> corrupt type graph,
+                              bitcoin serialize.h) */
                 int targ_count = 0;
                 uint32_t tnc = ts_node_named_child_count(qi_tmpl_args);
                 for (uint32_t ti = 0; ti < tnc && targ_count < 15; ti++) {
@@ -1589,7 +1597,9 @@ static const CBMType* c_eval_expr_type_inner(CLSPContext* ctx, TSNode node) {
         if (!base_ret) return f->signature;
 
         // Parse explicit template arguments from <...>
-        const CBMType* targs[16];
+        const CBMType* targs[16] = {
+            NULL}; /* zero-fill: cbm_type_substitute requires NULL-terminated args (uninitialized
+                      tail bound T to stack garbage -> corrupt type graph, bitcoin serialize.h) */
         int targ_count = 0;
         if (!ts_node_is_null(args_node)) {
             uint32_t nc = ts_node_named_child_count(args_node);
@@ -3040,7 +3050,24 @@ static void c_emit_unresolved_call(CLSPContext* ctx, const char* expr_text, cons
 // resolve_calls_in_node: walk AST and resolve calls
 // ============================================================================
 
+static void c_resolve_calls_in_node_inner(CLSPContext* ctx, TSNode node);
+
+#define C_LSP_MAX_WALK_DEPTH 512
+
+/* Depth-guarded entry: the AST walk recurses per nesting level and crashed
+ * with a stack overflow on deeply nested real-world C++ (bitcoin, SIGSEGV in
+ * cbm_type_substitute under hundreds of recursive c_resolve_calls_in_node
+ * frames via c_adl_resolve). Past the cap the subtree is skipped — its calls
+ * stay unresolved, which is graceful degradation, not a crash. */
 static void c_resolve_calls_in_node(CLSPContext* ctx, TSNode node) {
+    if (ctx->walk_depth >= C_LSP_MAX_WALK_DEPTH)
+        return;
+    ctx->walk_depth++;
+    c_resolve_calls_in_node_inner(ctx, node);
+    ctx->walk_depth--;
+}
+
+static void c_resolve_calls_in_node_inner(CLSPContext* ctx, TSNode node) {
     if (ts_node_is_null(node)) return;
     const char* kind = ts_node_type(node);
 
@@ -3807,8 +3834,14 @@ static void c_process_function(CLSPContext* ctx, TSNode func_node) {
     ctx->enclosing_func_qn = func_qn;
 
     // If inside a template, attach type_param_names to the registered function
-    // so pending template calls can be resolved at call sites.
-    if (ctx->in_template && ctx->template_param_count > 0) {
+    // so pending template calls can be resolved at call sites. NEVER do this
+    // against the shared Tier-2 cross registry: resolve workers walk files
+    // concurrently, so the write races other readers AND stores a pointer to
+    // THIS worker's per-file arena into shared state — once that arena is
+    // recycled the registry holds dangling memory (intermittent SIGSEGV
+    // indexing bitcoin). Cross-phase template deduction then relies on the
+    // positional fallback, which is graceful degradation.
+    if (ctx->in_template && ctx->template_param_count > 0 && !ctx->registry_shared) {
         // Find the registered function and set type_param_names
         for (int ri = 0; ri < ((CBMTypeRegistry*)ctx->registry)->func_count; ri++) {
             CBMRegisteredFunc* rf = &((CBMTypeRegistry*)ctx->registry)->funcs[ri];
@@ -4803,6 +4836,7 @@ void cbm_run_c_lsp_cross_with_registry(
 
     CLSPContext ctx;
     c_lsp_init(&ctx, arena, source, source_len, reg, module_qn, cpp_mode, out);
+    ctx.registry_shared = true; /* Tier-2 shared registry: read-only, see flag doc */
     for (int i = 0; i < include_count; i++) {
         c_lsp_add_include(&ctx, include_paths[i], include_ns_qns[i]);
     }

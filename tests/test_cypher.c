@@ -2461,6 +2461,45 @@ TEST(cypher_issue305_count_star_alias) {
     PASS();
 }
 
+/* Regression: projecting several computed/JSON properties in one row must yield
+ * DISTINCT values. node_prop previously returned a single shared static buffer,
+ * so every such column aliased the last property read — and because the search
+ * key is matched in the JSON, `loop_depth` must not be confused with its suffix
+ * `transitive_loop_depth`. Exercises the bottleneck metrics end-to-end. */
+TEST(cypher_multi_prop_projection_no_alias) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    cbm_node_t n = {.project = "test",
+                    .label = "Function",
+                    .name = "Hot",
+                    .qualified_name = "test.Hot",
+                    .file_path = "hot.go",
+                    .start_line = 10,
+                    .end_line = 42,
+                    .properties_json = "{\"complexity\":3,\"cognitive\":7,\"loop_count\":2,"
+                                       "\"loop_depth\":1,\"self_recursive\":false,"
+                                       "\"transitive_loop_depth\":5,\"recursive\":true}"};
+    cbm_store_upsert_node(s, &n);
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) RETURN f.loop_depth, f.transitive_loop_depth, "
+                                "f.cognitive, f.complexity, f.start_line, f.end_line",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_EQ(r.col_count, 6);
+    ASSERT_STR_EQ(r.rows[0][0], "1"); /* loop_depth — NOT the suffix transitive_loop_depth */
+    ASSERT_STR_EQ(r.rows[0][1], "5"); /* transitive_loop_depth */
+    ASSERT_STR_EQ(r.rows[0][2], "7"); /* cognitive */
+    ASSERT_STR_EQ(r.rows[0][3], "3"); /* complexity */
+    ASSERT_STR_EQ(r.rows[0][4], "10"); /* start_line (computed) */
+    ASSERT_STR_EQ(r.rows[0][5], "42"); /* end_line (computed) — distinct from start_line */
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════ */
 
 SUITE(cypher) {
@@ -2511,6 +2550,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_func_tointeger_tofloat);
     RUN_TEST(cypher_func_size_reverse);
     RUN_TEST(cypher_func_multiarg);
+    RUN_TEST(cypher_multi_prop_projection_no_alias);
     RUN_TEST(cypher_exists_no_callers);
     RUN_TEST(cypher_exists_has_outgoing_calls);
     RUN_TEST(cypher_exec_calls_relationship);

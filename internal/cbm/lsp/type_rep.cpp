@@ -2,6 +2,10 @@
 #include <stdint.h>
 #include <string.h>
 
+/* No real allocation lives in the first page; values below this are garbage
+ * (e.g. small integers or truncated string bytes misread as pointers). */
+enum { TR_MIN_PLAUSIBLE_PTR = 4096 };
+
 // Singleton UNKNOWN type (no allocation needed).
 static const CBMType unknown_singleton = { .kind = CBM_TYPE_UNKNOWN };
 
@@ -662,6 +666,34 @@ const CBMType* cbm_type_substitute(CBMArena* a, const CBMType* t,
     if (!t) return cbm_type_unknown();
     if (!type_params || !type_args) return t;
 
+    /* type_args may be SHORTER than type_params — a class template instantiated
+     * with fewer args than declared params, or trailing default template args
+     * (e.g. `Box<Widget>` for `template<class T, class U, class V>`). Indexing
+     * type_args[i] by the type_params loop index would then read past the args
+     * array, yielding a bogus CBMType* that is later dereferenced -> SEGV (#427).
+     * type_params is always NULL-terminated; type_args is either parallel-length
+     * (some callers pass a fixed positional array that is NOT NULL-terminated) or
+     * shorter-and-NULL-terminated. Bound the length walk by the param count so it
+     * can never run off a non-terminated args array, then bound every type_args[i]
+     * access by the result. */
+    int nparams = 0;
+    while (type_params[nparams]) {
+        nparams++;
+    }
+    /* Contract: type_args must be NULL-terminated (it may be shorter than
+     * type_params). A misaligned or null-page value can never be a real
+     * CBMType* — it means a caller passed an unterminated array and the walk
+     * is reading uninitialized memory (seen on bitcoin's serialize.h: an
+     * explicit-template-arg call bound T to stack garbage that was woven into
+     * the registered type graph and dereferenced later -> SIGSEGV). Treat such
+     * values as the terminator so garbage can never enter a type graph. */
+    int args_len = 0;
+    while (args_len < nparams && type_args[args_len] &&
+           ((uintptr_t)type_args[args_len] & (sizeof(void*) - 1)) == 0 &&
+           (uintptr_t)type_args[args_len] >= TR_MIN_PLAUSIBLE_PTR) {
+        args_len++;
+    }
+
     switch (t->kind) {
     case CBM_TYPE_TYPE_PARAM: {
         for (int i = 0; type_params[i]; i++) {
@@ -674,7 +706,7 @@ const CBMType* cbm_type_substitute(CBMArena* a, const CBMType* t,
                  * deref without guarding. Fall back to the unsubstituted
                  * TYPE_PARAM in that case — it keeps the result NULL-safe and
                  * later resolution simply leaves the call unresolved. */
-                return type_args[i] ? type_args[i] : t;
+                return (i < args_len && type_args[i]) ? type_args[i] : t;
             }
         }
         return t; // unmatched param stays as-is
@@ -690,7 +722,7 @@ const CBMType* cbm_type_substitute(CBMArena* a, const CBMType* t,
             for (int i = 0; type_params[i]; i++) {
                 if (strcmp(qn, type_params[i]) == 0 ||
                     strcmp(short_name, type_params[i]) == 0) {
-                    return type_args[i] ? type_args[i] : t;
+                    return (i < args_len && type_args[i]) ? type_args[i] : t;
                 }
             }
         }

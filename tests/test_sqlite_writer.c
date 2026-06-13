@@ -61,7 +61,8 @@ TEST(sw_minimal_data) {
          .url_path = ""},
     };
 
-    int rc = cbm_write_db(path, "test", "/tmp/test", "2026-03-14T00:00:00Z", nodes, 2, edges, 1, NULL, 0, NULL, 0);
+    int rc = cbm_write_db(path, "test", "/tmp/test", "2026-03-14T00:00:00Z", nodes, 2, edges, 1,
+                          NULL, 0, NULL, 0);
     ASSERT_EQ(rc, 0);
 
     /* Verify via SQLite */
@@ -195,8 +196,8 @@ TEST(sw_scale_and_indexes) {
         edge_count++;
     }
 
-    int rc =
-        cbm_write_db(path, "proj", "/repo", "2026-03-14T12:00:00Z", nodes, 100, edges, edge_count, NULL, 0, NULL, 0);
+    int rc = cbm_write_db(path, "proj", "/repo", "2026-03-14T12:00:00Z", nodes, 100, edges,
+                          edge_count, NULL, 0, NULL, 0);
     ASSERT_EQ(rc, 0);
 
     sqlite3 *db = NULL;
@@ -274,12 +275,88 @@ TEST(sw_scale_and_indexes) {
     PASS();
 }
 
+/* Index keys longer than the index-page max-local payload (~16.4 KB at the
+ * 64 KB page size) MUST spill to overflow pages; writing them fully inline
+ * makes SQLite read key bytes as an overflow page number — PRAGMA
+ * integrity_check reports "invalid page number 0x43654C6C ('CeLl')" and name
+ * lookups silently return nothing (seen on elasticsearch: very long
+ * Section/heading names). */
+TEST(sw_long_index_keys_overflow) {
+    char path[256];
+    ASSERT_EQ(make_temp_db(path, sizeof(path)), 0);
+
+    enum { LONGN = 20000 };
+    char *longname = malloc(LONGN + 1);
+    char *longqn = malloc(LONGN + 16);
+    ASSERT_NOT_NULL(longname);
+    ASSERT_NOT_NULL(longqn);
+    memset(longname, 'N', LONGN);
+    longname[LONGN] = '\0';
+    snprintf(longqn, LONGN + 16, "test.%s", longname);
+
+    CBMDumpNode nodes[3] = {
+        {.id = 1,
+         .project = "test",
+         .label = "Module",
+         .name = "main",
+         .qualified_name = "test.main",
+         .file_path = "main.md",
+         .start_line = 1,
+         .end_line = 2,
+         .properties = "{}"},
+        {.id = 2,
+         .project = "test",
+         .label = "Section",
+         .name = longname,
+         .qualified_name = longqn,
+         .file_path = "main.md",
+         .start_line = 3,
+         .end_line = 9,
+         .properties = "{}"},
+        {.id = 3,
+         .project = "test",
+         .label = "Function",
+         .name = "after",
+         .qualified_name = "test.main.after",
+         .file_path = "main.md",
+         .start_line = 10,
+         .end_line = 12,
+         .properties = "{}"},
+    };
+
+    int rc = cbm_write_db(path, "test", "/tmp/test", "2026-03-14T00:00:00Z", nodes, 3, NULL, 0,
+                          NULL, 0, NULL, 0);
+    ASSERT_EQ(rc, 0);
+
+    sqlite3 *db = NULL;
+    ASSERT_EQ(sqlite3_open(path, &db), SQLITE_OK);
+    sqlite3_stmt *stmt = NULL;
+    sqlite3_prepare_v2(db, "PRAGMA integrity_check", -1, &stmt, NULL);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+    const char *integrity = (const char *)sqlite3_column_text(stmt, 0);
+    ASSERT_STR_EQ(integrity, "ok");
+    sqlite3_finalize(stmt);
+
+    /* The long-named row must be findable via the name index. */
+    sqlite3_prepare_v2(db, "SELECT id FROM nodes WHERE name = ?1", -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 1, longname, -1, SQLITE_STATIC);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+    ASSERT_EQ(sqlite3_column_int64(stmt, 0), 2);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    free(longname);
+    free(longqn);
+    unlink(path);
+    PASS();
+}
+
 TEST(sw_empty) {
     char path[256];
     ASSERT_EQ(make_temp_db(path, sizeof(path)), 0);
 
-    int rc = cbm_write_db(path, "test", "/tmp/test", "2026-03-14T00:00:00Z", NULL, 0, NULL, 0,
-                          NULL, 0, NULL, 0);
+    int rc = cbm_write_db(path, "test", "/tmp/test", "2026-03-14T00:00:00Z", NULL, 0, NULL, 0, NULL,
+                          0, NULL, 0);
     ASSERT_EQ(rc, 0);
 
     sqlite3 *db = NULL;
@@ -326,8 +403,8 @@ TEST(sw_multi_page) {
         };
     }
 
-    int rc = cbm_write_db(path, "p", "/r", "2026-01-01T00:00:00Z", nodes, N, NULL, 0, NULL, 0,
-                          NULL, 0);
+    int rc =
+        cbm_write_db(path, "p", "/r", "2026-01-01T00:00:00Z", nodes, N, NULL, 0, NULL, 0, NULL, 0);
     ASSERT_EQ(rc, 0);
 
     sqlite3 *db = NULL;
@@ -404,7 +481,7 @@ TEST(sw_oversized_node) {
     }};
 
     int rc = cbm_write_db(path, "test", "/tmp/test", "2026-03-28T00:00:00Z", nodes, 1, NULL, 0,
-                         NULL, 0, NULL, 0);
+                          NULL, 0, NULL, 0);
     free(big_props);
     ASSERT_EQ(rc, 0);
 
@@ -443,6 +520,7 @@ TEST(sw_oversized_node) {
 SUITE(sqlite_writer) {
     RUN_TEST(sw_minimal_data);
     RUN_TEST(sw_scale_and_indexes);
+    RUN_TEST(sw_long_index_keys_overflow);
     RUN_TEST(sw_empty);
     RUN_TEST(sw_multi_page);
     RUN_TEST(sw_oversized_node);

@@ -185,10 +185,8 @@ cbm_add_vendored_library(cbm_sqlite3
     DEFS SQLITE_DQS=0 SQLITE_THREADSAFE=1 SQLITE_ENABLE_FTS5
     INCLUDES ${CMAKE_SOURCE_DIR}/vendored/sqlite3)
 
-cbm_add_vendored_library(cbm_mongoose
-    SOURCES ${CMAKE_SOURCE_DIR}/vendored/mongoose/mongoose.c
-    DEFS MG_ENABLE_LOG=0
-    INCLUDES ${CMAKE_SOURCE_DIR}/vendored)
+# mongoose removed: the graph-UI HTTP server is now a first-party impl
+# (src/ui/httpd.cpp), matching upstream's "Replace the graph-UI HTTP server" change.
 
 cbm_add_vendored_library(cbm_yyjson
     SOURCES ${CMAKE_SOURCE_DIR}/vendored/yyjson/yyjson.c
@@ -241,12 +239,16 @@ cbm_add_cxx_library(cbm_lsp_generated
     INCLUDES ${CBM_TS_SRC})
 target_compile_options(cbm_lsp_generated PRIVATE -Wno-comment)
 
-# ts_lsp / cs_lsp — ported to C++23 (the (const CBMType*[]){...} compound
-# literals are now arena-allocated via cbm_type_args). Large legacy resolver
-# bodies, not yet warning-clean as C++, so built with relaxed warnings like
-# the lsp_all unity blob; still sanitized as first-party code.
+# ts_lsp / cs_lsp / java / kotlin / rust — ported to C++23 (the
+# (const CBMType*[]){...} compound literals are now arena-allocated via
+# cbm_type_args). Large legacy resolver bodies, not yet warning-clean as C++,
+# so built with relaxed warnings like the lsp_all unity blob; still sanitized
+# as first-party code. Each resolver is its own TU (no static-symbol clashes).
 cbm_add_cxx_library(cbm_lsp_tscs
     SOURCES ${CBM_INTERNAL}/lsp/ts_lsp.cpp ${CBM_INTERNAL}/lsp/cs_lsp.cpp
+            ${CBM_INTERNAL}/lsp/java_lsp.cpp ${CBM_INTERNAL}/lsp/kotlin_lsp.cpp
+            ${CBM_INTERNAL}/lsp/rust_lsp.cpp ${CBM_INTERNAL}/lsp/rust_cargo.cpp
+            ${CBM_INTERNAL}/lsp/rust_proc_macros.cpp ${CBM_INTERNAL}/lsp/rust_rustdoc.cpp
     DEFS _DEFAULT_SOURCE _GNU_SOURCE
     INCLUDES ${CBM_TS_SRC})
 target_compile_options(cbm_lsp_tscs PRIVATE -Wno-comment)
@@ -269,7 +271,7 @@ set_source_files_properties(${CMAKE_SOURCE_DIR}/vendored/nomic/code_vectors_blob
                COMPILE_OPTIONS "-Wa,-I${CMAKE_SOURCE_DIR}")
 
 set(CBM_VENDORED_TARGETS
-    cbm_mimalloc cbm_sqlite3 cbm_mongoose cbm_yyjson
+    cbm_mimalloc cbm_sqlite3 cbm_yyjson
     cbm_lz4 cbm_zstd
     cbm_ts_runtime cbm_grammars cbm_lsp_all
     cbm_preprocessor cbm_unixcoder)
@@ -377,6 +379,7 @@ cbm_add_cxx_library(cbm_pipeline  SOURCES
     src/pipeline/pass_semantic_edges.cpp
     src/pipeline/pass_cross_repo.cpp
     src/pipeline/artifact.cpp
+    src/pipeline/pass_complexity.cpp
     src/pipeline/pass_pkgmap.cpp)
 cbm_add_cxx_library(cbm_simhash   SOURCES src/simhash/minhash.cpp)
 cbm_add_cxx_library(cbm_semantic  SOURCES src/semantic/semantic.cpp src/semantic/ast_profile.cpp)
@@ -391,6 +394,7 @@ else()
     set(CBM_UI_ASSETS_SRC src/ui/embedded_stub.cpp)
 endif()
 cbm_add_cxx_library(cbm_ui        SOURCES src/ui/config.cpp src/ui/http_server.cpp
+                                          src/ui/httpd.cpp
                                           src/ui/layout3d.cpp ${CBM_UI_ASSETS_SRC})
 
 set(CBM_FIRSTPARTY_TARGETS
@@ -445,7 +449,24 @@ set(CBM_TEST_SRCS
     tests/test_security.c tests/test_yaml.c tests/test_simhash.c
     tests/test_stack_overflow.c
     # integration
-    tests/test_integration.c tests/test_incremental.c)
+    tests/test_integration.c tests/test_incremental.c
+    # hybrid LSP resolvers (java / kotlin / rust)
+    tests/test_java_lsp.c tests/test_java_lsp_coverage.c
+    tests/test_kotlin_lsp.c tests/test_rust_lsp.c
+    # httpd (first-party graph-UI transport)
+    tests/test_httpd.c
+    # grammar coverage / extraction / edge / probe suites
+    tests/test_lang_contract.c tests/test_grammar_regression.c
+    tests/test_grammar_labels.c tests/test_grammar_imports.c
+    tests/test_extraction_imports.c tests/test_extraction_inheritance.c
+    tests/test_edge_imports.c tests/test_edge_structural.c
+    tests/test_lsp_resolution_probe.c tests/test_node_creation_probe.c
+    tests/test_edge_types_probe.c tests/test_convergence_probe.c
+    tests/test_matrix_known_classes.c tests/test_matrix_new_constructs.c
+    tests/test_grammar_probe_a.c tests/test_grammar_probe_b.c
+    tests/test_grammar_probe_c.c tests/test_grammar_probe_d.c
+    tests/test_grammar_probe_e.c tests/test_grammar_probe_f.c
+    tests/test_grammar_probe_g.c)
 
 add_executable(test-runner ${CBM_TEST_SRCS})
 

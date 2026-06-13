@@ -72,6 +72,14 @@ char *cbm_mkdtemp(char *tmpl) {
         return NULL;
     if (_mkdir(buf) != 0)
         return NULL;
+    /* Normalize to forward slashes. Callers embed this path in JSON repo_path
+     * (where "\t"/"\a" are invalid escapes → index fails) and pass it to git -C.
+     * Windows file APIs accept forward slashes, so the created dir is unaffected. */
+    for (char *p = buf; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
     /* Copy result back — callers now use char[CBM_SZ_256]+ buffers */
     strcpy(tmpl, buf);
     return tmpl;

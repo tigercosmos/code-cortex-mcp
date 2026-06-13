@@ -3164,7 +3164,7 @@ TEST(tslsp_real_router_chain) {
     PASS();
 }
 
-TEST(tslsp_real_mongoose_model) {
+TEST(tslsp_real_odm_model) {
     CBMFileResult *r = extract_ts(
         "interface Model<T> {\n"
         "    create(doc: Partial<T>): Promise<T>;\n"
@@ -3632,6 +3632,51 @@ TEST(tslsp_hash_registry_basic) {
     /* Negative lookups stay correct. */
     ASSERT(cbm_registry_lookup_type(&reg, "test.B") == NULL);
     ASSERT(cbm_registry_lookup_method(&reg, "test.A", "bar") == NULL);
+
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
+/* Entries added AFTER cbm_registry_finalize must remain findable. The hashed
+ * lookup returned NULL for anything not in the buckets, silently hiding
+ * post-finalize additions (receiver-type stubs, c_lsp tpn attach targets).
+ * The fix scans the un-indexed tail after a bucket miss. */
+TEST(tslsp_hash_registry_post_finalize_adds) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &arena);
+
+    CBMRegisteredType t;
+    memset(&t, 0, sizeof(t));
+    t.qualified_name = "test.A";
+    t.short_name = "A";
+    cbm_registry_add_type(&reg, t);
+    cbm_registry_finalize(&reg);
+
+    /* Post-finalize additions — the stub-registration pattern. */
+    CBMRegisteredType t2;
+    memset(&t2, 0, sizeof(t2));
+    t2.qualified_name = "test.LateStub";
+    t2.short_name = "LateStub";
+    cbm_registry_add_type(&reg, t2);
+
+    CBMRegisteredFunc f2;
+    memset(&f2, 0, sizeof(f2));
+    f2.qualified_name = "test.LateStub.run";
+    f2.short_name = "run";
+    f2.receiver_type = "test.LateStub";
+    f2.min_params = -1;
+    cbm_registry_add_func(&reg, f2);
+
+    ASSERT_NOT_NULL(cbm_registry_lookup_type(&reg, "test.A"));
+    ASSERT_NOT_NULL(cbm_registry_lookup_type(&reg, "test.LateStub"));
+    ASSERT_NOT_NULL(cbm_registry_lookup_func(&reg, "test.LateStub.run"));
+
+    /* Re-finalize folds the tail into the buckets; still findable. */
+    cbm_registry_finalize(&reg);
+    ASSERT_NOT_NULL(cbm_registry_lookup_type(&reg, "test.LateStub"));
+    ASSERT_NOT_NULL(cbm_registry_lookup_func(&reg, "test.LateStub.run"));
 
     cbm_arena_destroy(&arena);
     PASS();
@@ -4376,7 +4421,7 @@ SUITE(ts_lsp) {
     RUN_TEST(tslsp_real_zustand_store);
     RUN_TEST(tslsp_real_typeorm_repo);
     RUN_TEST(tslsp_real_router_chain);
-    RUN_TEST(tslsp_real_mongoose_model);
+    RUN_TEST(tslsp_real_odm_model);
 
     /* More patterns */
     RUN_TEST(tslsp_iterator_for_of_with_generic);
@@ -4423,6 +4468,7 @@ SUITE(ts_lsp) {
 
     /* Hash-table registry (task #2) */
     RUN_TEST(tslsp_hash_registry_basic);
+    RUN_TEST(tslsp_hash_registry_post_finalize_adds);
     RUN_TEST(tslsp_hash_registry_stress_10k);
 
     /* Partial relater (task #5) */

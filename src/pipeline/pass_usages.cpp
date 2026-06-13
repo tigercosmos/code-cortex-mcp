@@ -12,6 +12,7 @@
  * Depends on: pass_definitions having populated the registry and graph buffer
  */
 #include "foundation/constants.h"
+#include "foundation/str_util.h" // cbm_json_escape
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "graph_buffer/graph_buffer.h"
@@ -223,8 +224,12 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
             continue;
         }
 
-        char uprops[CBM_SZ_256];
-        snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", usage->ref_name);
+        /* ref_name is sliced source text and can contain quotes/newlines —
+         * escape it or the edge properties JSON is malformed. */
+        char esc_ref[CBM_SZ_256];
+        cbm_json_escape(esc_ref, sizeof(esc_ref), usage->ref_name);
+        char uprops[CBM_SZ_512];
+        snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
         cbm_gbuf_insert_edge(ctx->gbuf, src->id, tgt->id, "USAGE", uprops);
         resolved++;
     }

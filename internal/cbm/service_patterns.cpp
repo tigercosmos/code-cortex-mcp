@@ -154,19 +154,25 @@ static const lib_pattern_t async_libraries[] = {
     {"cloud.pubsub", CBM_SVC_ASYNC, "pubsub"},
     {"PubSub", CBM_SVC_ASYNC, "pubsub"},
 
-    /* AWS — use SDK module paths to avoid false positives */
+    /* AWS — use SDK module paths to avoid false positives.  cbm_fqn_compute
+     * converts path slashes to '.', so a resolved local Go QN reads
+     * "aws-sdk-go.service.sqs..."; include both slash and dot forms so the
+     * substring match fires whether the id comes from an import path or a QN. */
     {"aws-sdk-go/service/sqs", CBM_SVC_ASYNC, "sqs"},
+    {"aws-sdk-go.service.sqs", CBM_SVC_ASYNC, "sqs"},
     {"aws_sdk_sqs", CBM_SVC_ASYNC, "sqs"},
     {"Amazon.SQS", CBM_SVC_ASYNC, "sqs"},
     {"@aws-sdk/client-sqs", CBM_SVC_ASYNC, "sqs"},
     {"boto3.client.sqs", CBM_SVC_ASYNC, "sqs"},
     {"aws-sdk-go/service/sns", CBM_SVC_ASYNC, "sns"},
+    {"aws-sdk-go.service.sns", CBM_SVC_ASYNC, "sns"},
     {"aws_sdk_sns", CBM_SVC_ASYNC, "sns"},
     {"Amazon.SNS", CBM_SVC_ASYNC, "sns"},
     {"@aws-sdk/client-sns", CBM_SVC_ASYNC, "sns"},
     {"eventbridge", CBM_SVC_ASYNC, "eventbridge"},
     {"EventBridge", CBM_SVC_ASYNC, "eventbridge"},
     {"aws-sdk-go/service/lambda", CBM_SVC_ASYNC, "lambda"},
+    {"aws-sdk-go.service.lambda", CBM_SVC_ASYNC, "lambda"},
     {"aws_sdk_lambda", CBM_SVC_ASYNC, "lambda"},
     {"@aws-sdk/client-lambda", CBM_SVC_ASYNC, "lambda"},
     {"stepfunctions", CBM_SVC_ASYNC, "stepfunctions"},

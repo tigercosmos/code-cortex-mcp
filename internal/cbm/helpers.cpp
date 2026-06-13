@@ -4,6 +4,8 @@
 #include "lang_specs.h"
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
+#include "foundation/compat.h" // CBM_TLS
+#include <stdlib.h>            // calloc/free for the symbol-set cache
 
 enum {
     MIN_ROUTE_LEN = 3,
@@ -23,6 +25,27 @@ enum {
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+
+// --- Portable substring search ---
+
+// Hand-rolled memmem: does not rely on the system memmem (GNU/BSD-only;
+// msys2-clang on Windows lacks it), so it compiles identically everywhere.
+void *cbm_memmem(const void *haystack, size_t haystack_len, const void *needle, size_t needle_len) {
+    if (needle_len == 0) {
+        return (void *)haystack;
+    }
+    if (needle_len > haystack_len) {
+        return NULL;
+    }
+    const char *h = (const char *)haystack;
+    size_t last = haystack_len - needle_len;
+    for (size_t i = 0; i <= last; i++) {
+        if (memcmp(h + i, needle, needle_len) == 0) {
+            return (void *)(h + i);
+        }
+    }
+    return NULL;
+}
 
 // --- Node text extraction ---
 
@@ -100,6 +123,19 @@ static const char *java_keywords[] = {
     "Float",     "Boolean",      "Object",      "List",       "Map",     "Set",        "Optional",
     "Stream",    "Arrays",       "Collections", NULL};
 
+/* Kotlin hard keywords (those reserved everywhere). Kotlin does NOT reserve
+ * primitive type names — `double`, `int`, `float`, `boolean` are ordinary
+ * identifiers (the types are `Double`, `Int`, …), so a function named
+ * `fun double()` is legal and must NOT be filtered as a keyword the way the
+ * Java list (which lists Java primitives) would.  Soft/modifier keywords
+ * (`data`, `open`, `sealed`, `suspend`, …) are context-sensitive and usable as
+ * identifiers, so they are intentionally omitted. */
+static const char *kotlin_keywords[] = {
+    "as",     "break", "class", "continue",  "do",   "else", "false",     "for",
+    "fun",    "if",    "in",    "interface", "is",   "null", "object",    "package",
+    "return", "super", "this",  "throw",     "true", "try",  "typealias", "typeof",
+    "val",    "var",   "when",  "while",     NULL};
+
 static const char *generic_keywords[] = {
     "true",     "false",     "null",      "nil",    "None",   "undefined", "void",    "if",
     "else",     "for",       "while",     "do",     "switch", "case",      "default", "break",
@@ -132,9 +168,11 @@ bool cbm_is_keyword(const char *name, CBMLanguage lang) {
         keywords = rust_keywords;
         break;
     case CBM_LANG_JAVA:
-    case CBM_LANG_KOTLIN:
     case CBM_LANG_SCALA:
         keywords = java_keywords;
+        break;
+    case CBM_LANG_KOTLIN:
+        keywords = kotlin_keywords;
         break;
     default:
         keywords = generic_keywords;
@@ -267,17 +305,128 @@ TSNode cbm_find_child_by_kind(TSNode parent, const char *kind) {
     return null_node;
 }
 
-bool cbm_kind_in_set(TSNode node, const char **types) {
-    if (!types) {
-        return false;
-    }
+/* ── Node-type classification: TSSymbol bitset acceleration ───────────────
+ * cbm_kind_in_set is called for nearly every AST node (function/class/call/
+ * import/branching sets), so a linear strcmp over the type-name array is a hot
+ * path. tree-sitter already assigns each node type a small integer TSSymbol, so
+ * we precompute — per (language, type-array) — a bitset of the matching symbol
+ * ids and test ts_node_symbol() in O(1) with no string work.
+ *
+ * The cache is THREAD-LOCAL: extraction workers are independent pthreads, so a
+ * per-thread cache needs no locking and is trivially correct. Bitsets are built
+ * once per (lang, array) per thread from static spec arrays (bounded, stable).
+ * Any type name that fails to resolve to a symbol disables the bitset for that
+ * set (exact=false) and we fall back to the exact strcmp behavior — so the
+ * result is always identical to the original, only faster. */
+static bool kind_in_set_strcmp(TSNode node, const char *const *types) {
     const char *kind = ts_node_type(node);
-    for (const char **t = types; *t; t++) {
+    for (const char *const *t = types; *t; t++) {
         if (strcmp(kind, *t) == 0) {
             return true;
         }
     }
     return false;
+}
+
+typedef struct {
+    const TSLanguage *lang;   /* NULL = empty slot */
+    const char *const *types; /* identity key (static spec array pointer) */
+    uint64_t *bits;           /* symbol bitset; NULL when exact==false */
+    uint32_t nsyms;           /* ts_language_symbol_count(lang) */
+    bool exact;               /* false → every name resolved; use strcmp fallback */
+} ks_slot_t;
+
+enum { KS_SLOTS = 512, KS_SLOT_MASK = 511, KS_PROBE = 8 };
+static CBM_TLS ks_slot_t ks_cache[KS_SLOTS];
+
+static ks_slot_t *ks_build(const TSLanguage *lang, const char *const *types, ks_slot_t *s) {
+    s->lang = lang;
+    s->types = types;
+    s->bits = NULL;
+    s->nsyms = 0;
+    s->exact = false;
+    uint32_t nsyms = ts_language_symbol_count(lang);
+    if (nsyms == 0) {
+        return s; /* fall back to strcmp */
+    }
+    uint64_t *bits = (uint64_t *)calloc(((size_t)nsyms + 63) / 64, sizeof(uint64_t));
+    if (!bits) {
+        return s;
+    }
+    bool all_resolved = true;
+    for (const char *const *t = types; *t; t++) {
+        uint32_t len = (uint32_t)strlen(*t);
+        /* A name may be a named node type or an anonymous token ("for", "&&"):
+         * set whichever symbol(s) exist so ts_node_symbol matches either. */
+        TSSymbol sn = ts_language_symbol_for_name(lang, *t, len, true);
+        TSSymbol sa = ts_language_symbol_for_name(lang, *t, len, false);
+        bool any = false;
+        if (sn != 0 && sn < nsyms) {
+            bits[sn >> 6] |= (uint64_t)1 << (sn & 63);
+            any = true;
+        }
+        if (sa != 0 && sa < nsyms) {
+            bits[sa >> 6] |= (uint64_t)1 << (sa & 63);
+            any = true;
+        }
+        if (!any) {
+            all_resolved = false; /* unknown name → can't represent exactly */
+        }
+    }
+    if (!all_resolved) {
+        free(bits);
+        return s; /* exact stays false */
+    }
+    s->bits = bits;
+    s->nsyms = nsyms;
+    s->exact = true;
+    return s;
+}
+
+/* Find or build the cache slot for (lang, types). Returns NULL only if the
+ * thread-local table is saturated at this hash (extremely rare → strcmp). */
+static ks_slot_t *ks_get(const TSLanguage *lang, const char *const *types) {
+    uintptr_t h = ((uintptr_t)types >> 4) ^ ((uintptr_t)lang >> 3) ^ ((uintptr_t)types >> 13);
+    for (int probe = 0; probe < KS_PROBE; probe++) {
+        ks_slot_t *s = &ks_cache[(size_t)(h + (uintptr_t)probe) & KS_SLOT_MASK];
+        if (s->lang == NULL) {
+            return ks_build(lang, types, s);
+        }
+        if (s->lang == lang && s->types == types) {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+bool cbm_kind_in_set(TSNode node, const char **types) {
+    if (!types || !types[0]) {
+        return false;
+    }
+    const TSLanguage *lang = ts_node_language(node);
+    if (lang) {
+        ks_slot_t *s = ks_get(lang, (const char *const *)types);
+        if (s && s->exact && s->bits) {
+            TSSymbol sym = ts_node_symbol(node);
+            return sym < s->nsyms && (((s->bits[sym >> 6] >> (sym & 63)) & 1U) != 0);
+        }
+    }
+    return kind_in_set_strcmp(node, (const char *const *)types);
+}
+
+/* Free the calling thread's node-type bitset cache (the calloc'd `bits` arrays
+ * that cbm_kind_in_set builds lazily). The cache is thread-local, so each worker
+ * thread and the main thread must call this at teardown (worker exit / process
+ * exit) for LeakSanitizer to report no leak. Safe if no cache was ever built. */
+void cbm_kind_in_set_free_cache(void) {
+    for (int i = 0; i < KS_SLOTS; i++) {
+        free(ks_cache[i].bits);
+        ks_cache[i].bits = NULL;
+        ks_cache[i].lang = NULL;
+        ks_cache[i].types = NULL;
+        ks_cache[i].nsyms = 0;
+        ks_cache[i].exact = false;
+    }
 }
 
 bool cbm_has_ancestor_kind(TSNode node, const char *kind, int max_depth) {
@@ -324,6 +473,140 @@ int cbm_count_branching(TSNode node, const char **branching_types) {
         return 0;
     }
     return count_branching_iter(node, branching_types);
+}
+
+// Loop node-type names across tree-sitter grammars, for loop-nesting depth.
+bool cbm_is_loop_node_type(const char *kind) {
+    static const char *const loops[] = {"for_statement",
+                                        "while_statement",
+                                        "do_statement",
+                                        "do_while_statement",
+                                        "for_in_statement",
+                                        "for_of_statement",
+                                        "for_each_statement",
+                                        "foreach_statement",
+                                        "enhanced_for_statement",
+                                        "for_range_loop",
+                                        "c_style_for_statement",
+                                        "for_expression",
+                                        "while_expression",
+                                        "loop_expression",
+                                        "while_let_expression",
+                                        "repeat_statement",
+                                        "repeat_while_statement",
+                                        "until",
+                                        "while_modifier",
+                                        "until_modifier",
+                                        "for",
+                                        "while",
+                                        NULL};
+    for (const char *const *l = loops; *l; l++) {
+        if (strcmp(kind, *l) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Is `kind` a chained member/subscript access node? Language-agnostic generic
+// set covering the common grammars; used only for the structural "access depth"
+// smell, so unmatched grammars simply report 0 (never wrong, just silent).
+static bool is_member_access_node(const char *kind) {
+    static const char *const access[] = {"member_expression",
+                                         "field_expression",
+                                         "selector_expression",
+                                         "field_access",
+                                         "member_access_expression",
+                                         "navigation_expression",
+                                         "attribute",
+                                         "subscript_expression",
+                                         "subscript",
+                                         "index_expression",
+                                         "element_access_expression",
+                                         "scoped_identifier",
+                                         NULL};
+    for (const char *const *a = access; *a; a++) {
+        if (strcmp(kind, *a) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// One traversal computing cyclomatic + cognitive + loop-nesting + access-depth
+// metrics. Each frame carries its branch-, loop- and access-nesting depth so
+// every metric (cognitive Campbell penalty, loop_depth polynomial-degree proxy,
+// max chained access depth) is produced in a single walk.
+void cbm_compute_complexity(TSNode node, const char **branching_types, cbm_complexity_t *out) {
+    out->cyclomatic = 0;
+    out->cognitive = 0;
+    out->loop_count = 0;
+    out->loop_depth = 0;
+    out->max_access_depth = 0;
+    if (!branching_types) {
+        return;
+    }
+    struct cx_frame {
+        TSNode node;
+        int bdepth;
+        int ldepth;
+        int adepth;
+    };
+    struct cx_frame stack[BRANCHING_STACK_CAP];
+    int top = 0;
+    stack[top].node = node;
+    stack[top].bdepth = 0;
+    stack[top].ldepth = 0;
+    stack[top].adepth = 0;
+    top++;
+    while (top > 0) {
+        struct cx_frame f = stack[--top];
+        const char *kind = ts_node_type(f.node);
+        bool is_branch = false;
+        for (const char **t = branching_types; *t; t++) {
+            if (strcmp(kind, *t) == 0) {
+                is_branch = true;
+                break;
+            }
+        }
+        int child_b = f.bdepth;
+        int child_l = f.ldepth;
+        /* Chained member/subscript access: a.b.c.d nests as access(access(access(a))),
+         * so each consecutive access node deepens the chain; non-access nodes reset it. */
+        int child_a = 0;
+        if (ts_node_is_named(f.node) && is_member_access_node(kind)) {
+            child_a = f.adepth + 1;
+            if (child_a > out->max_access_depth) {
+                out->max_access_depth = child_a;
+            }
+        }
+        if (is_branch) {
+            out->cyclomatic++;
+            out->cognitive += 1 + f.bdepth; /* +1 plus nesting penalty (Campbell) */
+            child_b = f.bdepth + 1;
+        }
+        /* Only *named* nodes count as loops. In many grammars (Go, C, …) the
+         * loop's `for`/`while` keyword is an anonymous child token whose node
+         * type literally equals "for"/"while"; without this guard each loop is
+         * counted twice and nesting depth is inflated by one. Named loop nodes
+         * (e.g. Ruby's `while`/`until`/`for`) still match correctly. */
+        if (ts_node_is_named(f.node) && cbm_is_loop_node_type(kind)) {
+            out->loop_count++;
+            int d = f.ldepth + 1;
+            if (d > out->loop_depth) {
+                out->loop_depth = d;
+            }
+            child_l = d;
+        }
+        uint32_t n = ts_node_child_count(f.node);
+        for (int i = (int)n - SKIP_ONE; i >= 0 && top < BRANCHING_STACK_CAP; i--) {
+            stack[top].node = ts_node_child(f.node, (uint32_t)i);
+            stack[top].bdepth = child_b;
+            stack[top].ldepth = child_l;
+            stack[top].adepth = child_a;
+            top++;
+        }
+    }
 }
 
 // --- Enclosing function detection ---

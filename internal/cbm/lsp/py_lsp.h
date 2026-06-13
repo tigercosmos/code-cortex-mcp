@@ -52,6 +52,18 @@ typedef struct {
     // Output: resolved calls accumulate here.
     CBMResolvedCallArray* resolved_calls;
 
+    // Syntactic-call list (result->calls), borrowed from the per-file
+    // extraction result. The downstream pipeline only turns a resolved_call
+    // into a CALLS edge when a *syntactic* CBMCall with the same
+    // (enclosing_func_qn, callee short-name) exists here. Operator/subscript
+    // dunder desugaring (`s[k]` -> T.__getitem__, `a + b` -> T.__add__) never
+    // appears in result->calls because a `subscript`/`binary_operator` is not
+    // a `call` node, so the syntactic extractor produced no call. When this is
+    // non-NULL, py_emit_dunder_call injects a matching synthetic CBMCall so the
+    // recovered dunder call becomes a real CALLS edge. NULL in the cross-file
+    // path (no result->calls available there). Mirrors RustLSPContext.syn_calls.
+    CBMCallArray* syn_calls;
+
     // Lambda registry: simple linear list, looked up by name.
     CBMLambdaEntry* lambdas;
     int lambda_count;

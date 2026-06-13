@@ -197,6 +197,16 @@ typedef struct {
     const char *route_path;    // HTTP route path from decorator (e.g., "/api/users") or NULL
     const char *route_method;  // HTTP method from decorator (e.g., "POST") or NULL
     int complexity;            // cyclomatic complexity
+    int cognitive;             // cognitive complexity (nesting-weighted)
+    int loop_count;            // number of loop constructs in the body
+    int loop_depth;            // max nested-loop depth (bottleneck proxy)
+    bool is_recursive;         // body contains a direct self-call (seed for "recursive")
+    int param_count;           // number of parameters (large = complexity smell)
+    int max_access_depth;      // deepest chained member/subscript access (a.b.c.d)
+    int linear_scan_in_loop;   // count of linear-scan calls (find/contains/indexOf) inside loops
+    int alloc_in_loop;         // count of allocation/append calls inside loops
+    bool recursion_in_loop;    // a self-call occurs inside a loop body
+    bool unguarded_recursion;  // recursive with no self-call guarded by a conditional
     int lines;                 // body line count
     uint32_t *fingerprint;     // MinHash fingerprint (arena-allocated, K values) or NULL
     int fingerprint_k;         // number of hash values (CBM_MINHASH_K or 0)
@@ -225,6 +235,9 @@ typedef struct {
     const char *second_arg_name;        // second argument identifier (handler ref) or NULL
     CBMCallArg args[CBM_MAX_CALL_ARGS]; // first N arguments with expressions
     int arg_count;                      // number of captured arguments
+    int loop_depth;                     // enclosing loop nesting at the call site
+    int branch_depth;                   // enclosing branch nesting at the call site
+    int start_line;                     // 1-based source line of the call (for def range-match)
 } CBMCall;
 
 typedef struct {
@@ -424,11 +437,12 @@ typedef struct {
     CBMInfraBindingArray infra_bindings; // topic→URL pairs from IaC configs
     CBMChannelArray channels;            // Socket.IO / EventEmitter pub/sub participation
 
-    const char *module_qn;    // module qualified name
-    const char **exports;     // NULL-terminated (NULL if none)
-    const char **constants;   // NULL-terminated (NULL if none)
-    const char **global_vars; // NULL-terminated (NULL if none)
-    const char **macros;      // NULL-terminated, C/C++ only (NULL if none)
+    const char *module_qn;      // module qualified name
+    const char *namespace_name; // declared namespace/package (Java/Kotlin/C#/PHP), NULL if none
+    const char **exports;       // NULL-terminated (NULL if none)
+    const char **constants;     // NULL-terminated (NULL if none)
+    const char **global_vars;   // NULL-terminated (NULL if none)
+    const char **macros;        // NULL-terminated, C/C++ only (NULL if none)
 
     bool has_error;
     const char *error_msg;
@@ -490,6 +504,16 @@ typedef struct {
 
 // --- Public API ---
 
+// Bind third-party allocators (tree-sitter, sqlite3, libgit2) to mimalloc as
+// defense-in-depth, so they never depend on the fragile MI_OVERRIDE symbol
+// override (#424). MUST be called as the very first statement of main(), before
+// any sqlite3_open*/sqlite3_initialize (SQLITE_CONFIG_MALLOC returns
+// SQLITE_MISUSE once sqlite has initialized) and before any git_libgit2_init.
+// Idempotent (static guard); intended for single-threaded startup. cbm_init()
+// also calls it so non-main entry points (pipeline passes) still get the binds.
+// In the test build (no CBM_BIND_TS_ALLOCATOR) this is a no-op.
+void cbm_alloc_init(void);
+
 // Initialize the library. Call once at startup. Returns 0 on success.
 int cbm_init(void);
 
@@ -533,6 +557,12 @@ uint64_t cbm_get_lsp_ns(void);
 uint64_t cbm_get_preprocess_ns(void);
 uint64_t cbm_get_files_preprocessed(void);
 void cbm_reset_profile(void);
+
+// Toggle C/C++ preprocessor Macro-node extraction (#375). The pipeline enables
+// it only for full/advanced index modes (it dominates extraction on macro-dense
+// codebases). Default ON. Set before extraction; read-only during.
+void cbm_set_macro_extraction(int enabled);
+int cbm_macro_extraction_enabled(void);
 
 // --- Internal helpers used by extractors ---
 

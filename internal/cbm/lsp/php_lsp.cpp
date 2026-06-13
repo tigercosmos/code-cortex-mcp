@@ -3757,8 +3757,15 @@ static const char **php_split_pipe(CBMArena *arena, const char *text) {
  * functions. Return type strings are parsed via parse_return_type_text using
  * each def's def_module_qn so bare type names qualify against the module
  * where the def lives, not the importer's module. */
-static void php_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg,
+static void php_register_lsp_defs(CBMArena *arena, CBMArena *idx_arena, CBMTypeRegistry *reg,
                                   CBMLSPDef *defs, int def_count) {
+    /* Pass 1: types only. The method pass below probes the registry per
+     * Method def (receiver auto-registration); doing that against an
+     * unfinalized registry is a LINEAR scan over the growing type table —
+     * O(methods x types) per file, and PHP cross runs per file: symfony went
+     * from ~25 s to 416 s on exactly this. Register all types first, build
+     * the hash, then register funcs/methods with O(1) lookups (post-finalize
+     * stub additions stay visible via the registry's tail-scan). */
     for (int i = 0; i < def_count; i++) {
         CBMLSPDef *d = &defs[i];
         if (!d->qualified_name || !d->short_name || !d->label) continue;
@@ -3778,6 +3785,17 @@ static void php_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg,
             }
             cbm_registry_add_type(reg, rt);
         }
+    }
+    /* idx_arena == NULL skips the mid-build finalize (callers that register
+     * one def at a time would rebuild buckets per def — see py tier-2). */
+    if (idx_arena) {
+        cbm_registry_finalize_into(reg, idx_arena);
+    }
+
+    /* Pass 2: functions and methods. */
+    for (int i = 0; i < def_count; i++) {
+        CBMLSPDef *d = &defs[i];
+        if (!d->qualified_name || !d->short_name || !d->label) continue;
 
         if (strcmp(d->label, "Function") == 0 || strcmp(d->label, "Method") == 0) {
             CBMRegisteredFunc rf;
@@ -3857,11 +3875,16 @@ void cbm_run_php_lsp_cross(
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, arena);
     cbm_php_stdlib_register(&reg, arena);
-    php_register_lsp_defs(arena, &reg, defs, def_count);
+    /* Index allocations go to a per-call scratch arena: reg's arena is the
+     * pipeline-lifetime result arena, and per-file bucket allocations there
+     * accumulate GBs across a large repo. The scratch dies with this call. */
+    CBMArena idx_arena;
+    cbm_arena_init(&idx_arena);
+    php_register_lsp_defs(arena, &idx_arena, &reg, defs, def_count);
 
     /* Finalize registry — O(1) lookups. See go_lsp.c "3c. Finalize"
      * comment for the rationale. */
-    cbm_registry_finalize(&reg);
+    cbm_registry_finalize_into(&reg, &idx_arena);
 
     PHPLSPContext ctx;
     php_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, out);
@@ -3909,6 +3932,7 @@ void cbm_run_php_lsp_cross(
     }
 
     php_lsp_process_file(&ctx, root);
+    cbm_arena_destroy(&idx_arena);
 
     if (owns_tree && tree) ts_tree_delete(tree);
     if (parser) ts_parser_delete(parser);

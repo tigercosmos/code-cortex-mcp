@@ -115,6 +115,13 @@ void cbm_registry_init(CBMTypeRegistry* reg, CBMArena* arena);
 // it once after pass-1.5 def-collection.
 void cbm_registry_finalize(CBMTypeRegistry* reg);
 
+// Like cbm_registry_finalize, but the hash-index allocations (buckets/entries)
+// come from idx_arena instead of reg->arena. Per-file cross resolvers MUST use
+// this with a scratch arena destroyed after the walk: their reg->arena is the
+// pipeline-lifetime result arena, and per-file index allocations accumulated
+// there add GBs across a large repo (FastAPI incremental test: +1.1 GB RSS).
+void cbm_registry_finalize_into(CBMTypeRegistry* reg, CBMArena* idx_arena);
+
 // Register a function/method.
 void cbm_registry_add_func(CBMTypeRegistry* reg, CBMRegisteredFunc func);
 

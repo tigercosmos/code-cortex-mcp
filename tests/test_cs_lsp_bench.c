@@ -187,13 +187,9 @@ static double elapsed_ms(struct timespec t0, struct timespec t1) {
 }
 
 TEST(cslsp_bench_resolution_ratio) {
-    /* Perf benchmark: time-budgeted, so skip under CBM_SKIP_PERF (set by the
-     * CI dry-run). Under ASan+UBSan the budget is unattainable and an early
-     * assert-bail would leak the result; runs normally when perf is enabled. */
-    const char *skip = getenv("CBM_SKIP_PERF");
-    if (skip && skip[0] && skip[0] != '0') {
-        SKIP("CBM_SKIP_PERF=1 (perf benchmark)");
-    }
+    /* Perf benchmark: time-budgeted. Under ASan+UBSan the budget is scaled
+     * (see the sanitizer-aware time-budget assert below); the benchmark always
+     * runs so regressions surface in every configuration. */
     int slen = (int)strlen(bench_source);
 
     struct timespec t0;

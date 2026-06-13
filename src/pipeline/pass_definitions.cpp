@@ -13,6 +13,9 @@
 #include "foundation/constants.h"
 
 enum { PD_RING = 4, PD_RING_MASK = 3, PD_JSON_MARGIN = 10, PD_ESC_MARGIN = 3, PD_ESC_SPACE = 2 };
+/* Fixed bytes around a serialized JSON field: ,"key":"value" / ,"key":[...]
+ * -> comma + 2 key quotes + colon + 2 value quotes (resp. brackets). */
+enum { PD_JSON_FIELD_OVERHEAD = 6 };
 #include "pipeline/pipeline.h"
 #include <stdint.h>
 #include "pipeline/pipeline_internal.h"
@@ -100,7 +103,9 @@ static int def_json_escape_char(char *buf, size_t avail, char ch) {
         break;
     default:
         if (avail >= SKIP_ONE) {
-            buf[0] = ch;
+            /* Any other raw control byte (e.g. form feed) is invalid inside a
+             * JSON string — degrade to a space. */
+            buf[0] = ((unsigned char)ch < 0x20) ? ' ' : ch;
         }
         return SKIP_ONE;
     }
@@ -111,13 +116,41 @@ static int def_json_escape_char(char *buf, size_t avail, char ch) {
     return PD_ESC_SPACE;
 }
 
+/* Escaped length of a string under def_json_escape_char's rules: escaped
+ * characters expand to 2 bytes, everything else stays 1. */
+static size_t def_json_escaped_len(const char *s) {
+    size_t n = 0;
+    for (; *s; s++) {
+        switch (*s) {
+        case '"':
+        case '\\':
+        case '\n':
+        case '\r':
+        case '\t':
+            n += PD_ESC_SPACE;
+            break;
+        default:
+            n += SKIP_ONE;
+        }
+    }
+    return n;
+}
+
+/* Appends are ATOMIC: a field is emitted only if the WHOLE serialized form
+ * fits (with PD_ESC_SPACE bytes reserved for the closing '}' + NUL). Cutting a
+ * field mid-value produced unterminated strings/arrays — malformed properties
+ * JSON that aborts every json_extract()-based consumer downstream (seen on the
+ * Linux kernel: 50-param functions truncated at the 2 KB cap). Dropping an
+ * oversized optional field whole keeps the JSON valid. */
 static void append_json_string(char *buf, size_t bufsize, size_t *pos, const char *key,
                                const char *val) {
     if (!val || val[0] == '\0') {
         return;
     }
-    if (*pos >= bufsize - PD_JSON_MARGIN) {
-        return;
+    /* ,"key":"<escaped>" — comma + 2 key quotes + colon + 2 value quotes */
+    size_t required = strlen(key) + def_json_escaped_len(val) + PD_JSON_FIELD_OVERHEAD;
+    if (*pos + required + PD_ESC_SPACE > bufsize) {
+        return; /* whole field would not fit — skip it atomically */
     }
     size_t p = *pos;
     int w = snprintf(buf + p, bufsize - p, ",\"%s\":\"", key);
@@ -135,11 +168,20 @@ static void append_json_string(char *buf, size_t bufsize, size_t *pos, const cha
     *pos = p;
 }
 
-/* Append a JSON array of strings: ,"key":["a","b","c"] */
+/* Append a JSON array of strings: ,"key":["a","b","c"]. Atomic like
+ * append_json_string: emitted only if the whole array fits. */
 static void append_json_str_array(char *buf, size_t bufsize, size_t *pos, const char *key,
                                   const char **arr) {
     if (!arr || !arr[0] || *pos >= bufsize - PD_JSON_MARGIN) {
         return;
+    }
+    /* ,"key":[ + per item "<escaped>" + separating commas + ] */
+    size_t required = strlen(key) + PD_JSON_FIELD_OVERHEAD;
+    for (int i = 0; arr[i]; i++) {
+        required += def_json_escaped_len(arr[i]) + PD_ESC_SPACE + (i > 0 ? SKIP_ONE : 0);
+    }
+    if (*pos + required + PD_ESC_SPACE > bufsize) {
+        return; /* whole array would not fit — skip it atomically */
     }
     size_t p = *pos;
     int n = snprintf(buf + p, bufsize - p, ",\"%s\":[", key);
@@ -154,14 +196,11 @@ static void append_json_str_array(char *buf, size_t bufsize, size_t *pos, const 
         if (p < bufsize - SKIP_ONE) {
             buf[p++] = '"';
         }
+        /* Full escaping (not just quote/backslash): items like C param types
+         * sliced from multi-line declarations carry raw \n/\t bytes, which are
+         * invalid inside JSON strings. */
         for (const char *s = arr[i]; *s && p < bufsize - PD_ESC_SPACE; s++) {
-            if (*s == '"' || *s == '\\') {
-                buf[p++] = '\\';
-                if (p >= bufsize - PD_ESC_SPACE) {
-                    break;
-                }
-            }
-            buf[p++] = *s;
+            p += (size_t)def_json_escape_char(buf + p, bufsize - p - PD_ESC_SPACE, *s);
         }
         if (p < bufsize - SKIP_ONE) {
             buf[p++] = '"';
@@ -176,11 +215,35 @@ static void append_json_str_array(char *buf, size_t bufsize, size_t *pos, const 
 
 /* Build properties JSON for a definition node. */
 static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def) {
-    int n = snprintf(buf, bufsize,
-                     "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,"
-                     "\"is_test\":%s,\"is_entry_point\":%s",
+    /* The complexity/loop/recursion metrics are only meaningful for executable
+     * units (Function/Method). Emitting them on the millions of Macro/Field/
+     * Variable/Class/Enum nodes — where they are always zero — bloats every
+     * node's properties (~150 B), inflating RAM, the gbuf merge copy and the
+     * dump. Gate the block to functions; other labels keep the lean base. */
+    const bool is_fn =
+        def->label && (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0);
+    int n;
+    if (is_fn) {
+        n = snprintf(buf, bufsize,
+                     "{\"complexity\":%d,\"cognitive\":%d,\"loop_count\":%d,\"loop_depth\":%d,"
+                     "\"self_recursive\":%s,\"param_count\":%d,\"max_access_depth\":%d,"
+                     "\"linear_scan_in_loop\":%d,\"alloc_in_loop\":%d,\"recursion_in_loop\":%s,"
+                     "\"unguarded_recursion\":%s,"
+                     "\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,\"is_entry_point\":%s",
+                     def->complexity, def->cognitive, def->loop_count, def->loop_depth,
+                     def->is_recursive ? "true" : "false", def->param_count, def->max_access_depth,
+                     def->linear_scan_in_loop, def->alloc_in_loop,
+                     def->recursion_in_loop ? "true" : "false",
+                     def->unguarded_recursion ? "true" : "false", def->lines,
+                     def->is_exported ? "true" : "false", def->is_test ? "true" : "false",
+                     def->is_entry_point ? "true" : "false");
+    } else {
+        n = snprintf(buf, bufsize,
+                     "{\"complexity\":%d,\"lines\":%d,\"is_exported\":%s,\"is_test\":%s,"
+                     "\"is_entry_point\":%s",
                      def->complexity, def->lines, def->is_exported ? "true" : "false",
                      def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false");
+    }
 
     if (n <= 0 || (size_t)n >= bufsize) {
         buf[0] = '\0';
@@ -234,10 +297,13 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
         def->file_path ? def->file_path : rel, (int)def->start_line, (int)def->end_line, props);
     /* Register callable symbols + Interface.  Interface must be in the registry
      * so C#/Java `class Foo : IBar` / `class Foo implements IBar` can resolve
-     * `IBar` to an INHERITS edge target during the enrichment phase. */
+     * `IBar` to an INHERITS edge target during the enrichment phase.
+     * Variable/Field defs are also registered so pass_usages.c can resolve
+     * READS/WRITES accesses (rw->var_name) to a Variable/Field node QN. */
     if (node_id > 0 && def->label &&
         (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
-         strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0)) {
+         strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0 ||
+         strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0)) {
         cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
     }
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
@@ -298,31 +364,79 @@ static void create_channel_edges_for_file(cbm_pipeline_ctx_t *ctx, const CBMFile
     }
 }
 
+/* Create CONFIGURES edges for one file's env accesses.  extract_env_accesses.c
+ * records every os.Getenv / process.env / Environment.GetEnvironmentVariable
+ * style access into result->env_accesses.  We materialize one EnvVar node per
+ * env key and link the enclosing function (or the file node) CONFIGURES-> it,
+ * so environment-driven configuration is visible even when the accessor is a
+ * stdlib symbol that never resolves to an in-graph callee. */
+static int create_env_configures_for_file(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
+                                          const char *rel) {
+    int count = 0;
+    char *file_qn = nullptr;
+    const cbm_gbuf_node_t *file_node = nullptr;
+    for (int j = 0; j < result->env_accesses.count; j++) {
+        const CBMEnvAccess *ea = &result->env_accesses.items[j];
+        if (!ea->env_key || !ea->env_key[0]) {
+            continue;
+        }
+        char env_qn[CBM_SZ_512];
+        snprintf(env_qn, sizeof(env_qn), "__env__%s", ea->env_key);
+        char env_props[CBM_SZ_512];
+        snprintf(env_props, sizeof(env_props), "{\"env_key\":\"%s\"}", ea->env_key);
+        int64_t env_id =
+            cbm_gbuf_upsert_node(ctx->gbuf, "EnvVar", ea->env_key, env_qn, "", 0, 0, env_props);
+        if (env_id <= 0) {
+            continue;
+        }
+        const cbm_gbuf_node_t *src = nullptr;
+        if (ea->enclosing_func_qn && ea->enclosing_func_qn[0]) {
+            src = cbm_gbuf_find_by_qn(ctx->gbuf, ea->enclosing_func_qn);
+        }
+        if (!src) {
+            if (!file_qn) {
+                file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+                file_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
+            }
+            src = file_node;
+        }
+        if (src && src->id != env_id) {
+            cbm_gbuf_insert_edge(ctx->gbuf, src->id, env_id, "CONFIGURES",
+                                 "{\"strategy\":\"env_access\"}");
+            count++;
+        }
+    }
+    free(file_qn);
+    return count;
+}
+
 /* Create IMPORTS edges for one file's imports.  Mirrors the resolution
  * logic in pass_parallel.c register_and_link_def — keep the two in sync. */
 static int create_import_edges_for_file(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
-                                        const char *rel) {
+                                        const char *rel, CBMHashTable *namespace_map) {
     int count = 0;
+    char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+    const cbm_gbuf_node_t *source_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
+    if (!source_node) {
+        free(file_qn);
+        return 0;
+    }
     for (int j = 0; j < result->imports.count; j++) {
         const CBMImport *imp = &result->imports.items[j];
         if (!imp->module_path) {
             continue;
         }
-        char *target_qn = NULL;
-        target_qn = cbm_pipeline_resolve_module(ctx, rel, imp->module_path);
-        const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(ctx->gbuf, target_qn);
-        char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
-        const cbm_gbuf_node_t *source_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
-        if (source_node && target) {
+        const cbm_gbuf_node_t *target =
+            cbm_pipeline_resolve_import_node(ctx, rel, file_qn, imp, namespace_map);
+        if (target && target->id != source_node->id) {
             char imp_props[CBM_SZ_256];
             snprintf(imp_props, sizeof(imp_props), "{\"local_name\":\"%s\"}",
                      imp->local_name ? imp->local_name : "");
             cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props);
             count++;
         }
-        free(target_qn);
-        free(file_qn);
     }
+    free(file_qn);
     return count;
 }
 
@@ -401,9 +515,11 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         } else {
             /* Cache unavailable: imports for this file can still only
              * resolve to defs already in the graph, but the file's
-             * own defs are now persisted before the lookup. */
-            total_imports += create_import_edges_for_file(ctx, result, rel);
+             * own defs are now persisted before the lookup. No namespace
+             * map is available without the cache (single-file scope). */
+            total_imports += create_import_edges_for_file(ctx, result, rel, nullptr);
             create_channel_edges_for_file(ctx, result, rel);
+            create_env_configures_for_file(ctx, result, rel);
             cbm_free_result(result);
         }
     }
@@ -413,6 +529,18 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
      * create IMPORTS / channel edges. Imports resolve against the full
      * project graph. */
     if (local_cache) {
+        /* Build a namespace/package → File-QN map so that namespace imports
+         * (C# `using`, Java/Kotlin `import`, PHP `use`) resolve to the file
+         * that declares the namespace. */
+        const char **rels = (const char **)calloc((size_t)file_count, sizeof(char *));
+        if (rels) {
+            for (int i = 0; i < file_count; i++) {
+                rels[i] = files[i].rel_path;
+            }
+        }
+        CBMHashTable *namespace_map =
+            cbm_pipeline_namespace_map_build(ctx->project_name, local_cache, rels, file_count);
+        free(rels);
         for (int i = 0; i < file_count; i++) {
             if (cbm_pipeline_check_cancel(ctx)) {
                 break;
@@ -421,9 +549,12 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             if (!result) {
                 continue;
             }
-            total_imports += create_import_edges_for_file(ctx, result, files[i].rel_path);
+            total_imports +=
+                create_import_edges_for_file(ctx, result, files[i].rel_path, namespace_map);
             create_channel_edges_for_file(ctx, result, files[i].rel_path);
+            create_env_configures_for_file(ctx, result, files[i].rel_path);
         }
+        cbm_pipeline_namespace_map_free(namespace_map);
         if (owns_local_cache) {
             for (int i = 0; i < file_count; i++) {
                 if (local_cache[i]) {

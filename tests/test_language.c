@@ -650,8 +650,9 @@ TEST(lang_ext_d) {
 }
 
 TEST(lang_ext_nim) {
-    ASSERT_EQ(cbm_language_for_extension(".nim"), CBM_LANG_NIM);
-    ASSERT_EQ(cbm_language_for_extension(".nims"), CBM_LANG_NIM);
+    /* nim grammar removed — .nim/.nims no longer map to a language */
+    ASSERT_EQ(cbm_language_for_extension(".nim"), CBM_LANG_COUNT);
+    ASSERT_EQ(cbm_language_for_extension(".nims"), CBM_LANG_COUNT);
     PASS();
 }
 

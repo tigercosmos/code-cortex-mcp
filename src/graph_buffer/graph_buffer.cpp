@@ -23,6 +23,7 @@ enum {
     GB_DEDUP_LOOKAHEAD = 1,  /* compare current with next element */
 };
 #include "graph_buffer/graph_buffer.h"
+#include <yyjson/yyjson.h> // url_path extraction must match json_extract semantics
 #include "store/store.h"
 #include "sqlite_writer.h"
 #include "foundation/hash_table.h"
@@ -30,6 +31,7 @@ enum {
 #include "foundation/log.h"
 #include "foundation/dyn_array.h"
 #include "foundation/profile.h"
+#include "foundation/mem.h"
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -89,6 +91,13 @@ struct cbm_gbuf {
     CBMHashTable *edges_by_target_type; /* "tgtID:type" → edge_ptr_array_t* */
     CBMHashTable *edges_by_type;        /* "type" → edge_ptr_array_t* */
 
+    /* String intern pool for highly-repetitive fields (node label/file_path,
+     * edge type). Maps string content → owned canonical copy, collapsing
+     * O(nodes+edges) duplicate allocations to O(distinct). The pool owns the
+     * copies; interned pointers are stable for the buffer lifetime and are NOT
+     * freed by free_node_strings/free_edge_strings — only once in cbm_gbuf_free. */
+    CBMHashTable *intern_pool;
+
     /* Vector storage for semantic embeddings (filled by pass_semantic_edges,
      * consumed by cbm_write_db during dump). */
     CBMDumpVector *dump_vectors;
@@ -105,6 +114,23 @@ struct cbm_gbuf {
 
 static char *heap_strdup(const char *s) {
     return s ? strdup(s) : strdup("{}");
+}
+
+/* Intern a repetitive string into the buffer's pool: identical content collapses
+ * to a single heap copy owned by the pool. NULL maps to "{}" (matches
+ * heap_strdup). The returned pointer is stable for the buffer's lifetime and
+ * must never be freed or mutated by callers. Returns NULL only on OOM. */
+static const char *gb_intern(cbm_gbuf_t *gb, const char *s) {
+    const char *key = s ? s : "{}";
+    const char *found = (const char *)cbm_ht_get(gb->intern_pool, key);
+    if (found) {
+        return found;
+    }
+    char *copy = strdup(key);
+    if (copy) {
+        cbm_ht_set(gb->intern_pool, copy, copy); /* key == value == owned copy */
+    }
+    return copy;
 }
 
 static void make_id_key(char *buf, size_t bufsz, int64_t id) {
@@ -168,18 +194,17 @@ static void free_key_only(const char *key, void *value, void *ud) {
     free((void *)key);
 }
 
-/* Free a single node's owned strings */
+/* Free a single node's owned strings. label and file_path are interned
+ * (pool-owned) — NOT freed here; the pool frees them once in cbm_gbuf_free. */
 static void free_node_strings(cbm_gbuf_node_t *n) {
-    free(n->label);
     free(n->name);
     free(n->qualified_name);
-    free(n->file_path);
     free(n->properties_json);
 }
 
-/* Free a single edge's owned strings */
+/* Free a single edge's owned strings. type is interned (pool-owned) — NOT
+ * freed here; the pool frees it once in cbm_gbuf_free. */
 static void free_edge_strings(cbm_gbuf_edge_t *e) {
-    free(e->type);
     free(e->properties_json);
 }
 
@@ -372,6 +397,8 @@ cbm_gbuf_t *cbm_gbuf_new(const char *project, const char *root_path) {
     gb->edges_by_target_type = cbm_ht_create(CBM_SZ_256);
     gb->edges_by_type = cbm_ht_create(CBM_SZ_32);
 
+    gb->intern_pool = cbm_ht_create(CBM_SZ_1K);
+
     return gb;
 }
 
@@ -450,6 +477,14 @@ void cbm_gbuf_free(cbm_gbuf_t *gb) {
         free((void *)gb->dump_token_vecs[i].vector);
     }
     free(gb->dump_token_vecs);
+
+    /* Free interned strings (node label/file_path, edge type) — pool owns one
+     * copy each (key == value), freed exactly once via free_key_only. Done after
+     * nodes/edges since they borrowed these pointers. */
+    if (gb->intern_pool) {
+        cbm_ht_foreach(gb->intern_pool, free_key_only, NULL);
+        cbm_ht_free(gb->intern_pool);
+    }
 
     free(gb->project);
     free(gb->root_path);
@@ -557,18 +592,16 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
     /* Check if node already exists */
     cbm_gbuf_node_t *existing = (cbm_gbuf_node_t *)cbm_ht_get(gb->node_by_qn, qualified_name);
     if (existing) {
-        /* Update in-place. Strdup new values BEFORE freeing old ones,
-         * because callers may pass existing->label etc. as arguments. */
-        char *new_label = heap_strdup(label);
+        /* Update in-place. name/properties are strdup'd BEFORE freeing old ones
+         * (callers may pass existing->name as an argument). label/file_path are
+         * interned: gb_intern returns a stable pool pointer (idempotent even when
+         * label == existing->label), so the old value is replaced, never freed. */
         char *new_name = heap_strdup(name);
-        char *new_file = heap_strdup(file_path);
         char *new_props = properties_json ? heap_strdup(properties_json) : NULL;
-        free(existing->label);
-        existing->label = new_label;
+        existing->label = (char *)gb_intern(gb, label);
         free(existing->name);
         existing->name = new_name;
-        free(existing->file_path);
-        existing->file_path = new_file;
+        existing->file_path = (char *)gb_intern(gb, file_path);
         existing->start_line = start_line;
         existing->end_line = end_line;
         if (new_props) {
@@ -587,10 +620,10 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
     int64_t id = alloc_next_id(gb);
     node->id = id;
     node->project = gb->project;
-    node->label = heap_strdup(label);
+    node->label = (char *)gb_intern(gb, label);
     node->name = heap_strdup(name);
     node->qualified_name = heap_strdup(qualified_name);
-    node->file_path = heap_strdup(file_path);
+    node->file_path = (char *)gb_intern(gb, file_path);
     node->start_line = start_line;
     node->end_line = end_line;
     node->properties_json = heap_strdup(properties_json);
@@ -904,7 +937,7 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     edge->project = gb->project;
     edge->source_id = source_id;
     edge->target_id = target_id;
-    edge->type = heap_strdup(type);
+    edge->type = (char *)gb_intern(gb, type);
     edge->properties_json = heap_strdup(properties_json);
 
     /* Store pointer in array */
@@ -1021,15 +1054,14 @@ static void free_remap_entry(const char *key, void *val, void *ud) {
     free(val);
 }
 
-/* Handle QN collision: update dst node fields (src wins), record remap if IDs differ. */
-static void merge_update_existing(cbm_gbuf_node_t *existing, const cbm_gbuf_node_t *sn,
-                                  CBMHashTable **remap) {
-    free(existing->label);
-    existing->label = heap_strdup(sn->label);
+/* Handle QN collision: update dst node fields (src wins), record remap if IDs differ.
+ * label/file_path are re-interned into dst's pool (sn's pointers belong to src). */
+static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
+                                  const cbm_gbuf_node_t *sn, CBMHashTable **remap) {
+    existing->label = (char *)gb_intern(dst, sn->label);
     free(existing->name);
     existing->name = heap_strdup(sn->name);
-    free(existing->file_path);
-    existing->file_path = heap_strdup(sn->file_path);
+    existing->file_path = (char *)gb_intern(dst, sn->file_path);
     existing->start_line = sn->start_line;
     existing->end_line = sn->end_line;
     if (sn->properties_json) {
@@ -1058,10 +1090,10 @@ static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
 
     node->id = sn->id;
     node->project = dst->project;
-    node->label = heap_strdup(sn->label);
+    node->label = (char *)gb_intern(dst, sn->label);
     node->name = heap_strdup(sn->name);
     node->qualified_name = heap_strdup(sn->qualified_name);
-    node->file_path = heap_strdup(sn->file_path);
+    node->file_path = (char *)gb_intern(dst, sn->file_path);
     node->start_line = sn->start_line;
     node->end_line = sn->end_line;
     node->properties_json = heap_strdup(sn->properties_json);
@@ -1127,7 +1159,7 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
         cbm_gbuf_node_t *existing =
             (cbm_gbuf_node_t *)cbm_ht_get(dst->node_by_qn, sn->qualified_name);
         if (existing) {
-            merge_update_existing(existing, sn, &remap);
+            merge_update_existing(dst, existing, sn, &remap);
         } else {
             merge_copy_new_node(dst, sn);
         }
@@ -1147,21 +1179,28 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
 /* ── Dump / Flush ────────────────────────────────────────────────── */
 
 /* Extract url_path value from a properties JSON string.
- * Returns heap-allocated string or NULL. Caller must free. */
+ * Returns heap-allocated string or NULL. Caller must free.
+ * Parses real JSON: the dump writer feeds this value into idx_edges_url_path,
+ * whose backing column is GENERATED AS json_extract(properties,'$.url_path').
+ * Naive byte slicing returned the ESCAPED text (and cut at embedded \\")
+ * while json_extract yields the unescaped value — the mismatch left rows
+ * "missing from index idx_edges_url_path" under PRAGMA integrity_check. */
 static char *extract_url_path(const char *props) {
-    if (!props) {
+    if (!props || !strstr(props, "\"url_path\"")) {
         return NULL;
     }
-    const char *key = strstr(props, "\"url_path\":\"");
-    if (!key) {
+    yyjson_doc *doc = yyjson_read(props, strlen(props), 0);
+    if (!doc) {
         return NULL;
     }
-    key += GB_URL_PATH_PREFIX; /* strlen("\"url_path\":\"") */
-    const char *end = strchr(key, '"');
-    if (!end || end <= key) {
-        return NULL;
+    char *out = NULL;
+    yyjson_val *v = yyjson_obj_get(yyjson_doc_get_root(doc), "url_path");
+    if (v && yyjson_is_str(v)) {
+        const char *sv = yyjson_get_str(v);
+        out = cbm_strndup(sv, strlen(sv));
     }
-    return cbm_strndup(key, (size_t)(end - key));
+    yyjson_doc_free(doc);
+    return out;
 }
 
 /* Remap a temp edge ID to its final sequential ID, or 0 if out of range. */
@@ -1175,9 +1214,14 @@ static bool dump_vector_id_less(const CBMDumpVector &a, const CBMDumpVector &b) 
 }
 
 static CBMDumpNode *build_dump_nodes(cbm_gbuf_t *gb, int live_count, int64_t *temp_to_final,
-                                     int64_t max_temp_id, int *out_count) {
-    CBMDumpNode *dump_nodes = (CBMDumpNode *)malloc(
-        (size_t)(live_count > 0 ? live_count : SKIP_ONE) * sizeof(CBMDumpNode));
+                                     int64_t max_temp_id, int *out_count,
+                                     cbm_gbuf_node_t ***src_out) {
+    size_t cap = (size_t)(live_count > 0 ? live_count : SKIP_ONE);
+    CBMDumpNode *dump_nodes = (CBMDumpNode *)malloc(cap * sizeof(CBMDumpNode));
+    /* Parallel gbuf-node pointers so a streamed partition can free its heavy
+     * properties_json after the rows are persisted. NULL on OOM disables the
+     * per-partition free (the dump still succeeds). */
+    cbm_gbuf_node_t **src = (cbm_gbuf_node_t **)malloc(cap * sizeof(cbm_gbuf_node_t *));
     int idx = 0;
 
     for (int i = 0; i < gb->nodes.count; i++) {
@@ -1204,10 +1248,14 @@ static CBMDumpNode *build_dump_nodes(cbm_gbuf_t *gb, int live_count, int64_t *te
             .end_line = n->end_line,
             .properties = props,
         };
+        if (src) {
+            src[idx] = n;
+        }
         idx++;
     }
 
     *out_count = idx;
+    *src_out = src;
     return dump_nodes;
 }
 
@@ -1366,31 +1414,77 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
     }
 
     int node_idx = 0;
+    cbm_gbuf_node_t **src_nodes = NULL;
     CBMDumpNode *dump_nodes =
-        build_dump_nodes(gb, live_count, temp_to_final, max_temp_id, &node_idx);
+        build_dump_nodes(gb, live_count, temp_to_final, max_temp_id, &node_idx, &src_nodes);
     CBM_PROF_END_N("dump", "2_build_dump_nodes", t_build_nodes, node_idx);
-
-    CBM_PROF_START(t_build_edges);
-    int edge_idx = 0;
-    char **url_paths = NULL;
-    CBMDumpEdge *dump_edges =
-        build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths);
-    CBM_PROF_END_N("dump", "3_build_dump_edges", t_build_edges, edge_idx);
 
     char indexed_at[CBM_SZ_64];
     generate_iso_timestamp(indexed_at, sizeof(indexed_at));
 
-    release_and_remap_vectors(gb, temp_to_final, max_temp_id);
+    /* Stream node rows to the DB in partitions. Under memory pressure, free each
+     * partition's heavy properties_json once persisted — the heavy column is
+     * write-once and never read again, so this bounds the dump/finalize peak.
+     * The DB output is identical whether or not freeing engages, so non-pressure
+     * runs (and tests) leave the gbuf intact (the budget>0 guard keeps an
+     * uninitialized budget from ever triggering the free). */
+    cbm_db_writer_t *w = cbm_writer_open(path);
+    if (!w) {
+        free(src_nodes);
+        free(dump_nodes);
+        free(temp_to_final);
+        return CBM_NOT_FOUND;
+    }
 
-    /* Sub-phase: Write SQLite DB file (B-tree writer) */
-    CBM_PROF_START(t_write_db);
-    int rc = cbm_write_db(path, gb->project, gb->root_path, indexed_at, dump_nodes, node_idx,
-                          dump_edges, edge_idx, gb->dump_vectors, gb->dump_vector_count,
-                          gb->dump_token_vecs, gb->dump_token_vec_count);
-    CBM_PROF_END_N("dump", "6_write_db_btree", t_write_db, node_idx + edge_idx);
+    CBM_PROF_START(t_append);
+    enum { DUMP_PARTITION_NODES = 1 << 16 };
+    bool free_heavy = false;
+    int rc = 0;
+    for (int off = 0; off < node_idx; off += DUMP_PARTITION_NODES) {
+        int chunk = node_idx - off;
+        if (chunk > DUMP_PARTITION_NODES) {
+            chunk = DUMP_PARTITION_NODES;
+        }
+        rc = cbm_writer_append_nodes(w, &dump_nodes[off], chunk);
+        if (rc != 0) {
+            break;
+        }
+        free_heavy = free_heavy || (cbm_mem_budget() > 0 && cbm_mem_over_budget());
+        if (free_heavy && src_nodes) {
+            for (int j = off; j < off + chunk; j++) {
+                free(src_nodes[j]->properties_json);
+                src_nodes[j]->properties_json = NULL;
+                dump_nodes[j].properties = NULL;
+            }
+            cbm_mem_collect();
+        }
+    }
+    CBM_PROF_END_N("dump", "2b_stream_append_nodes", t_append, node_idx);
+
+    int edge_idx = 0;
+    char **url_paths = NULL;
+    CBMDumpEdge *dump_edges = NULL;
+    if (rc == 0) {
+        CBM_PROF_START(t_build_edges);
+        dump_edges = build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths);
+        CBM_PROF_END_N("dump", "3_build_dump_edges", t_build_edges, edge_idx);
+        release_and_remap_vectors(gb, temp_to_final, max_temp_id);
+    }
+
+    /* Finalize: nodes-table interior + edges/vectors/metadata/indexes/sqlite_master.
+     * Frees w and closes the file; handles a prior append error cleanly. */
+    CBM_PROF_START(t_finalize);
+    int frc = cbm_writer_finalize(w, gb->project, gb->root_path, indexed_at, dump_nodes, node_idx,
+                                  dump_edges, edge_idx, gb->dump_vectors, gb->dump_vector_count,
+                                  gb->dump_token_vecs, gb->dump_token_vec_count);
+    CBM_PROF_END_N("dump", "6_write_db_finalize", t_finalize, node_idx + edge_idx);
+    if (rc == 0) {
+        rc = frc;
+    }
 
     log_dump_summary(node_idx, edge_idx);
     free_dump_resources(url_paths, edge_idx, dump_edges, dump_nodes, temp_to_final);
+    free(src_nodes);
     return rc;
 }
 

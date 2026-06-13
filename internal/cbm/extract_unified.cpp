@@ -36,6 +36,8 @@ static void recompute_state(WalkState *state, const char *module_qn) {
     state->enclosing_class_qn = NULL;
     state->inside_call = false;
     state->inside_import = false;
+    state->loop_depth = 0;
+    state->branch_depth = 0;
 
     for (int i = 0; i < state->scope_top; i++) {
         switch (state->scopes[i].kind) {
@@ -50,6 +52,12 @@ static void recompute_state(WalkState *state, const char *module_qn) {
             break;
         case SCOPE_IMPORT:
             state->inside_import = true;
+            break;
+        case SCOPE_LOOP:
+            state->loop_depth++;
+            break;
+        case SCOPE_BRANCH:
+            state->branch_depth++;
             break;
         default:
             break;
@@ -88,6 +96,11 @@ static TSNode resolve_func_name_node(TSNode node) {
             name_node = ts_node_child_by_field_name(parent, TS_FIELD("name"));
         }
     }
+    /* Grammars without a `name` field (e.g. newer tree-sitter-kotlin): the
+     * function name is a simple_identifier child of function_declaration. */
+    if (ts_node_is_null(name_node) && strcmp(ts_node_type(node), "function_declaration") == 0) {
+        name_node = cbm_find_child_by_kind(node, "simple_identifier");
+    }
     return name_node;
 }
 
@@ -118,6 +131,10 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
 // Compute class QN for scope tracking.
 static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node) {
     TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
+    /* Newer tree-sitter-kotlin: class/object name is a type_identifier child. */
+    if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_KOTLIN) {
+        name_node = cbm_find_child_by_kind(node, "type_identifier");
+    }
     if (ts_node_is_null(name_node)) {
         return NULL;
     }
@@ -535,24 +552,46 @@ static void scan_yaml_for_infra_bindings(CBMExtractCtx *ctx, TSNode root) {
  * where one is a source key (topic, queue_name) and another is a
  * target key (uri, push_endpoint). Handles nested blocks like
  * push_config { push_endpoint = "..." }. */
-// Extract a string value from an HCL attribute value node
-// (quoted_template/template_literal/string_lit).
+// Extract a string value from an HCL attribute value node.  The tree-sitter-hcl
+// grammar wraps the literal: attribute → (identifier)(expression → literal_value
+// → string_lit → template_literal).  Descend through the expression/literal_value
+// wrappers to reach the actual string token before reading it.
 static char *extract_hcl_string_val(CBMArena *a, TSNode val_node, const char *source) {
-    const char *vk = ts_node_type(val_node);
-    if (strcmp(vk, "quoted_template") != 0 && strcmp(vk, "template_literal") != 0 &&
-        strcmp(vk, "string_lit") != 0) {
+    enum { HCL_MAX_UNWRAP = 5 };
+    for (int depth = 0; depth < HCL_MAX_UNWRAP; depth++) {
+        const char *vk = ts_node_type(val_node);
+        if (strcmp(vk, "expression") == 0 || strcmp(vk, "literal_value") == 0) {
+            if (ts_node_named_child_count(val_node) == 0) {
+                return NULL;
+            }
+            val_node = ts_node_named_child(val_node, 0);
+            continue;
+        }
+        if (strcmp(vk, "quoted_template") == 0 || strcmp(vk, "template_literal") == 0 ||
+            strcmp(vk, "string_lit") == 0) {
+            char *val = cbm_node_text(a, val_node, source);
+            return strip_yaml_quotes(a, val);
+        }
         return NULL;
     }
-    char *val = cbm_node_text(a, val_node, source);
-    return strip_yaml_quotes(a, val);
+    return NULL;
+}
+
+// The tree-sitter-hcl grammar nests a block's attributes/sub-blocks inside a
+// `body` child rather than directly under the block. Return that body node so
+// scanners iterate the right level; fall back to the block itself if no body.
+static TSNode hcl_block_body(TSNode block) {
+    TSNode body = cbm_find_child_by_kind(block, "body");
+    return ts_node_is_null(body) ? block : body;
 }
 
 // Scan a nested HCL block for target keys (push_endpoint, uri, etc.).
 static void scan_hcl_nested_block_targets(CBMExtractCtx *ctx, TSNode block, const char **targets,
                                           int *n_targets) {
-    uint32_t bnc = ts_node_named_child_count(block);
+    TSNode body = hcl_block_body(block);
+    uint32_t bnc = ts_node_named_child_count(body);
     for (uint32_t bi = 0; bi < bnc; bi++) {
-        TSNode bchild = ts_node_named_child(block, bi);
+        TSNode bchild = ts_node_named_child(body, bi);
         if (strcmp(ts_node_type(bchild), "attribute") != 0) {
             continue;
         }
@@ -572,6 +611,48 @@ static void scan_hcl_nested_block_targets(CBMExtractCtx *ctx, TSNode block, cons
     }
 }
 
+/* A scheduler/cron job has no topic/queue source key — its identity is the
+ * resource itself, and the binding target is the job's invocation endpoint
+ * (uri / http_target / pubsub_target).  Detect such a block by its first label
+ * (resource type, e.g. "google_cloud_scheduler_job") and return the job's
+ * synthetic source name (its second label / resource name), or NULL if the
+ * block is not a scheduler job.  Sets *broker_out to the scheduler broker id. */
+static const char *hcl_scheduler_source(CBMExtractCtx *ctx, TSNode block, const char **broker_out) {
+    const char *first_label = NULL;
+    const char *last_label = NULL;
+    uint32_t cc = ts_node_named_child_count(block);
+    for (uint32_t i = 0; i < cc; i++) {
+        TSNode ch = ts_node_named_child(block, i);
+        if (strcmp(ts_node_type(ch), "string_lit") != 0) {
+            continue;
+        }
+        TSNode lit = cbm_find_child_by_kind(ch, "template_literal");
+        if (ts_node_is_null(lit)) {
+            continue;
+        }
+        char *label = cbm_node_text(ctx->arena, lit, ctx->source);
+        if (!label || !label[0]) {
+            continue;
+        }
+        if (!first_label) {
+            first_label = label;
+        }
+        last_label = label;
+    }
+    if (!first_label) {
+        return NULL;
+    }
+    /* google_cloud_scheduler_job, aws_cloudwatch_event_rule (cron), etc. */
+    if (strstr(first_label, "scheduler") || strstr(first_label, "schedule") ||
+        strstr(first_label, "cron")) {
+        if (broker_out) {
+            *broker_out = "cloud_scheduler";
+        }
+        return last_label ? last_label : first_label;
+    }
+    return NULL;
+}
+
 static void scan_hcl_block_for_bindings(CBMExtractCtx *ctx, TSNode block) {
     const char *sources[MAX_INFRA_BINDINGS] = {NULL};
     const char *source_keys[MAX_INFRA_BINDINGS] = {NULL};
@@ -579,9 +660,10 @@ static void scan_hcl_block_for_bindings(CBMExtractCtx *ctx, TSNode block) {
     const char *targets[MAX_INFRA_BINDINGS] = {NULL};
     int n_targets = 0;
 
-    uint32_t nc = ts_node_named_child_count(block);
+    TSNode body = hcl_block_body(block);
+    uint32_t nc = ts_node_named_child_count(body);
     for (uint32_t i = 0; i < nc; i++) {
-        TSNode child = ts_node_named_child(block, i);
+        TSNode child = ts_node_named_child(body, i);
         const char *ck = ts_node_type(child);
 
         if (strcmp(ck, "attribute") == 0) {
@@ -610,6 +692,29 @@ static void scan_hcl_block_for_bindings(CBMExtractCtx *ctx, TSNode block) {
             }
         } else if (strcmp(ck, "block") == 0) {
             scan_hcl_nested_block_targets(ctx, child, targets, &n_targets);
+        }
+    }
+
+    /* Scheduler/cron jobs carry no topic/queue source key — the resource itself
+     * is the source. If we found an invocation target (uri/http_target) but no
+     * explicit source key, synthesize the source from the scheduler resource so
+     * the job→endpoint binding (INFRA_MAPS) still forms. */
+    if (n_sources == 0 && n_targets > 0) {
+        const char *sched_broker = NULL;
+        const char *sched_src = hcl_scheduler_source(ctx, block, &sched_broker);
+        if (sched_src) {
+            for (int ti = 0; ti < n_targets; ti++) {
+                if (!targets[ti]) {
+                    continue;
+                }
+                CBMInfraBinding ib = {
+                    .source_name = sched_src,
+                    .target_url = targets[ti],
+                    .broker = sched_broker ? sched_broker : "cloud_scheduler",
+                };
+                cbm_infrabinding_push(&ctx->result->infra_bindings, ctx->arena, ib);
+            }
+            return;
         }
     }
 
@@ -655,6 +760,32 @@ static void scan_infra_bindings(CBMExtractCtx *ctx, TSNode node) {
     }
 }
 
+// JS/TS `export_statement` appears in import_node_types so re-exports
+// (`export { X } from './m'`) are treated as an import boundary.  But it also
+// wraps exported *declarations* (`export function f(cfg: Config) {}`), and
+// treating those as an import boundary wrongly suppresses USAGE edges for type
+// references inside the exported declaration's signature.  Return true when the
+// node is an export that contains a declaration child (i.e. NOT a bare re-export),
+// so the caller skips the import-scope push for it.
+static bool is_export_of_declaration(TSNode node) {
+    if (strcmp(ts_node_type(node), "export_statement") != 0) {
+        return false;
+    }
+    uint32_t n = ts_node_child_count(node);
+    for (uint32_t i = 0; i < n; i++) {
+        const char *ck = ts_node_type(ts_node_child(node, i));
+        if (strcmp(ck, "function_declaration") == 0 || strcmp(ck, "class_declaration") == 0 ||
+            strcmp(ck, "lexical_declaration") == 0 ||
+            strcmp(ck, "abstract_class_declaration") == 0 ||
+            strcmp(ck, "interface_declaration") == 0 || strcmp(ck, "enum_declaration") == 0 ||
+            strcmp(ck, "type_alias_declaration") == 0 || strcmp(ck, "variable_declaration") == 0 ||
+            strcmp(ck, "generator_function_declaration") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Push scope markers for function, class, call, and import boundary nodes.
 static void push_boundary_scopes(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
                                  WalkState *state, uint32_t depth) {
@@ -683,8 +814,18 @@ static void push_boundary_scopes(CBMExtractCtx *ctx, TSNode node, const CBMLangS
     if (spec->call_node_types && cbm_kind_in_set(node, spec->call_node_types)) {
         push_scope(state, SCOPE_CALL, depth, NULL);
     }
-    if (spec->import_node_types && cbm_kind_in_set(node, spec->import_node_types)) {
+    if (spec->import_node_types && cbm_kind_in_set(node, spec->import_node_types) &&
+        !is_export_of_declaration(node)) {
         push_scope(state, SCOPE_IMPORT, depth, NULL);
+    }
+    /* Loop / branch nesting for bottleneck metrics. Loops are gated on named
+     * nodes so anonymous `for`/`while` keyword tokens don't count. A loop is NOT
+     * also counted as a branch (many specs list loops in branching_node_types,
+     * but a loop is not a base-case guard for the unguarded-recursion signal). */
+    if (ts_node_is_named(node) && cbm_is_loop_node_type(ts_node_type(node))) {
+        push_scope(state, SCOPE_LOOP, depth, NULL);
+    } else if (spec->branching_node_types && cbm_kind_in_set(node, spec->branching_node_types)) {
+        push_scope(state, SCOPE_BRANCH, depth, NULL);
     }
 }
 

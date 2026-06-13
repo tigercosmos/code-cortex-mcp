@@ -502,7 +502,7 @@ TEST(discover_symlink_skipped) {
 #ifdef _WIN32
     /* Symlinks require elevated privileges on Windows — skip.
      * Guard the entire body: symlink() doesn't exist on Windows. */
-    SKIP("symlinks need admin on Windows");
+    SKIP_PLATFORM("Windows: symlinks need admin / symlink() unavailable");
 #else
     char *base = th_mktempdir("cbm_disc_sym");
     ASSERT(base != NULL);

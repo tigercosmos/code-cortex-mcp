@@ -38,15 +38,15 @@ static int next_pow2(int n) {
     return p;
 }
 
-static void build_qn_index(CBMTypeRegistry* reg, bool for_funcs) {
+static void build_qn_index(CBMTypeRegistry* reg, CBMArena* idx_arena, bool for_funcs) {
     int count = for_funcs ? reg->func_count : reg->type_count;
     if (count == 0) return;
     int bucket_count = next_pow2(count * 2);
     if (bucket_count < 16) bucket_count = 16;
 
-    int* buckets = (int*)cbm_arena_alloc(reg->arena, (size_t)bucket_count * sizeof(int));
+    int* buckets = (int*)cbm_arena_alloc(idx_arena, (size_t)bucket_count * sizeof(int));
     CBMRegistryHashEntry* entries = (CBMRegistryHashEntry*)cbm_arena_alloc(
-        reg->arena, (size_t)count * sizeof(CBMRegistryHashEntry));
+        idx_arena, (size_t)count * sizeof(CBMRegistryHashEntry));
     if (!buckets || !entries) return;
     for (int i = 0; i < bucket_count; i++) buckets[i] = -1;
 
@@ -75,11 +75,11 @@ static void build_qn_index(CBMTypeRegistry* reg, bool for_funcs) {
     }
 }
 
-static void build_method_index(CBMTypeRegistry* reg) {
+static void build_method_index(CBMTypeRegistry* reg, CBMArena* idx_arena) {
     if (reg->func_count == 0) return;
     int bucket_count = next_pow2(reg->func_count * 2);
     if (bucket_count < 16) bucket_count = 16;
-    int* buckets = (int*)cbm_arena_alloc(reg->arena, (size_t)bucket_count * sizeof(int));
+    int* buckets = (int*)cbm_arena_alloc(idx_arena, (size_t)bucket_count * sizeof(int));
     CBMRegistryHashEntry* entries = (CBMRegistryHashEntry*)cbm_arena_alloc(
         reg->arena, (size_t)reg->func_count * sizeof(CBMRegistryHashEntry));
     if (!buckets || !entries) return;
@@ -104,11 +104,16 @@ static void build_method_index(CBMTypeRegistry* reg) {
     reg->method_entry_count = idx;
 }
 
+void cbm_registry_finalize_into(CBMTypeRegistry* reg, CBMArena* idx_arena) {
+    if (!reg || !idx_arena) return;
+    build_qn_index(reg, idx_arena, /*for_funcs=*/true);
+    build_qn_index(reg, idx_arena, /*for_funcs=*/false);
+    build_method_index(reg, idx_arena);
+}
+
 void cbm_registry_finalize(CBMTypeRegistry* reg) {
     if (!reg) return;
-    build_qn_index(reg, /*for_funcs=*/true);
-    build_qn_index(reg, /*for_funcs=*/false);
-    build_method_index(reg);
+    cbm_registry_finalize_into(reg, reg->arena);
 }
 
 void cbm_registry_init(CBMTypeRegistry* reg, CBMArena* arena) {
@@ -162,6 +167,17 @@ static const CBMRegisteredFunc* lookup_method_self(const CBMTypeRegistry* reg,
                 return f;
             }
         }
+        /* Funcs added AFTER finalize are not in the buckets — scan only that
+         * tail (func_qn_entry_count == func_count at finalize time) so
+         * post-finalize additions stay visible instead of silently vanishing. */
+        for (int i = reg->func_qn_entry_count; i < reg->func_count; i++) {
+            const CBMRegisteredFunc* f = &reg->funcs[i];
+            if (f->receiver_type && f->short_name &&
+                strcmp(f->receiver_type, receiver_qn) == 0 &&
+                strcmp(f->short_name, method_name) == 0) {
+                return f;
+            }
+        }
         return NULL;
     }
 
@@ -200,6 +216,13 @@ static const CBMRegisteredType* lookup_type_self(const CBMTypeRegistry* reg,
                 return &reg->types[p];
             }
         }
+        /* Tail-scan types added after finalize (see lookup_method_self). */
+        for (int i = reg->type_qn_entry_count; i < reg->type_count; i++) {
+            if (reg->types[i].qualified_name &&
+                strcmp(reg->types[i].qualified_name, qualified_name) == 0) {
+                return &reg->types[i];
+            }
+        }
         return NULL;
     }
 
@@ -233,6 +256,13 @@ static const CBMRegisteredFunc* lookup_func_self(const CBMTypeRegistry* reg,
             if (reg->funcs[p].qualified_name &&
                 strcmp(reg->funcs[p].qualified_name, qualified_name) == 0) {
                 return &reg->funcs[p];
+            }
+        }
+        /* Tail-scan funcs added after finalize (see lookup_method_self). */
+        for (int i = reg->func_qn_entry_count; i < reg->func_count; i++) {
+            if (reg->funcs[i].qualified_name &&
+                strcmp(reg->funcs[i].qualified_name, qualified_name) == 0) {
+                return &reg->funcs[i];
             }
         }
         return NULL;
@@ -320,6 +350,50 @@ const CBMRegisteredFunc* cbm_registry_lookup_method_by_args(const CBMTypeRegistr
 
     const CBMRegisteredFunc* first_match = NULL;
     const CBMRegisteredFunc* range_match = NULL;
+
+    // Hashed path when finalized: walk only the (receiver,name) overload chain
+    // instead of every registered func. The chain holds exactly the funcs whose
+    // (receiver_type, short_name) hash to this key, so results are identical to
+    // the linear scan below — just O(overloads) instead of O(func_count). This
+    // matters on project-wide registries: a header with thousands of method
+    // calls × tens of thousands of registered funcs was O(calls×funcs) (#410).
+    if (reg->method_buckets && reg->method_bucket_count > 0) {
+        // The chain is in descending registration order, but the linear scan
+        // resolves ties by LOWEST registration index (first exact match, else
+        // first range match, else first match). Track the lowest index in each
+        // category so the hashed path returns the identical func.
+        int exact_pi = -1, range_pi = -1, first_pi = -1;
+        uint64_t h = fnv1a_pair(receiver_qn, method_name);
+        int slot = (int)(h & (uint64_t)(reg->method_bucket_count - 1));
+        for (int idx = reg->method_buckets[slot]; idx >= 0;
+             idx = reg->method_entries[idx].next_index) {
+            if (reg->method_entries[idx].hash != h) continue;
+            int pi = reg->method_entries[idx].payload_index;
+            const CBMRegisteredFunc* f = &reg->funcs[pi];
+            if (!f->receiver_type || !f->short_name ||
+                strcmp(f->receiver_type, receiver_qn) != 0 ||
+                strcmp(f->short_name, method_name) != 0)
+                continue;
+            if (first_pi < 0 || pi < first_pi) first_pi = pi;
+            int pc = count_func_params(f);
+            if (pc == arg_count) {
+                if (exact_pi < 0 || pi < exact_pi) exact_pi = pi;
+                continue;
+            }
+            int min_pc = (f->min_params >= 0) ? f->min_params : pc;
+            if (arg_count >= min_pc && arg_count <= pc) {
+                if (range_pi < 0 || pi < range_pi) range_pi = pi;
+            }
+        }
+        int sel = exact_pi >= 0 ? exact_pi : (range_pi >= 0 ? range_pi : first_pi);
+        if (sel >= 0) return &reg->funcs[sel];
+        if (reg->fallback) {
+            return cbm_registry_lookup_method_by_args(reg->fallback, receiver_qn, method_name,
+                                                      arg_count);
+        }
+        return NULL;
+    }
+
     for (int i = 0; i < reg->func_count; i++) {
         const CBMRegisteredFunc* f = &reg->funcs[i];
         if (f->receiver_type && f->short_name &&
@@ -423,6 +497,46 @@ const CBMRegisteredFunc* cbm_registry_lookup_method_by_types(const CBMTypeRegist
     int best_score = 0;
     const CBMRegisteredFunc* first_match = NULL;
 
+    // Hashed path when finalized: score only the (receiver,name) overload chain
+    // instead of every registered func. Identical result set to the linear scan
+    // below (same membership test), but O(overloads) instead of O(func_count) —
+    // the hot per-call lookup that made large-header resolve O(calls×funcs)
+    // (#410: a 10989-def header took ~34s/file in the resolve phase).
+    if (reg->method_buckets && reg->method_bucket_count > 0) {
+        // The chain is in descending registration order. The linear scan keeps
+        // the first (lowest-index) func at the best score (strict '>'), and
+        // falls back to the lowest-index match. Track lowest index per category
+        // so the hashed path returns the identical func.
+        int best_pi = -1, first_pi = -1;
+        uint64_t h = fnv1a_pair(receiver_qn, method_name);
+        int slot = (int)(h & (uint64_t)(reg->method_bucket_count - 1));
+        for (int idx = reg->method_buckets[slot]; idx >= 0;
+             idx = reg->method_entries[idx].next_index) {
+            if (reg->method_entries[idx].hash != h) continue;
+            int pi = reg->method_entries[idx].payload_index;
+            const CBMRegisteredFunc* f = &reg->funcs[pi];
+            if (!f->receiver_type || !f->short_name ||
+                strcmp(f->receiver_type, receiver_qn) != 0 ||
+                strcmp(f->short_name, method_name) != 0)
+                continue;
+            if (first_pi < 0 || pi < first_pi) first_pi = pi;
+            int s = score_overload_match(f, arg_types, arg_count);
+            if (s > best_score || (s == best_score && best_pi >= 0 && pi < best_pi)) {
+                best_score = s;
+                best_pi = pi;
+            }
+        }
+        // best_score starts at 0; a score of 0 means "wrong arg count" → no
+        // match, exactly as the linear scan (which never sets best on s==0).
+        int sel = (best_pi >= 0 && best_score > 0) ? best_pi : first_pi;
+        if (sel >= 0) return &reg->funcs[sel];
+        if (reg->fallback) {
+            return cbm_registry_lookup_method_by_types(reg->fallback, receiver_qn, method_name,
+                                                       arg_types, arg_count);
+        }
+        return NULL;
+    }
+
     for (int i = 0; i < reg->func_count; i++) {
         const CBMRegisteredFunc* f = &reg->funcs[i];
         if (f->receiver_type && f->short_name &&
@@ -461,6 +575,35 @@ const CBMRegisteredFunc* cbm_registry_lookup_symbol_by_types(const CBMTypeRegist
     int best_score = 0;
     const CBMRegisteredFunc* first_match = NULL;
 
+    // Hashed path when finalized: walk only the QN overload chain. The func QN
+    // index chains every func sharing a qualified_name, so this scores the exact
+    // same overload set as the linear scan, in O(overloads) not O(func_count).
+    if (reg->func_qn_buckets && reg->func_qn_bucket_count > 0) {
+        int best_pi = -1, first_pi = -1;
+        uint64_t h = fnv1a(buf);
+        int slot = (int)(h & (uint64_t)(reg->func_qn_bucket_count - 1));
+        for (int idx = reg->func_qn_buckets[slot]; idx >= 0;
+             idx = reg->func_qn_entries[idx].next_index) {
+            if (reg->func_qn_entries[idx].hash != h) continue;
+            int pi = reg->func_qn_entries[idx].payload_index;
+            const CBMRegisteredFunc* f = &reg->funcs[pi];
+            if (!f->qualified_name || strcmp(f->qualified_name, buf) != 0) continue;
+            if (first_pi < 0 || pi < first_pi) first_pi = pi;
+            int s = score_overload_match(f, arg_types, arg_count);
+            if (s > best_score || (s == best_score && best_pi >= 0 && pi < best_pi)) {
+                best_score = s;
+                best_pi = pi;
+            }
+        }
+        int sel = (best_pi >= 0 && best_score > 0) ? best_pi : first_pi;
+        if (sel >= 0) return &reg->funcs[sel];
+        if (reg->fallback) {
+            return cbm_registry_lookup_symbol_by_types(reg->fallback, package_qn, name, arg_types,
+                                                       arg_count);
+        }
+        return NULL;
+    }
+
     for (int i = 0; i < reg->func_count; i++) {
         const CBMRegisteredFunc* f = &reg->funcs[i];
         if (strcmp(f->qualified_name, buf) == 0) {
@@ -493,6 +636,38 @@ const CBMRegisteredFunc* cbm_registry_lookup_symbol_by_args(const CBMTypeRegistr
 
     const CBMRegisteredFunc* first_match = NULL;
     const CBMRegisteredFunc* range_match = NULL;
+
+    // Hashed path when finalized: walk only the QN overload chain (see
+    // cbm_registry_lookup_symbol_by_types). O(overloads) not O(func_count).
+    if (reg->func_qn_buckets && reg->func_qn_bucket_count > 0) {
+        int exact_pi = -1, range_pi = -1, first_pi = -1;
+        uint64_t h = fnv1a(buf);
+        int slot = (int)(h & (uint64_t)(reg->func_qn_bucket_count - 1));
+        for (int idx = reg->func_qn_buckets[slot]; idx >= 0;
+             idx = reg->func_qn_entries[idx].next_index) {
+            if (reg->func_qn_entries[idx].hash != h) continue;
+            int pi = reg->func_qn_entries[idx].payload_index;
+            const CBMRegisteredFunc* f = &reg->funcs[pi];
+            if (!f->qualified_name || strcmp(f->qualified_name, buf) != 0) continue;
+            if (first_pi < 0 || pi < first_pi) first_pi = pi;
+            int pc = count_func_params(f);
+            if (pc == arg_count) {
+                if (exact_pi < 0 || pi < exact_pi) exact_pi = pi;
+                continue;
+            }
+            int min_pc = (f->min_params >= 0) ? f->min_params : pc;
+            if (arg_count >= min_pc && arg_count <= pc) {
+                if (range_pi < 0 || pi < range_pi) range_pi = pi;
+            }
+        }
+        int sel = exact_pi >= 0 ? exact_pi : (range_pi >= 0 ? range_pi : first_pi);
+        if (sel >= 0) return &reg->funcs[sel];
+        if (reg->fallback) {
+            return cbm_registry_lookup_symbol_by_args(reg->fallback, package_qn, name, arg_count);
+        }
+        return NULL;
+    }
+
     for (int i = 0; i < reg->func_count; i++) {
         const CBMRegisteredFunc* f = &reg->funcs[i];
         if (strcmp(f->qualified_name, buf) == 0) {

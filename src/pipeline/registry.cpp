@@ -12,6 +12,14 @@
 #include "foundation/constants.h"
 
 enum { REG_INIT_CAP = 16, REG_MIN_CANDIDATES = 3, REG_RESOLVED = 1, REG_SUFFIX_ALLOC = 2 };
+/* Names with more registered definitions than this are unresolvable by name
+ * alone: candidate_count_penalty already floors their confidence to ~3/count
+ * (<= 0.006 at 256), so the emitted edge is noise — while the candidate walk
+ * (reachability + scoring per candidate, re-done per file) is the dominant
+ * resolution cost on identifier-dense repos. On the Linux kernel, 274 names
+ * exceed 256 candidates ("list_head" 7188, "flags" 5520, "dev" 4374, ...) and
+ * accounted for ~900 s of the 987 s usage-resolution CPU. Bail out early. */
+enum { REG_MAX_CANDIDATES = 256 };
 #define REG_FULL_CONF 1.0
 #define REG_HALF_PENALTY 0.5
 
@@ -76,10 +84,23 @@ struct cbm_registry {
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
-/* Extract last dot-separated segment from a QN. Returns pointer into s. */
+/* Extract the last path segment from a QN. Returns pointer into s.
+ * Recognizes both '.' (most langs) and Rust/C++ '::' separators, so a
+ * scoped callee like "lib::square" yields "square" rather than the whole
+ * scoped path (which never matches the by-name index). */
 static const char *simple_name(const char *qn) {
-    const char *last = strrchr(qn, '.');
-    return last ? last + SKIP_ONE : qn;
+    const char *dot = strrchr(qn, '.');
+    const char *seg = dot ? dot + SKIP_ONE : qn;
+    /* Find the last "::" and, if it sits after the last '.', use the
+     * segment following it. */
+    const char *colons = NULL;
+    for (const char *p = qn; (p = strstr(p, "::")) != NULL; p += 2) {
+        colons = p;
+    }
+    if (colons && colons + 2 > seg) {
+        seg = colons + 2;
+    }
+    return seg;
 }
 
 /* Extract everything before the last dot. Returns heap-allocated string. */
@@ -444,28 +465,6 @@ int cbm_registry_size(const cbm_registry_t *r) {
 /* ── Resolution ──────────────────────────────────────────────────── */
 
 /* Callback context for import_map_suffix scan */
-struct ims_ctx {
-    const char *resolved_dot; /* "proj.other." */
-    size_t resolved_dot_len;
-    const char *dot_suffix; /* ".Foo" */
-    size_t dot_suffix_len;
-    const char *found_key;
-};
-
-static void ims_scan(const char *key, void *value, void *ud) {
-    (void)value;
-    struct ims_ctx *ctx = (ims_ctx *)ud;
-    if (ctx->found_key) {
-        return; /* already found */
-    }
-    size_t klen = strlen(key);
-    if (klen >= ctx->resolved_dot_len + ctx->dot_suffix_len &&
-        strncmp(key, ctx->resolved_dot, ctx->resolved_dot_len) == 0 &&
-        strcmp(key + klen - ctx->dot_suffix_len, ctx->dot_suffix) == 0) {
-        ctx->found_key = key;
-    }
-}
-
 /* Strategy 1: Import map lookup (exact → suffix fallback) */
 static cbm_resolution_t resolve_import_map(const cbm_registry_t *r, const char *prefix,
                                            const char *suffix, const char **keys, const char **vals,
@@ -510,24 +509,30 @@ static cbm_resolution_t resolve_import_map(const cbm_registry_t *r, const char *
         return (cbm_resolution_t){stored_key, "import_map", CONF_IMPORT_MAP, REG_RESOLVED};
     }
 
-    /* import_map_suffix fallback: scan for QNs starting with resolved+"."
-     * and ending with "."+suffix */
+    /* import_map_suffix fallback: find a QN starting with resolved+"." and
+     * ending with "."+suffix. Any such QN's last segment equals the last
+     * segment of suffix, so probe the by_name index and tail-check the (few)
+     * candidates instead of cbm_ht_foreach over the WHOLE exact table — that
+     * scan ran per unresolved call and dominated elasticsearch's resolve
+     * phase (94% of samples: 700k-entry foreach + strlen per entry). */
     if (suffix && suffix[0]) {
         char resolved_dot[CBM_SZ_512];
         char dot_suffix[CBM_SZ_256];
         snprintf(resolved_dot, sizeof(resolved_dot), "%s.", resolved);
         snprintf(dot_suffix, sizeof(dot_suffix), ".%s", suffix);
-        struct ims_ctx ctx = {
-            .resolved_dot = resolved_dot,
-            .resolved_dot_len = strlen(resolved_dot),
-            .dot_suffix = dot_suffix,
-            .dot_suffix_len = strlen(dot_suffix),
-            .found_key = NULL,
-        };
-        cbm_ht_foreach(r->exact, ims_scan, &ctx);
-        if (ctx.found_key) {
-            return (cbm_resolution_t){ctx.found_key, "import_map_suffix", CONF_IMPORT_MAP_SUFFIX,
-                                      REG_RESOLVED};
+        qn_array_t *arr = (qn_array_t *)cbm_ht_get(r->by_name, simple_name(suffix));
+        if (arr) {
+            size_t rd_len = strlen(resolved_dot);
+            size_t ds_len = strlen(dot_suffix);
+            for (int i = 0; i < arr->count; i++) {
+                const char *qn = arr->items[i];
+                size_t klen = strlen(qn);
+                if (klen >= rd_len + ds_len && strncmp(qn, resolved_dot, rd_len) == 0 &&
+                    strcmp(qn + klen - ds_len, dot_suffix) == 0) {
+                    return (cbm_resolution_t){qn, "import_map_suffix", CONF_IMPORT_MAP_SUFFIX,
+                                              REG_RESOLVED};
+                }
+            }
         }
     }
     return empty_result();
@@ -591,6 +596,9 @@ static cbm_resolution_t resolve_name_lookup(const cbm_registry_t *r, const char 
     if (!arr || arr->count == 0) {
         return empty_result();
     }
+    if (arr->count > REG_MAX_CANDIDATES) {
+        return empty_result(); /* unresolvably ambiguous — see REG_MAX_CANDIDATES */
+    }
 
     /* Strategy 3: unique name */
     if (arr->count == SKIP_ONE) {
@@ -632,18 +640,29 @@ cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *calle
         }
     }
 
-    /* Split callee: "pkg.Func" → prefix="pkg", suffix="Func" */
+    /* Split callee at the first path separator: "pkg.Func" → prefix="pkg",
+     * suffix="Func".  Rust/C++ use "::" rather than ".", so honor whichever
+     * separator appears first ("lib::square" → prefix="lib", suffix="square").
+     * Both separators are unambiguous, so handling "::" never affects "."-only
+     * callees. */
     char prefix[CBM_SZ_256] = {0};
     const char *suffix = NULL;
     const char *dot = strchr(callee_name, '.');
-    if (dot) {
-        size_t plen = dot - callee_name;
+    const char *colons = strstr(callee_name, "::");
+    const char *sep = dot;
+    size_t sep_len = SKIP_ONE; /* length of '.' */
+    if (colons && (!sep || colons < sep)) {
+        sep = colons;
+        sep_len = 2; /* length of "::" */
+    }
+    if (sep) {
+        size_t plen = sep - callee_name;
         if (plen >= sizeof(prefix)) {
             plen = sizeof(prefix) - SKIP_ONE;
         }
         memcpy(prefix, callee_name, plen);
         prefix[plen] = '\0';
-        suffix = dot + SKIP_ONE;
+        suffix = sep + sep_len;
     } else {
         snprintf(prefix, sizeof(prefix), "%s", callee_name);
     }
@@ -705,6 +724,9 @@ cbm_fuzzy_result_t cbm_registry_fuzzy_resolve(const cbm_registry_t *r, const cha
     qn_array_t *arr = (qn_array_t *)cbm_ht_get(r->by_name, lookup);
     if (!arr || arr->count == 0) {
         return no_match;
+    }
+    if (arr->count > REG_MAX_CANDIDATES) {
+        return no_match; /* unresolvably ambiguous — see REG_MAX_CANDIDATES */
     }
 
     bool have_imports = (import_map_vals && import_map_count > 0);

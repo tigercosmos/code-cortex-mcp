@@ -88,8 +88,10 @@ TEST(typerep_optional_is_union_with_none) {
     bool has_int = false, has_none = false;
     for (int k = 0; k < opt->data.union_type.count; k++) {
         const CBMType *m = opt->data.union_type.members[k];
-        if (m->kind == CBM_TYPE_BUILTIN && strcmp(m->data.builtin.name, "int") == 0) has_int = true;
-        if (m->kind == CBM_TYPE_BUILTIN && strcmp(m->data.builtin.name, "None") == 0) has_none = true;
+        if (m->kind == CBM_TYPE_BUILTIN && strcmp(m->data.builtin.name, "int") == 0)
+            has_int = true;
+        if (m->kind == CBM_TYPE_BUILTIN && strcmp(m->data.builtin.name, "None") == 0)
+            has_none = true;
     }
     ASSERT(has_int);
     ASSERT(has_none);
@@ -223,7 +225,7 @@ TEST(typerep_callable_equality) {
     const CBMType *p1[1] = {i};
     const CBMType *c1 = cbm_type_callable(&a, p1, 1, s);
     const CBMType *c2 = cbm_type_callable(&a, p1, 1, s);
-    const CBMType *c3 = cbm_type_callable(&a, p1, 1, i);  /* different return */
+    const CBMType *c3 = cbm_type_callable(&a, p1, 1, i); /* different return */
     ASSERT(cbm_type_equal(c1, c2));
     ASSERT(!cbm_type_equal(c1, c3));
     cbm_arena_destroy(&a);
@@ -240,6 +242,51 @@ TEST(typerep_substitute_unbound_param_preserved) {
     const CBMType *args[] = {NULL, NULL};
     const CBMType *sub = cbm_type_substitute(&a, t, params, args);
     ASSERT(sub == t);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+/* #427: type_args may be SHORTER than type_params — a class template
+ * instantiated with fewer args than declared params (e.g. `Box<Widget>` for
+ * `template<class T, class U, class V>`) or trailing default template args.
+ * Matching a param whose index exceeds the args length must NOT index past the
+ * args array's NULL terminator. Pre-fix, this read args[2] one element past the
+ * 2-slot stack array (ASan stack-buffer-overflow) and returned a bogus CBMType*
+ * that was later dereferenced -> SEGV in type_to_qn (c_lsp.c). The unbound
+ * param must be preserved as-is. */
+TEST(typerep_substitute_short_args_no_oob_issue427) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    const CBMType *t = cbm_type_type_param(&a, "V");                   /* the 3rd declared param */
+    const char *params[] = {"T", "U", "V", NULL};                      /* 3 declared params */
+    const CBMType *args[] = {cbm_type_type_param(&a, "Widget"), NULL}; /* 1 arg */
+    const CBMType *sub = cbm_type_substitute(&a, t, params, args);
+    ASSERT(sub == t); /* "V" (index 2) has no supplied arg -> preserved, no OOB */
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+/* A caller that forgets to NULL-terminate type_args (a stack array) makes the
+ * bounded walk read uninitialized memory — and a garbage "pointer" within the
+ * param count would be BOUND to a type param and woven into the resulting type
+ * graph (bitcoin serialize.h: Using<Fmt>(v) with explicit args bound T to stack
+ * garbage; the corrupt graph was dereferenced later -> SIGSEGV). Implausible
+ * values (misaligned / null-page) must act as the terminator instead. */
+TEST(typerep_substitute_rejects_garbage_args_entries) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    const CBMType *t =
+        cbm_type_reference(&a, cbm_type_type_param(&a, "T")); /* T& as in Wrapper<F, T&> */
+    const char *params[] = {"F", "T", NULL};
+    const CBMType *args[2];
+    args[0] = cbm_type_named(&a, "proj.Fmt"); /* explicit arg for F */
+    args[1] = (const CBMType *)0x37;          /* simulated uninitialized stack garbage */
+    const CBMType *sub = cbm_type_substitute(&a, t, params, args);
+    ASSERT_NOT_NULL(sub);
+    ASSERT_EQ(sub->kind, CBM_TYPE_REFERENCE);
+    /* T has no real binding: it must be preserved, never the garbage value. */
+    ASSERT_TRUE(sub->data.reference.elem != (const CBMType *)0x37);
+    ASSERT_EQ(sub->data.reference.elem->kind, CBM_TYPE_TYPE_PARAM);
     cbm_arena_destroy(&a);
     PASS();
 }
@@ -270,4 +317,6 @@ SUITE(type_rep) {
     RUN_TEST(typerep_callable_equality);
     /* SUBSTITUTION */
     RUN_TEST(typerep_substitute_unbound_param_preserved);
+    RUN_TEST(typerep_substitute_short_args_no_oob_issue427);
+    RUN_TEST(typerep_substitute_rejects_garbage_args_entries);
 }

@@ -24,6 +24,8 @@
 #include <store/store.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <time.h>
 
 /* ── Helper: create architecture test store ──────────────────────── */
 
@@ -311,6 +313,94 @@ TEST(arch_boundaries) {
 
     cbm_store_architecture_free(&info);
     cbm_store_close(s);
+    PASS();
+}
+
+/* Build a synthetic graph (nodes Functions across packages, random CALLS
+ * edges) and return the wall ms of the "boundaries" aspect. Returns -1 on
+ * setup/query failure. */
+static double timed_boundaries_ms(int n_nodes, int n_edges, int n_pkgs) {
+    cbm_store_t *s = cbm_store_open_memory();
+    if (!s) {
+        return -1;
+    }
+    cbm_store_upsert_project(s, "perf", "/tmp/perf");
+
+    cbm_store_begin(s);
+    int64_t *ids = malloc((size_t)n_nodes * sizeof(int64_t));
+    if (!ids) {
+        cbm_store_close(s);
+        return -1;
+    }
+    for (int i = 0; i < n_nodes; i++) {
+        char name[32], qn[64];
+        snprintf(name, sizeof(name), "fn%d", i);
+        snprintf(qn, sizeof(qn), "perf.pkg%d.fn%d", i % n_pkgs, i);
+        cbm_node_t n = {.project = "perf",
+                        .label = "Function",
+                        .name = name,
+                        .qualified_name = qn,
+                        .file_path = "f.c"};
+        ids[i] = cbm_store_upsert_node(s, &n);
+    }
+    uint64_t rng = 42;
+    for (int i = 0; i < n_edges; i++) {
+        rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
+        int a = (int)((rng >> 33) % (uint64_t)n_nodes);
+        rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
+        int b = (int)((rng >> 33) % (uint64_t)n_nodes);
+        cbm_edge_t e = {
+            .project = "perf", .source_id = ids[a], .target_id = ids[b], .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+    cbm_store_commit(s);
+    free(ids);
+
+    cbm_architecture_info_t info;
+    memset(&info, 0, sizeof(info));
+    const char *aspects[] = {"boundaries"};
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    int rc = cbm_store_get_architecture(s, "perf", aspects, 1, &info);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms =
+        (double)(t1.tv_sec - t0.tv_sec) * 1000.0 + (double)(t1.tv_nsec - t0.tv_nsec) / 1000000.0;
+    int bcount = info.boundary_count;
+    cbm_store_architecture_free(&info);
+    cbm_store_close(s);
+    if (rc != CBM_STORE_OK || bcount <= 0) {
+        return -1;
+    }
+    return ms;
+}
+
+/* arch_boundaries used a LINEAR SCAN over all def nodes for EVERY CALLS edge
+ * (lookup_pkg over parallel arrays) — O(E×N). On the Linux kernel graph
+ * (~1.4M defs × ~1.4M CALLS) get_architecture spun >10 min at 100% CPU. The
+ * bug was latent while C call extraction was broken (few CALLS edges) and
+ * surfaced when extraction was fixed.
+ *
+ * Guard is SELF-RELATIVE because absolute wall bounds do not survive CI's
+ * machine spread (207 ms locally vs ~26 s on the shared ubuntu-arm UBSan
+ * runner for the same work): doubling nodes AND edges must scale the aspect
+ * by ~2x (linear; allow 3x for noise), while the quadratic scales by ~4x.
+ * A fast absolute result short-circuits (pre-fix the small size alone took
+ * >4 s on an M3 Pro, so 2 s means the scan is certainly gone). */
+TEST(arch_boundaries_no_quadratic_scan) {
+    enum { BN_NODES = 40000, BN_EDGES = 80000, BN_PKGS = 200, BN_FAST_MS = 2000 };
+    double t_small = timed_boundaries_ms(BN_NODES, BN_EDGES, BN_PKGS);
+    ASSERT_TRUE(t_small >= 0);
+    if (t_small < (double)BN_FAST_MS) {
+        printf("    boundaries %dk/%dk: %.0f ms — fast path, linear\n", BN_NODES / 1000,
+               BN_EDGES / 1000, t_small);
+        PASS();
+    }
+    double t_big = timed_boundaries_ms(BN_NODES * 2, BN_EDGES * 2, BN_PKGS);
+    ASSERT_TRUE(t_big >= 0);
+    double ratio = t_big / t_small;
+    printf("    boundaries %.0f ms -> %.0f ms at 2x size (ratio %.2f, quadratic ~4)\n", t_small,
+           t_big, ratio);
+    ASSERT_TRUE(ratio < 3.0);
     PASS();
 }
 
@@ -1194,6 +1284,7 @@ SUITE(store_arch) {
     RUN_TEST(arch_routes);
     RUN_TEST(arch_hotspots);
     RUN_TEST(arch_boundaries);
+    RUN_TEST(arch_boundaries_no_quadratic_scan);
     RUN_TEST(arch_layers);
     RUN_TEST(arch_file_tree);
     RUN_TEST(arch_clusters);

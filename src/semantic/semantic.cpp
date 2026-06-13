@@ -878,7 +878,14 @@ typedef struct {
 static void cooccur_sparse_one_target(cooccur_sparse_ctx_t *cc, int tid, cbm_sem_vec_t *target) {
     int occ_start = cc->rev->offsets[tid];
     int occ_end = cc->rev->offsets[tid + SKIP_ONE];
-    for (int p = occ_start; p < occ_end; p++) {
+    /* Frequent-token subsampling: stride over occurrences when a token is very
+     * common so the enriched vector's direction is preserved (it's normalized
+     * after) while bounding work to ~CBM_SEM_MAX_OCCUR samples. See semantic.h. */
+    int occ_step = SKIP_ONE;
+    if (occ_end - occ_start > CBM_SEM_MAX_OCCUR) {
+        occ_step = (occ_end - occ_start) / CBM_SEM_MAX_OCCUR;
+    }
+    for (int p = occ_start; p < occ_end; p += occ_step) {
         int d = cc->rev->flat[p].doc_id;
         int i = cc->rev->flat[p].pos;
         int *ids = cc->doc_token_ids[d];
@@ -960,7 +967,12 @@ static inline void sem_vec_add_int8_scaled(cbm_sem_vec_t *dst, const int8_t *src
 static void cooccur_int8_one_target(cooccur_int8_ctx_t *cc, int tid, cbm_sem_vec_t *target) {
     int occ_start = cc->rev->offsets[tid];
     int occ_end = cc->rev->offsets[tid + SKIP_ONE];
-    for (int p = occ_start; p < occ_end; p++) {
+    /* Frequent-token subsampling (see cooccur_sparse_one_target / semantic.h). */
+    int occ_step = SKIP_ONE;
+    if (occ_end - occ_start > CBM_SEM_MAX_OCCUR) {
+        occ_step = (occ_end - occ_start) / CBM_SEM_MAX_OCCUR;
+    }
+    for (int p = occ_start; p < occ_end; p += occ_step) {
         int d = cc->rev->flat[p].doc_id;
         int i = cc->rev->flat[p].pos;
         int *ids = cc->doc_token_ids[d];

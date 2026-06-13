@@ -2069,6 +2069,8 @@ static const char *node_string_field(const cbm_node_t *n, const char *prop) {
 
 /* Get node property by name.
  * store may be NULL; only needed for virtual degree properties. */
+static const char *json_extract_prop(const char *json, const char *key, char *buf, size_t buf_sz);
+
 static const char *node_prop(const cbm_node_t *n, const char *prop, cbm_store_t *store) {
     if (!n || !prop) {
         return "";
@@ -2077,15 +2079,22 @@ static const char *node_prop(const cbm_node_t *n, const char *prop, cbm_store_t 
     if (str) {
         return str;
     }
-    /* Integer properties returned as strings. */
-    static thread_local char int_buf[CBM_SZ_32];
+    /* Computed and JSON-derived values live in rotating thread-local buffers:
+     * a single row (or an ORDER-BY comparison) reads several of these before any
+     * of them is copied out, so returning one shared static buffer would alias
+     * every column to the last value read. Mirrors edge_prop's rotation. */
+    static thread_local char bufs[CYP_BUF_8][CBM_SZ_512];
+    static thread_local int buf_idx = 0;
+    char *out = bufs[buf_idx];
+    buf_idx = (buf_idx + SKIP_ONE) % CYP_BUF_8;
+
     if (strcmp(prop, "start_line") == 0) {
-        snprintf(int_buf, sizeof(int_buf), "%d", n->start_line);
-        return int_buf;
+        snprintf(out, CBM_SZ_512, "%d", n->start_line);
+        return out;
     }
     if (strcmp(prop, "end_line") == 0) {
-        snprintf(int_buf, sizeof(int_buf), "%d", n->end_line);
-        return int_buf;
+        snprintf(out, CBM_SZ_512, "%d", n->end_line);
+        return out;
     }
     /* Virtual computed properties: in_degree/out_degree via CALLS edges.
      * Enables Cypher dead-code detection: WHERE n.in_degree = '0'. */
@@ -2094,8 +2103,18 @@ static const char *node_prop(const cbm_node_t *n, const char *prop, cbm_store_t 
         int out_deg = 0;
         cbm_store_node_degree(store, n->id, &in_deg, &out_deg);
         int val = (strcmp(prop, "in_degree") == 0) ? in_deg : out_deg;
-        snprintf(int_buf, sizeof(int_buf), "%d", val);
-        return int_buf;
+        snprintf(out, CBM_SZ_512, "%d", val);
+        return out;
+    }
+    /* Fall back to any value stored in the node's properties JSON — exposes the
+     * extraction metrics (complexity, cognitive, loop_count, loop_depth,
+     * transitive_loop_depth, recursive) and any other persisted property to
+     * WHERE/RETURN, e.g. WHERE n.loop_depth >= 2. */
+    if (n->properties_json && n->properties_json[0] == '{') {
+        const char *v = json_extract_prop(n->properties_json, prop, out, CBM_SZ_512);
+        if (v && v[0]) {
+            return v;
+        }
     }
     return "";
 }
@@ -3289,7 +3308,20 @@ static const char *project_item(binding_t *b, cbm_return_item_t *item, char *fun
     if (is_scalar_value_func(item->func)) {
         return apply_string_func(item->func, raw, func_buf, buf_sz);
     }
-    return raw;
+    /* Copy into the caller's per-column buffer. `raw` may point to node_prop's
+     * rotating scratch buffer, which the next column's projection would overwrite
+     * before rb_add_row copies the assembled row — aliasing every such column to
+     * the last value read. The per-column func_buf gives each column stable storage. */
+    if (raw && raw != func_buf && raw[0]) {
+        size_t len = strlen(raw);
+        if (len >= buf_sz) {
+            len = buf_sz - SKIP_ONE;
+        }
+        memcpy(func_buf, raw, len);
+        func_buf[len] = '\0';
+        return func_buf;
+    }
+    return raw ? raw : "";
 }
 
 /* Check if a function name is an aggregate */
@@ -3879,15 +3911,21 @@ static void ret_agg_free(ret_agg_entry_t *aggs, int agg_count, int item_count) {
 /* Execute RETURN with aggregation */
 /* Build group key and projected values for one binding */
 static void ret_agg_build_key(cbm_return_clause_t *ret, binding_t *b, char *key, size_t key_sz,
-                              const char **vals) {
+                              const char **vals, char valbufs[][CBM_SZ_512]) {
     int klen = 0;
     for (int ci = 0; ci < ret->count; ci++) {
         if (ret->items[ci].func) {
             vals[ci] = "0";
             continue;
         }
-        char func_buf[CBM_SZ_512];
-        vals[ci] = project_item(b, &ret->items[ci], func_buf, sizeof(func_buf));
+        /* project_item may return its own scratch (stable static or a per-column
+         * buffer it copied into); persist the value in the caller-owned valbufs
+         * so vals[] survives until ret_agg_init_group strdup's it. */
+        const char *v = project_item(b, &ret->items[ci], valbufs[ci], CBM_SZ_512);
+        if (v != valbufs[ci]) {
+            snprintf(valbufs[ci], CBM_SZ_512, "%s", v ? v : "");
+        }
+        vals[ci] = valbufs[ci];
         klen += snprintf(key + klen, key_sz - (size_t)klen, "%s|", vals[ci]);
         if (klen >= (int)key_sz) {
             klen = (int)key_sz - SKIP_ONE;
@@ -3927,7 +3965,8 @@ static void execute_return_agg(cbm_return_clause_t *ret, binding_t *bindings, in
     for (int bi = 0; bi < bind_count; bi++) {
         char key[CBM_SZ_1K] = "";
         const char *vals[CBM_SZ_32];
-        ret_agg_build_key(ret, &bindings[bi], key, sizeof(key), vals);
+        char valbufs[CBM_SZ_32][CBM_SZ_512];
+        ret_agg_build_key(ret, &bindings[bi], key, sizeof(key), vals, valbufs);
 
         int found = CYP_FOUND_NONE;
         for (int a = 0; a < agg_count; a++) {
