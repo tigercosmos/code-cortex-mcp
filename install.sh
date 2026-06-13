@@ -97,10 +97,20 @@ else
     EXT="tar.gz"
 fi
 
-if [ "$VARIANT" = "ui" ]; then
-    ARCHIVE="codebase-memory-mcp-ui-${OS}-${ARCH}.${EXT}"
+# Linux ships a fully-static "-portable" build that runs on any glibc; the
+# standard linux binary is dynamically linked against the builder's (newer)
+# glibc/libstdc++ and fails on older distros. Match the binary's own update
+# path (src/cli/cli.cpp build_update_url). Other OSes have no -portable asset.
+if [ "$OS" = "linux" ]; then
+    PORTABLE="-portable"
 else
-    ARCHIVE="codebase-memory-mcp-${OS}-${ARCH}.${EXT}"
+    PORTABLE=""
+fi
+
+if [ "$VARIANT" = "ui" ]; then
+    ARCHIVE="codebase-memory-mcp-ui-${OS}-${ARCH}${PORTABLE}.${EXT}"
+else
+    ARCHIVE="codebase-memory-mcp-${OS}-${ARCH}${PORTABLE}.${EXT}"
 fi
 
 URL="${CBM_DOWNLOAD_URL}/${ARCHIVE}"
