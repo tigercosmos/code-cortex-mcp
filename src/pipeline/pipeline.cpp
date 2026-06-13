@@ -398,9 +398,13 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
         /* The config file IS the declaration that the topic/queue/schedule exists;
          * upsert its Route node so the binding maps even when no code-side dispatch
          * call created the node first (e.g. a standalone scheduler/subscription
-         * manifest). */
+         * manifest). nodes.properties must be valid JSON (json_each/json_extract
+         * consumers), not a bare broker token. */
+        char topic_props[CBM_SZ_256];
+        snprintf(topic_props, sizeof(topic_props), "{\"broker\":\"%s\",\"topic\":\"%s\"}",
+                 ib->broker ? ib->broker : "async", ib->source_name);
         topic_route_id = cbm_gbuf_upsert_node(gbuf, "Route", ib->source_name, topic_route_qn,
-                                              rel_path, 0, 0, ib->broker ? ib->broker : "async");
+                                              rel_path, 0, 0, topic_props);
         if (topic_route_id <= 0) {
             return 0;
         }

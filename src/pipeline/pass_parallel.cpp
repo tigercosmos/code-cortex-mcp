@@ -836,6 +836,9 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
     free(file_qn);
     if (def->parent_class && strcmp(def->label, "Method") == 0) {
         const cbm_gbuf_node_t *parent = cbm_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
+        if (!parent) {
+            parent = cbm_pipeline_resolve_method_parent(ctx->gbuf, def->parent_class);
+        }
         if (parent && def_node) {
             cbm_gbuf_insert_edge(ctx->gbuf, parent->id, def_node->id, "DEFINES_METHOD", "{}");
         }
@@ -917,6 +920,49 @@ static void create_channel_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *r
     }
 }
 
+/* Create EnvVar nodes + CONFIGURES edges for one file's env accesses.
+ * Mirrors create_env_configures_for_file in pass_definitions.cpp — the
+ * sequential path runs that one; the parallel path (this file) runs this twin.
+ * Keep the two in sync. */
+static void create_env_configures(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result,
+                                  const char *rel) {
+    char *file_qn = nullptr;
+    const cbm_gbuf_node_t *file_node = nullptr;
+    for (int j = 0; j < result->env_accesses.count; j++) {
+        const CBMEnvAccess *ea = &result->env_accesses.items[j];
+        if (!ea->env_key || !ea->env_key[0]) {
+            continue;
+        }
+        char env_qn[CBM_SZ_512];
+        snprintf(env_qn, sizeof(env_qn), "__env__%s", ea->env_key);
+        char esc_key[CBM_SZ_256];
+        cbm_json_escape(esc_key, sizeof(esc_key), ea->env_key);
+        char env_props[CBM_SZ_512];
+        snprintf(env_props, sizeof(env_props), "{\"env_key\":\"%s\"}", esc_key);
+        int64_t env_id =
+            cbm_gbuf_upsert_node(ctx->gbuf, "EnvVar", ea->env_key, env_qn, "", 0, 0, env_props);
+        if (env_id <= 0) {
+            continue;
+        }
+        const cbm_gbuf_node_t *src = nullptr;
+        if (ea->enclosing_func_qn && ea->enclosing_func_qn[0]) {
+            src = cbm_gbuf_find_by_qn(ctx->gbuf, ea->enclosing_func_qn);
+        }
+        if (!src) {
+            if (!file_qn) {
+                file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
+                file_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
+            }
+            src = file_node;
+        }
+        if (src && src->id != env_id) {
+            cbm_gbuf_insert_edge(ctx->gbuf, src->id, env_id, "CONFIGURES",
+                                 "{\"strategy\":\"env_access\"}");
+        }
+    }
+    free(file_qn);
+}
+
 int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                                   int file_count, CBMFileResult **result_cache) {
     cbm_log_info("parallel.registry.start", "files", itoa_log(file_count));
@@ -958,6 +1004,7 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
 
         imports_edges += create_imports_edges(ctx, result, rel, namespace_map);
         create_channel_edges(ctx, result, rel);
+        create_env_configures(ctx, result, rel);
     }
 
     cbm_pipeline_namespace_map_free(namespace_map);

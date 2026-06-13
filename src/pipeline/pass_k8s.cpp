@@ -247,6 +247,7 @@ static void k8s_scan_labels(const char *source, k8s_record_t *rec) {
     } stack[K8S_PATH_DEPTH];
     int depth = 0;
     bool got_name = false;
+    bool seen_content = false;
 
     const char *p = source;
     while (p && *p) {
@@ -257,16 +258,27 @@ static void k8s_scan_labels(const char *source, k8s_record_t *rec) {
         memcpy(line, p, cp);
         line[cp] = '\0';
 
-        /* End of first YAML document — stop (one Resource per file). */
+        /* YAML document marker.  A leading `---` (before any content) is just a
+         * stream-start separator — skip it and keep scanning the first document.
+         * A `---` after content begins the next document: stop (one Resource per
+         * file).  Many k8s manifests open with a top-level `---`. */
         const char *trimmed = line;
         while (*trimmed == ' ') {
             trimmed++;
         }
         if (strncmp(trimmed, "---", 3) == 0 && line == trimmed) {
-            break;
+            if (seen_content) {
+                break;
+            }
+            if (!eol) {
+                break;
+            }
+            p = eol + 1;
+            continue;
         }
 
         if (trimmed[0] && trimmed[0] != '#') {
+            seen_content = true;
             int ind = k8s_indent(line);
             while (depth > 0 && stack[depth - 1].indent >= ind) {
                 depth--;

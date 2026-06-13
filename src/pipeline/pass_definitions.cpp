@@ -285,6 +285,39 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     }
 }
 
+/* See pipeline_internal.h. By-name fallback for out-of-line / cross-file method
+ * parents (Go methods, C++ .h/.cpp split) whose rel_path-derived parent QN does
+ * not match a node. Links only on a unique type-like match. */
+const cbm_gbuf_node_t *cbm_pipeline_resolve_method_parent(const cbm_gbuf_t *gb,
+                                                          const char *parent_qn) {
+    if (!parent_qn || !parent_qn[0]) {
+        return nullptr;
+    }
+    const char *dot = strrchr(parent_qn, '.');
+    const char *short_name = dot ? dot + 1 : parent_qn;
+    if (!short_name[0]) {
+        return nullptr;
+    }
+    const cbm_gbuf_node_t **cand = nullptr;
+    int ncand = 0;
+    if (cbm_gbuf_find_by_name(gb, short_name, &cand, &ncand) != 0) {
+        return nullptr;
+    }
+    const cbm_gbuf_node_t *match = nullptr;
+    int matches = 0;
+    for (int k = 0; k < ncand; k++) {
+        const char *lbl = cand[k]->label;
+        if (lbl && (strcmp(lbl, "Class") == 0 || strcmp(lbl, "Struct") == 0 ||
+                    strcmp(lbl, "Interface") == 0 || strcmp(lbl, "Enum") == 0 ||
+                    strcmp(lbl, "Trait") == 0 || strcmp(lbl, "Object") == 0 ||
+                    strcmp(lbl, "Protocol") == 0 || strcmp(lbl, "Type") == 0)) {
+            match = cand[k];
+            matches++;
+        }
+    }
+    return matches == 1 ? match : nullptr;
+}
+
 /* Process one definition: create node, register, DEFINES + DEFINES_METHOD edges. */
 static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const char *rel) {
     if (!def->qualified_name || !def->name) {
@@ -314,6 +347,9 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
     free(file_qn);
     if (def->parent_class && def->label && strcmp(def->label, "Method") == 0) {
         const cbm_gbuf_node_t *parent = cbm_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
+        if (!parent) {
+            parent = cbm_pipeline_resolve_method_parent(ctx->gbuf, def->parent_class);
+        }
         if (parent && node_id > 0) {
             cbm_gbuf_insert_edge(ctx->gbuf, parent->id, node_id, "DEFINES_METHOD", "{}");
         }

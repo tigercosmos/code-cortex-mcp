@@ -112,6 +112,14 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                                                         const CBMImport *imp,
                                                         CBMHashTable *namespace_map);
 
+/* Resolve a Method's parent type when its rel_path-derived parent QN does not
+ * match a node (out-of-line / cross-file definitions: Go methods declared in a
+ * different file from the receiver type, C++ methods split across .h/.cpp).
+ * Falls back to a by-name lookup over type-like nodes, returning a match ONLY
+ * when it is unique — so an ambiguous name never mis-attributes the method. */
+const cbm_gbuf_node_t *cbm_pipeline_resolve_method_parent(const cbm_gbuf_t *gb,
+                                                          const char *parent_qn);
+
 /* Build a namespace → File-node-QN map from a set of extraction results.
  * Each result that declared a namespace/package contributes one entry keyed by
  * the namespace string (e.g. "App.Utils", "com.example").  Returns NULL when no

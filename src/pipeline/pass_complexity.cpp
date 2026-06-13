@@ -102,7 +102,7 @@ static void append_complexity_props(cbm_gbuf_node_t *node, int tld, bool recursi
 /* Memoized DFS: tld(id) = loop_depth(id) + max over CALLS-callees of tld(callee).
  * state: 0=unvisited, 1=in-progress (back-edge → cycle), 2=done. */
 static int tld_dfs(const cbm_gbuf_t *gb, int64_t id, const int *loop_depth, int *tld, char *state,
-                   bool *recursive, int64_t maxid, int depth) {
+                   bool *recursive, int64_t maxid, int depth, int64_t *path) {
     if (id < 1 || id > maxid) {
         return 0;
     }
@@ -110,6 +110,16 @@ static int tld_dfs(const cbm_gbuf_t *gb, int64_t id, const int *loop_depth, int 
         return tld[id];
     }
     if (state[id] == 1) {
+        /* Back edge: id is an ancestor on the current DFS path, so every node
+         * from the current caller back up to id forms one call cycle (mutual
+         * recursion A→B→A). Mark the whole cycle, not just id — otherwise the
+         * caller is memoized done with recursive=false. */
+        for (int k = depth - 1; k >= 0; k--) {
+            recursive[path[k]] = true;
+            if (path[k] == id) {
+                break;
+            }
+        }
         recursive[id] = true; /* back edge → call-graph cycle */
         return 0;
     }
@@ -117,6 +127,7 @@ static int tld_dfs(const cbm_gbuf_t *gb, int64_t id, const int *loop_depth, int 
         return loop_depth[id];
     }
     state[id] = 1;
+    path[depth] = id; /* push onto the DFS path stack for cycle attribution */
     int best = 0;
     const cbm_gbuf_edge_t **edges = NULL;
     int ne = 0;
@@ -127,7 +138,7 @@ static int tld_dfs(const cbm_gbuf_t *gb, int64_t id, const int *loop_depth, int 
             recursive[id] = true; /* direct self-recursion */
             continue;
         }
-        int ct = tld_dfs(gb, c, loop_depth, tld, state, recursive, maxid, depth + 1);
+        int ct = tld_dfs(gb, c, loop_depth, tld, state, recursive, maxid, depth + 1, path);
         if (ct > best) {
             best = ct;
         }
@@ -186,12 +197,13 @@ void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
     seed_loop_depths(gb, "Method", loop_depth, recursive, nptr, maxid);
 
     int updated = 0;
+    int64_t path[CBM_TLD_MAX_DEPTH + 1]; /* DFS path stack for cycle attribution */
     for (int64_t id = 1; id <= maxid; id++) {
         if (!nptr[id]) {
             continue; /* only Function/Method nodes */
         }
         if (state[id] != 2) {
-            tld_dfs(gb, id, loop_depth, tld, state, recursive, maxid, 0);
+            tld_dfs(gb, id, loop_depth, tld, state, recursive, maxid, 0, path);
         }
         append_complexity_props(nptr[id], tld[id], recursive[id]);
         updated++;
