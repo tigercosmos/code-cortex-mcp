@@ -11,6 +11,7 @@
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "store/store.h"
+#include "git/git_context.h"
 #include <yyjson/yyjson.h> // properties-JSON validity (oversized-props regression)
 
 #include <stdlib.h>
@@ -317,6 +318,93 @@ TEST(pipeline_project_name_derived) {
     ASSERT_NOT_NULL(name);
     ASSERT_TRUE(strlen(name) > 0);
 
+    cbm_pipeline_free(p);
+    teardown_test_repo();
+    PASS();
+}
+
+TEST(pipeline_branch_root_structure) {
+    if (setup_test_repo() != 0) {
+        FAIL("failed to create temp dir");
+    }
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/test_branch_root.db", g_tmpdir);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    int rc = cbm_pipeline_run(p);
+    ASSERT_EQ(rc, 0);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    char branch_qn[1024];
+    snprintf(branch_qn, sizeof(branch_qn), "%s.__branch__.working-tree", project);
+
+    cbm_node_t project_node = {0};
+    cbm_node_t branch_node = {0};
+    cbm_node_t root_file_node = {0};
+    cbm_node_t root_folder_node = {0};
+    rc = cbm_store_find_node_by_qn(s, project, project, &project_node);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    rc = cbm_store_find_node_by_qn(s, project, branch_qn, &branch_node);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_STR_EQ(branch_node.label, "Branch");
+    ASSERT_STR_EQ(branch_node.name, "working-tree");
+    ASSERT_NOT_NULL(strstr(branch_node.properties_json, "\"is_git\":false"));
+    char *root_folder_qn = cbm_pipeline_fqn_folder(project, "pkg");
+    char *root_file_qn = cbm_pipeline_fqn_compute(project, "main.go", "__file__");
+    ASSERT_NOT_NULL(root_folder_qn);
+    ASSERT_NOT_NULL(root_file_qn);
+    rc = cbm_store_find_node_by_qn(s, project, root_folder_qn, &root_folder_node);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    rc = cbm_store_find_node_by_qn(s, project, root_file_qn, &root_file_node);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+
+    cbm_edge_t *has_branch = NULL;
+    int has_branch_count = 0;
+    rc = cbm_store_find_edges_by_source_type(s, project_node.id, "HAS_BRANCH", &has_branch,
+                                             &has_branch_count);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(has_branch_count, 1);
+    ASSERT_EQ(has_branch[0].target_id, branch_node.id);
+
+    cbm_edge_t *project_files = NULL;
+    int project_file_count = 0;
+    rc = cbm_store_find_edges_by_source_type(s, project_node.id, "CONTAINS_FILE", &project_files,
+                                             &project_file_count);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(project_file_count, 0);
+
+    cbm_edge_t *branch_files = NULL;
+    int branch_file_count = 0;
+    rc = cbm_store_find_edges_by_source_type(s, branch_node.id, "CONTAINS_FILE", &branch_files,
+                                             &branch_file_count);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(branch_file_count, 1);
+    ASSERT_EQ(branch_files[0].target_id, root_file_node.id);
+
+    cbm_edge_t *branch_folders = NULL;
+    int branch_folder_count = 0;
+    rc = cbm_store_find_edges_by_source_type(s, branch_node.id, "CONTAINS_FOLDER", &branch_folders,
+                                             &branch_folder_count);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(branch_folder_count, 1);
+    ASSERT_EQ(branch_folders[0].target_id, root_folder_node.id);
+
+    cbm_store_free_edges(has_branch, has_branch_count);
+    cbm_store_free_edges(project_files, project_file_count);
+    cbm_store_free_edges(branch_files, branch_file_count);
+    cbm_store_free_edges(branch_folders, branch_folder_count);
+    cbm_node_free_fields(&project_node);
+    cbm_node_free_fields(&branch_node);
+    cbm_node_free_fields(&root_file_node);
+    cbm_node_free_fields(&root_folder_node);
+    free(root_folder_qn);
+    free(root_file_qn);
+    cbm_store_close(s);
     cbm_pipeline_free(p);
     teardown_test_repo();
     PASS();
@@ -2142,6 +2230,132 @@ TEST(project_name_drive_letter_case_insensitive_issue394) {
     snprintf(buf2, sizeof(buf2), "%s", "d:\\proj\\sub");
     cbm_normalize_path_sep(buf2);
     ASSERT_STR_EQ(buf2, "D:/proj/sub");
+    PASS();
+}
+
+static const char *test_null_dev(void) {
+#ifdef _WIN32
+    return "NUL";
+#else
+    return "/dev/null";
+#endif
+}
+
+static bool git_available(void) {
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "git --version >%s 2>&1", test_null_dev());
+    int rc = system(cmd);
+    return rc == 0;
+}
+
+static int run_cmd(const char *cmd) {
+    return system(cmd);
+}
+
+TEST(git_context_non_git_path) {
+    char *tmp = th_mktempdir("cbm_gitctx_nongit");
+    ASSERT_NOT_NULL(tmp);
+
+    cbm_git_context_t ctx = {0};
+    ASSERT_EQ(cbm_git_context_resolve(tmp, &ctx), 0);
+    ASSERT_FALSE(ctx.is_git);
+    ASSERT_TRUE(ctx.root_exists);
+
+    char *qn = cbm_git_context_branch_qn("proj", &ctx);
+    ASSERT_NOT_NULL(qn);
+    ASSERT_STR_EQ(qn, "proj.__branch__.working-tree");
+    free(qn);
+
+    char json[1024];
+    ASSERT_GT(cbm_git_context_props_json(&ctx, json, sizeof(json)), 0);
+    ASSERT_NOT_NULL(strstr(json, "\"is_git\":false"));
+    ASSERT_NOT_NULL(strstr(json, "\"root_exists\":true"));
+
+    char long_value[1200];
+    memset(long_value, 'a', sizeof(long_value) - 1);
+    long_value[sizeof(long_value) - 1] = '\0';
+    cbm_git_context_t long_ctx = {
+        .root_exists = true,
+        .canonical_root = long_value,
+    };
+    char small_json[64];
+    ASSERT_EQ(cbm_git_context_props_json(&long_ctx, small_json, sizeof(small_json)), 0);
+
+    cbm_git_context_free(&ctx);
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(git_context_linked_worktree) {
+    if (!git_available()) {
+        FAIL("git unavailable");
+    }
+
+    char *tmp = th_mktempdir("cbm_gitctx_repo");
+    ASSERT_NOT_NULL(tmp);
+
+    char repo[512], wt[512], cmd[2048];
+    int n = snprintf(repo, sizeof(repo), "%s/repo with space", tmp);
+    ASSERT_TRUE(n > 0 && n < (int)sizeof(repo));
+    n = snprintf(wt, sizeof(wt), "%s/wt with space", tmp);
+    ASSERT_TRUE(n > 0 && n < (int)sizeof(wt));
+    ASSERT_EQ(th_mkdir_p(repo), 0);
+
+    const char *null_dev = test_null_dev();
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" init >%s 2>&1", repo, null_dev);
+    ASSERT_EQ(run_cmd(cmd), 0);
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" checkout -b main >%s 2>&1", repo, null_dev);
+    ASSERT_EQ(run_cmd(cmd), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(repo, "file.txt"), "hello\n"), 0);
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" add file.txt >%s 2>&1", repo, null_dev);
+    ASSERT_EQ(run_cmd(cmd), 0);
+    snprintf(cmd, sizeof(cmd),
+             "git -C \"%s\" -c user.name=\"CBM Test\" -c user.email=\"cbm@example.invalid\" "
+             "commit -m \"initial\" >%s 2>&1",
+             repo, null_dev);
+    ASSERT_EQ(run_cmd(cmd), 0);
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" worktree add -b feature/git-context \"%s\" >%s 2>&1",
+             repo, wt, null_dev);
+    ASSERT_EQ(run_cmd(cmd), 0);
+
+    cbm_git_context_t main_ctx = {0};
+    cbm_git_context_t wt_ctx = {0};
+    ASSERT_EQ(cbm_git_context_resolve(repo, &main_ctx), 0);
+    ASSERT_EQ(cbm_git_context_resolve(wt, &wt_ctx), 0);
+
+    ASSERT_TRUE(main_ctx.is_git);
+    ASSERT_FALSE(main_ctx.is_worktree);
+    ASSERT_TRUE(wt_ctx.is_git);
+    ASSERT_TRUE(wt_ctx.is_worktree);
+    ASSERT_STR_EQ(main_ctx.canonical_root, wt_ctx.canonical_root);
+    ASSERT_NOT_NULL(wt_ctx.branch);
+    ASSERT_STR_EQ(wt_ctx.branch, "feature/git-context");
+    ASSERT_STR_EQ(wt_ctx.branch_slug, "feature-git-context");
+    ASSERT_NOT_NULL(wt_ctx.head_sha);
+
+    char *qn = cbm_git_context_branch_qn("proj", &wt_ctx);
+    ASSERT_NOT_NULL(qn);
+    ASSERT_STR_EQ(qn, "proj.__branch__.feature-git-context");
+    free(qn);
+
+    char json[2048];
+    ASSERT_GT(cbm_git_context_props_json(&wt_ctx, json, sizeof(json)), 0);
+    ASSERT_NOT_NULL(strstr(json, "\"is_git\":true"));
+    ASSERT_NOT_NULL(strstr(json, "\"is_worktree\":true"));
+    ASSERT_NOT_NULL(strstr(json, "\"branch\":\"feature/git-context\""));
+
+    cbm_git_context_free(&main_ctx);
+    cbm_git_context_free(&wt_ctx);
+
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" checkout --detach HEAD >%s 2>&1", repo, null_dev);
+    ASSERT_EQ(run_cmd(cmd), 0);
+    cbm_git_context_t detached_ctx = {0};
+    ASSERT_EQ(cbm_git_context_resolve(repo, &detached_ctx), 0);
+    ASSERT_TRUE(detached_ctx.is_detached);
+    ASSERT_STR_EQ(detached_ctx.branch_slug, "detached");
+    cbm_git_context_free(&detached_ctx);
+
+    th_rmtree(tmp);
     PASS();
 }
 
@@ -5685,6 +5899,7 @@ SUITE(pipeline) {
     /* Integration: structure pass */
     RUN_TEST(pipeline_structure_nodes);
     RUN_TEST(pipeline_structure_edges);
+    RUN_TEST(pipeline_branch_root_structure);
     RUN_TEST(pipeline_project_name_derived);
     RUN_TEST(pipeline_fast_mode);
     /* Definitions pass */
@@ -5735,6 +5950,8 @@ SUITE(pipeline) {
     /* Project name */
     RUN_TEST(project_name_from_path);
     RUN_TEST(project_name_drive_letter_case_insensitive_issue394);
+    RUN_TEST(git_context_non_git_path);
+    RUN_TEST(git_context_linked_worktree);
     RUN_TEST(project_name_uniqueness);
     /* Git diff helpers */
     RUN_TEST(gitdiff_parse_range_with_count);

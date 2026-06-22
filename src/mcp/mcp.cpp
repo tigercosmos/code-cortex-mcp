@@ -46,6 +46,7 @@ enum {
 #include "cypher/cypher.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pass_cross_repo.h"
+#include "git/git_context.h"
 #include "cli/cli.h"
 #include "watcher/watcher.h"
 #include "foundation/mem.h"
@@ -885,6 +886,37 @@ static int collect_db_project_names(const char *dir_path, char *out, size_t out_
     return count;
 }
 
+static void add_git_context_string(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
+                                   const char *value) {
+    if (value) {
+        yyjson_mut_obj_add_strcpy(doc, obj, key, value);
+    } else {
+        yyjson_mut_obj_add_null(doc, obj, key);
+    }
+}
+
+static void add_git_context_json(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *root_path) {
+    cbm_git_context_t ctx = {0};
+    (void)cbm_git_context_resolve(root_path, &ctx);
+
+    yyjson_mut_val *git = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_bool(doc, git, "is_git", ctx.is_git);
+    yyjson_mut_obj_add_bool(doc, git, "is_worktree", ctx.is_worktree);
+    yyjson_mut_obj_add_bool(doc, git, "is_detached", ctx.is_detached);
+    yyjson_mut_obj_add_bool(doc, git, "root_exists", ctx.root_exists);
+    add_git_context_string(doc, git, "worktree_root", ctx.worktree_root);
+    add_git_context_string(doc, git, "git_dir", ctx.git_dir);
+    add_git_context_string(doc, git, "git_common_dir", ctx.git_common_dir);
+    add_git_context_string(doc, git, "canonical_root", ctx.canonical_root);
+    add_git_context_string(doc, git, "branch", ctx.branch);
+    add_git_context_string(doc, git, "branch_slug", ctx.branch_slug);
+    add_git_context_string(doc, git, "head_sha", ctx.head_sha);
+    add_git_context_string(doc, git, "base_sha", ctx.base_sha);
+    yyjson_mut_obj_add_val(doc, obj, "git", git);
+
+    cbm_git_context_free(&ctx);
+}
+
 /* Build a helpful error listing available projects. Caller must free() result. */
 static char *build_project_list_error(const char *reason) {
     char dir_path[CBM_SZ_1K];
@@ -972,6 +1004,7 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
     yyjson_mut_val *p = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, p, "name", project_name);
     yyjson_mut_obj_add_strcpy(doc, p, "root_path", root_path_buf);
+    add_git_context_json(doc, p, root_path_buf[0] ? root_path_buf : NULL);
     yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
     yyjson_mut_obj_add_int(doc, p, "edges", edges);
     yyjson_mut_obj_add_int(doc, p, "size_bytes", (int64_t)st->st_size);
@@ -1726,6 +1759,15 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
         yyjson_mut_obj_add_int(doc, root, "nodes", nodes);
         yyjson_mut_obj_add_int(doc, root, "edges", edges);
         yyjson_mut_obj_add_str(doc, root, "status", nodes > 0 ? "ready" : "empty");
+        cbm_project_t proj_info = {0};
+        if (cbm_store_get_project(store, project, &proj_info) == CBM_STORE_OK) {
+            yyjson_mut_obj_add_strcpy(doc, root, "root_path",
+                                      proj_info.root_path ? proj_info.root_path : "");
+            add_git_context_json(doc, root, proj_info.root_path);
+            safe_str_free(&proj_info.name);
+            safe_str_free(&proj_info.indexed_at);
+            safe_str_free(&proj_info.root_path);
+        }
         if (nodes == 0) {
             yyjson_mut_obj_add_str(
                 doc, root, "hint",

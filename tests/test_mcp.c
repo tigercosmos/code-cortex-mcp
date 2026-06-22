@@ -496,6 +496,30 @@ TEST(tool_index_status_no_project) {
     PASS();
 }
 
+TEST(tool_index_status_includes_git_metadata) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"index_status\","
+                                   "\"arguments\":{\"project\":\"test-project\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"root_path\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"git\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"is_git\":false"));
+    ASSERT_NOT_NULL(strstr(inner, "\"root_exists\":true"));
+
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  TOOL HANDLERS WITH DATA
  * ══════════════════════════════════════════════════════════════════ */
@@ -2012,6 +2036,7 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_includes_node_properties);
     RUN_TEST(tool_query_graph_basic);
     RUN_TEST(tool_index_status_no_project);
+    RUN_TEST(tool_index_status_includes_git_metadata);
 
     /* Tool handlers with validation */
     RUN_TEST(tool_trace_call_path_not_found);

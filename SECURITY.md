@@ -26,13 +26,47 @@ Please report **privately** rather than as a public issue so we can fix before p
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability, please report it responsibly:
+If you discover a security vulnerability, please report it **privately** so we
+can fix it before public disclosure:
 
-1. **Do NOT open a public issue** for security vulnerabilities
-2. Email: martin.vogel.tech@gmail.com
-3. Include: description, reproduction steps, affected version, potential impact
+1. **Do NOT open a public issue, PR, or social-media post** for security
+   vulnerabilities.
+2. **Preferred:** use GitHub's [private vulnerability reporting](https://github.com/tigercosmos/cpp-codebase-memory-mcp/security/advisories/new)
+   (the repository's **Security → Report a vulnerability** button). This keeps
+   everything in one place and starts a private advisory automatically.
+3. **Alternative:** email martin.vogel.tech@gmail.com.
+4. Include: description, reproduction steps, affected version, and potential
+   impact.
+5. Include your **GitHub handle and a contact email**. We use these to credit
+   you and to invite you (read-only) to privately verify the fix before its
+   release — see step 4 of the
+   [handling process](docs/SECURITY-DISCLOSURE.md#what-happens-after-you-report).
+   Let us know if you would prefer to remain anonymous.
 
-We will acknowledge your report within 48 hours and provide a fix timeline within 7 days.
+> **This is a solo, volunteer-maintained project, so security handling is
+> best-effort.** As good-faith targets — not guarantees — we aim to:
+>
+> - **acknowledge** your report within **7 days** (usually much sooner);
+> - give an **initial assessment and severity** within **14 days**;
+> - **develop, validate, and release a fix** as quickly as the severity
+>   warrants — typically within **90 days**, and expedited for high-severity
+>   issues.
+>
+> If something will take longer, we will tell you and keep you updated.
+
+We follow **coordinated disclosure**: fixes are developed privately, validated
+across all supported platforms, released, and only then disclosed publicly via a
+[GitHub Security Advisory](https://github.com/tigercosmos/cpp-codebase-memory-mcp/security/advisories)
+with a **CVE** and credit to you. The full handling process — including how you
+can verify the fix before release — is documented in
+[`docs/SECURITY-DISCLOSURE.md`](docs/SECURITY-DISCLOSURE.md).
+
+### Safe harbor
+
+We will not pursue or support legal action against researchers who act in good
+faith — accessing only their own test data, avoiding privacy violations and
+service disruption, and giving us reasonable time to fix before public
+disclosure. Research conducted under this policy is considered authorised.
 
 ## Security Measures
 
@@ -103,5 +137,9 @@ sha256sum -c checksums.txt
 
 | Version | Supported |
 |---------|-----------|
-| 0.5.x   | Yes       |
-| < 0.5   | No (Go codebase, superseded by C rewrite) |
+| Latest `0.8.x` | Yes — security fixes land in the newest release |
+| < 0.8   | No — please upgrade to the latest release |
+
+Only the latest release is supported. Security fixes are shipped in a new
+patched release rather than backported to older versions; upgrading to the
+newest version is the supported path to receive them.
