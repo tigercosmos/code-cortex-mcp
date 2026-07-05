@@ -346,6 +346,49 @@ static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     cbm_da_push(by_name, (const cbm_gbuf_node_t *)node);
 }
 
+/* Remove `node` from one bucket array of `ht` (linear scan — label/name
+ * changes on QN collisions are rare, so this is off the hot path). */
+static void node_array_remove(CBMHashTable *ht, const char *key, const cbm_gbuf_node_t *node) {
+    node_ptr_array_t *arr = (node_ptr_array_t *)cbm_ht_get(ht, key ? key : "");
+    if (!arr) {
+        return;
+    }
+    for (int i = 0; i < arr->count; i++) {
+        if (arr->items[i] == node) {
+            memmove(&arr->items[i], &arr->items[i + 1],
+                    (size_t)(arr->count - i - 1) * sizeof(arr->items[0]));
+            arr->count--;
+            return;
+        }
+    }
+}
+
+/* Keep the label/name secondary indexes consistent when an in-place node
+ * update is about to change those fields. Without this, the by-label and
+ * by-name arrays retained FIRST-arrival membership while node->label
+ * converged to the update winner — so find_by_label consumers (e.g. the
+ * semantic-edges pass) saw a node set that depended on worker merge order
+ * (redis: the Function/Macro split flapped ±3 between identical runs,
+ * rippling into corpus IDF and the SEMANTICALLY_RELATED edge set). Call
+ * BEFORE assigning the new label/name. */
+static void reindex_node_on_update(cbm_gbuf_t *gb, cbm_gbuf_node_t *node, const char *new_label,
+                                   const char *new_name) {
+    const char *old_label = node->label ? node->label : "";
+    const char *nl = new_label ? new_label : "";
+    if (strcmp(old_label, nl) != 0) {
+        node_array_remove(gb->nodes_by_label, old_label, node);
+        cbm_da_push(get_or_create_node_array(gb->nodes_by_label, nl),
+                    (const cbm_gbuf_node_t *)node);
+    }
+    const char *old_name = node->name ? node->name : "";
+    const char *nn = new_name ? new_name : "";
+    if (strcmp(old_name, nn) != 0) {
+        node_array_remove(gb->nodes_by_name, old_name, node);
+        cbm_da_push(get_or_create_node_array(gb->nodes_by_name, nn),
+                    (const cbm_gbuf_node_t *)node);
+    }
+}
+
 /* Push an edge pointer into a dynamic array (wraps macro to reduce CC contribution). */
 static void edge_array_push(edge_ptr_array_t *arr, const cbm_gbuf_edge_t *edge) {
     cbm_da_push(arr, edge);
@@ -633,12 +676,28 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
     /* Check if node already exists */
     cbm_gbuf_node_t *existing = (cbm_gbuf_node_t *)cbm_ht_get(gb->node_by_qn, qualified_name);
     if (existing) {
+        /* Same-file re-upserts refresh extraction data (last write wins;
+         * file-internal order is deterministic). CROSS-file collisions on
+         * one qualified name (e.g. a C macro and a function sharing a name
+         * in different files) used to be last-write-wins too — but worker
+         * completion order decides arrival order, so the surviving label
+         * flip-flopped between identical runs (redis: Function vs Macro
+         * counts traded ±3, which rippled into the semantic corpus and
+         * made SEMANTICALLY_RELATED edges nondeterministic). Resolve those
+         * by a stable content key instead: the lexicographically smaller
+         * file path (then lower start line) wins, regardless of order. */
+        const char *efp = existing->file_path ? existing->file_path : "";
+        const char *nfp = file_path ? file_path : "";
+        if (strcmp(nfp, efp) > 0) {
+            return existing->id; /* existing (smaller-path) node wins — keep it */
+        }
         /* Update in-place. name/properties are strdup'd BEFORE freeing old ones
          * (callers may pass existing->name as an argument). label/file_path are
          * interned: gb_intern returns a stable pool pointer (idempotent even when
          * label == existing->label), so the old value is replaced, never freed. */
         char *new_name = heap_strdup(name);
         char *new_props = properties_json ? heap_strdup(properties_json) : NULL;
+        reindex_node_on_update(gb, existing, label, name);
         existing->label = (char *)gb_intern(gb, label);
         free(existing->name);
         existing->name = new_name;
@@ -1099,15 +1158,28 @@ static void free_remap_entry(const char *key, void *val, void *ud) {
  * label/file_path are re-interned into dst's pool (sn's pointers belong to src). */
 static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
                                   const cbm_gbuf_node_t *sn, CBMHashTable **remap) {
-    existing->label = (char *)gb_intern(dst, sn->label);
-    free(existing->name);
-    existing->name = heap_strdup(sn->name);
-    existing->file_path = (char *)gb_intern(dst, sn->file_path);
-    existing->start_line = sn->start_line;
-    existing->end_line = sn->end_line;
-    if (sn->properties_json) {
-        free(existing->properties_json);
-        existing->properties_json = heap_strdup(sn->properties_json);
+    /* Cross-file QN collisions resolve by stable content key (smaller file
+     * path wins), NOT by merge arrival order: worker-local buffers merge in
+     * completion order, and last-write-wins here made the surviving label
+     * flip between identical runs (see cbm_gbuf_upsert_node). Same-file
+     * updates keep last-write-wins (fresh extraction data). The edge-id
+     * remap below runs either way — src edges must point at the surviving
+     * node regardless of whose fields won. */
+    const char *efp = existing->file_path ? existing->file_path : "";
+    const char *nfp = sn->file_path ? sn->file_path : "";
+    bool keep_existing = strcmp(nfp, efp) > 0;
+    if (!keep_existing) {
+        reindex_node_on_update(dst, existing, sn->label, sn->name);
+        existing->label = (char *)gb_intern(dst, sn->label);
+        free(existing->name);
+        existing->name = heap_strdup(sn->name);
+        existing->file_path = (char *)gb_intern(dst, sn->file_path);
+        existing->start_line = sn->start_line;
+        existing->end_line = sn->end_line;
+        if (sn->properties_json) {
+            free(existing->properties_json);
+            existing->properties_json = heap_strdup(sn->properties_json);
+        }
     }
 
     if (sn->id != existing->id) {

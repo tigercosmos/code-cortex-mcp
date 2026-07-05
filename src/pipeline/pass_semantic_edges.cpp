@@ -65,6 +65,7 @@ enum {
 typedef struct {
     int64_t source_id;
     int64_t target_id;
+    int fi, fj; /* function indices — merge-time budget accounting */
     float score;
     bool same_file;
 } deferred_edge_t;
@@ -81,8 +82,8 @@ static void deferred_buf_init(deferred_edge_buf_t *buf) {
     buf->cap = 0;
 }
 
-static void deferred_buf_push(deferred_edge_buf_t *buf, int64_t src, int64_t tgt, float score,
-                              bool same_file) {
+static void deferred_buf_push(deferred_edge_buf_t *buf, int64_t src, int64_t tgt, int fi, int fj,
+                              float score, bool same_file) {
     if (buf->count >= buf->cap) {
         int nc = buf->cap < CBM_SZ_256 ? CBM_SZ_256 : buf->cap * GROW;
         deferred_edge_t *grown =
@@ -93,8 +94,12 @@ static void deferred_buf_push(deferred_edge_buf_t *buf, int64_t src, int64_t tgt
         buf->edges = grown;
         buf->cap = nc;
     }
-    buf->edges[buf->count++] = (deferred_edge_t){
-        .source_id = src, .target_id = tgt, .score = score, .same_file = same_file};
+    buf->edges[buf->count++] = (deferred_edge_t){.source_id = src,
+                                                 .target_id = tgt,
+                                                 .fi = fi,
+                                                 .fj = fj,
+                                                 .score = score,
+                                                 .same_file = same_file};
 }
 
 static void deferred_buf_free(deferred_edge_buf_t *buf) {
@@ -412,6 +417,10 @@ static int tokenize_json_array_field(const char *json, const char *key, char **t
 /* Walk the CALLS edges rooted at n (either outbound or inbound depending on
  * `outbound`) and tokenize the names of the target/source nodes.  Caller-side
  * caps via max_tokens and MAX_CALLEES. */
+static int name_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
 static int tokenize_call_neighbors(const cbm_gbuf_node_t *n, const cbm_gbuf_t *gbuf, bool outbound,
                                    char **tokens, int count, int max_tokens) {
     if (!gbuf || count >= max_tokens) {
@@ -424,13 +433,34 @@ static int tokenize_call_neighbors(const cbm_gbuf_node_t *n, const cbm_gbuf_t *g
     if (rc != 0) {
         return count;
     }
-    for (int e = 0; e < ec && e < MAX_CALLEES && count < max_tokens; e++) {
+    /* Canonicalize neighbor order before tokenizing. Inbound CALLS edges
+     * arrive in resolve-worker merge order, which varies between identical
+     * runs; the MAX_CALLEES truncation and the downstream float
+     * accumulation over these tokens are both order-sensitive, so an
+     * unstable order made semantic scores (and near-threshold edges)
+     * jitter run to run. */
+    const char **names = (const char **)malloc((size_t)(ec + SKIP_ONE) * sizeof(const char *));
+    if (!names) {
+        return count;
+    }
+    int name_count = 0;
+    for (int e = 0; e < ec; e++) {
         int64_t id = outbound ? edges[e]->target_id : edges[e]->source_id;
         const cbm_gbuf_node_t *neighbor = cbm_gbuf_find_by_id(gbuf, id);
         if (neighbor && neighbor->name) {
-            count += cbm_sem_tokenize(neighbor->name, tokens + count, max_tokens - count);
+            names[name_count++] = neighbor->name;
         }
     }
+    /* Sort ALL neighbors, then truncate — truncating first would keep an
+     * arrival-order-dependent subset. */
+    qsort(names, (size_t)name_count, sizeof(const char *), name_cmp);
+    if (name_count > MAX_CALLEES) {
+        name_count = MAX_CALLEES;
+    }
+    for (int i = 0; i < name_count && count < max_tokens; i++) {
+        count += cbm_sem_tokenize(names[i], tokens + count, max_tokens - count);
+    }
+    free(names);
     return count;
 }
 
@@ -476,16 +506,31 @@ static void build_api_vec(const cbm_gbuf_t *gbuf, int64_t node_id, cbm_sem_vec_t
     if (cbm_gbuf_find_edges_by_source_type(gbuf, node_id, "CALLS", &edges, &edge_count) != 0) {
         return;
     }
-    int added = 0;
-    for (int i = 0; i < edge_count && added < MAX_CALLEES; i++) {
+    /* Canonicalize callee order before accumulating: the MAX_CALLEES cut
+     * and the float summation below are order-sensitive, and edge order
+     * must not leak scheduling into the vector (see tokenize_call_neighbors). */
+    const char **names = (const char **)malloc((size_t)(edge_count + SKIP_ONE) *
+                                               sizeof(const char *));
+    if (!names) {
+        return;
+    }
+    int name_count = 0;
+    for (int i = 0; i < edge_count; i++) {
         const cbm_gbuf_node_t *target = cbm_gbuf_find_by_id(gbuf, edges[i]->target_id);
         if (target && target->name) {
-            cbm_sem_vec_t callee_ri;
-            cbm_sem_random_index(target->name, &callee_ri);
-            cbm_sem_vec_add_scaled(out, &callee_ri, PSE_UNIT_POS);
-            added++;
+            names[name_count++] = target->name;
         }
     }
+    qsort(names, (size_t)name_count, sizeof(const char *), name_cmp);
+    if (name_count > MAX_CALLEES) {
+        name_count = MAX_CALLEES;
+    }
+    for (int i = 0; i < name_count; i++) {
+        cbm_sem_vec_t callee_ri;
+        cbm_sem_random_index(names[i], &callee_ri);
+        cbm_sem_vec_add_scaled(out, &callee_ri, PSE_UNIT_POS);
+    }
+    free(names);
     cbm_sem_normalize(out);
 }
 
@@ -715,7 +760,6 @@ static void sig_build_worker(int worker_id, void *ctx_ptr) {
 typedef struct {
     cbm_sem_func_t *funcs;
     uint64_t *signatures;
-    int *edge_counts; /* shared, atomically updated */
     cbm_sem_config_t cfg;
     int func_count;
 
@@ -787,11 +831,16 @@ static int score_collect_candidates(score_ctx_t *sc, int i, int *seen, int *cand
 }
 
 /* Score one candidate pair (i, j) and push a deferred edge if the score
- * passes the threshold and both endpoints still have edge budget. */
-static void score_try_emit(score_ctx_t *sc, int i, int j, deferred_edge_buf_t *my_buf) {
-    int ei = atomic_load_explicit((std::atomic<int> *)&sc->edge_counts[i], memory_order_relaxed);
-    int ej = atomic_load_explicit((std::atomic<int> *)&sc->edge_counts[j], memory_order_relaxed);
-    if (ei >= sc->cfg.max_edges || ej >= sc->cfg.max_edges) {
+ * passes the threshold. Emission here is DELIBERATELY budget-free on the
+ * j side: the per-node edge budget used to be enforced with shared atomic
+ * counters, so which pairs consumed a node's budget depended on worker
+ * scheduling and the emitted edge SET varied between identical runs.
+ * Budgets are now applied deterministically in phase6b after a canonical
+ * sort; `local_emitted` bounds this i's fan-out so the deferred total
+ * keeps the same func_count × max_edges worst case as before. */
+static void score_try_emit(score_ctx_t *sc, int i, int j, deferred_edge_buf_t *my_buf,
+                           int *local_emitted) {
+    if (*local_emitted >= sc->cfg.max_edges) {
         return;
     }
     if (strcmp(sc->funcs[i].file_ext, sc->funcs[j].file_ext) != 0) {
@@ -803,11 +852,8 @@ static void score_try_emit(score_ctx_t *sc, int i, int j, deferred_edge_buf_t *m
     }
     bool same_file = sc->funcs[i].file_path && sc->funcs[j].file_path &&
                      strcmp(sc->funcs[i].file_path, sc->funcs[j].file_path) == 0;
-    deferred_buf_push(my_buf, sc->funcs[i].node_id, sc->funcs[j].node_id, score, same_file);
-    atomic_fetch_add_explicit((std::atomic<int> *)&sc->edge_counts[i], SKIP_ONE,
-                              memory_order_relaxed);
-    atomic_fetch_add_explicit((std::atomic<int> *)&sc->edge_counts[j], SKIP_ONE,
-                              memory_order_relaxed);
+    deferred_buf_push(my_buf, sc->funcs[i].node_id, sc->funcs[j].node_id, i, j, score, same_file);
+    (*local_emitted)++;
 }
 
 static void score_worker(int worker_id, void *ctx_ptr) {
@@ -819,19 +865,15 @@ static void score_worker(int worker_id, void *ctx_ptr) {
         if (i >= sc->func_count) {
             break;
         }
-        int my_edges =
-            atomic_load_explicit((std::atomic<int> *)&sc->edge_counts[i], memory_order_relaxed);
-        if (my_edges >= sc->cfg.max_edges) {
-            continue;
-        }
         int seen[SCORE_SEEN_CAP];
         for (int s = 0; s < SCORE_SEEN_CAP; s++) {
             seen[s] = SCORE_SEEN_EMPTY;
         }
         int candidates[SEM_MAX_CANDIDATES];
         int cand_count = score_collect_candidates(sc, i, seen, candidates, SEM_MAX_CANDIDATES);
+        int local_emitted = 0;
         for (int c = 0; c < cand_count; c++) {
-            score_try_emit(sc, i, candidates[c], my_buf);
+            score_try_emit(sc, i, candidates[c], my_buf, &local_emitted);
         }
     }
 }
@@ -877,14 +919,41 @@ typedef struct {
     int cap;
 } sem_bucket_t;
 
+/* Canonical function order: by qualified name, then file path and line.
+ * Graph-buffer node order follows parallel-extract completion order and
+ * varies between identical runs; every downstream consumer here is index-
+ * sensitive (LSH bucket item order, per-candidate caps, which endpoint of
+ * a pair plays `i`), so an unstable order made the emitted edge set
+ * jitter run to run. Content-based ordering pins it down. */
+static int func_node_cmp(const void *a, const void *b) {
+    const cbm_gbuf_node_t *na = *(const cbm_gbuf_node_t *const *)a;
+    const cbm_gbuf_node_t *nb = *(const cbm_gbuf_node_t *const *)b;
+    const char *qa = na->qualified_name ? na->qualified_name : "";
+    const char *qb = nb->qualified_name ? nb->qualified_name : "";
+    int c = strcmp(qa, qb);
+    if (c != 0) {
+        return c;
+    }
+    const char *fa = na->file_path ? na->file_path : "";
+    const char *fb = nb->file_path ? nb->file_path : "";
+    c = strcmp(fa, fb);
+    if (c != 0) {
+        return c;
+    }
+    if (na->start_line != nb->start_line) {
+        return na->start_line < nb->start_line ? -1 : 1;
+    }
+    return 0;
+}
+
 /* Phase 1a: seed the funcs[] / node_ptrs[] arrays from all Function and
- * Method nodes in the graph buffer.  Returns the number of functions collected
- * (0 on OOM), and fills *out_funcs / *out_nodes with newly malloc'd arrays. */
+ * Method nodes in the graph buffer, in canonical (content-based) order.
+ * Returns the number of functions collected (0 on OOM), and fills
+ * *out_funcs / *out_nodes with newly malloc'd arrays. */
 static int phase1_scan_functions(cbm_gbuf_t *gbuf, cbm_sem_func_t **out_funcs,
                                  const cbm_gbuf_node_t ***out_nodes) {
     *out_funcs = NULL;
     *out_nodes = NULL;
-    cbm_sem_func_t *funcs = NULL;
     const cbm_gbuf_node_t **node_ptrs = NULL;
     int func_count = 0;
     int func_cap = 0;
@@ -902,12 +971,6 @@ static int phase1_scan_functions(cbm_gbuf_t *gbuf, cbm_sem_func_t **out_funcs,
             }
             if (func_count >= func_cap) {
                 int new_cap = func_cap < MAX_FUNCS_INIT ? MAX_FUNCS_INIT : func_cap * GROW;
-                cbm_sem_func_t *grown =
-                    (cbm_sem_func_t *)realloc(funcs, (size_t)new_cap * sizeof(cbm_sem_func_t));
-                if (!grown) {
-                    break;
-                }
-                funcs = grown;
                 const cbm_gbuf_node_t **np_grown = (const cbm_gbuf_node_t **)realloc(
                     node_ptrs, (size_t)new_cap * sizeof(cbm_gbuf_node_t *));
                 if (!np_grown) {
@@ -916,13 +979,25 @@ static int phase1_scan_functions(cbm_gbuf_t *gbuf, cbm_sem_func_t **out_funcs,
                 node_ptrs = np_grown;
                 func_cap = new_cap;
             }
-            memset(&funcs[func_count], 0, sizeof(cbm_sem_func_t));
-            funcs[func_count].node_id = nodes[i]->id;
-            funcs[func_count].file_path = nodes[i]->file_path;
-            funcs[func_count].file_ext = file_ext(nodes[i]->file_path);
-            node_ptrs[func_count] = nodes[i];
-            func_count++;
+            node_ptrs[func_count++] = nodes[i];
         }
+    }
+    if (func_count == 0) {
+        free(node_ptrs);
+        return 0;
+    }
+    qsort(node_ptrs, (size_t)func_count, sizeof(const cbm_gbuf_node_t *), func_node_cmp);
+
+    cbm_sem_func_t *funcs = (cbm_sem_func_t *)malloc((size_t)func_count * sizeof(cbm_sem_func_t));
+    if (!funcs) {
+        free(node_ptrs);
+        return 0;
+    }
+    for (int i = 0; i < func_count; i++) {
+        memset(&funcs[i], 0, sizeof(cbm_sem_func_t));
+        funcs[i].node_id = node_ptrs[i]->id;
+        funcs[i].file_path = node_ptrs[i]->file_path;
+        funcs[i].file_ext = file_ext(node_ptrs[i]->file_path);
     }
     *out_funcs = funcs;
     *out_nodes = node_ptrs;
@@ -956,20 +1031,65 @@ static void phase5c_build_lsh_buckets(const uint64_t *signatures, int func_count
     }
 }
 
-/* Phase 6b: serialize deferred edges from all worker buffers into the graph
- * buffer (sequential because gbuf isn't thread-safe). */
+/* Canonical order for deferred edges: best score first, ties by function
+ * indices. Which worker found an edge (and in what order) varies run to
+ * run; this sort makes the budget cut and the gbuf insert order depend on
+ * the edges themselves only. */
+static int deferred_edge_cmp(const void *a, const void *b) {
+    const deferred_edge_t *ea = (const deferred_edge_t *)a;
+    const deferred_edge_t *eb = (const deferred_edge_t *)b;
+    if (ea->score != eb->score) {
+        return ea->score > eb->score ? -1 : 1;
+    }
+    if (ea->fi != eb->fi) {
+        return ea->fi < eb->fi ? -1 : 1;
+    }
+    if (ea->fj != eb->fj) {
+        return ea->fj < eb->fj ? -1 : 1;
+    }
+    return 0;
+}
+
+/* Phase 6b: apply the per-node edge budget deterministically, then serialize
+ * the surviving deferred edges into the graph buffer (sequential because
+ * gbuf isn't thread-safe). Highest-scoring edges win a node's budget. */
 static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_bufs,
-                               int worker_count) {
-    int total_edges = 0;
+                               int worker_count, int func_count, int max_edges) {
+    int total_deferred = 0;
     for (int w = 0; w < worker_count; w++) {
-        for (int e = 0; e < worker_bufs[w].count; e++) {
-            deferred_edge_t *de = &worker_bufs[w].edges[e];
-            char props[PROPS_BUF];
-            snprintf(props, sizeof(props), "{\"score\":%.3f,\"same_file\":%s}", de->score,
-                     de->same_file ? "true" : "false");
-            cbm_gbuf_insert_edge(gbuf, de->source_id, de->target_id, "SEMANTICALLY_RELATED", props);
-            total_edges++;
+        total_deferred += worker_bufs[w].count;
+    }
+    deferred_edge_t *all =
+        (deferred_edge_t *)malloc((size_t)(total_deferred + SKIP_ONE) * sizeof(deferred_edge_t));
+    int *node_budget = (int *)calloc((size_t)(func_count + SKIP_ONE), sizeof(int));
+    int all_count = 0;
+    if (all && node_budget) {
+        for (int w = 0; w < worker_count; w++) {
+            for (int e = 0; e < worker_bufs[w].count; e++) {
+                all[all_count++] = worker_bufs[w].edges[e];
+            }
         }
+        qsort(all, (size_t)all_count, sizeof(deferred_edge_t), deferred_edge_cmp);
+    }
+
+    int total_edges = 0;
+    for (int e = 0; e < all_count; e++) {
+        deferred_edge_t *de = &all[e];
+        if (node_budget[de->fi] >= max_edges || node_budget[de->fj] >= max_edges) {
+            continue;
+        }
+        node_budget[de->fi]++;
+        node_budget[de->fj]++;
+        char props[PROPS_BUF];
+        snprintf(props, sizeof(props), "{\"score\":%.3f,\"same_file\":%s}", de->score,
+                 de->same_file ? "true" : "false");
+        cbm_gbuf_insert_edge(gbuf, de->source_id, de->target_id, "SEMANTICALLY_RELATED", props);
+        total_edges++;
+    }
+
+    free(all);
+    free(node_budget);
+    for (int w = 0; w < worker_count; w++) {
         deferred_buf_free(&worker_bufs[w]);
     }
     return total_edges;
@@ -1116,14 +1236,13 @@ static void phase5_lsh_build(cbm_sem_func_t *funcs, int func_count, int worker_c
 }
 
 /* Phase 6a: score candidate pairs in parallel and collect deferred edges. */
-static void phase6a_score_candidates(cbm_sem_func_t *funcs, uint64_t *signatures, int *edge_counts,
+static void phase6a_score_candidates(cbm_sem_func_t *funcs, uint64_t *signatures,
                                      sem_bucket_t **band_buckets, cbm_sem_config_t cfg,
                                      deferred_edge_buf_t *worker_bufs, int func_count,
                                      int worker_count) {
     score_ctx_t sc = {
         .funcs = funcs,
         .signatures = signatures,
-        .edge_counts = edge_counts,
         .cfg = cfg,
         .func_count = func_count,
         .band_buckets = (decltype(score_ctx_t::band_buckets))(void *)band_buckets,
@@ -1179,12 +1298,9 @@ static cbm_sem_corpus_t *run_corpus_phase(cbm_gbuf_t *gbuf, char **all_tokens, i
 static int run_scoring_phase(cbm_gbuf_t *gbuf, cbm_sem_func_t *funcs, uint64_t *signatures,
                              sem_bucket_t **band_buckets, cbm_sem_config_t cfg, int func_count,
                              int worker_count) {
-    int *edge_counts = (int *)calloc((size_t)func_count, sizeof(int));
     deferred_edge_buf_t *worker_bufs =
         (deferred_edge_buf_t *)calloc((size_t)worker_count, sizeof(deferred_edge_buf_t));
-    if (!edge_counts || !worker_bufs) {
-        free(edge_counts);
-        free(worker_bufs);
+    if (!worker_bufs) {
         return 0;
     }
     for (int w = 0; w < worker_count; w++) {
@@ -1192,16 +1308,15 @@ static int run_scoring_phase(cbm_gbuf_t *gbuf, cbm_sem_func_t *funcs, uint64_t *
     }
 
     CBM_PROF_START(t_phase6a);
-    phase6a_score_candidates(funcs, signatures, edge_counts, band_buckets, cfg, worker_bufs,
-                             func_count, worker_count);
+    phase6a_score_candidates(funcs, signatures, band_buckets, cfg, worker_bufs, func_count,
+                             worker_count);
     CBM_PROF_END_N("semantic_edges", "6a_score_parallel", t_phase6a, func_count);
 
     CBM_PROF_START(t_phase6b);
-    int total = phase6b_merge_edges(gbuf, worker_bufs, worker_count);
+    int total = phase6b_merge_edges(gbuf, worker_bufs, worker_count, func_count, cfg.max_edges);
     CBM_PROF_END_N("semantic_edges", "6b_edge_merge_seq", t_phase6b, total);
 
     free(worker_bufs);
-    free(edge_counts);
     return total;
 }
 
@@ -1279,6 +1394,32 @@ int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx) {
 
     cbm_log_info("pass.semantic.lsh_built", "functions", itoa_log(func_count), "bands",
                  itoa_log(SEM_LSH_BANDS));
+
+    /* Debug: dump per-function input checksums for determinism triage. */
+    const char *dump_path = getenv("CBM_SEM_DUMP");
+    if (dump_path) {
+        FILE *df = fopen(dump_path, "w");
+        if (df) {
+            for (int f = 0; f < func_count; f++) {
+                uint64_t h_ri = XXH3_64bits(funcs[f].ri_vec.v, sizeof(funcs[f].ri_vec.v));
+                uint64_t h_api = XXH3_64bits(funcs[f].api_vec.v, sizeof(funcs[f].api_vec.v));
+                uint64_t h_type = XXH3_64bits(funcs[f].type_vec.v, sizeof(funcs[f].type_vec.v));
+                uint64_t h_deco = XXH3_64bits(funcs[f].deco_vec.v, sizeof(funcs[f].deco_vec.v));
+                uint64_t h_sp =
+                    XXH3_64bits(funcs[f].struct_profile, sizeof(funcs[f].struct_profile));
+                uint64_t h_tf = funcs[f].tfidf_len > 0
+                                    ? XXH3_64bits(funcs[f].tfidf_weights,
+                                                  (size_t)funcs[f].tfidf_len * sizeof(float))
+                                    : 0;
+                fprintf(df, "%d ri=%llx api=%llx type=%llx deco=%llx sp=%llx tf=%llx sig=%llx\n",
+                        f, (unsigned long long)h_ri, (unsigned long long)h_api,
+                        (unsigned long long)h_type, (unsigned long long)h_deco,
+                        (unsigned long long)h_sp, (unsigned long long)h_tf,
+                        (unsigned long long)signatures[f]);
+            }
+            fclose(df);
+        }
+    }
 
     /* Phase 6: Parallel scoring + sequential edge merge. */
     int total_edges =

@@ -163,7 +163,13 @@ static const char *best_by_import_distance(const char **candidates, int count,
     int best_score = CBM_NOT_FOUND;
     for (int i = 0; i < count; i++) {
         int score = candidate_score(candidates[i], module_qn);
-        if (score > best_score) {
+        /* Score ties break by lexicographic QN, not array position — the
+         * candidate array order reflects registry insertion order, and an
+         * order-sensitive pick let equally-scored ambiguous names (e.g. two
+         * Makefiles both defining an `echo` target) resolve differently
+         * between identical runs. */
+        if (score > best_score ||
+            (score == best_score && best && strcmp(candidates[i], best) < 0)) {
             best_score = score;
             best = candidates[i];
         }

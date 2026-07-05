@@ -91,11 +91,37 @@ typedef struct {
     const char *ext;
 } fp_entry_t;
 
-/* Collect all Function/Method nodes with fingerprints from graph buffer. */
+/* Canonical node order for pair generation. Graph-buffer label lists
+ * follow parallel-extract merge order, which varies between identical
+ * runs; SIMILAR_TO pairs are emitted directionally as (entry i → entry j,
+ * i < j), so an unstable order flipped edge direction run to run. */
+static int sim_node_cmp(const void *a, const void *b) {
+    const cbm_gbuf_node_t *na = *(const cbm_gbuf_node_t *const *)a;
+    const cbm_gbuf_node_t *nb = *(const cbm_gbuf_node_t *const *)b;
+    const char *qa = na->qualified_name ? na->qualified_name : "";
+    const char *qb = nb->qualified_name ? nb->qualified_name : "";
+    int c = strcmp(qa, qb);
+    if (c != 0) {
+        return c;
+    }
+    const char *fa = na->file_path ? na->file_path : "";
+    const char *fb = nb->file_path ? nb->file_path : "";
+    c = strcmp(fa, fb);
+    if (c != 0) {
+        return c;
+    }
+    if (na->start_line != nb->start_line) {
+        return na->start_line < nb->start_line ? -1 : 1;
+    }
+    return 0;
+}
+
+/* Collect all Function/Method nodes with fingerprints from graph buffer,
+ * in canonical (content-based) order. */
 static int collect_fp_entries(cbm_gbuf_t *gbuf, fp_entry_t **out_entries) {
-    fp_entry_t *entries = NULL;
-    int count = 0;
-    int cap = 0;
+    const cbm_gbuf_node_t **all = NULL;
+    int all_count = 0;
+    int all_cap = 0;
 
     const char *labels[] = {"Function", "Method", NULL};
     for (int li = 0; labels[li]; li++) {
@@ -105,29 +131,48 @@ static int collect_fp_entries(cbm_gbuf_t *gbuf, fp_entry_t **out_entries) {
             continue;
         }
         for (int i = 0; i < node_count; i++) {
-            const cbm_gbuf_node_t *n = nodes[i];
-            cbm_minhash_t fp;
-            if (!parse_fp_from_props(n->properties_json, &fp)) {
-                continue;
-            }
-            if (count >= cap) {
-                int new_cap = cap < FP_ENTRY_INIT_CAP ? FP_ENTRY_INIT_CAP : cap * FP_ENTRY_GROW;
-                fp_entry_t *grown =
-                    (fp_entry_t *)realloc(entries, (size_t)new_cap * sizeof(fp_entry_t));
+            if (all_count >= all_cap) {
+                int new_cap = all_cap < FP_ENTRY_INIT_CAP ? FP_ENTRY_INIT_CAP
+                                                          : all_cap * FP_ENTRY_GROW;
+                const cbm_gbuf_node_t **grown = (const cbm_gbuf_node_t **)realloc(
+                    all, (size_t)new_cap * sizeof(const cbm_gbuf_node_t *));
                 if (!grown) {
                     break;
                 }
-                entries = grown;
-                cap = new_cap;
+                all = grown;
+                all_cap = new_cap;
             }
-            entries[count++] = (fp_entry_t){
-                .node_id = n->id,
-                .fp = fp,
-                .file_path = n->file_path,
-                .ext = file_ext(n->file_path),
-            };
+            all[all_count++] = nodes[i];
         }
     }
+    if (all_count == 0) {
+        free(all);
+        *out_entries = NULL;
+        return 0;
+    }
+    qsort(all, (size_t)all_count, sizeof(const cbm_gbuf_node_t *), sim_node_cmp);
+
+    fp_entry_t *entries = (fp_entry_t *)malloc((size_t)all_count * sizeof(fp_entry_t));
+    if (!entries) {
+        free(all);
+        *out_entries = NULL;
+        return 0;
+    }
+    int count = 0;
+    for (int i = 0; i < all_count; i++) {
+        const cbm_gbuf_node_t *n = all[i];
+        cbm_minhash_t fp;
+        if (!parse_fp_from_props(n->properties_json, &fp)) {
+            continue;
+        }
+        entries[count++] = (fp_entry_t){
+            .node_id = n->id,
+            .fp = fp,
+            .file_path = n->file_path,
+            .ext = file_ext(n->file_path),
+        };
+    }
+    free(all);
     *out_entries = entries;
     return count;
 }
