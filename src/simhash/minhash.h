@@ -94,6 +94,8 @@ typedef struct {
     const cbm_minhash_t *fingerprint;
     const char *file_path; /* for same-file tagging */
     const char *file_ext;  /* for same-language filtering */
+    int tag;               /* caller-defined (e.g. canonical entry index);
+                            * copied through queries, 0 if unset */
 } cbm_lsh_entry_t;
 
 /* Create a new LSH index. */

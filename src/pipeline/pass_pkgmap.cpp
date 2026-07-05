@@ -1505,6 +1505,14 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
             const cbm_gbuf_node_t **hits = NULL;
             int n = 0;
             if (cbm_gbuf_find_by_name(ctx->gbuf, cands[ci], &hits, &n) == 0 && hits) {
+                /* Among equally-named candidates pick the lexicographically
+                 * smallest QN, not the first hit: the by-name array follows
+                 * worker merge order, and a first-hit pick let ambiguous
+                 * names (two Makefiles both defining an `echo` target)
+                 * resolve differently between identical runs — which then
+                 * rippled into the importing file's reachability set and
+                 * flipped its CALLS attributions too. */
+                const cbm_gbuf_node_t *best = NULL;
                 for (int i = 0; i < n; i++) {
                     const cbm_gbuf_node_t *cand = hits[i];
                     if (!cand || !import_targetable_label(cand->label)) {
@@ -1514,7 +1522,14 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                         strcmp(cand->qualified_name, source_file_qn) == 0) {
                         continue; /* self */
                     }
-                    return cand;
+                    if (!best ||
+                        (cand->qualified_name && best->qualified_name &&
+                         strcmp(cand->qualified_name, best->qualified_name) < 0)) {
+                        best = cand;
+                    }
+                }
+                if (best) {
+                    return best;
                 }
             }
         }

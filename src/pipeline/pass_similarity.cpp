@@ -244,13 +244,16 @@ static void sim_query_worker(int worker_id, void *ctx_ptr) {
         int emitted = 0;
         for (int c = 0; c < cand_count; c++) {
             const cbm_lsh_entry_t *cand = cands[c];
-            if (cand->node_id == src->node_id) {
+            /* Emit each pair once, from the smaller CANONICAL index side.
+             * This used to compare node ids, but ids follow gbuf arrival
+             * order (worker completion order), so the emitted direction of
+             * a SIMILAR_TO pair flipped between identical runs. Entries are
+             * canonically sorted; the index is stable. */
+            int ci = cand->tag;
+            if (ci <= i) {
                 continue;
             }
             if (strcmp(src->ext, cand->file_ext) != 0) {
-                continue;
-            }
-            if (src->node_id >= cand->node_id) {
                 continue;
             }
 
@@ -331,6 +334,7 @@ int cbm_pipeline_pass_similarity(cbm_pipeline_ctx_t *ctx) {
             .fingerprint = &entries[i].fp,
             .file_path = entries[i].file_path,
             .file_ext = entries[i].ext,
+            .tag = i, /* canonical index — see sim_query_worker */
         };
         cbm_lsh_insert(lsh, &lsh_entries[i]);
     }
