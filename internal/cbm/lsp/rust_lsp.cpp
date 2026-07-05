@@ -4604,6 +4604,16 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
         }
     }
 
+    /* Hash-index the Phase-A registrations so the phases below (B/B1/A2/
+     * B2/C) do bucket lookups instead of linear scans over the registry —
+     * O(defs × registry) on macro-heavy or generated files (same shape as
+     * the large-header resolve fixed in #410). Entries added after this
+     * point stay visible via the post-finalize tail-scan in the lookup
+     * helpers, and the key fields (qualified_name, receiver_type,
+     * short_name) are never mutated below, so the index stays valid.
+     * The caller re-finalizes after we return, folding late adds in. */
+    cbm_registry_finalize(reg);
+
     /* Phase B: walk the AST to extract struct fields + record `impl Trait
      * for Type` linkage as embedded types. */
     if (!ts_node_is_null(root)) {
@@ -4653,23 +4663,21 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                         fld_count++;
                     }
                     if (fld_count > 0) {
-                        for (int ti = 0; ti < reg->type_count; ti++) {
-                            if (reg->types[ti].qualified_name &&
-                                strcmp(reg->types[ti].qualified_name, type_qn) == 0) {
-                                const char **names = (const char **)cbm_arena_alloc(
-                                    arena, (fld_count + 1) * sizeof(const char *));
-                                const CBMType **types = (const CBMType **)cbm_arena_alloc(
-                                    arena, (fld_count + 1) * sizeof(const CBMType *));
-                                for (int fi = 0; fi < fld_count; fi++) {
-                                    names[fi] = fld_names[fi];
-                                    types[fi] = fld_types[fi];
-                                }
-                                names[fld_count] = NULL;
-                                types[fld_count] = NULL;
-                                reg->types[ti].field_names = names;
-                                reg->types[ti].field_types = types;
-                                break;
+                        CBMRegisteredType *rt = (CBMRegisteredType *)cbm_registry_lookup_type(
+                            reg, type_qn);
+                        if (rt) {
+                            const char **names = (const char **)cbm_arena_alloc(
+                                arena, (fld_count + 1) * sizeof(const char *));
+                            const CBMType **types = (const CBMType **)cbm_arena_alloc(
+                                arena, (fld_count + 1) * sizeof(const CBMType *));
+                            for (int fi = 0; fi < fld_count; fi++) {
+                                names[fi] = fld_names[fi];
+                                types[fi] = fld_types[fi];
                             }
+                            names[fld_count] = NULL;
+                            types[fld_count] = NULL;
+                            rt->field_names = names;
+                            rt->field_types = types;
                         }
                     }
                 }
@@ -4686,38 +4694,35 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                 const char *trait_qn = cbm_arena_sprintf(arena, "%s.%s", module_qn, tn);
 
                 /* Mark as interface and collect method names. */
-                for (int ti = 0; ti < reg->type_count; ti++) {
-                    if (!reg->types[ti].qualified_name)
-                        continue;
-                    if (strcmp(reg->types[ti].qualified_name, trait_qn) == 0) {
-                        reg->types[ti].is_interface = true;
-                        if (!ts_node_is_null(body)) {
-                            const char *methods[64];
-                            int mc = 0;
-                            uint32_t bc = ts_node_named_child_count(body);
-                            for (uint32_t j = 0; j < bc && mc < 63; j++) {
-                                TSNode item = ts_node_named_child(body, j);
-                                const char *ik = ts_node_type(item);
-                                if (strcmp(ik, "function_item") != 0 &&
-                                    strcmp(ik, "function_signature_item") != 0)
-                                    continue;
-                                TSNode mn = ts_node_child_by_field_name(item, "name", 4);
-                                if (ts_node_is_null(mn))
-                                    continue;
-                                char *mname = cbm_node_text(arena, mn, source);
-                                if (mname)
-                                    methods[mc++] = mname;
-                            }
-                            if (mc > 0) {
-                                const char **arr = (const char **)cbm_arena_alloc(
-                                    arena, (mc + 1) * sizeof(const char *));
-                                for (int mi = 0; mi < mc; mi++)
-                                    arr[mi] = methods[mi];
-                                arr[mc] = NULL;
-                                reg->types[ti].method_names = arr;
-                            }
+                CBMRegisteredType *trt =
+                    (CBMRegisteredType *)cbm_registry_lookup_type(reg, trait_qn);
+                if (trt) {
+                    trt->is_interface = true;
+                    if (!ts_node_is_null(body)) {
+                        const char *methods[64];
+                        int mc = 0;
+                        uint32_t bc = ts_node_named_child_count(body);
+                        for (uint32_t j = 0; j < bc && mc < 63; j++) {
+                            TSNode item = ts_node_named_child(body, j);
+                            const char *ik = ts_node_type(item);
+                            if (strcmp(ik, "function_item") != 0 &&
+                                strcmp(ik, "function_signature_item") != 0)
+                                continue;
+                            TSNode mn = ts_node_child_by_field_name(item, "name", 4);
+                            if (ts_node_is_null(mn))
+                                continue;
+                            char *mname = cbm_node_text(arena, mn, source);
+                            if (mname)
+                                methods[mc++] = mname;
                         }
-                        break;
+                        if (mc > 0) {
+                            const char **arr = (const char **)cbm_arena_alloc(
+                                arena, (mc + 1) * sizeof(const char *));
+                            for (int mi = 0; mi < mc; mi++)
+                                arr[mi] = methods[mi];
+                            arr[mc] = NULL;
+                            trt->method_names = arr;
+                        }
                     }
                 }
             }
@@ -4752,20 +4757,13 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                 continue;
             const CBMType *ret = rust_parse_type_node(&tmp, rtn);
             const char *fn_qn = cbm_arena_sprintf(arena, "%s.%s", module_qn, fname);
-            for (int k = 0; k < reg->func_count; k++) {
-                CBMRegisteredFunc *rf = &reg->funcs[k];
-                if (!rf->qualified_name)
-                    continue;
-                if (rf->receiver_type)
-                    continue; /* free fns only */
-                if (strcmp(rf->qualified_name, fn_qn) != 0)
-                    continue;
+            CBMRegisteredFunc *rf = (CBMRegisteredFunc *)cbm_registry_lookup_func(reg, fn_qn);
+            if (rf && !rf->receiver_type) { /* free fns only */
                 const CBMType **ret_arr =
                     (const CBMType **)cbm_arena_alloc(arena, 2 * sizeof(const CBMType *));
                 ret_arr[0] = ret;
                 ret_arr[1] = NULL;
                 rf->signature = cbm_type_func(arena, NULL, NULL, ret_arr);
-                break;
             }
         }
     }
@@ -4893,14 +4891,8 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                         /* Found a matching curated derive. Register the
                          * trait QN as an embedded_type on the receiver
                          * AND synthesize the method entries. */
-                        CBMRegisteredType *rt = NULL;
-                        for (int ti = 0; ti < reg->type_count; ti++) {
-                            if (reg->types[ti].qualified_name &&
-                                strcmp(reg->types[ti].qualified_name, d->qualified_name) == 0) {
-                                rt = &reg->types[ti];
-                                break;
-                            }
-                        }
+                        CBMRegisteredType *rt = (CBMRegisteredType *)cbm_registry_lookup_type(
+                            reg, d->qualified_name);
                         if (!rt)
                             break;
 
@@ -5008,20 +5000,14 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                     ret = cbm_type_named(arena, type_qn);
                 }
                 /* Patch the registered function's signature. */
-                for (int k = 0; k < reg->func_count; k++) {
-                    CBMRegisteredFunc *rf = &reg->funcs[k];
-                    if (!rf->receiver_type || !rf->short_name)
-                        continue;
-                    if (strcmp(rf->receiver_type, type_qn) != 0)
-                        continue;
-                    if (strcmp(rf->short_name, mname) != 0)
-                        continue;
+                CBMRegisteredFunc *rf = (CBMRegisteredFunc *)cbm_registry_lookup_method(
+                    reg, type_qn, mname);
+                if (rf) {
                     const CBMType **ret_arr =
                         (const CBMType **)cbm_arena_alloc(arena, 2 * sizeof(const CBMType *));
                     ret_arr[0] = ret;
                     ret_arr[1] = NULL;
                     rf->signature = cbm_type_func(arena, NULL, NULL, ret_arr);
-                    break;
                 }
             }
         }
@@ -5038,14 +5024,7 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                                    ? convert_path_to_qn(arena, it->trait_name)
                                    : cbm_arena_sprintf(arena, "%s.%s", module_qn, it->trait_name);
 
-        CBMRegisteredType *rt = NULL;
-        for (int ti = 0; ti < reg->type_count; ti++) {
-            if (reg->types[ti].qualified_name &&
-                strcmp(reg->types[ti].qualified_name, recv_qn) == 0) {
-                rt = &reg->types[ti];
-                break;
-            }
-        }
+        CBMRegisteredType *rt = (CBMRegisteredType *)cbm_registry_lookup_type(reg, recv_qn);
         if (!rt) {
             CBMRegisteredType auto_t;
             memset(&auto_t, 0, sizeof(auto_t));

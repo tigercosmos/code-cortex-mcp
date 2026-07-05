@@ -3097,63 +3097,77 @@ static const char** py_split_pipe(CBMArena* arena, const char* text) {
 
 /* Build a registry from CBMLSPDef[] supplied by the caller — covers both
  * the source file's own defs and cross-file referenced defs. */
+static bool py_def_is_type(const CBMLSPDef* d) {
+    return strcmp(d->label, "Type") == 0 || strcmp(d->label, "Class") == 0 ||
+           strcmp(d->label, "Interface") == 0 || strcmp(d->label, "Protocol") == 0;
+}
+
+static bool py_def_is_func(const CBMLSPDef* d) {
+    return strcmp(d->label, "Function") == 0 || strcmp(d->label, "Method") == 0;
+}
+
+static void py_register_def_type(CBMArena* arena, CBMTypeRegistry* reg, CBMLSPDef* d) {
+    CBMRegisteredType rt;
+    memset(&rt, 0, sizeof(rt));
+    rt.qualified_name = d->qualified_name; /* borrowed — d outlives this call */
+    rt.short_name = d->short_name;
+    rt.is_interface = d->is_interface ||
+        strcmp(d->label, "Interface") == 0 ||
+        strcmp(d->label, "Protocol") == 0;
+    rt.embedded_types = py_split_pipe(arena, d->embedded_types);
+    if (d->method_names_str && d->method_names_str[0]) {
+        rt.method_names = py_split_pipe(arena, d->method_names_str);
+    }
+    cbm_registry_add_type(reg, rt);
+}
+
+static void py_register_def_func(CBMArena* arena, CBMTypeRegistry* reg, CBMLSPDef* d) {
+    CBMRegisteredFunc rf;
+    memset(&rf, 0, sizeof(rf));
+    rf.qualified_name = d->qualified_name; /* borrowed */
+    rf.short_name = d->short_name;
+
+    // Build FUNC type from "|"-separated return types.
+    const char** ret_strs = py_split_pipe(arena, d->return_types);
+    const CBMType** ret_types = NULL;
+    if (ret_strs) {
+        int n = 0;
+        while (ret_strs[n]) n++;
+        if (n > 0) {
+            ret_types = (const CBMType**)cbm_arena_alloc(arena,
+                (size_t)(n + 1) * sizeof(const CBMType*));
+            for (int j = 0; j < n; j++) {
+                ret_types[j] = cbm_type_named(arena, ret_strs[j]);
+            }
+            ret_types[n] = NULL;
+        }
+    }
+    rf.signature = cbm_type_func(arena, NULL, NULL, ret_types);
+
+    if (strcmp(d->label, "Method") == 0 && d->receiver_type && d->receiver_type[0]) {
+        rf.receiver_type = d->receiver_type; /* borrowed */
+        if (!cbm_registry_lookup_type(reg, rf.receiver_type)) {
+            CBMRegisteredType auto_t;
+            memset(&auto_t, 0, sizeof(auto_t));
+            auto_t.qualified_name = rf.receiver_type;
+            const char* dot = strrchr(d->receiver_type, '.');
+            auto_t.short_name = dot ? dot + 1 : rf.receiver_type; /* borrowed substring */
+            cbm_registry_add_type(reg, auto_t);
+        }
+    }
+    cbm_registry_add_func(reg, rf);
+}
+
 static void py_register_lsp_defs(CBMArena* arena, CBMTypeRegistry* reg,
     CBMLSPDef* defs, int def_count) {
     for (int i = 0; i < def_count; i++) {
         CBMLSPDef* d = &defs[i];
         if (!d->qualified_name || !d->short_name || !d->label) continue;
-
-        if (strcmp(d->label, "Type") == 0 || strcmp(d->label, "Class") == 0 ||
-            strcmp(d->label, "Interface") == 0 || strcmp(d->label, "Protocol") == 0) {
-            CBMRegisteredType rt;
-            memset(&rt, 0, sizeof(rt));
-            rt.qualified_name = d->qualified_name; /* borrowed — d outlives this call */
-            rt.short_name = d->short_name;
-            rt.is_interface = d->is_interface ||
-                strcmp(d->label, "Interface") == 0 ||
-                strcmp(d->label, "Protocol") == 0;
-            rt.embedded_types = py_split_pipe(arena, d->embedded_types);
-            if (d->method_names_str && d->method_names_str[0]) {
-                rt.method_names = py_split_pipe(arena, d->method_names_str);
-            }
-            cbm_registry_add_type(reg, rt);
+        if (py_def_is_type(d)) {
+            py_register_def_type(arena, reg, d);
         }
-
-        if (strcmp(d->label, "Function") == 0 || strcmp(d->label, "Method") == 0) {
-            CBMRegisteredFunc rf;
-            memset(&rf, 0, sizeof(rf));
-            rf.qualified_name = d->qualified_name; /* borrowed */
-            rf.short_name = d->short_name;
-
-            // Build FUNC type from "|"-separated return types.
-            const char** ret_strs = py_split_pipe(arena, d->return_types);
-            const CBMType** ret_types = NULL;
-            if (ret_strs) {
-                int n = 0;
-                while (ret_strs[n]) n++;
-                if (n > 0) {
-                    ret_types = (const CBMType**)cbm_arena_alloc(arena,
-                        (size_t)(n + 1) * sizeof(const CBMType*));
-                    for (int j = 0; j < n; j++) {
-                        ret_types[j] = cbm_type_named(arena, ret_strs[j]);
-                    }
-                    ret_types[n] = NULL;
-                }
-            }
-            rf.signature = cbm_type_func(arena, NULL, NULL, ret_types);
-
-            if (strcmp(d->label, "Method") == 0 && d->receiver_type && d->receiver_type[0]) {
-                rf.receiver_type = d->receiver_type; /* borrowed */
-                if (!cbm_registry_lookup_type(reg, rf.receiver_type)) {
-                    CBMRegisteredType auto_t;
-                    memset(&auto_t, 0, sizeof(auto_t));
-                    auto_t.qualified_name = rf.receiver_type;
-                    const char* dot = strrchr(d->receiver_type, '.');
-                    auto_t.short_name = dot ? dot + 1 : rf.receiver_type; /* borrowed substring */
-                    cbm_registry_add_type(reg, auto_t);
-                }
-            }
-            cbm_registry_add_func(reg, rf);
+        if (py_def_is_func(d)) {
+            py_register_def_func(arena, reg, d);
         }
     }
 }
@@ -3213,14 +3227,33 @@ CBMTypeRegistry* cbm_py_build_cross_registry(
     cbm_registry_init(reg, arena);
     cbm_python_stdlib_register(reg, arena);
 
-    /* Filter to Python defs only — defs[] is mixed-language all_defs. */
+    /* Two passes with a finalize in between: registering a method looks up
+     * its receiver type, which is a linear scan on an unfinalized registry —
+     * O(defs × types) over a project-wide def set (django: ~1s single-
+     * threaded). Register every type first, hash-index once, then register
+     * funcs against O(1) lookups; receiver types auto-added in pass 2 stay
+     * visible via the post-finalize tail-scan. */
     for (int i = 0; i < def_count; i++) {
         CBMLSPDef* d = &defs[i];
         if (d->lang != CBM_LANG_PYTHON) continue;
-        /* Reuse the existing register fn on a single-def slice (n=1 inline). */
-        py_register_lsp_defs(arena, reg, d, 1);
+        if (!d->qualified_name || !d->short_name || !d->label) continue;
+        if (py_def_is_type(d)) {
+            py_register_def_type(arena, reg, d);
+        }
     }
 
+    cbm_registry_finalize(reg);
+
+    for (int i = 0; i < def_count; i++) {
+        CBMLSPDef* d = &defs[i];
+        if (d->lang != CBM_LANG_PYTHON) continue;
+        if (!d->qualified_name || !d->short_name || !d->label) continue;
+        if (py_def_is_func(d)) {
+            py_register_def_func(arena, reg, d);
+        }
+    }
+
+    /* Re-finalize to fold in funcs + pass-2 auto-added receiver types. */
     cbm_registry_finalize(reg);
     return reg;
 }

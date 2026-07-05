@@ -2094,14 +2094,20 @@ static void parse_field_defs_into_type(CBMArena* arena, CBMTypeRegistry* reg,
     types[idx] = NULL;
 
     if (idx > 0) {
-        // Find the registered type and update field info
-        for (int ti = 0; ti < reg->type_count; ti++) {
-            if (reg->types[ti].qualified_name &&
-                strcmp(reg->types[ti].qualified_name, type_qn) == 0) {
-                reg->types[ti].field_names = names;
-                reg->types[ti].field_types = types;
-                break;
-            }
+        // Find the registered type and update field info. The common caller
+        // registers the type immediately before this call — check the tail
+        // entry first, then fall back to the registry lookup (hashed when
+        // finalized, linear otherwise).
+        CBMRegisteredType* rt = NULL;
+        if (reg->type_count > 0 && reg->types[reg->type_count - 1].qualified_name &&
+            strcmp(reg->types[reg->type_count - 1].qualified_name, type_qn) == 0) {
+            rt = &reg->types[reg->type_count - 1];
+        } else {
+            rt = (CBMRegisteredType*)cbm_registry_lookup_type(reg, type_qn);
+        }
+        if (rt) {
+            rt->field_names = names;
+            rt->field_types = types;
         }
     }
 }
@@ -2742,15 +2748,20 @@ CBMTypeRegistry* cbm_go_build_cross_registry(
     cbm_registry_init(reg, arena);
     cbm_go_stdlib_register(reg, arena);
 
+    /* Two passes with a finalize in between: registering a method looks up
+     * its receiver type, and field parsing looks up the owning type — on an
+     * unfinalized registry both are linear scans, making this build
+     * O(defs × types) on large repos. Register every type first, build the
+     * hash index once, then attach fields and register funcs against O(1)
+     * lookups (types auto-added for unseen receivers in pass 2 stay visible
+     * via the post-finalize tail-scan). A method whose receiver def appears
+     * later in defs[] now also binds to the real type instead of spawning a
+     * stub duplicate. */
     for (int i = 0; i < def_count; i++) {
         CBMLSPDef* d = &defs[i];
         if (!d->qualified_name || !d->short_name || !d->label) continue;
         /* Filter to Go defs only — the all_defs[] array is mixed-language. */
         if (d->lang != CBM_LANG_GO) continue;
-        /* In the pre-built path every def carries its own def_module_qn
-         * (set by cbm_pxc_collect_all_defs). There is no caller module to
-         * fall back to — this registry is project-wide, not per-file. */
-        const char* def_mod = d->def_module_qn ? d->def_module_qn : "";
 
         if (strcmp(d->label, "Type") == 0 || strcmp(d->label, "Class") == 0 ||
             strcmp(d->label, "Interface") == 0) {
@@ -2764,10 +2775,24 @@ CBMTypeRegistry* cbm_go_build_cross_registry(
                 rt.method_names = split_pipe_strings(arena, d->method_names_str);
             }
             cbm_registry_add_type(reg, rt);
-            if (d->field_defs && d->field_defs[0]) {
-                parse_field_defs_into_type(arena, reg, rt.qualified_name,
-                                           d->field_defs, def_mod);
-            }
+        }
+    }
+
+    cbm_registry_finalize(reg);
+
+    for (int i = 0; i < def_count; i++) {
+        CBMLSPDef* d = &defs[i];
+        if (!d->qualified_name || !d->short_name || !d->label) continue;
+        if (d->lang != CBM_LANG_GO) continue;
+        /* In the pre-built path every def carries its own def_module_qn
+         * (set by cbm_pxc_collect_all_defs). There is no caller module to
+         * fall back to — this registry is project-wide, not per-file. */
+        const char* def_mod = d->def_module_qn ? d->def_module_qn : "";
+
+        if ((strcmp(d->label, "Type") == 0 || strcmp(d->label, "Class") == 0 ||
+             strcmp(d->label, "Interface") == 0) &&
+            d->field_defs && d->field_defs[0]) {
+            parse_field_defs_into_type(arena, reg, d->qualified_name, d->field_defs, def_mod);
         }
 
         if (strcmp(d->label, "Function") == 0 || strcmp(d->label, "Method") == 0) {
@@ -2792,6 +2817,7 @@ CBMTypeRegistry* cbm_go_build_cross_registry(
         }
     }
 
+    /* Re-finalize to fold in funcs + pass-2 auto-added receiver types. */
     cbm_registry_finalize(reg);
     return reg;
 }
