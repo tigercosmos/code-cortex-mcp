@@ -140,16 +140,6 @@ set(CBM_COMMON_INCLUDES
     ${CBM_INTERNAL}
     ${CBM_TS_INCLUDE})
 
-# ── Helper: declare a first-party C library ────────────────────
-function(cbm_add_c_library tgt)
-    cmake_parse_arguments(A "" "" "SOURCES;DEFS;INCLUDES" ${ARGN})
-    add_library(${tgt} OBJECT ${A_SOURCES})
-    target_compile_options(${tgt} PRIVATE ${CBM_FIRSTPARTY_C_FLAGS})
-    target_compile_definitions(${tgt} PRIVATE ${A_DEFS} ${CBM_LIBGIT2_DEFS})
-    target_include_directories(${tgt} PRIVATE ${CBM_COMMON_INCLUDES} ${A_INCLUDES})
-    set_target_properties(${tgt} PROPERTIES C_STANDARD 11)
-endfunction()
-
 # ── Helper: declare a first-party C++23 library ────────────────
 function(cbm_add_cxx_library tgt)
     cmake_parse_arguments(A "" "" "SOURCES;DEFS;INCLUDES" ${ARGN})
