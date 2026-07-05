@@ -120,6 +120,9 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
 
 - **Graph & analysis** — import-aware, type-inferred call graph; dead-code detection; Louvain
   community detection; git-diff impact mapping; Cypher-like queries.
+- **Deterministic indexing** — re-indexing the same tree produces a byte-identical graph
+  (nodes, labels, edges, and edge directions), independent of worker scheduling. Diff two
+  snapshots and only real code changes show up.
 - **Search** — semantic vector search (bundled `nomic-embed-code` embeddings, no API key),
   BM25 full-text (FTS5, camelCase/snake_case aware), and structural/code search.
 - **Cross-service linking** — HTTP route ↔ call-site matching; gRPC/GraphQL/tRPC detection;
@@ -139,12 +142,15 @@ binary artifact never causes merge conflicts. Optional — gitignore `.codebase-
 
 ## Performance
 
-Benchmarked on Apple M3 Pro:
+Benchmarked on Apple Silicon (M-series):
 
 | Operation | Time |
 |-----------|------|
 | Linux kernel full index (28M LOC, 75K files → 2.1M nodes) | ~3 min |
-| Django full index (49K nodes, 196K edges) | ~6 s |
+| RocksDB full index (C++, 62K nodes, 218K edges) | ~6 s |
+| Django full index (Python, 55K nodes, 312K edges) | ~4 s |
+| Redis full index (C, 37K nodes, 95K edges) | ~2 s |
+| etcd full index (Go, 17K nodes, 96K edges) | ~1.3 s |
 | Cypher query / trace path | <1–10 ms |
 | Dead-code detection (full graph) | ~150 ms |
 
