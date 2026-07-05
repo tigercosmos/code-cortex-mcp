@@ -7,6 +7,7 @@
  */
 #include "cypher/cypher.h"
 #include "store/store.h"
+#include "foundation/log.h"
 #include "foundation/platform.h"
 
 enum {
@@ -2838,14 +2839,22 @@ typedef struct {
     binding_t *items;
     int count;
     int cap;
+    bool truncated; /* hit CYP_MAX_INTERMEDIATE — results are partial */
 } binding_vec_t;
 
 enum { CYP_MAX_INTERMEDIATE = 1 << 17 }; /* runaway-cross-join backstop */
 
 /* Append a binding (ownership transfers on success). Returns false when the
- * push is refused (cap reached or realloc failure) — caller must free `nb`. */
+ * push is refused (cap reached or realloc failure) — caller must free `nb`.
+ * Hitting the backstop is logged once per expansion so oversized queries
+ * report partial results instead of silently under-counting. */
 static bool bvec_push(binding_vec_t *v, const binding_t *nb) {
     if (v->count >= CYP_MAX_INTERMEDIATE) {
+        if (!v->truncated) {
+            v->truncated = true;
+            cbm_log_warn("cypher.intermediate_cap", "max_rows", "131072", "hint",
+                         "results are partial; narrow the MATCH with labels or WHERE");
+        }
         return false;
     }
     if (v->count >= v->cap) {
@@ -3590,14 +3599,31 @@ static void with_agg_accumulate(with_agg_t *agg, cbm_return_clause_t *wc, bindin
 
 /* Format a WITH aggregation value into buf */
 static void with_agg_format(const char *func, with_agg_t *agg, int ci, char *buf, size_t buf_sz) {
+    /* MIN/MAX/AVG over zero accumulated values (every row's aggregate var
+     * was unbound — an OPTIONAL MATCH miss group) is null in Cypher: emit
+     * the empty string, not the CYP_DBL_MAX init sentinels. SUM of an
+     * empty set stays 0 and COUNT stays 0, matching Cypher semantics. */
+    bool empty = agg->counts[ci] == 0;
     if (strcmp(func, "SUM") == 0) {
         snprintf(buf, buf_sz, "%.10g", agg->sums[ci]);
     } else if (strcmp(func, "AVG") == 0) {
-        snprintf(buf, buf_sz, "%.10g", agg->counts[ci] > 0 ? agg->sums[ci] / agg->counts[ci] : 0.0);
+        if (empty) {
+            buf[0] = '\0';
+        } else {
+            snprintf(buf, buf_sz, "%.10g", agg->sums[ci] / agg->counts[ci]);
+        }
     } else if (strcmp(func, "MIN") == 0) {
-        snprintf(buf, buf_sz, "%.10g", agg->mins[ci]);
+        if (empty) {
+            buf[0] = '\0';
+        } else {
+            snprintf(buf, buf_sz, "%.10g", agg->mins[ci]);
+        }
     } else if (strcmp(func, "MAX") == 0) {
-        snprintf(buf, buf_sz, "%.10g", agg->maxs[ci]);
+        if (empty) {
+            buf[0] = '\0';
+        } else {
+            snprintf(buf, buf_sz, "%.10g", agg->maxs[ci]);
+        }
     } else {
         snprintf(buf, buf_sz, "%d", agg->counts[ci]);
     }
@@ -3936,14 +3962,29 @@ static void format_collect_list(char **items, int item_count, char *buf, size_t 
 static void format_agg_value(const char *func, int count, double sum, double min_val,
                              double max_val, char ***collect_lists, int *collect_counts, int ci,
                              char *buf, size_t buf_sz) {
+    /* MIN/MAX/AVG over zero accumulated values (every row's aggregate var
+     * was unbound — an OPTIONAL MATCH miss group) is null in Cypher: emit
+     * the empty string, not the init sentinels. SUM and COUNT stay 0. */
     if (strcmp(func, "SUM") == 0) {
         snprintf(buf, buf_sz, "%.10g", sum);
     } else if (strcmp(func, "AVG") == 0) {
-        snprintf(buf, buf_sz, "%.10g", count > 0 ? sum / count : 0.0);
+        if (count > 0) {
+            snprintf(buf, buf_sz, "%.10g", sum / count);
+        } else {
+            buf[0] = '\0';
+        }
     } else if (strcmp(func, "MIN") == 0) {
-        snprintf(buf, buf_sz, "%.10g", min_val);
+        if (count > 0) {
+            snprintf(buf, buf_sz, "%.10g", min_val);
+        } else {
+            buf[0] = '\0';
+        }
     } else if (strcmp(func, "MAX") == 0) {
-        snprintf(buf, buf_sz, "%.10g", max_val);
+        if (count > 0) {
+            snprintf(buf, buf_sz, "%.10g", max_val);
+        } else {
+            buf[0] = '\0';
+        }
     } else if (strcmp(func, "COLLECT") == 0) {
         format_collect_list(collect_lists[ci], collect_counts[ci], buf, buf_sz);
     } else {

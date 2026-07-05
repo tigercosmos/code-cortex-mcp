@@ -2364,6 +2364,27 @@ TEST(cypher_exec_optional_match_zero_callers) {
     PASS();
 }
 
+TEST(cypher_exec_optional_match_empty_min_max) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    /* LogError calls nothing → g is unbound on every row. MIN/MAX over an
+     * all-null aggregate must be null (empty), not the DBL_MAX/-DBL_MAX
+     * init sentinels; COUNT stays 0. */
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WHERE f.name = \"LogError\" "
+                                "OPTIONAL MATCH (f)-[:CALLS]->(g:Function) "
+                                "RETURN COUNT(g), MIN(g.start_line), MAX(g.start_line)",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "0");
+    ASSERT_STR_EQ(r.rows[0][1], "");
+    ASSERT_STR_EQ(r.rows[0][2], "");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_parse_optional_match) {
     cbm_query_t *q = NULL;
     char *err = NULL;
@@ -2712,6 +2733,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_second_match_joins_bound_var);
     RUN_TEST(cypher_exec_optional_match_count_skips_null);
     RUN_TEST(cypher_exec_optional_match_zero_callers);
+    RUN_TEST(cypher_exec_optional_match_empty_min_max);
     RUN_TEST(cypher_exec_multi_match);
     RUN_TEST(cypher_parse_optional_match);
     RUN_TEST(cypher_parse_multi_match);
