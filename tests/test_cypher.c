@@ -2304,6 +2304,66 @@ TEST(cypher_exec_multi_match) {
     PASS();
 }
 
+TEST(cypher_exec_second_match_joins_bound_var) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    /* `f` is bound by the first MATCH; the second MATCH must treat it as a
+     * join constraint, not rebind it (regression: this used to cross-join
+     * every scanned `c` and overwrite `f`, returning bogus rows). */
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WHERE f.name = \"LogError\" "
+                                "MATCH (c)-[:CALLS]->(f) "
+                                "RETURN c.name",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1); /* only HandleOrder calls LogError */
+    ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_optional_match_count_skips_null) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    /* LogError calls nothing → g is unbound on its row; COUNT(g) must skip
+     * nulls and yield 0, not count the row itself. */
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WHERE f.name = \"LogError\" "
+                                "OPTIONAL MATCH (f)-[:CALLS]->(g:Function) "
+                                "WITH f, COUNT(g) AS cnt "
+                                "RETURN f.name, cnt",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "LogError");
+    ASSERT_STR_EQ(r.rows[0][1], "0");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_optional_match_zero_callers) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    /* The canonical dead-code query: only HandleOrder has no inbound CALLS.
+     * Regression: this shape used to explode into a cross product (OOM on
+     * real graphs) and never produced callers = 0 rows. */
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) "
+                                "OPTIONAL MATCH (c)-[:CALLS]->(f) "
+                                "WITH f, COUNT(c) AS callers "
+                                "WHERE callers = 0 "
+                                "RETURN f.name",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_parse_optional_match) {
     cbm_query_t *q = NULL;
     char *err = NULL;
@@ -2649,6 +2709,9 @@ SUITE(cypher) {
     /* Phase 7: OPTIONAL MATCH + multiple MATCH */
     RUN_TEST(cypher_exec_optional_match_no_result);
     RUN_TEST(cypher_exec_optional_match_has_result);
+    RUN_TEST(cypher_exec_second_match_joins_bound_var);
+    RUN_TEST(cypher_exec_optional_match_count_skips_null);
+    RUN_TEST(cypher_exec_optional_match_zero_callers);
     RUN_TEST(cypher_exec_multi_match);
     RUN_TEST(cypher_parse_optional_match);
     RUN_TEST(cypher_parse_multi_match);

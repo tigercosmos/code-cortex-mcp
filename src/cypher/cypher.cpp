@@ -22,6 +22,7 @@ enum {
     CYP_MAX_VARS = 16,     /* max Cypher variables in a query */
     CYP_MAX_EDGE_VARS = 8, /* max edge variables */
     CYP_GROWTH_10 = 10,    /* binding growth factor */
+    CYP_BINDINGS_MIN_CAP = 64, /* initial binding_vec_t capacity */
     CYP_MAX_DEPTH = 10,    /* max variable-length path depth */
     CYP_CHAR_IDX1 = 1,     /* second character index (e.g. op[1]) */
     CYP_EBUF_MASK = 7,
@@ -2591,6 +2592,28 @@ static const char *binding_get_virtual(binding_t *b, const char *var, const char
     return "";
 }
 
+/* True when `var`(.prop) resolves to something bound in this row — a
+ * virtual WITH projection, an edge var, or a node var. The unbound side of
+ * an OPTIONAL MATCH miss is null, and Cypher aggregates skip nulls:
+ * COUNT(c) over rows where c never matched must yield 0, not row count. */
+static bool binding_var_is_bound(binding_t *b, const char *var, const char *prop) {
+    char full[CBM_SZ_256];
+    if (prop) {
+        snprintf(full, sizeof(full), "%s.%s", var, prop);
+    } else {
+        snprintf(full, sizeof(full), "%s", var);
+    }
+    for (int i = 0; i < b->var_count; i++) {
+        if (strcmp(b->var_names[i], full) == 0) {
+            return true;
+        }
+    }
+    if (binding_get_edge(b, var)) {
+        return true;
+    }
+    return binding_get(b, var) != NULL;
+}
+
 /* ── String function application ──────────────────────────────── */
 
 static const char *apply_string_func(const char *func, const char *val, char *buf, size_t buf_sz) {
@@ -2807,14 +2830,53 @@ static void scan_pattern_nodes(cbm_store_t *store, const char *project, int max_
 
 /* ── Expand one pattern's relationships on a set of bindings ──── */
 
+/* Growable binding array. Expansion used to write into fixed arrays sized
+ * `bind_cap * CYP_GROWTH_10` up front, which both silently truncated matches
+ * past the cap and — for cross joins — requested bind_count × extra_count ×
+ * 10 bindings in a single malloc (multi-GB on real graphs → OOM kill). */
+typedef struct {
+    binding_t *items;
+    int count;
+    int cap;
+} binding_vec_t;
+
+enum { CYP_MAX_INTERMEDIATE = 1 << 17 }; /* runaway-cross-join backstop */
+
+/* Append a binding (ownership transfers on success). Returns false when the
+ * push is refused (cap reached or realloc failure) — caller must free `nb`. */
+static bool bvec_push(binding_vec_t *v, const binding_t *nb) {
+    if (v->count >= CYP_MAX_INTERMEDIATE) {
+        return false;
+    }
+    if (v->count >= v->cap) {
+        int new_cap = v->cap > 0 ? v->cap * PAIR_LEN : CYP_BINDINGS_MIN_CAP;
+        binding_t *grown = (binding_t *)realloc(v->items, (size_t)new_cap * sizeof(binding_t));
+        if (!grown) {
+            return false;
+        }
+        v->items = grown;
+        v->cap = new_cap;
+    }
+    v->items[v->count++] = *nb;
+    return true;
+}
+
 /* Process edges: look up target node, filter by label/props, add binding.
- * `inbound` controls which end of the edge is the target id. */
+ * `inbound` controls which end of the edge is the target id.
+ * If `to_var` is already bound in `b` (a later MATCH re-uses a variable from
+ * an earlier one), the edge must land on that exact node — a join constraint,
+ * not a rebind. Overwriting the binding here degenerated multi-pattern
+ * queries like `MATCH (f) OPTIONAL MATCH (c)-[:CALLS]->(f)` into full cross
+ * products. */
 static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count, bool inbound,
                           const cbm_node_pattern_t *target_node, binding_t *b, const char *to_var,
-                          const char *rel_var, binding_t *new_bindings, int *new_count, int max_new,
-                          int *match_count) {
-    for (int ei = 0; ei < edge_count && *new_count < max_new; ei++) {
+                          const char *rel_var, binding_vec_t *out, int *match_count) {
+    const cbm_node_t *pre = binding_get(b, to_var);
+    for (int ei = 0; ei < edge_count; ei++) {
         int64_t tid = inbound ? edges[ei].source_id : edges[ei].target_id;
+        if (pre && pre->id != tid) {
+            continue; /* bound variable: enforce the join */
+        }
         cbm_node_t found = {0};
         if (cbm_store_find_node_by_id(store, tid, &found) != CBM_STORE_OK) {
             continue;
@@ -2834,7 +2896,10 @@ static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count,
             binding_set_edge(&nb, rel_var, &edges[ei]);
         }
         node_fields_free(&found);
-        new_bindings[(*new_count)++] = nb;
+        if (!bvec_push(out, &nb)) {
+            binding_free(&nb);
+            return;
+        }
         (*match_count)++;
     }
 }
@@ -2842,16 +2907,19 @@ static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count,
 /* Expand variable-length relationship via BFS */
 static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                               cbm_node_pattern_t *target_node, binding_t *b, cbm_node_t *src,
-                              const char *to_var, binding_t *new_bindings, int *new_count,
-                              int max_new, int *match_count) {
+                              const char *to_var, binding_vec_t *out, int *match_count) {
     int max_depth = rel->max_hops > 0 ? rel->max_hops : CYP_MAX_DEPTH;
     cbm_traverse_result_t tr = {0};
     const char *dir = rel->direction ? rel->direction : "outbound";
     cbm_store_bfs(store, src->id, dir, rel->types, rel->type_count, max_depth, CBM_PERCENT, &tr);
-    for (int v = 0; v < tr.visited_count && *new_count < max_new; v++) {
+    const cbm_node_t *pre = binding_get(b, to_var);
+    for (int v = 0; v < tr.visited_count; v++) {
         cbm_node_hop_t *hop = &tr.visited[v];
         if (hop->hop < rel->min_hops) {
             continue;
+        }
+        if (pre && pre->id != hop->node.id) {
+            continue; /* bound variable: enforce the join */
         }
         if (target_node->label && !label_alt_matches(hop->node.label, target_node->label)) {
             continue;
@@ -2862,7 +2930,10 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
         binding_t nb = {0};
         binding_copy(&nb, b);
         binding_set(&nb, to_var, &hop->node);
-        new_bindings[(*new_count)++] = nb;
+        if (!bvec_push(out, &nb)) {
+            binding_free(&nb);
+            break;
+        }
         (*match_count)++;
     }
     cbm_store_traverse_free(&tr);
@@ -2871,8 +2942,7 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
 /* Expand fixed-length (1-hop) relationship edges */
 static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                                 cbm_node_pattern_t *target_node, binding_t *b, cbm_node_t *src,
-                                const char *to_var, binding_t *new_bindings, int *new_count,
-                                int max_new, int *match_count) {
+                                const char *to_var, binding_vec_t *out, int *match_count) {
     bool is_inbound = rel->direction && strcmp(rel->direction, "inbound") == 0;
     bool is_any = rel->direction && strcmp(rel->direction, "any") == 0;
     const char *rel_var = rel->variable;
@@ -2889,7 +2959,7 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                                                     &edge_count);
             }
             process_edges(store, edges, edge_count, is_inbound, target_node, b, to_var, rel_var,
-                          new_bindings, new_count, max_new, match_count);
+                          out, match_count);
             cbm_store_free_edges(edges, edge_count);
         }
         if (is_any) {
@@ -2899,7 +2969,7 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                 cbm_store_find_edges_by_target_type(store, src->id, rel->types[ti], &edges,
                                                     &edge_count);
                 process_edges(store, edges, edge_count, true, target_node, b, to_var, rel_var,
-                              new_bindings, new_count, max_new, match_count);
+                              out, match_count);
                 cbm_store_free_edges(edges, edge_count);
             }
         }
@@ -2912,22 +2982,21 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
             cbm_store_find_edges_by_source(store, src->id, &edges, &edge_count);
         }
         process_edges(store, edges, edge_count, is_inbound, target_node, b, to_var, rel_var,
-                      new_bindings, new_count, max_new, match_count);
+                      out, match_count);
         cbm_store_free_edges(edges, edge_count);
         if (is_any) {
             edges = NULL;
             edge_count = 0;
             cbm_store_find_edges_by_target(store, src->id, &edges, &edge_count);
             process_edges(store, edges, edge_count, true, target_node, b, to_var, rel_var,
-                          new_bindings, new_count, max_new, match_count);
+                          out, match_count);
             cbm_store_free_edges(edges, edge_count);
         }
     }
 }
 
 static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_t **bindings,
-                                int *bind_count, const int *bind_cap, const char **var_name,
-                                bool is_optional) {
+                                int *bind_count, const char **var_name, bool is_optional) {
     for (int ri = 0; ri < pat->rel_count; ri++) {
         cbm_rel_pattern_t *rel = &pat->rels[ri];
         cbm_node_pattern_t *target_node = &pat->nodes[ri + SKIP_ONE];
@@ -2935,9 +3004,7 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
 
         bool is_variable_length = (rel->min_hops != SKIP_ONE || rel->max_hops != SKIP_ONE);
 
-        binding_t *new_bindings =
-            (binding_t *)malloc(((*bind_cap * CYP_GROWTH_10) + SKIP_ONE) * sizeof(binding_t));
-        int new_count = 0;
+        binding_vec_t out = {0};
 
         for (int bi = 0; bi < *bind_count; bi++) {
             binding_t *b = &(*bindings)[bi];
@@ -2948,13 +3015,10 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
 
             int match_count = 0;
 
-            int max_new = *bind_cap * CYP_GROWTH_10;
             if (is_variable_length) {
-                expand_var_length(store, rel, target_node, b, src, to_var, new_bindings, &new_count,
-                                  max_new, &match_count);
+                expand_var_length(store, rel, target_node, b, src, to_var, &out, &match_count);
             } else {
-                expand_fixed_length(store, rel, target_node, b, src, to_var, new_bindings,
-                                    &new_count, max_new, &match_count);
+                expand_fixed_length(store, rel, target_node, b, src, to_var, &out, &match_count);
             }
 
             /* OPTIONAL MATCH: keep binding with empty target if no matches */
@@ -2962,7 +3026,9 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
                 binding_t nb = {0};
                 binding_copy(&nb, b);
                 /* Don't set to_var — it remains unbound; projection returns "" */
-                new_bindings[new_count++] = nb;
+                if (!bvec_push(&out, &nb)) {
+                    binding_free(&nb);
+                }
             }
         }
 
@@ -2970,8 +3036,8 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
             binding_free(&(*bindings)[bi]);
         }
         free(*bindings);
-        *bindings = new_bindings;
-        *bind_count = new_count;
+        *bindings = out.items;
+        *bind_count = out.count;
         *var_name = to_var;
     }
 }
@@ -3415,6 +3481,11 @@ static const char *resolve_item_alias(const cbm_return_item_t *item, char *name_
 typedef struct {
     char group_key[CBM_SZ_1K];
     const char **group_vals;
+    cbm_node_t *group_nodes; /* deep copies of bare-variable group nodes so
+                              * `WITH f, COUNT(..)` carries the full node
+                              * (all properties) past the WITH, not just
+                              * its display name */
+    bool *group_node_set;    /* parallel: group_nodes[ci] is populated */
     double *sums;
     int *counts;
     double *mins, *maxs;
@@ -3429,8 +3500,15 @@ static int with_agg_build_key(cbm_return_clause_t *wc, binding_t *b, char *key, 
         if (wc->items[ci].func) {
             continue;
         }
-        const char *v = binding_get_virtual(b, wc->items[ci].variable, wc->items[ci].property);
-        kl += snprintf(key + kl, key_sz - (size_t)kl, "%s|", v);
+        /* Bare node variable: group by node id, not display name — distinct
+         * nodes can share a name (e.g. `main` defined in two files). */
+        cbm_node_t *n = NULL;
+        if (!wc->items[ci].property && (n = binding_get(b, wc->items[ci].variable)) != NULL) {
+            kl += snprintf(key + kl, key_sz - (size_t)kl, "#%lld|", (long long)n->id);
+        } else {
+            const char *v = binding_get_virtual(b, wc->items[ci].variable, wc->items[ci].property);
+            kl += snprintf(key + kl, key_sz - (size_t)kl, "%s|", v);
+        }
         if (kl >= (int)key_sz) {
             kl = (int)key_sz - SKIP_ONE;
         }
@@ -3453,6 +3531,8 @@ static int with_agg_find_or_create(with_agg_t **aggs, int *agg_cnt, int *agg_cap
     int found = (*agg_cnt)++;
     snprintf((*aggs)[found].group_key, sizeof((*aggs)[found].group_key), "%s", key);
     (*aggs)[found].group_vals = (const char **)calloc(wc->count, sizeof(const char *));
+    (*aggs)[found].group_nodes = (cbm_node_t *)calloc(wc->count, sizeof(cbm_node_t));
+    (*aggs)[found].group_node_set = (bool *)calloc(wc->count, sizeof(bool));
     (*aggs)[found].sums = (double *)calloc(wc->count, sizeof(double));
     (*aggs)[found].counts = (int *)calloc(wc->count, sizeof(int));
     (*aggs)[found].mins = (double *)calloc(wc->count, sizeof(double));
@@ -3470,6 +3550,13 @@ static int with_agg_find_or_create(with_agg_t **aggs, int *agg_cnt, int *agg_cap
         }
         const char *v = binding_get_virtual(b, wc->items[ci].variable, wc->items[ci].property);
         (*aggs)[found].group_vals[ci] = heap_strdup(v);
+        /* Keep the full node for bare variables so post-WITH WHERE/RETURN
+         * can still read its properties (f.file_path etc.). */
+        cbm_node_t *n = NULL;
+        if (!wc->items[ci].property && (n = binding_get(b, wc->items[ci].variable)) != NULL) {
+            node_deep_copy(&(*aggs)[found].group_nodes[ci], n);
+            (*aggs)[found].group_node_set[ci] = true;
+        }
     }
     return found;
 }
@@ -3478,6 +3565,11 @@ static int with_agg_find_or_create(with_agg_t **aggs, int *agg_cnt, int *agg_cap
 static void with_agg_accumulate(with_agg_t *agg, cbm_return_clause_t *wc, binding_t *b) {
     for (int ci = 0; ci < wc->count; ci++) {
         if (!wc->items[ci].func) {
+            continue;
+        }
+        /* Aggregates skip nulls (unbound OPTIONAL MATCH vars); * counts all. */
+        if (wc->items[ci].variable && strcmp(wc->items[ci].variable, "*") != 0 &&
+            !binding_var_is_bound(b, wc->items[ci].variable, wc->items[ci].property)) {
             continue;
         }
         agg->counts[ci]++;
@@ -3526,6 +3618,9 @@ static void with_agg_free(with_agg_t *aggs, int agg_cnt, int item_count) {
     for (int a = 0; a < agg_cnt; a++) {
         for (int ci = 0; ci < item_count; ci++) {
             safe_str_free(&aggs[a].group_vals[ci]);
+            if (aggs[a].group_node_set && aggs[a].group_node_set[ci]) {
+                node_fields_free(&aggs[a].group_nodes[ci]);
+            }
             if (aggs[a].distinct_lists && aggs[a].distinct_lists[ci]) {
                 for (int j = 0; j < aggs[a].distinct_n[ci]; j++) {
                     free(aggs[a].distinct_lists[ci][j]);
@@ -3534,6 +3629,8 @@ static void with_agg_free(with_agg_t *aggs, int agg_cnt, int item_count) {
             }
         }
         free(aggs[a].group_vals);
+        free(aggs[a].group_nodes);
+        free(aggs[a].group_node_set);
         free(aggs[a].sums);
         free(aggs[a].counts);
         free(aggs[a].mins);
@@ -3566,6 +3663,7 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
     }
     for (int a = 0; a < agg_cnt; a++) {
         binding_t vb = {0};
+        vb.store = bind_count > 0 ? bindings[0].store : NULL;
         for (int ci = 0; ci < wc->count; ci++) {
             char name_buf[CBM_SZ_256];
             const char *alias = resolve_item_alias(&wc->items[ci], name_buf, sizeof(name_buf));
@@ -3577,6 +3675,12 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
                     with_agg_format(wc->items[ci].func, &aggs[a], ci, vbuf, sizeof(vbuf));
                 }
                 with_add_vbinding_var(&vb, alias, vbuf);
+            } else if (aggs[a].group_node_set[ci]) {
+                /* Bare variable: re-bind the real node (AST-owned name) so
+                 * post-WITH WHERE/RETURN can read all its properties. */
+                const char *stable = wc->items[ci].alias ? wc->items[ci].alias
+                                                         : wc->items[ci].variable;
+                binding_set(&vb, stable, &aggs[a].group_nodes[ci]);
             } else {
                 with_add_vbinding_var(&vb, alias, aggs[a].group_vals[ci]);
             }
@@ -3591,9 +3695,26 @@ static void execute_with_simple(cbm_return_clause_t *wc, binding_t *bindings, in
                                 binding_t *vbindings, int *vcount) {
     for (int bi = 0; bi < bind_count; bi++) {
         binding_t vb = {0};
+        vb.store = bindings[bi].store;
         for (int ci = 0; ci < wc->count; ci++) {
             char name_buf[CBM_SZ_256];
             const char *alias = resolve_item_alias(&wc->items[ci], name_buf, sizeof(name_buf));
+            /* Bare variable: pass the real node/edge binding through so later
+             * clauses can still read all its properties. */
+            if (!wc->items[ci].func && !wc->items[ci].property) {
+                const char *stable = wc->items[ci].alias ? wc->items[ci].alias
+                                                         : wc->items[ci].variable;
+                cbm_node_t *n = binding_get(&bindings[bi], wc->items[ci].variable);
+                if (n) {
+                    binding_set(&vb, stable, n);
+                    continue;
+                }
+                cbm_edge_t *e = binding_get_edge(&bindings[bi], wc->items[ci].variable);
+                if (e) {
+                    binding_set_edge(&vb, stable, e);
+                    continue;
+                }
+            }
             char func_buf[CBM_SZ_512];
             const char *val =
                 project_item(&bindings[bi], &wc->items[ci], func_buf, sizeof(func_buf));
@@ -3865,6 +3986,11 @@ static void ret_agg_accumulate(ret_agg_entry_t *entry, cbm_return_clause_t *ret,
         if (!ret->items[ci].func) {
             continue;
         }
+        /* Aggregates skip nulls (unbound OPTIONAL MATCH vars); * counts all. */
+        if (ret->items[ci].variable && strcmp(ret->items[ci].variable, "*") != 0 &&
+            !binding_var_is_bound(b, ret->items[ci].variable, ret->items[ci].property)) {
+            continue;
+        }
         entry->counts[ci]++;
         const char *raw = binding_get_virtual(b, ret->items[ci].variable, ret->items[ci].property);
         double dv = strtod(raw, NULL);
@@ -4083,74 +4209,104 @@ static void execute_default_projection(cbm_pattern_t *pat0, binding_t *bindings,
     }
 }
 
-/* Cross-join node-only pattern into existing bindings */
+/* Cross-join node-only pattern into existing bindings. When `nvar` is
+ * already bound in a row, the scanned nodes act as a filter on that binding
+ * (join semantics) instead of fanning the row out over every scanned node. */
 static void cross_join_nodes(binding_t **bindings, int *bind_count, cbm_node_t *extra_nodes,
                              int extra_count, const char *nvar, bool opt) {
-    binding_t *new_bindings =
-        (binding_t *)malloc(((*bind_count * extra_count) + SKIP_ONE) * sizeof(binding_t));
-    int new_count = 0;
+    binding_vec_t out = {0};
     for (int bi = 0; bi < *bind_count; bi++) {
+        binding_t *b = &(*bindings)[bi];
+        const cbm_node_t *pre = binding_get(b, nvar);
+        int matched = 0;
         for (int ni = 0; ni < extra_count; ni++) {
+            if (pre && pre->id != extra_nodes[ni].id) {
+                continue; /* bound variable: enforce the join */
+            }
             binding_t nb = {0};
-            binding_copy(&nb, &(*bindings)[bi]);
+            binding_copy(&nb, b);
             binding_set(&nb, nvar, &extra_nodes[ni]);
-            new_bindings[new_count++] = nb;
+            if (!bvec_push(&out, &nb)) {
+                binding_free(&nb);
+                break;
+            }
+            matched++;
         }
-        if (opt && extra_count == 0) {
+        /* OPTIONAL MATCH: keep the row (nvar unbound) if nothing matched */
+        if (opt && matched == 0) {
             binding_t nb = {0};
-            binding_copy(&nb, &(*bindings)[bi]);
-            new_bindings[new_count++] = nb;
+            binding_copy(&nb, b);
+            if (!bvec_push(&out, &nb)) {
+                binding_free(&nb);
+            }
         }
     }
     for (int bi = 0; bi < *bind_count; bi++) {
         binding_free(&(*bindings)[bi]);
     }
     free(*bindings);
-    *bindings = new_bindings;
-    *bind_count = new_count;
+    *bindings = out.items;
+    *bind_count = out.count;
 }
 
-/* Cross-join pattern-with-rels into existing bindings */
+/* Cross-join pattern-with-rels into existing bindings.
+ *
+ * Grows the result dynamically — the old implementation malloc'd
+ * bind_count × extra_count × 10 bindings up front, a multi-GB request on
+ * real graphs (`MATCH (f:Function) OPTIONAL MATCH (c)-[:CALLS]->(f)` got
+ * the process OOM-killed) — and applies OPTIONAL semantics per input row:
+ * if no (start-node, rels) combination matches for a row, that row is kept
+ * once, instead of once per scanned start node. */
 static void cross_join_with_rels(cbm_store_t *store, cbm_pattern_t *patn, binding_t **bindings,
                                  int *bind_count, cbm_node_t *extra_nodes, int extra_count,
                                  const char *nvar, bool opt) {
-    binding_t *new_bindings = (binding_t *)malloc(
-        ((*bind_count * extra_count * CYP_GROWTH_10) + SKIP_ONE) * sizeof(binding_t));
-    int new_count = 0;
+    binding_vec_t out = {0};
     for (int bi = 0; bi < *bind_count; bi++) {
+        binding_t *b = &(*bindings)[bi];
+        const cbm_node_t *pre = binding_get(b, nvar);
+        int matched = 0;
         for (int ni = 0; ni < extra_count; ni++) {
+            if (pre && pre->id != extra_nodes[ni].id) {
+                continue; /* bound variable: enforce the join */
+            }
             binding_t nb = {0};
-            binding_copy(&nb, &(*bindings)[bi]);
+            binding_copy(&nb, b);
             binding_set(&nb, nvar, &extra_nodes[ni]);
-            binding_t *tmp = (binding_t *)malloc(PAIR_LEN * sizeof(binding_t));
+            binding_t *tmp = (binding_t *)malloc(sizeof(binding_t));
             tmp[0] = nb;
             int tc = SKIP_ONE;
-            int tcap = SKIP_ONE;
             const char *tv = nvar;
-            expand_pattern_rels(store, patn, &tmp, &tc, &tcap, &tv, opt);
+            /* Non-optional here: a start node with no rel match contributes
+             * nothing; the row-level OPTIONAL fallback below handles opt. */
+            expand_pattern_rels(store, patn, &tmp, &tc, &tv, false);
             for (int ti = 0; ti < tc; ti++) {
-                new_bindings[new_count++] = tmp[ti];
+                if (bvec_push(&out, &tmp[ti])) {
+                    matched++;
+                } else {
+                    binding_free(&tmp[ti]);
+                }
             }
             free(tmp);
         }
-        if (opt && extra_count == 0) {
+        if (opt && matched == 0) {
             binding_t nb = {0};
-            binding_copy(&nb, &(*bindings)[bi]);
-            new_bindings[new_count++] = nb;
+            binding_copy(&nb, b);
+            if (!bvec_push(&out, &nb)) {
+                binding_free(&nb);
+            }
         }
     }
     for (int bi = 0; bi < *bind_count; bi++) {
         binding_free(&(*bindings)[bi]);
     }
     free(*bindings);
-    *bindings = new_bindings;
-    *bind_count = new_count;
+    *bindings = out.items;
+    *bind_count = out.count;
 }
 
 /* Expand additional MATCH patterns (pi >= 1) */
 static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const char *project,
-                                       int max_rows, binding_t **bindings, int *bind_count,
-                                       int *bind_cap) {
+                                       int max_rows, binding_t **bindings, int *bind_count) {
     for (int pi = SKIP_ONE; pi < q->pattern_count; pi++) {
         cbm_pattern_t *patn = &q->patterns[pi];
         bool opt = q->pattern_optional[pi];
@@ -4159,7 +4315,7 @@ static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const
 
         if (start_bound && patn->rel_count > 0) {
             const char *tv = nvar;
-            expand_pattern_rels(store, patn, bindings, bind_count, bind_cap, &tv, opt);
+            expand_pattern_rels(store, patn, bindings, bind_count, &tv, opt);
         } else {
             cbm_node_t *extra_nodes = NULL;
             int extra_count = 0;
@@ -4233,11 +4389,10 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     }
 
     /* Step 2: Expand first pattern's relationships */
-    expand_pattern_rels(store, pat0, &bindings, &bind_count, &bind_cap, &var_name,
-                        q->pattern_optional[0]);
+    expand_pattern_rels(store, pat0, &bindings, &bind_count, &var_name, q->pattern_optional[0]);
 
     /* Step 2b: Additional patterns */
-    expand_additional_patterns(store, q, project, max_rows, &bindings, &bind_count, &bind_cap);
+    expand_additional_patterns(store, q, project, max_rows, &bindings, &bind_count);
 
     /* Step 3: Late WHERE */
     if (q->where && (pat0->rel_count > 0 || q->pattern_count > SKIP_ONE)) {
