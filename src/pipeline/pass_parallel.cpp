@@ -1803,6 +1803,7 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * depending on whether parallel mode kicked in. */
         cbm_resolution_t res = {0};
         const CBMResolvedCall *lsp = NULL;
+        bool idx_authoritative = false;
         _rc_t0 = extract_now_ns();
         if (lsp_idx && call->enclosing_func_qn) {
             char key[1024];
@@ -1810,12 +1811,20 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                 snprintf(key, sizeof(key), "%s|%s", call->enclosing_func_qn, call->callee_name);
             if (kn > 0 && kn < (int)sizeof(key)) {
                 lsp = (const CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
+                /* The index and the linear scan share the exact same match
+                 * rule (caller_qn + callee short-name + confidence floor),
+                 * and key equality implies equal key length — so any entry
+                 * the build skipped for key overflow would make THIS key
+                 * overflow too. A fitting key that misses the index misses
+                 * the linear scan as well; skip it. The per-miss fallback
+                 * scan was O(calls × resolved_calls) per file — the bulk of
+                 * resolve_calls time on C++ repos (8s CPU on rocksdb). */
+                idx_authoritative = true;
             }
         }
-        if (!lsp) {
-            /* Fallback to the linear scan for edge cases the index may
-             * miss (e.g. callee_name that wasn't the registered short
-             * name). Keeps semantics identical. */
+        if (!lsp && !idx_authoritative) {
+            /* Index unavailable (alloc failure) or the key overflowed —
+             * fall back to the linear scan. Semantics identical. */
             lsp = cbm_pipeline_find_lsp_resolution(&result->resolved_calls, call);
         }
         atomic_fetch_add_explicit(&rc->time_ns_rc_lsp_lookup, extract_now_ns() - _rc_t0,
