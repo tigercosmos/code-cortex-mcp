@@ -133,16 +133,57 @@ static const char *gb_intern(cbm_gbuf_t *gb, const char *s) {
     return copy;
 }
 
+/* Format an int64 as decimal (same output as snprintf "%lld"). Key building
+ * runs on every node/edge lookup and insert — millions of calls per index —
+ * and snprintf's format machinery dominated the resolve/dump profile here.
+ * Returns the number of chars written (excluding the NUL). */
+static size_t fmt_i64(char *buf, size_t bufsz, int64_t v) {
+    char tmp[CBM_SZ_32];
+    size_t n = 0;
+    uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1u : (uint64_t)v;
+    do {
+        tmp[n++] = (char)('0' + (u % 10u));
+        u /= 10u;
+    } while (u > 0);
+    size_t w = 0;
+    if (v < 0 && w + SKIP_ONE < bufsz) {
+        buf[w++] = '-';
+    }
+    while (n > 0 && w + SKIP_ONE < bufsz) {
+        buf[w++] = tmp[--n];
+    }
+    buf[w] = '\0';
+    return w;
+}
+
+/* Append src (NUL-terminated) to buf starting at offset w, bounded by bufsz.
+ * Returns the new write offset. */
+static size_t append_str(char *buf, size_t bufsz, size_t w, const char *src) {
+    while (*src && w + SKIP_ONE < bufsz) {
+        buf[w++] = *src++;
+    }
+    if (w < bufsz) {
+        buf[w] = '\0';
+    }
+    return w;
+}
+
 static void make_id_key(char *buf, size_t bufsz, int64_t id) {
-    snprintf(buf, bufsz, "%lld", (long long)id);
+    fmt_i64(buf, bufsz, id);
 }
 
 static void make_edge_key(char *buf, size_t bufsz, int64_t src, int64_t tgt, const char *type) {
-    snprintf(buf, bufsz, "%lld:%lld:%s", (long long)src, (long long)tgt, type);
+    size_t w = fmt_i64(buf, bufsz, src);
+    w = append_str(buf, bufsz, w, ":");
+    w += fmt_i64(buf + w, bufsz - w, tgt);
+    w = append_str(buf, bufsz, w, ":");
+    append_str(buf, bufsz, w, type);
 }
 
 static void make_src_type_key(char *buf, size_t bufsz, int64_t src, const char *type) {
-    snprintf(buf, bufsz, "%lld:%s", (long long)src, type);
+    size_t w = fmt_i64(buf, bufsz, src);
+    w = append_str(buf, bufsz, w, ":");
+    append_str(buf, bufsz, w, type);
 }
 
 /* Get or create a node_ptr_array_t in a hash table */

@@ -111,18 +111,34 @@ typedef struct {
     char normalized[CBM_SZ_256];
 } code_entry_t;
 
-static int collect_code_entries(cbm_gbuf_t *gb, code_entry_t *out, int max_out) {
-    int n = 0;
+/* Collect ALL eligible code entries (allocates *out; caller frees). No
+ * fixed cap: truncating here made the emitted CONFIGURES edge set depend
+ * on parallel-extraction node order — same repo, different edges per run. */
+static int collect_code_entries(cbm_gbuf_t *gb, code_entry_t **out) {
     static const char *labels[] = {"Function", "Variable", "Class", NULL};
 
-    for (int li = 0; labels[li] && n < max_out; li++) {
+    int total = 0;
+    for (int li = 0; labels[li]; li++) {
+        const cbm_gbuf_node_t **nodes = NULL;
+        int count = 0;
+        if (cbm_gbuf_find_by_label(gb, labels[li], &nodes, &count) == 0) {
+            total += count;
+        }
+    }
+    *out = (code_entry_t *)malloc((size_t)(total + SKIP_ONE) * sizeof(code_entry_t));
+    if (!*out) {
+        return 0;
+    }
+
+    int n = 0;
+    for (int li = 0; labels[li]; li++) {
         const cbm_gbuf_node_t **nodes = NULL;
         int count = 0;
         if (cbm_gbuf_find_by_label(gb, labels[li], &nodes, &count) != 0) {
             continue;
         }
 
-        for (int i = 0; i < count && n < max_out; i++) {
+        for (int i = 0; i < count && n < total; i++) {
             if (cbm_has_config_extension(nodes[i]->file_path)) {
                 continue;
             }
@@ -133,13 +149,51 @@ static int collect_code_entries(cbm_gbuf_t *gb, code_entry_t *out, int max_out) 
                 continue;
             }
 
-            out[n].node_id = nodes[i]->id;
-            snprintf(out[n].normalized, sizeof(out[n].normalized), "%s", norm);
+            (*out)[n].node_id = nodes[i]->id;
+            snprintf((*out)[n].normalized, sizeof((*out)[n].normalized), "%s", norm);
             n++;
         }
         /* gbuf data is borrowed — no free */
     }
     return n;
+}
+
+/* (4-gram key, code entry index) posting pair for the substring prefilter. */
+typedef struct {
+    uint32_t gram;
+    int32_t code_idx;
+} gram_post_t;
+
+static int gram_post_cmp(const void *a, const void *b) {
+    const gram_post_t *pa = (const gram_post_t *)a;
+    const gram_post_t *pb = (const gram_post_t *)b;
+    if (pa->gram != pb->gram) {
+        return pa->gram < pb->gram ? -1 : 1;
+    }
+    if (pa->code_idx != pb->code_idx) {
+        return pa->code_idx < pb->code_idx ? -1 : 1;
+    }
+    return 0;
+}
+
+static uint32_t gram4_at(const char *s) {
+    return ((uint32_t)(unsigned char)s[0] << 24) | ((uint32_t)(unsigned char)s[1] << 16) |
+           ((uint32_t)(unsigned char)s[2] << 8) | (uint32_t)(unsigned char)s[3];
+}
+
+/* First posting index whose gram >= key (lower bound). */
+static int gram_lower_bound(const gram_post_t *posts, int n, uint32_t key) {
+    int lo = 0;
+    int hi = n;
+    while (lo < hi) {
+        int mid = lo + ((hi - lo) / PAIR_LEN);
+        if (posts[mid].gram < key) {
+            lo = mid + SKIP_ONE;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
 }
 
 static int strategy_key_symbols(cbm_gbuf_t *gb) {
@@ -150,26 +204,76 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
         return 0;
     }
 
-    config_entry_t config_entries[CBM_SZ_4K];
-    int config_count = collect_config_entries(vars, var_count, config_entries, CBM_SZ_4K);
+    config_entry_t *config_entries =
+        (config_entry_t *)malloc((size_t)(var_count + SKIP_ONE) * sizeof(config_entry_t));
+    if (!config_entries) {
+        return 0;
+    }
+    int config_count = collect_config_entries(vars, var_count, config_entries, var_count);
 
     if (config_count == 0) {
+        free(config_entries);
         return 0;
     }
 
-    code_entry_t code_entries[CBM_SZ_8K];
-    int code_count = collect_code_entries(gb, code_entries, CBM_SZ_8K);
+    code_entry_t *code_entries = NULL;
+    int code_count = collect_code_entries(gb, &code_entries);
+    if (!code_entries) {
+        free(config_entries);
+        return 0;
+    }
+
+    /* Pairing every config key against every code symbol is O(keys × symbols)
+     * strstr calls — ~33M on a config-heavy repo like redis. Instead, index
+     * every 4-byte substring of each code name once (sorted posting list); a
+     * config key can only be a substring of code names that contain its first
+     * 4-gram, so each key scans just that posting range. Config keys are
+     * always ≥7 chars here (two tokens ≥3 chars + '_'). */
+    int total_grams = 0;
+    for (int co = 0; co < code_count; co++) {
+        int len = (int)strlen(code_entries[co].normalized);
+        if (len >= CBM_SZ_4) {
+            total_grams += len - (CBM_SZ_4 - SKIP_ONE);
+        }
+    }
+    gram_post_t *posts = (gram_post_t *)malloc((size_t)(total_grams + SKIP_ONE) *
+                                               sizeof(gram_post_t));
+    if (!posts) {
+        free(config_entries);
+        free(code_entries);
+        return 0;
+    }
+    int post_count = 0;
+    for (int co = 0; co < code_count; co++) {
+        const char *norm = code_entries[co].normalized;
+        int len = (int)strlen(norm);
+        for (int off = 0; off + CBM_SZ_4 <= len; off++) {
+            posts[post_count].gram = gram4_at(norm + off);
+            posts[post_count].code_idx = co;
+            post_count++;
+        }
+    }
+    qsort(posts, (size_t)post_count, sizeof(gram_post_t), gram_post_cmp);
 
     int edge_count = 0;
 
     for (int ci = 0; ci < config_count; ci++) {
-        for (int co = 0; co < code_count; co++) {
-            double confidence = 0.0;
+        const char *key = config_entries[ci].normalized;
+        uint32_t g = gram4_at(key); /* keys are ≥7 chars — safe */
+        int last_idx = -1;
+        for (int pi = gram_lower_bound(posts, post_count, g);
+             pi < post_count && posts[pi].gram == g; pi++) {
+            int co = posts[pi].code_idx;
+            if (co == last_idx) {
+                continue; /* duplicates are adjacent after the sort */
+            }
+            last_idx = co;
 
-            if (strcmp(config_entries[ci].normalized, code_entries[co].normalized) == 0) {
+            double confidence = 0.0;
+            if (strcmp(key, code_entries[co].normalized) == 0) {
                 /* Exact match */
                 confidence = CONF_KEY_EXACT;
-            } else if (strstr(code_entries[co].normalized, config_entries[ci].normalized) != NULL) {
+            } else if (strstr(code_entries[co].normalized, key) != NULL) {
                 /* Substring match */
                 confidence = CONF_KEY_SUBSTRING;
             }
@@ -187,6 +291,9 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
         }
     }
 
+    free(posts);
+    free(code_entries);
+    free(config_entries);
     return edge_count;
 }
 
@@ -269,24 +376,13 @@ static void lowercase_into(char *buf, size_t bufsize, const char *src) {
     buf[len < bufsize ? len : bufsize - SKIP_ONE] = '\0';
 }
 
-/* Match a dep name (lowercased) against an import target node.
- * Returns confidence > 0 on match, 0 on no match. */
-static double match_dep_to_import(const cbm_gbuf_node_t *target, const char *dep_lower) {
+/* Pre-resolved, pre-lowercased IMPORTS edge endpoint. */
+typedef struct {
+    int64_t source_id;
     char target_lower[CBM_SZ_256];
-    lowercase_into(target_lower, sizeof(target_lower), target->name);
-
-    if (strcmp(target_lower, dep_lower) == 0) {
-        return CONF_DEP_EXACT;
-    }
-    if (target->qualified_name) {
-        char qn_lower[CBM_SZ_512];
-        lowercase_into(qn_lower, sizeof(qn_lower), target->qualified_name);
-        if (strstr(qn_lower, dep_lower) != NULL) {
-            return CONF_DEP_QN_SUBSTR;
-        }
-    }
-    return 0.0;
-}
+    char qn_lower[CBM_SZ_512];
+    bool has_qn;
+} import_entry_t;
 
 static int strategy_dep_imports(cbm_gbuf_t *gb) {
     const cbm_gbuf_node_t **vars = NULL;
@@ -309,24 +405,46 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
         return 0;
     }
 
+    /* Resolve + lowercase every import endpoint once, not once per dep. */
+    import_entry_t *entries = (import_entry_t *)malloc((size_t)(import_count + SKIP_ONE) *
+                                                       sizeof(import_entry_t));
+    if (!entries) {
+        return 0;
+    }
+    int entry_count = 0;
+    for (int ii = 0; ii < import_count; ii++) {
+        const cbm_gbuf_node_t *target = cbm_gbuf_find_by_id(gb, imports[ii]->target_id);
+        if (!target) {
+            continue;
+        }
+        const cbm_gbuf_node_t *source = cbm_gbuf_find_by_id(gb, imports[ii]->source_id);
+        if (!source) {
+            continue;
+        }
+        import_entry_t *e = &entries[entry_count++];
+        e->source_id = source->id;
+        lowercase_into(e->target_lower, sizeof(e->target_lower), target->name);
+        e->has_qn = target->qualified_name != NULL;
+        if (e->has_qn) {
+            lowercase_into(e->qn_lower, sizeof(e->qn_lower), target->qualified_name);
+        }
+    }
+
     int edge_count = 0;
 
     for (int di = 0; di < dep_count; di++) {
         char dep_lower[CBM_SZ_256];
         lowercase_into(dep_lower, sizeof(dep_lower), deps[di].name);
 
-        for (int ii = 0; ii < import_count; ii++) {
-            const cbm_gbuf_node_t *target = cbm_gbuf_find_by_id(gb, imports[ii]->target_id);
-            if (!target) {
-                continue;
+        for (int ii = 0; ii < entry_count; ii++) {
+            const import_entry_t *e = &entries[ii];
+            double confidence = 0.0;
+            if (strcmp(e->target_lower, dep_lower) == 0) {
+                confidence = CONF_DEP_EXACT;
+            } else if (e->has_qn && strstr(e->qn_lower, dep_lower) != NULL) {
+                confidence = CONF_DEP_QN_SUBSTR;
             }
 
-            const cbm_gbuf_node_t *source = cbm_gbuf_find_by_id(gb, imports[ii]->source_id);
-            if (!source) {
-                continue;
-            }
-
-            double confidence = match_dep_to_import(target, dep_lower);
             if (confidence > 0.0) {
                 char props[CBM_SZ_512];
                 snprintf(
@@ -334,12 +452,13 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
                     "{\"strategy\":\"dependency_import\",\"confidence\":%.2f,\"dep_name\":\"%s\"}",
                     confidence, deps[di].name);
 
-                cbm_gbuf_insert_edge(gb, source->id, deps[di].node_id, "CONFIGURES", props);
+                cbm_gbuf_insert_edge(gb, e->source_id, deps[di].node_id, "CONFIGURES", props);
                 edge_count++;
             }
         }
     }
 
+    free(entries);
     /* gbuf data is borrowed — no free */
     return edge_count;
 }
