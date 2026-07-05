@@ -384,8 +384,7 @@ static void reindex_node_on_update(cbm_gbuf_t *gb, cbm_gbuf_node_t *node, const 
     const char *nn = new_name ? new_name : "";
     if (strcmp(old_name, nn) != 0) {
         node_array_remove(gb->nodes_by_name, old_name, node);
-        cbm_da_push(get_or_create_node_array(gb->nodes_by_name, nn),
-                    (const cbm_gbuf_node_t *)node);
+        cbm_da_push(get_or_create_node_array(gb->nodes_by_name, nn), (const cbm_gbuf_node_t *)node);
     }
 }
 

@@ -18,14 +18,14 @@ enum {
     CYP_MAX_TOKEN = 10, /* max token lookahead */
     CYP_PAIR = 2,
     CYP_TRIPLE = 3,
-    CYP_INIT_CAP4 = 4,     /* initial small array capacity */
-    CYP_INIT_CAP8 = 8,     /* initial medium array capacity */
-    CYP_MAX_VARS = 16,     /* max Cypher variables in a query */
-    CYP_MAX_EDGE_VARS = 8, /* max edge variables */
-    CYP_GROWTH_10 = 10,    /* binding growth factor */
+    CYP_INIT_CAP4 = 4,         /* initial small array capacity */
+    CYP_INIT_CAP8 = 8,         /* initial medium array capacity */
+    CYP_MAX_VARS = 16,         /* max Cypher variables in a query */
+    CYP_MAX_EDGE_VARS = 8,     /* max edge variables */
+    CYP_GROWTH_10 = 10,        /* binding growth factor */
     CYP_BINDINGS_MIN_CAP = 64, /* initial binding_vec_t capacity */
-    CYP_MAX_DEPTH = 10,    /* max variable-length path depth */
-    CYP_CHAR_IDX1 = 1,     /* second character index (e.g. op[1]) */
+    CYP_MAX_DEPTH = 10,        /* max variable-length path depth */
+    CYP_CHAR_IDX1 = 1,         /* second character index (e.g. op[1]) */
     CYP_EBUF_MASK = 7,
     CYP_NODE_COLS = 4, /* columns per node var: name, qn, label, file */
     CYP_EDGE_COLS = 3, /* columns per edge var: name, qn, label */
@@ -2977,8 +2977,8 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                 int edge_count = 0;
                 cbm_store_find_edges_by_target_type(store, src->id, rel->types[ti], &edges,
                                                     &edge_count);
-                process_edges(store, edges, edge_count, true, target_node, b, to_var, rel_var,
-                              out, match_count);
+                process_edges(store, edges, edge_count, true, target_node, b, to_var, rel_var, out,
+                              match_count);
                 cbm_store_free_edges(edges, edge_count);
             }
         }
@@ -2990,15 +2990,15 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
         } else {
             cbm_store_find_edges_by_source(store, src->id, &edges, &edge_count);
         }
-        process_edges(store, edges, edge_count, is_inbound, target_node, b, to_var, rel_var,
-                      out, match_count);
+        process_edges(store, edges, edge_count, is_inbound, target_node, b, to_var, rel_var, out,
+                      match_count);
         cbm_store_free_edges(edges, edge_count);
         if (is_any) {
             edges = NULL;
             edge_count = 0;
             cbm_store_find_edges_by_target(store, src->id, &edges, &edge_count);
-            process_edges(store, edges, edge_count, true, target_node, b, to_var, rel_var,
-                          out, match_count);
+            process_edges(store, edges, edge_count, true, target_node, b, to_var, rel_var, out,
+                          match_count);
             cbm_store_free_edges(edges, edge_count);
         }
     }
@@ -3704,8 +3704,8 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
             } else if (aggs[a].group_node_set[ci]) {
                 /* Bare variable: re-bind the real node (AST-owned name) so
                  * post-WITH WHERE/RETURN can read all its properties. */
-                const char *stable = wc->items[ci].alias ? wc->items[ci].alias
-                                                         : wc->items[ci].variable;
+                const char *stable =
+                    wc->items[ci].alias ? wc->items[ci].alias : wc->items[ci].variable;
                 binding_set(&vb, stable, &aggs[a].group_nodes[ci]);
             } else {
                 with_add_vbinding_var(&vb, alias, aggs[a].group_vals[ci]);
@@ -3728,8 +3728,8 @@ static void execute_with_simple(cbm_return_clause_t *wc, binding_t *bindings, in
             /* Bare variable: pass the real node/edge binding through so later
              * clauses can still read all its properties. */
             if (!wc->items[ci].func && !wc->items[ci].property) {
-                const char *stable = wc->items[ci].alias ? wc->items[ci].alias
-                                                         : wc->items[ci].variable;
+                const char *stable =
+                    wc->items[ci].alias ? wc->items[ci].alias : wc->items[ci].variable;
                 cbm_node_t *n = binding_get(&bindings[bi], wc->items[ci].variable);
                 if (n) {
                     binding_set(&vb, stable, n);

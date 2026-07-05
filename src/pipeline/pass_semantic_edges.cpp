@@ -509,8 +509,8 @@ static void build_api_vec(const cbm_gbuf_t *gbuf, int64_t node_id, cbm_sem_vec_t
     /* Canonicalize callee order before accumulating: the MAX_CALLEES cut
      * and the float summation below are order-sensitive, and edge order
      * must not leak scheduling into the vector (see tokenize_call_neighbors). */
-    const char **names = (const char **)malloc((size_t)(edge_count + SKIP_ONE) *
-                                               sizeof(const char *));
+    const char **names =
+        (const char **)malloc((size_t)(edge_count + SKIP_ONE) * sizeof(const char *));
     if (!names) {
         return;
     }
@@ -1053,8 +1053,8 @@ static int deferred_edge_cmp(const void *a, const void *b) {
 /* Phase 6b: apply the per-node edge budget deterministically, then serialize
  * the surviving deferred edges into the graph buffer (sequential because
  * gbuf isn't thread-safe). Highest-scoring edges win a node's budget. */
-static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_bufs,
-                               int worker_count, int func_count, int max_edges) {
+static int phase6b_merge_edges(cbm_gbuf_t *gbuf, deferred_edge_buf_t *worker_bufs, int worker_count,
+                               int func_count, int max_edges) {
     int total_deferred = 0;
     for (int w = 0; w < worker_count; w++) {
         total_deferred += worker_bufs[w].count;
@@ -1411,8 +1411,8 @@ int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx) {
                                     ? XXH3_64bits(funcs[f].tfidf_weights,
                                                   (size_t)funcs[f].tfidf_len * sizeof(float))
                                     : 0;
-                fprintf(df, "%d ri=%llx api=%llx type=%llx deco=%llx sp=%llx tf=%llx sig=%llx\n",
-                        f, (unsigned long long)h_ri, (unsigned long long)h_api,
+                fprintf(df, "%d ri=%llx api=%llx type=%llx deco=%llx sp=%llx tf=%llx sig=%llx\n", f,
+                        (unsigned long long)h_ri, (unsigned long long)h_api,
                         (unsigned long long)h_type, (unsigned long long)h_deco,
                         (unsigned long long)h_sp, (unsigned long long)h_tf,
                         (unsigned long long)signatures[f]);

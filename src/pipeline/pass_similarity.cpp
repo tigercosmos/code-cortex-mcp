@@ -132,8 +132,8 @@ static int collect_fp_entries(cbm_gbuf_t *gbuf, fp_entry_t **out_entries) {
         }
         for (int i = 0; i < node_count; i++) {
             if (all_count >= all_cap) {
-                int new_cap = all_cap < FP_ENTRY_INIT_CAP ? FP_ENTRY_INIT_CAP
-                                                          : all_cap * FP_ENTRY_GROW;
+                int new_cap =
+                    all_cap < FP_ENTRY_INIT_CAP ? FP_ENTRY_INIT_CAP : all_cap * FP_ENTRY_GROW;
                 const cbm_gbuf_node_t **grown = (const cbm_gbuf_node_t **)realloc(
                     all, (size_t)new_cap * sizeof(const cbm_gbuf_node_t *));
                 if (!grown) {

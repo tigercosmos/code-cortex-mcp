@@ -1522,9 +1522,8 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                         strcmp(cand->qualified_name, source_file_qn) == 0) {
                         continue; /* self */
                     }
-                    if (!best ||
-                        (cand->qualified_name && best->qualified_name &&
-                         strcmp(cand->qualified_name, best->qualified_name) < 0)) {
+                    if (!best || (cand->qualified_name && best->qualified_name &&
+                                  strcmp(cand->qualified_name, best->qualified_name) < 0)) {
                         best = cand;
                     }
                 }

@@ -236,8 +236,8 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
             total_grams += len - (CBM_SZ_4 - SKIP_ONE);
         }
     }
-    gram_post_t *posts = (gram_post_t *)malloc((size_t)(total_grams + SKIP_ONE) *
-                                               sizeof(gram_post_t));
+    gram_post_t *posts =
+        (gram_post_t *)malloc((size_t)(total_grams + SKIP_ONE) * sizeof(gram_post_t));
     if (!posts) {
         free(config_entries);
         free(code_entries);
@@ -406,8 +406,8 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
     }
 
     /* Resolve + lowercase every import endpoint once, not once per dep. */
-    import_entry_t *entries = (import_entry_t *)malloc((size_t)(import_count + SKIP_ONE) *
-                                                       sizeof(import_entry_t));
+    import_entry_t *entries =
+        (import_entry_t *)malloc((size_t)(import_count + SKIP_ONE) * sizeof(import_entry_t));
     if (!entries) {
         return 0;
     }
