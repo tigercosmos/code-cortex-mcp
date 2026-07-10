@@ -18,6 +18,7 @@ extern "C" {
 #endif
 
 typedef struct cbm_http_server cbm_http_server_t;
+struct cbm_watcher; /* from watcher/watcher.h — forward decl for set_watcher */
 
 /* Create an HTTP server on the given port.
  * Creates its own cbm_mcp_server_t with a separate read-only SQLite connection.

@@ -1661,6 +1661,9 @@ static void extract_route_from_decorators(CBMArena *a, TSNode func_node, const c
             if (try_route_from_decorator_call(a, dchild, source, out_path, out_method)) {
                 return;
             }
+            if (try_drf_action_decorator(a, dchild, source, func_node, out_path, out_method)) {
+                return;
+            }
         }
         /* JVM/C# annotation-form route mapping (Spring @GetMapping etc.) — the
          * prev-sibling itself may be the annotation node. */

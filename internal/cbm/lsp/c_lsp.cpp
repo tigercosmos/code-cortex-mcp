@@ -4668,6 +4668,10 @@ void c_lsp_process_file(CLSPContext* ctx, TSNode root) {
         child = kids[i];
         c_process_body_child(ctx, child);
     }
+
+    // Release the per-file negative-lookup memo (malloc-owned; only allocated in
+    // shared-registry mode). No-op when it was never populated.
+    c_neg_memo_free(ctx);
 }
 
 // ============================================================================
