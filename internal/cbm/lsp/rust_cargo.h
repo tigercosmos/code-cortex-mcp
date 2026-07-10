@@ -26,22 +26,22 @@
 extern "C" {
 #endif
 
-#define CBM_CARGO_MAX_DEPS    256
-#define CBM_CARGO_MAX_MEMBERS  64
+#define CBM_CARGO_MAX_DEPS 256
+#define CBM_CARGO_MAX_MEMBERS 64
 
 typedef struct {
-    const char* name;       /* declared dependency name */
-    const char* path;       /* path = "../foo" if local, else NULL */
+    const char *name; /* declared dependency name */
+    const char *path; /* path = "../foo" if local, else NULL */
 } CBMCargoDep;
 
 typedef struct {
-    const char* member_name;   /* directory name */
-    const char* member_path;   /* relative path inside workspace root */
+    const char *member_name; /* directory name */
+    const char *member_path; /* relative path inside workspace root */
 } CBMCargoMember;
 
 typedef struct CBMCargoManifest {
-    const char* package_name;    /* [package].name, NULL if missing */
-    const char* package_version; /* [package].version, NULL if missing */
+    const char *package_name;    /* [package].name, NULL if missing */
+    const char *package_version; /* [package].version, NULL if missing */
     bool is_workspace_root;      /* [workspace] section seen */
 
     CBMCargoDep deps[CBM_CARGO_MAX_DEPS];
@@ -53,17 +53,15 @@ typedef struct CBMCargoManifest {
 
 /* Parse a Cargo.toml-formatted string. The output strings are
  * arena-allocated (so the caller doesn't need to keep `src` alive). */
-void cbm_cargo_parse(CBMArena* arena, const char* src, int src_len,
-    CBMCargoManifest* out);
+void cbm_cargo_parse(CBMArena *arena, const char *src, int src_len, CBMCargoManifest *out);
 
 /* Convenience: does a given path-prefix look like one of the listed
  * dependency names? Used by the resolver to recognise external crate
  * paths. */
-bool cbm_cargo_is_known_dep(const CBMCargoManifest* m, const char* head);
+bool cbm_cargo_is_known_dep(const CBMCargoManifest *m, const char *head);
 
 /* Find a workspace member by crate name. Returns NULL if absent. */
-const CBMCargoMember* cbm_cargo_find_member(const CBMCargoManifest* m,
-    const char* name);
+const CBMCargoMember *cbm_cargo_find_member(const CBMCargoManifest *m, const char *name);
 
 #ifdef __cplusplus
 }

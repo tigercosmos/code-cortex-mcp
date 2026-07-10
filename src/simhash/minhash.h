@@ -92,10 +92,13 @@ typedef struct cbm_lsh_index cbm_lsh_index_t;
 typedef struct {
     int64_t node_id;
     const cbm_minhash_t *fingerprint;
-    const char *file_path; /* for same-file tagging */
-    const char *file_ext;  /* for same-language filtering */
-    int tag;               /* caller-defined (e.g. canonical entry index);
-                            * copied through queries, 0 if unset */
+    const char *file_path;      /* for same-file tagging */
+    const char *file_ext;       /* for same-language filtering */
+    const char *qualified_name; /* canonical pair-ownership tie-break: node ids
+                                   vary run-to-run under parallel extraction,
+                                   qualified names do not (determinism) */
+    int tag;                    /* caller-defined (e.g. canonical entry index);
+                                 * copied through queries, 0 if unset */
 } cbm_lsh_entry_t;
 
 /* Create a new LSH index. */

@@ -7,6 +7,7 @@
  */
 #include "cypher/cypher.h"
 #include "store/store.h"
+#include "foundation/limits.h"
 #include "foundation/log.h"
 #include "foundation/platform.h"
 
@@ -24,7 +25,6 @@ enum {
     CYP_MAX_EDGE_VARS = 8,     /* max edge variables */
     CYP_GROWTH_10 = 10,        /* binding growth factor */
     CYP_BINDINGS_MIN_CAP = 64, /* initial binding_vec_t capacity */
-    CYP_MAX_DEPTH = 10,        /* max variable-length path depth */
     CYP_CHAR_IDX1 = 1,         /* second character index (e.g. op[1]) */
     CYP_EBUF_MASK = 7,
     CYP_NODE_COLS = 4, /* columns per node var: name, qn, label, file */
@@ -1621,6 +1621,10 @@ static int parse_return_or_with(parser_t *p, cbm_return_clause_t **out, bool is_
 
     cbm_return_clause_t *r =
         (cbm_return_clause_t *)calloc(CBM_ALLOC_ONE, sizeof(cbm_return_clause_t));
+    /* -1 = no LIMIT clause (return all). An explicit `LIMIT 0` parses to 0 below
+     * and must return 0 rows — distinguishing the two requires a sentinel, since
+     * calloc zeroes limit and `limit > 0` would treat LIMIT 0 as "no limit". */
+    r->limit = -1;
     int cap = CYP_INIT_CAP8;
     r->items = (__typeof__(r->items))malloc(cap * sizeof(cbm_return_item_t));
 
@@ -1653,6 +1657,16 @@ static int parse_return_or_with(parser_t *p, cbm_return_clause_t **out, bool is_
         r->items[r->count++] = item;
 
     } while (check(p, TOK_COMMA));
+
+    /* Projection is materialized per row into fixed-width stack arrays sized at
+     * CBM_SZ_32 columns (execute_return_simple and its siblings). Bound the
+     * parsed item count to that width so an over-wide RETURN is rejected here
+     * instead of writing past those arrays downstream. */
+    if (r->count > CBM_SZ_32) {
+        free(r->items);
+        free(r);
+        return CBM_NOT_FOUND;
+    }
 
 tail:
     /* Optional ORDER BY */
@@ -2411,11 +2425,11 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
 
     /* IS NULL / IS NOT NULL */
     if (strcmp(c->op, "IS NULL") == 0) {
-        result = (!actual || actual[0] == '\0');
+        result = (actual[0] == '\0');
         return c->negated ? !result : result;
     }
     if (strcmp(c->op, "IS NOT NULL") == 0) {
-        result = (actual && actual[0] != '\0');
+        result = (actual[0] != '\0');
         return c->negated ? !result : result;
     }
 
@@ -2563,6 +2577,9 @@ static void rb_add_row(result_builder_t *rb, const char **values) {
 /* ── Binding virtual variables (for WITH clause) ──────────────── */
 
 static const char *binding_get_virtual(binding_t *b, const char *var, const char *prop) {
+    if (!var) {
+        return "";
+    }
     /* Check virtual vars first (from WITH projection) */
     char full[CBM_SZ_256];
     if (prop) {
@@ -2917,7 +2934,20 @@ static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count,
 static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                               cbm_node_pattern_t *target_node, binding_t *b, cbm_node_t *src,
                               const char *to_var, binding_vec_t *out, int *match_count) {
-    int max_depth = rel->max_hops > 0 ? rel->max_hops : CYP_MAX_DEPTH;
+    /* Clamp BOTH the explicit (`*1..N`) and unbounded (`*`, `*..m`) forms to the
+     * engine ceiling: an explicit N above the cap was previously honoured
+     * verbatim, driving cbm_store_bfs to an unbounded hop count (#887). WARN on
+     * clamp — never a silent truncation. */
+    int depth_cap = cbm_cypher_max_depth();
+    int max_depth = rel->max_hops > 0 ? rel->max_hops : depth_cap;
+    if (max_depth > depth_cap) {
+        char req_buf[16];
+        char cap_buf[16];
+        snprintf(req_buf, sizeof(req_buf), "%d", max_depth);
+        snprintf(cap_buf, sizeof(cap_buf), "%d", depth_cap);
+        cbm_log_warn("cypher.depth_capped", "requested", req_buf, "cap", cap_buf);
+        max_depth = depth_cap;
+    }
     cbm_traverse_result_t tr = {0};
     const char *dir = rel->direction ? rel->direction : "outbound";
     cbm_store_bfs(store, src->id, dir, rel->types, rel->type_count, max_depth, CBM_PERCENT, &tr);
@@ -3139,7 +3169,7 @@ static void rb_apply_skip_limit(result_builder_t *rb, int skip_n, int limit) {
         rb->row_count = 0;
     }
     /* Limit */
-    if (limit > 0 && rb->row_count > limit) {
+    if (limit >= 0 && rb->row_count > limit) {
         for (int i = limit; i < rb->row_count; i++) {
             for (int c = 0; c < rb->col_count; c++) {
                 safe_str_free(&rb->rows[i][c]);
@@ -3453,7 +3483,7 @@ static void bindings_skip_limit(binding_t *vbindings, int *count, int skip, int 
         }
         *count = 0;
     }
-    if (limit > 0 && *count > limit) {
+    if (limit >= 0 && *count > limit) {
         for (int i = limit; i < *count; i++) {
             binding_free(&vbindings[i]);
         }
@@ -4193,7 +4223,7 @@ static void build_return_columns(result_builder_t *rb, cbm_return_clause_t *ret)
 static void execute_return_simple(cbm_return_clause_t *ret, binding_t *bindings, int bind_count,
                                   int max_rows, result_builder_t *rb) {
     int proj_cap = max_rows;
-    if (ret->limit > 0 && !ret->order_by && ret->skip <= 0) {
+    if (ret->limit > 0 && !ret->distinct && !ret->order_by && ret->skip <= 0) {
         proj_cap = ret->limit;
     }
     for (int bi = 0; bi < bind_count && rb->row_count < proj_cap; bi++) {
@@ -4395,11 +4425,11 @@ static void execute_return_clause(cbm_query_t *q, cbm_return_clause_t *ret, bind
         }
     }
 
-    rb_apply_order_by(rb, ret);
-    rb_apply_skip_limit(rb, ret->skip, ret->limit > 0 ? ret->limit : max_rows);
     if (ret->distinct) {
         rb_apply_distinct(rb);
     }
+    rb_apply_order_by(rb, ret);
+    rb_apply_skip_limit(rb, ret->skip, ret->limit >= 0 ? ret->limit : max_rows);
 }
 
 static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *project, int max_rows,

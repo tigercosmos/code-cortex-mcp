@@ -27,8 +27,10 @@
 
 #include "rust_lsp.h"
 #include "rust_cargo.h"
+#include "lsp_neg_memo.h"
 #include "../helpers.h"
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -4663,8 +4665,8 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                         fld_count++;
                     }
                     if (fld_count > 0) {
-                        CBMRegisteredType *rt = (CBMRegisteredType *)cbm_registry_lookup_type(
-                            reg, type_qn);
+                        CBMRegisteredType *rt =
+                            (CBMRegisteredType *)cbm_registry_lookup_type(reg, type_qn);
                         if (rt) {
                             const char **names = (const char **)cbm_arena_alloc(
                                 arena, (fld_count + 1) * sizeof(const char *));
@@ -4891,8 +4893,8 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                         /* Found a matching curated derive. Register the
                          * trait QN as an embedded_type on the receiver
                          * AND synthesize the method entries. */
-                        CBMRegisteredType *rt = (CBMRegisteredType *)cbm_registry_lookup_type(
-                            reg, d->qualified_name);
+                        CBMRegisteredType *rt =
+                            (CBMRegisteredType *)cbm_registry_lookup_type(reg, d->qualified_name);
                         if (!rt)
                             break;
 
@@ -5000,8 +5002,8 @@ static void rust_build_registry_from_defs(CBMArena *arena, CBMTypeRegistry *reg,
                     ret = cbm_type_named(arena, type_qn);
                 }
                 /* Patch the registered function's signature. */
-                CBMRegisteredFunc *rf = (CBMRegisteredFunc *)cbm_registry_lookup_method(
-                    reg, type_qn, mname);
+                CBMRegisteredFunc *rf =
+                    (CBMRegisteredFunc *)cbm_registry_lookup_method(reg, type_qn, mname);
                 if (rf) {
                     const CBMType **ret_arr =
                         (const CBMType **)cbm_arena_alloc(arena, 2 * sizeof(const CBMType *));
@@ -5098,34 +5100,34 @@ void cbm_run_rust_lsp(CBMArena *arena, CBMFileResult *result, const char *source
 
 extern "C" const TSLanguage *tree_sitter_rust(void);
 
-void cbm_run_rust_lsp_cross(CBMArena *arena, const char *source, int source_len,
-                            const char *module_qn, CBMRustLSPDef *defs, int def_count,
-                            const char **import_names, const char **import_qns, int import_count,
-                            TSTree *cached_tree, CBMResolvedCallArray *out) {
-    if (!source || source_len <= 0 || !out)
-        return;
+/* Populate + finalize a Rust cross-file type registry from `defs`. Shared by the
+ * per-file resolver (cbm_run_rust_lsp_cross_with_manifest) and the build-once shared
+ * registry (cbm_rust_build_cross_registry) so both produce a byte-identical registry.
+ * `module_qn` is ONLY the fallback used to qualify a def's return type when that def
+ * carries no def_module_qn; pass NULL for the shared build (all_defs always carry
+ * def_module_qn — verified: 0 NULL across the C + Rust kernel corpora). */
+static void rust_populate_cross_registry(CBMTypeRegistry *reg, CBMArena *arena, CBMRustLSPDef *defs,
+                                         int def_count, const char *module_qn) {
+    cbm_registry_init(reg, arena);
+    cbm_rust_stdlib_register(reg, arena);
 
-    TSParser *parser = NULL;
-    TSTree *tree = cached_tree;
-    bool owns_tree = false;
-    if (!tree) {
-        parser = ts_parser_new();
-        if (!parser)
-            return;
-        ts_parser_set_language(parser, tree_sitter_rust());
-        tree = ts_parser_parse_string(parser, NULL, source, source_len);
-        owns_tree = true;
-        if (!tree) {
-            ts_parser_delete(parser);
-            return;
+    /* qn → (type index + 1), FIRST occurrence wins (mirrors the linear scans
+     * this map replaces). Both in-loop registry probes below — the receiver
+     * auto-registration check and the trait-linkage lookup — used to scan the
+     * UNFINALIZED registry linearly (no buckets exist before finalize): the
+     * checklist's lookup-in-registration-loop pattern. Invisible on small
+     * per-file builds; on the shared all_defs build (~1.4M entries) those
+     * scans were a constant ~63 s of the kernel run — and the sibling
+     * null-filter files waited on the build once-guard for exactly that long,
+     * which is why no resolution-side fix ever moved their wall time. Index,
+     * not pointer, because reg->types reallocs as it grows. */
+    CBMIdxMemo type_idx = {0};
+    for (int ti = 0; ti < reg->type_count; ti++) {
+        const char *qn = reg->types[ti].qualified_name;
+        if (qn) {
+            cbm_idxmemo_put_if_absent(&type_idx, arena, qn, ti);
         }
     }
-    TSNode root = ts_tree_root_node(tree);
-
-    /* Build registry from cross-file defs + stdlib. */
-    CBMTypeRegistry reg;
-    cbm_registry_init(&reg, arena);
-    cbm_rust_stdlib_register(&reg, arena);
 
     for (int i = 0; i < def_count; i++) {
         CBMRustLSPDef *d = &defs[i];
@@ -5133,15 +5135,17 @@ void cbm_run_rust_lsp_cross(CBMArena *arena, const char *source, int source_len,
             continue;
         const char *def_mod = d->def_module_qn ? d->def_module_qn : module_qn;
 
-        if (strcmp(d->label, "Type") == 0 || strcmp(d->label, "Class") == 0 ||
-            strcmp(d->label, "Interface") == 0 || strcmp(d->label, "Trait") == 0) {
+        // Every type-like container (Type/Class/Struct/Interface/Trait/Enum).
+        // Struct included so Rust structs (now labelled "Struct") register here.
+        if (cbm_label_is_type_like(d->label)) {
             CBMRegisteredType rt;
             memset(&rt, 0, sizeof(rt));
             rt.qualified_name = cbm_arena_strdup(arena, d->qualified_name);
             rt.short_name = cbm_arena_strdup(arena, d->short_name);
             rt.is_interface = d->is_interface || strcmp(d->label, "Trait") == 0 ||
                               strcmp(d->label, "Interface") == 0;
-            cbm_registry_add_type(&reg, rt);
+            cbm_registry_add_type(reg, rt);
+            cbm_idxmemo_put_if_absent(&type_idx, arena, rt.qualified_name, reg->type_count - 1);
         }
 
         if (strcmp(d->label, "Function") == 0 || strcmp(d->label, "Method") == 0) {
@@ -5182,27 +5186,26 @@ void cbm_run_rust_lsp_cross(CBMArena *arena, const char *source, int source_len,
 
             if (strcmp(d->label, "Method") == 0 && d->receiver_type && d->receiver_type[0]) {
                 rf.receiver_type = cbm_arena_strdup(arena, d->receiver_type);
-                if (!cbm_registry_lookup_type(&reg, rf.receiver_type)) {
+                if (cbm_idxmemo_get(&type_idx, rf.receiver_type) < 0) {
                     CBMRegisteredType auto_t;
                     memset(&auto_t, 0, sizeof(auto_t));
                     auto_t.qualified_name = rf.receiver_type;
                     const char *dot = strrchr(d->receiver_type, '.');
                     auto_t.short_name = dot ? cbm_arena_strdup(arena, dot + 1) : rf.receiver_type;
-                    cbm_registry_add_type(&reg, auto_t);
+                    cbm_registry_add_type(reg, auto_t);
+                    cbm_idxmemo_put_if_absent(&type_idx, arena, auto_t.qualified_name,
+                                              reg->type_count - 1);
                 }
             }
 
-            cbm_registry_add_func(&reg, rf);
+            cbm_registry_add_func(reg, rf);
 
             /* If trait_qn set: encode embedded_type linkage on receiver. */
             if (rf.receiver_type && d->trait_qn && d->trait_qn[0]) {
                 CBMRegisteredType *rt = NULL;
-                for (int ti = 0; ti < reg.type_count; ti++) {
-                    if (reg.types[ti].qualified_name &&
-                        strcmp(reg.types[ti].qualified_name, rf.receiver_type) == 0) {
-                        rt = &reg.types[ti];
-                        break;
-                    }
+                int32_t tix = cbm_idxmemo_get(&type_idx, rf.receiver_type);
+                if (tix >= 0) {
+                    rt = &reg->types[tix];
                 }
                 if (rt) {
                     int existing = 0;
@@ -5221,12 +5224,138 @@ void cbm_run_rust_lsp_cross(CBMArena *arena, const char *source, int source_len,
         }
     }
 
-    /* Run the per-file walker. */
-    /* Finalise the cross-file registry now that all defs are added. */
-    cbm_registry_finalize(&reg);
+    /* Finalise the cross-file registry now that all defs are added.
+     * (type_idx is arena-owned — freed with the registry's arena.) */
+    cbm_registry_finalize(reg);
+}
+
+/* Resolve one Rust file against an ALREADY-built (per-file or shared) registry. */
+static void rust_resolve_against_registry(CBMArena *arena, const char *source, int source_len,
+                                          const char *module_qn, const CBMTypeRegistry *reg,
+                                          const char **import_names, const char **import_qns,
+                                          int import_count, TSNode root,
+                                          const struct CBMCargoManifest *manifest,
+                                          CBMResolvedCallArray *out, CBMFileResult *result) {
+    RustLSPContext ctx;
+    rust_lsp_init(&ctx, arena, source, source_len, reg, module_qn, out);
+    ctx.cargo_manifest = manifest;
+    rust_collect_uses(&ctx, root);
+    for (int i = 0; i < import_count; i++) {
+        if (import_names[i] && import_qns[i]) {
+            rust_lsp_add_use(&ctx, import_names[i], import_qns[i]);
+        }
+    }
+    rust_lsp_process_file(&ctx, root);
+    if (result)
+        cbm_rust_synth_proc_macro_edges(arena, result);
+}
+
+/* Tier-2: build the Rust cross registry ONCE from all project defs, sealed
+ * read-only, and shared across every Rust file's resolve (mirrors C/py/cs/ts).
+ * Converts the pipeline's CBMLSPDef into CBMRustLSPDef inline (same field copy as
+ * pass_lsp_cross.c's pxc_lspdefs_to_rust, incl. trait_qn=NULL). module_qn=NULL is
+ * byte-identical because all_defs always carry def_module_qn. */
+CBMTypeRegistry *cbm_rust_build_cross_registry(CBMArena *arena, CBMLSPDef *defs, int def_count) {
+    if (!arena)
+        return NULL;
+    CBMTypeRegistry *reg = (CBMTypeRegistry *)cbm_arena_alloc(arena, sizeof(*reg));
+    if (!reg)
+        return NULL;
+    CBMRustLSPDef *rdefs = NULL;
+    if (def_count > 0) {
+        rdefs = (CBMRustLSPDef *)cbm_arena_alloc(arena, (size_t)def_count * sizeof(CBMRustLSPDef));
+        if (!rdefs)
+            return NULL;
+        for (int i = 0; i < def_count; i++) {
+            rdefs[i].qualified_name = defs[i].qualified_name;
+            rdefs[i].short_name = defs[i].short_name;
+            rdefs[i].label = defs[i].label;
+            rdefs[i].receiver_type = defs[i].receiver_type;
+            rdefs[i].def_module_qn = defs[i].def_module_qn;
+            rdefs[i].return_types = defs[i].return_types;
+            rdefs[i].embedded_types = defs[i].embedded_types;
+            rdefs[i].field_defs = defs[i].field_defs;
+            rdefs[i].method_names_str = defs[i].method_names_str;
+            rdefs[i].trait_qn = NULL;
+            rdefs[i].is_interface = defs[i].is_interface;
+        }
+    }
+    rust_populate_cross_registry(reg, arena, rdefs, def_count, /*module_qn=*/NULL);
+    reg->read_only = true; /* seal: shared Tier-2 registry is read-only during resolve */
+    return reg;
+}
+
+/* Cross-file Rust resolve using a pre-built shared registry (Tier-2). Skips the
+ * per-file registry build; just parse + resolve. Mirrors cbm_run_c_lsp_cross_with_registry. */
+void cbm_run_rust_lsp_cross_with_registry(CBMArena *arena, const char *source, int source_len,
+                                          const char *module_qn, const CBMTypeRegistry *reg,
+                                          const char **import_names, const char **import_qns,
+                                          int import_count, TSTree *cached_tree,
+                                          const struct CBMCargoManifest *manifest,
+                                          CBMResolvedCallArray *out, CBMFileResult *result) {
+    if (!source || source_len <= 0 || !out || !reg)
+        return;
+    TSParser *parser = NULL;
+    TSTree *tree = cached_tree;
+    bool owns_tree = false;
+    if (!tree) {
+        parser = ts_parser_new();
+        if (!parser)
+            return;
+        ts_parser_set_language(parser, tree_sitter_rust());
+        tree = ts_parser_parse_string(parser, NULL, source, source_len);
+        owns_tree = true;
+        if (!tree) {
+            ts_parser_delete(parser);
+            return;
+        }
+    }
+    TSNode root = ts_tree_root_node(tree);
+    rust_resolve_against_registry(arena, source, source_len, module_qn, reg, import_names,
+                                  import_qns, import_count, root, manifest, out, result);
+    if (owns_tree) {
+        ts_tree_delete(tree);
+        if (parser)
+            ts_parser_delete(parser);
+    }
+}
+
+void cbm_run_rust_lsp_cross_with_manifest(CBMArena *arena, const char *source, int source_len,
+                                          const char *module_qn, CBMRustLSPDef *defs, int def_count,
+                                          const char **import_names, const char **import_qns,
+                                          int import_count, TSTree *cached_tree,
+                                          const struct CBMCargoManifest *manifest,
+                                          CBMResolvedCallArray *out) {
+    if (!source || source_len <= 0 || !out)
+        return;
+
+    TSParser *parser = NULL;
+    TSTree *tree = cached_tree;
+    bool owns_tree = false;
+    if (!tree) {
+        parser = ts_parser_new();
+        if (!parser)
+            return;
+        ts_parser_set_language(parser, tree_sitter_rust());
+        tree = ts_parser_parse_string(parser, NULL, source, source_len);
+        owns_tree = true;
+        if (!tree) {
+            ts_parser_delete(parser);
+            return;
+        }
+    }
+    TSNode root = ts_tree_root_node(tree);
+
+    /* Build registry from cross-file defs + stdlib (per-file). */
+    CBMTypeRegistry reg;
+    rust_populate_cross_registry(&reg, arena, defs, def_count, module_qn);
 
     RustLSPContext ctx;
     rust_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, out);
+    /* Workspace/dependency awareness for cross-CRATE path routing (#56).
+     * Mirrors the single-file path (cbm_run_rust_lsp_with_manifest). NULL
+     * when no Cargo.toml was parsed — in-crate resolution is unaffected. */
+    ctx.cargo_manifest = manifest;
     rust_collect_uses(&ctx, root);
     for (int i = 0; i < import_count; i++) {
         if (import_names[i] && import_qns[i]) {
@@ -5240,6 +5369,18 @@ void cbm_run_rust_lsp_cross(CBMArena *arena, const char *source, int source_len,
         if (parser)
             ts_parser_delete(parser);
     }
+}
+
+/* Manifest-free entry point. Preserves the pre-existing signature used by
+ * the unit tests (test_rust_lsp.c) and the batch wrapper — delegates to
+ * the manifest-aware variant with a NULL manifest. */
+void cbm_run_rust_lsp_cross(CBMArena *arena, const char *source, int source_len,
+                            const char *module_qn, CBMRustLSPDef *defs, int def_count,
+                            const char **import_names, const char **import_qns, int import_count,
+                            TSTree *cached_tree, CBMResolvedCallArray *out) {
+    cbm_run_rust_lsp_cross_with_manifest(arena, source, source_len, module_qn, defs, def_count,
+                                         import_names, import_qns, import_count, cached_tree, NULL,
+                                         out);
 }
 
 void cbm_batch_rust_lsp_cross(CBMArena *arena, CBMBatchRustLSPFile *files, int file_count,

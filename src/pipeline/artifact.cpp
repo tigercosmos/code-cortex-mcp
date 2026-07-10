@@ -15,12 +15,20 @@ enum {
 };
 #define ART_BYTES_PER_MB ((size_t)1024 * 1024)
 
+/* Generous ceiling on an imported artifact's decompressed size. Real indexes
+ * (a full Linux-kernel DB is ~14 GB) fit comfortably; a frame that declares
+ * more than this is rejected before any allocation so a crafted content size
+ * can neither trigger a runaway allocation nor be used to desync the decoder
+ * capacity from the destination buffer. */
+#define ART_MAX_DECOMPRESSED_BYTES ((size_t)64 * 1024 * ART_BYTES_PER_MB)
+
 #include "pipeline/artifact.h"
 #include "store/store.h"
 #include "foundation/platform.h"
 #include "foundation/compat_fs.h"
 #include "foundation/compat.h"
 #include "foundation/log.h"
+#include "foundation/str_util.h" /* cbm_validate_shell_arg — git shell-out hardening */
 
 #include "zstd_store.h"
 
@@ -36,12 +44,17 @@ enum {
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
 /* Thread-local rotating buffers for small int→string conversions (logging).
  * Rotating allows multiple itoa_buf() calls in a single log statement. */
 enum { ART_RING = 4, ART_RING_MASK = 3 };
+static thread_local char g_export_error[CBM_SZ_512];
+
 static const char *itoa_buf(int v) {
     static thread_local char bufs[ART_RING][CBM_SZ_32];
     static thread_local int idx = 0;
@@ -51,14 +64,73 @@ static const char *itoa_buf(int v) {
     return bufs[i];
 }
 
+const char *cbm_artifact_export_last_error(void) {
+    return g_export_error[0] ? g_export_error : NULL;
+}
+
+static void clear_export_error(void) {
+    g_export_error[0] = '\0';
+}
+
+static int artifact_export_fail(const char *stage, const char *path, const char *err, int err_no) {
+    const char *safe_stage = stage ? stage : "unknown";
+    const char *safe_err = err ? err : "unknown";
+
+    if (path && err_no != 0) {
+        snprintf(g_export_error, sizeof(g_export_error), "%s: %s errno=%d path=%s", safe_stage,
+                 safe_err, err_no, path);
+    } else if (path) {
+        snprintf(g_export_error, sizeof(g_export_error), "%s: %s path=%s", safe_stage, safe_err,
+                 path);
+    } else if (err_no != 0) {
+        snprintf(g_export_error, sizeof(g_export_error), "%s: %s errno=%d", safe_stage, safe_err,
+                 err_no);
+    } else {
+        snprintf(g_export_error, sizeof(g_export_error), "%s: %s", safe_stage, safe_err);
+    }
+
+    if (path && err_no != 0) {
+        cbm_log_error("artifact.export", "stage", safe_stage, "err", safe_err, "errno",
+                      itoa_buf(err_no), "path", path);
+    } else if (path) {
+        cbm_log_error("artifact.export", "stage", safe_stage, "err", safe_err, "path", path);
+    } else if (err_no != 0) {
+        cbm_log_error("artifact.export", "stage", safe_stage, "err", safe_err, "errno",
+                      itoa_buf(err_no));
+    } else {
+        cbm_log_error("artifact.export", "stage", safe_stage, "err", safe_err);
+    }
+    return CBM_NOT_FOUND;
+}
+
+typedef struct {
+    const char *err;
+    int err_no;
+} artifact_file_error_t;
+
+static void file_error_clear(artifact_file_error_t *out) {
+    if (out) {
+        out->err = NULL;
+        out->err_no = 0;
+    }
+}
+
+static void file_error_set(artifact_file_error_t *out, const char *err, int err_no) {
+    if (out) {
+        out->err = err;
+        out->err_no = err_no;
+    }
+}
+
 /* Build path: <repo>/.codebase-memory/<name> into caller-owned buf. */
-static void artifact_path(char *buf, size_t bufsz, const char *repo_path, const char *name) {
-    snprintf(buf, bufsz, "%s/%s/%s", repo_path, CBM_ARTIFACT_DIR, name);
+static bool artifact_path(char *buf, size_t bufsz, const char *repo_path, const char *name) {
+    int n = snprintf(buf, bufsz, "%s/%s/%s", repo_path, CBM_ARTIFACT_DIR, name);
+    return n >= 0 && (size_t)n < bufsz;
 }
 
 /* Read entire file into malloc'd buffer. Sets *out_len. Returns NULL on error. */
 static char *read_file_alloc(const char *path, size_t *out_len) {
-    FILE *fp = fopen(path, "rb");
+    FILE *fp = cbm_fopen(path, "rb");
     if (!fp) {
         return NULL;
     }
@@ -85,30 +157,97 @@ static char *read_file_alloc(const char *path, size_t *out_len) {
 }
 
 /* Write buffer to file atomically (write to tmp, rename). Returns 0 on success. */
-static int write_file_atomic(const char *path, const char *data, size_t len) {
+static int write_file_atomic(const char *path, const char *data, size_t len,
+                             artifact_file_error_t *out_err) {
+    file_error_clear(out_err);
+
     char tmp[CBM_SZ_4K];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    if (n < 0 || (size_t)n >= sizeof(tmp)) {
+        file_error_set(out_err, "path_too_long", 0);
+        return CBM_NOT_FOUND;
+    }
+
     FILE *fp = fopen(tmp, "wb");
     if (!fp) {
+        file_error_set(out_err, "open_temp", errno);
         return CBM_NOT_FOUND;
     }
+
     size_t wr = fwrite(data, ART_NUL, len, fp);
-    (void)fclose(fp);
     if (wr != len) {
+        int saved_errno = ferror(fp) ? errno : 0;
+        (void)fclose(fp);
         cbm_unlink(tmp);
+        file_error_set(out_err, "write_temp", saved_errno);
         return CBM_NOT_FOUND;
     }
+
+    if (fclose(fp) != 0) {
+        int saved_errno = errno;
+        cbm_unlink(tmp);
+        file_error_set(out_err, "close_temp", saved_errno);
+        return CBM_NOT_FOUND;
+    }
+
+#ifdef _WIN32
+    /* MoveFileEx replace approach suggested by @Ayush7Ranjan in #492. */
+    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DWORD saved_error = GetLastError();
+        cbm_unlink(tmp);
+        file_error_set(out_err, "rename_temp", (int)saved_error);
+        return CBM_NOT_FOUND;
+    }
+#else
     if (rename(tmp, path) != 0) {
+        int saved_errno = errno;
         cbm_unlink(tmp);
+        file_error_set(out_err, "rename_temp", saved_errno);
         return CBM_NOT_FOUND;
     }
+#endif
     return 0;
+}
+
+#ifdef _WIN32
+#define ARTIFACT_NULL_DEV "NUL"
+#else
+#define ARTIFACT_NULL_DEV "/dev/null"
+#endif
+
+/* See artifact.h. Mirrors git_context.c's git_validate_repo_path (the best-hardened
+ * git shell-out): cbm_validate_shell_arg rejects quote / backslash / substitution
+ * metacharacters, and on Windows we also reject the cmd.exe expansion metacharacters
+ * % ! ^. Callers then use DOUBLE quotes (honored by both POSIX sh and cmd.exe, unlike
+ * single quotes on cmd.exe), so a repo path may legitimately contain spaces. */
+bool cbm_artifact_repo_path_is_shell_safe(const char *repo_path) {
+    if (!cbm_validate_shell_arg(repo_path)) {
+        return false;
+    }
+#ifdef _WIN32
+    for (const char *p = repo_path; *p; p++) {
+        if (*p == '%' || *p == '!' || *p == '^') {
+            return false;
+        }
+    }
+#endif
+    return true;
 }
 
 /* Get current git HEAD hash. buf must be >= CBM_SZ_64. Returns false on error. */
 static bool git_head_hash(const char *repo_path, char *buf, size_t bufsz) {
     char cmd[CBM_SZ_1K];
-    snprintf(cmd, sizeof(cmd), "git -C '%s' rev-parse HEAD 2>/dev/null", repo_path);
+    if (!cbm_artifact_repo_path_is_shell_safe(repo_path)) {
+        buf[0] = '\0';
+        return false;
+    }
+    int n =
+        snprintf(cmd, sizeof(cmd), "git -C \"%s\" rev-parse HEAD 2>" ARTIFACT_NULL_DEV, repo_path);
+    if (n < 0 || (size_t)n >= sizeof(cmd)) {
+        buf[0] = '\0'; /* truncated command → don't run a malformed shell string (parity with
+                          git_context.c) */
+        return false;
+    }
     FILE *fp = cbm_popen(cmd, "r");
     if (!fp) {
         buf[0] = '\0';
@@ -215,13 +354,20 @@ static int write_metadata(const char *repo_path, const char *project_name, int n
     char *json = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY, &json_len);
     yyjson_mut_doc_free(doc);
     if (!json) {
-        return CBM_NOT_FOUND;
+        return artifact_export_fail("write_metadata", NULL, "json_encode", 0);
     }
 
     char meta_path[CBM_SZ_4K];
-    artifact_path(meta_path, sizeof(meta_path), repo_path, CBM_ARTIFACT_META);
-    int rc = write_file_atomic(meta_path, json, json_len);
+    if (!artifact_path(meta_path, sizeof(meta_path), repo_path, CBM_ARTIFACT_META)) {
+        free(json);
+        return artifact_export_fail("write_metadata", repo_path, "path_too_long", 0);
+    }
+    artifact_file_error_t ioerr;
+    int rc = write_file_atomic(meta_path, json, json_len, &ioerr);
     free(json);
+    if (rc != 0) {
+        return artifact_export_fail("write_metadata", meta_path, ioerr.err, ioerr.err_no);
+    }
     return rc;
 }
 
@@ -243,9 +389,13 @@ static void ensure_gitattributes(const char *repo_path) {
     } else {
         FILE *fp = fdopen(fd, "w");
         if (fp) {
+            /* Order matters: attributes apply left to right and the `binary`
+             * macro expands to `-diff -merge -text`, so a trailing `binary`
+             * unsets `merge=ours` and the conflict prevention this file
+             * exists for never engages. The macro must come first. */
             (void)fputs("# Auto-generated by codebase-memory-mcp\n"
                         "# Prevent merge conflicts on compressed artifact\n" CBM_ARTIFACT_FILENAME
-                        " merge=ours binary\n",
+                        " binary merge=ours\n",
                         fp);
             (void)fclose(fp);
         } else {
@@ -254,8 +404,15 @@ static void ensure_gitattributes(const char *repo_path) {
     }
 
     /* Best-effort: configure merge driver */
+    if (!cbm_artifact_repo_path_is_shell_safe(repo_path)) {
+        return;
+    }
     char cmd[CBM_SZ_1K];
-    snprintf(cmd, sizeof(cmd), "git -C '%s' config merge.ours.driver true 2>/dev/null", repo_path);
+    int n = snprintf(cmd, sizeof(cmd),
+                     "git -C \"%s\" config merge.ours.driver true 2>" ARTIFACT_NULL_DEV, repo_path);
+    if (n < 0 || (size_t)n >= sizeof(cmd)) {
+        return; /* truncated command → skip (parity with git_context.c) */
+    }
     FILE *p = cbm_popen(cmd, "r");
     if (p) {
         (void)cbm_pclose(p);
@@ -288,7 +445,8 @@ static char *prepare_stripped_db(const char *db_path, size_t *out_size) {
      * (which blocks ATTACH, used internally by VACUUM INTO). */
     sqlite3 *raw_db = NULL;
     if (sqlite3_open_v2(db_path, &raw_db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
-        cbm_log_error("artifact.export", "err", "open_source_db");
+        const char *err = raw_db ? sqlite3_errmsg(raw_db) : "sqlite_open";
+        artifact_export_fail("open_source_db", db_path, err, 0);
         sqlite3_close(raw_db);
         return NULL;
     }
@@ -300,7 +458,7 @@ static char *prepare_stripped_db(const char *db_path, size_t *out_size) {
     sqlite3_close(raw_db);
 
     if (vrc != SQLITE_OK) {
-        cbm_log_error("artifact.export", "err", "vacuum_into");
+        artifact_export_fail("vacuum_into", tmp_path, errmsg ? errmsg : sqlite3_errstr(vrc), 0);
         sqlite3_free(errmsg);
         cbm_unlink(tmp_path);
         return NULL;
@@ -315,6 +473,9 @@ static char *prepare_stripped_db(const char *db_path, size_t *out_size) {
     }
 
     char *data = read_file_alloc(tmp_path, out_size);
+    if (!data || *out_size == 0) {
+        artifact_export_fail("read_stripped_db", tmp_path, "empty_or_unreadable", errno);
+    }
     cbm_unlink(tmp_path);
 
     /* Clean up WAL/SHM from temp */
@@ -331,14 +492,26 @@ static char *prepare_stripped_db(const char *db_path, size_t *out_size) {
 
 int cbm_artifact_export(const char *db_path, const char *repo_path, const char *project_name,
                         int quality) {
+    clear_export_error();
+
     if (!db_path || !repo_path || !project_name) {
-        return CBM_NOT_FOUND;
+        return artifact_export_fail("validate_args", NULL, "missing_argument", 0);
     }
 
     /* Ensure .codebase-memory/ directory exists */
     char art_dir[CBM_SZ_4K];
-    snprintf(art_dir, sizeof(art_dir), "%s/%s", repo_path, CBM_ARTIFACT_DIR);
-    cbm_mkdir_p(art_dir, ART_DIR_PERMS);
+    int dir_len = snprintf(art_dir, sizeof(art_dir), "%s/%s", repo_path, CBM_ARTIFACT_DIR);
+    if (dir_len < 0 || (size_t)dir_len >= sizeof(art_dir)) {
+        return artifact_export_fail("prepare_artifact_dir", repo_path, "path_too_long", 0);
+    }
+    errno = 0;
+    if (!cbm_mkdir_p(art_dir, ART_DIR_PERMS)) {
+        return artifact_export_fail("prepare_artifact_dir", art_dir, "mkdir_or_not_directory",
+                                    errno);
+    }
+    if (!cbm_is_dir(art_dir)) {
+        return artifact_export_fail("prepare_artifact_dir", art_dir, "not_directory", 0);
+    }
 
     size_t db_size = 0;
     char *db_data = NULL;
@@ -353,8 +526,10 @@ int cbm_artifact_export(const char *db_path, const char *repo_path, const char *
 
     if (!db_data || db_size == 0) {
         free(db_data);
-        cbm_log_error("artifact.export", "err", "read_db");
-        return CBM_NOT_FOUND;
+        if (cbm_artifact_export_last_error()) {
+            return CBM_NOT_FOUND;
+        }
+        return artifact_export_fail("read_db", db_path, "empty_or_unreadable", errno);
     }
 
     /* Compress with zstd */
@@ -362,7 +537,7 @@ int cbm_artifact_export(const char *db_path, const char *repo_path, const char *
     char *compressed = (char *)malloc(bound);
     if (!compressed) {
         free(db_data);
-        return CBM_NOT_FOUND;
+        return artifact_export_fail("compress", NULL, "alloc_compressed_buffer", 0);
     }
 
     int clen = cbm_zstd_compress(db_data, (int)db_size, compressed, (int)bound, compression_level);
@@ -370,19 +545,21 @@ int cbm_artifact_export(const char *db_path, const char *repo_path, const char *
 
     if (clen <= 0) {
         free(compressed);
-        cbm_log_error("artifact.export", "err", "zstd_compress");
-        return CBM_NOT_FOUND;
+        return artifact_export_fail("compress", NULL, "zstd_compress", 0);
     }
 
     /* Write compressed artifact */
     char zst_path[CBM_SZ_4K];
-    artifact_path(zst_path, sizeof(zst_path), repo_path, CBM_ARTIFACT_FILENAME);
-    int wrc = write_file_atomic(zst_path, compressed, (size_t)clen);
+    if (!artifact_path(zst_path, sizeof(zst_path), repo_path, CBM_ARTIFACT_FILENAME)) {
+        free(compressed);
+        return artifact_export_fail("write_artifact", repo_path, "path_too_long", 0);
+    }
+    artifact_file_error_t ioerr;
+    int wrc = write_file_atomic(zst_path, compressed, (size_t)clen, &ioerr);
     free(compressed);
 
     if (wrc != 0) {
-        cbm_log_error("artifact.export", "err", "write_artifact");
-        return CBM_NOT_FOUND;
+        return artifact_export_fail("write_artifact", zst_path, ioerr.err, ioerr.err_no);
     }
 
     /* Get node/edge counts for metadata */
@@ -396,7 +573,11 @@ int cbm_artifact_export(const char *db_path, const char *repo_path, const char *
     }
 
     /* Write metadata */
-    write_metadata(repo_path, project_name, nodes, edges, db_size, (size_t)clen, compression_level);
+    if (write_metadata(repo_path, project_name, nodes, edges, db_size, (size_t)clen,
+                       compression_level) != 0) {
+        cbm_unlink(zst_path);
+        return CBM_NOT_FOUND;
+    }
 
     /* Ensure .gitattributes for merge conflict prevention */
     ensure_gitattributes(repo_path);
@@ -444,16 +625,29 @@ int cbm_artifact_import(const char *repo_path, const char *cache_db_path) {
     }
 
     /* Decompress */
-    char *decompressed = (char *)malloc(original_size);
+    /* Size the destination from the zstd frame's own content-size header, not
+     * from the separately-stored (attacker-controllable) original_size field.
+     * The allocation and the decoder capacity are then the SAME size_t value,
+     * so a crafted size can never make the capacity exceed the real buffer
+     * (the int-truncation that used to do exactly that is gone with the size_t
+     * signature). Require the metadata field to agree, and cap the total. */
+    size_t frame_size = cbm_zstd_frame_content_size(compressed, clen);
+    if (frame_size == 0 || frame_size > ART_MAX_DECOMPRESSED_BYTES || frame_size != original_size) {
+        free(compressed);
+        cbm_log_error("artifact.import", "err", "bad_decompressed_size");
+        return CBM_NOT_FOUND;
+    }
+
+    char *decompressed = (char *)malloc(frame_size);
     if (!decompressed) {
         free(compressed);
         return CBM_NOT_FOUND;
     }
 
-    int dlen = cbm_zstd_decompress(compressed, (int)clen, decompressed, (int)original_size);
+    int64_t dlen = cbm_zstd_decompress(compressed, clen, decompressed, frame_size);
     free(compressed);
 
-    if (dlen <= 0) {
+    if (dlen <= 0 || (size_t)dlen != frame_size) {
         free(decompressed);
         cbm_log_error("artifact.import", "err", "zstd_decompress");
         return CBM_NOT_FOUND;
@@ -472,11 +666,18 @@ int cbm_artifact_import(const char *repo_path, const char *cache_db_path) {
         cbm_mkdir_p(cache_dir, ART_DIR_PERMS);
     }
 
-    int wrc = write_file_atomic(tmp_path, decompressed, (size_t)dlen);
+    artifact_file_error_t ioerr;
+    int wrc = write_file_atomic(tmp_path, decompressed, (size_t)dlen, &ioerr);
     free(decompressed);
 
     if (wrc != 0) {
-        cbm_log_error("artifact.import", "err", "write_temp_db");
+        if (ioerr.err_no != 0) {
+            cbm_log_error("artifact.import", "err", "write_temp_db", "detail", ioerr.err, "errno",
+                          itoa_buf(ioerr.err_no), "path", tmp_path);
+        } else {
+            cbm_log_error("artifact.import", "err", "write_temp_db", "detail", ioerr.err, "path",
+                          tmp_path);
+        }
         return CBM_NOT_FOUND;
     }
 

@@ -167,6 +167,9 @@ extern const TSLanguage *tree_sitter_apex(void);
 extern const TSLanguage *tree_sitter_soql(void);
 extern const TSLanguage *tree_sitter_sosl(void);
 extern const TSLanguage *tree_sitter_pine(void);
+/* Mojo language is wired (enum + extension detection) but its tree-sitter
+ * grammar is not vendored in this fork — deferred like cfml/qml. The lang spec
+ * below uses a NULL grammar fn so .mojo files are recognized but not parsed. */
 #ifdef __cplusplus
 }
 #endif
@@ -479,7 +482,7 @@ static const char *elixir_var_types[] = {"binary_operator", NULL};
 
 // ==================== HASKELL ====================
 /* "bind" = a nullary value binding (`foo = 1`); has a `name` field like `function`.
- * `signature` (type annotations) is suppressed in resolve_func_name so it never doubles. */
+ * `signature` (type annotations) is suppressed in cbm_resolve_func_name so it never doubles. */
 static const char *haskell_func_types[] = {"function", "signature", "bind", NULL};
 static const char *haskell_class_types[] = {"class", "data_type", "newtype", NULL};
 static const char *haskell_module_types[] = {"haskell", NULL};
@@ -557,7 +560,7 @@ static const char *perl_func_types[] = {"subroutine_declaration_statement", NULL
 static const char *perl_module_types[] = {"source_file", NULL};
 static const char *perl_call_types[] = {"ambiguous_function_call_expression",
                                         "function_call_expression", "func1op_call_expression",
-                                        NULL};
+                                        "method_call_expression", NULL};
 static const char *perl_import_types[] = {"use_statement", "require_statement", "require", NULL};
 static const char *perl_branch_types[] = {"if_statement",      "unless_statement", "for_statement",
                                           "foreach_statement", "while_statement",  NULL};
@@ -608,7 +611,7 @@ static const char *css_import_types[] = {"import_statement", NULL};
 // ==================== SCSS ====================
 static const char *scss_func_types[] = {"mixin_statement", "function_statement", NULL};
 static const char *scss_module_types[] = {"stylesheet", NULL};
-static const char *scss_call_types[] = {"call_expression", NULL};
+static const char *scss_call_types[] = {"call_expression", "include_statement", NULL};
 static const char *scss_import_types[] = {"import_statement", "use_statement", "include_statement",
                                           NULL};
 static const char *scss_branch_types[] = {"if_statement", NULL};
@@ -666,6 +669,10 @@ static const char *r_env_funcs[] = {"Sys.getenv", NULL};
 static const char *perl_env_funcs[] = {"$ENV", NULL};
 
 // ==================== CLOJURE ====================
+/* Clojure def-forms (defn/def/...) are `list_lit` nodes; gating the actual
+ * def-vs-call distinction happens in cbm_resolve_func_name (returns NULL for a
+ * non-def list_lit such as a call), so non-def lists never push a SCOPE_FUNC. */
+static const char *clojure_func_types[] = {"list_lit", NULL};
 static const char *clojure_module_types[] = {"source", NULL};
 static const char *clojure_call_types[] = {"list_lit", NULL};
 
@@ -673,7 +680,7 @@ static const char *clojure_call_types[] = {"list_lit", NULL};
 /* Top-level `let f () = ...` parses to function_or_value_defn (module-level
  * value_declaration is aliased to declaration_expression, which wraps it). The
  * name lives on a function_declaration_left/value_declaration_left child — see
- * the CBM_LANG_FSHARP branch in resolve_func_name. */
+ * the CBM_LANG_FSHARP branch in cbm_resolve_func_name. */
 static const char *fsharp_func_types[] = {"function_declaration", "value_declaration",
                                           "function_or_value_defn", NULL};
 static const char *fsharp_class_types[] = {"type_definition", "exception_definition", NULL};
@@ -686,7 +693,11 @@ static const char *fsharp_branch_types[] = {"if_expression",    "for_expression"
 static const char *fsharp_var_types[] = {"value_declaration", NULL};
 
 // ==================== JULIA ====================
-static const char *julia_func_types[] = {"function_definition", "short_function_definition", NULL};
+/* `assignment` covers Julia short-form `f(x) = body` (the grammar parses it as an
+ * assignment with a call_expression LHS, not a short_function_definition). The
+ * resolver names it only when the LHS is a call, so plain `x = 5` is not a def. */
+static const char *julia_func_types[] = {"function_definition", "short_function_definition",
+                                         "assignment", NULL};
 static const char *julia_class_types[] = {"struct_definition", "abstract_definition",
                                           "primitive_definition", NULL};
 static const char *julia_module_types[] = {"source_file", NULL};
@@ -795,7 +806,7 @@ static const char *markdown_class_types[] = {"atx_heading", "setext_heading", NU
 // ==================== MAKEFILE ====================
 static const char *makefile_func_types[] = {"rule", "recipe", NULL};
 static const char *makefile_module_types[] = {"makefile", NULL};
-static const char *makefile_call_types[] = {"function_call", "call", NULL};
+static const char *makefile_call_types[] = {"function_call", "call", "shell_function", NULL};
 static const char *makefile_import_types[] = {"include_directive", "include", NULL};
 static const char *makefile_var_types[] = {"variable_assignment", NULL};
 
@@ -858,7 +869,7 @@ static const char *svelte_branch_types[] = {"if_statement", "each_statement", "a
 // ==================== MESON ====================
 static const char *meson_func_types[] = {"function_expression", NULL};
 static const char *meson_module_types[] = {"source_file", NULL};
-static const char *meson_call_types[] = {"function_expression", "command", NULL};
+static const char *meson_call_types[] = {"normal_command", NULL};
 static const char *meson_branch_types[] = {"if_statement", "foreach_statement", NULL};
 static const char *meson_var_types[] = {"assignment_statement", NULL};
 
@@ -942,7 +953,7 @@ static const char *d_throw_types[] = {"throw_expression", NULL};
 
 // ==================== LLVM IR ====================
 static const char *llvm_func_types[] = {"function_header", NULL};
-static const char *llvm_call_types[] = {"call", "invoke", NULL};
+static const char *llvm_call_types[] = {"call", "invoke", "instruction_call", NULL};
 static const char *llvm_branch_types[] = {"br", "switch", NULL};
 static const char *llvm_var_types[] = {"local_var", "global_var", NULL};
 
@@ -970,7 +981,7 @@ static const char *solidity_assign_types[] = {"assignment_expression",
                                               "augmented_assignment_expression", NULL};
 static const char *solidity_throw_types[] = {"revert_statement", "emit_statement", NULL};
 static const char *solidity_module_types[] = {"source_file", NULL};
-static const char *typst_func_types[] = {"lambda", NULL};
+static const char *typst_func_types[] = {"lambda", "let", NULL};
 static const char *typst_call_types[] = {"call", NULL};
 static const char *typst_import_types[] = {"import", "include", NULL};
 static const char *typst_branch_types[] = {"if", "for", "while", NULL};
@@ -1028,6 +1039,9 @@ static const char *pascal_assign_types[] = {"assignment", NULL};
 static const char *pascal_throw_types[] = {"raise", NULL};
 static const char *pascal_module_types[] = {"source_file", NULL};
 static const char *d_module_types[] = {"source_file", NULL};
+/* Scheme def-forms (`(define (f ..) ..)`) are `list` nodes; the def-vs-call
+ * gate is in cbm_resolve_func_name (returns NULL for a non-def list). */
+static const char *scheme_func_types[] = {"list", NULL};
 static const char *scheme_call_types[] = {"list", NULL};
 static const char *scheme_var_types[] = {"symbol", NULL};
 static const char *scheme_module_types[] = {"program", NULL};
@@ -1043,7 +1057,11 @@ static const char *fish_branch_types[] = {"if_statement", "switch_statement", "w
                                           "for_statement", NULL};
 static const char *fish_var_types[] = {"variable", NULL};
 static const char *fish_module_types[] = {"program", NULL};
-static const char *awk_func_types[] = {"func_def", "rule", NULL};
+/* Only `func_def` (a named `function f(){}`) is a callable. A `rule` (`{...}` /
+ * `/re/{...}` / BEGIN/END) is ANONYMOUS top-level executable code — it cannot be
+ * called by name, so a call inside a rule is legitimately Module-sourced, and a
+ * rule must NOT be treated as a function boundary. */
+static const char *awk_func_types[] = {"func_def", NULL};
 static const char *awk_call_types[] = {"func_call", "command", NULL};
 static const char *awk_branch_types[] = {"if_statement",
                                          "for_statement",
@@ -1091,12 +1109,15 @@ static const char *ada_throw_types[] = {"raise_statement", NULL};
 static const char *ada_module_types[] = {"compilation", NULL};
 static const char *agda_func_types[] = {"function", NULL};
 static const char *agda_class_types[] = {"data", "record", NULL};
-static const char *agda_call_types[] = {"module_application", NULL};
+static const char *agda_call_types[] = {"module_application", "expr", NULL};
 static const char *agda_import_types[] = {"import", "open", "import_directive", "instance", NULL};
 static const char *agda_branch_types[] = {"lambda", "match", "do", NULL};
 static const char *agda_var_types[] = {"typed_binding", NULL};
 static const char *agda_module_types[] = {"source_file", NULL};
 static const char *racket_class_types[] = {"structure", NULL};
+/* Racket def-forms (`(define (f ..) ..)`) are `list` nodes; the def-vs-call
+ * gate is in cbm_resolve_func_name (returns NULL for a non-def list). */
+static const char *racket_func_types[] = {"list", NULL};
 static const char *racket_call_types[] = {"list", NULL};
 static const char *racket_var_types[] = {"symbol", NULL};
 static const char *racket_module_types[] = {"program", NULL};
@@ -1132,8 +1153,13 @@ static const char *purescript_import_types[] = {"import", "import_item", "instan
 static const char *purescript_branch_types[] = {"exp_if", "exp_case", "exp_do", NULL};
 static const char *purescript_var_types[] = {"signature", NULL};
 static const char *purescript_module_types[] = {"module", NULL};
-static const char *nickel_func_types[] = {"fun", NULL};
-static const char *nickel_call_types[] = {"infix_expr", NULL};
+/* The lambda node is `fun_expr` (the bare `fun` is only the keyword token, never
+ * a named node); its name lives on the enclosing let_binding's `pat` field, so
+ * cbm_resolve_func_name climbs to the parent for naming. A function application
+ * (`f x y`) is an `applicative` node — `infix_expr` is binary-operator
+ * application (`a + b`), not a call. */
+static const char *nickel_func_types[] = {"fun_expr", NULL};
+static const char *nickel_call_types[] = {"applicative", NULL};
 static const char *nickel_import_types[] = {"import", "include", NULL};
 static const char *nickel_branch_types[] = {"if", "match", NULL};
 static const char *nickel_var_types[] = {"let", NULL};
@@ -1210,7 +1236,7 @@ static const char *sway_assign_types[] = {"assignment_expression", NULL};
 static const char *sway_module_types[] = {"source_file", NULL};
 static const char *nasm_func_types[] = {"label", "preproc_def", "preproc_multiline_macro", NULL};
 static const char *nasm_class_types[] = {"struc_declaration", NULL};
-static const char *nasm_call_types[] = {"call_syntax_expression", NULL};
+static const char *nasm_call_types[] = {"call_syntax_expression", "actual_instruction", NULL};
 static const char *nasm_import_types[] = {"preproc_include", NULL};
 static const char *nasm_var_types[] = {"label", NULL};
 static const char *nasm_module_types[] = {"source_file", NULL};
@@ -1220,13 +1246,14 @@ static const char *assembly_module_types[] = {"program", NULL};
 static const char *astro_module_types[] = {"document", NULL};
 static const char *blade_module_types[] = {"document", NULL};
 static const char *just_func_types[] = {"recipe", NULL};
-static const char *just_call_types[] = {"function_call", NULL};
+static const char *just_call_types[] = {"function_call", "dependency", NULL};
 static const char *just_import_types[] = {"import", NULL};
 static const char *just_branch_types[] = {"if_expression", NULL};
 static const char *just_assign_types[] = {"assignment", NULL};
 static const char *just_module_types[] = {"source_file", NULL};
+static const char *gotemplate_func_types[] = {"define_action", NULL};
 static const char *gotemplate_call_types[] = {"function_call", "method_call", "template_action",
-                                               NULL};
+                                              NULL};
 static const char *gotemplate_module_types[] = {"template", NULL};
 static const char *templ_func_types[] = {"function_declaration", "method_declaration",
                                          "method_elem", NULL};
@@ -1264,7 +1291,7 @@ static const char *wgsl_assign_types[] = {"assignment_statement", NULL};
 static const char *wgsl_module_types[] = {"translation_unit", NULL};
 static const char *kdl_module_types[] = {"document", NULL};
 static const char *json5_module_types[] = {"document", NULL};
-static const char *jsonnet_func_types[] = {"anonymous_function", NULL};
+static const char *jsonnet_func_types[] = {"anonymous_function", "bind", NULL};
 static const char *jsonnet_call_types[] = {"functioncall", NULL};
 static const char *jsonnet_import_types[] = {"import", "importstr", NULL};
 static const char *jsonnet_branch_types[] = {"conditional", NULL};
@@ -1290,7 +1317,8 @@ static const char *capnp_import_types[] = {"import", "extends", "using_directive
 static const char *capnp_var_types[] = {"const", NULL};
 static const char *capnp_module_types[] = {"source", NULL};
 static const char *properties_var_types[] = {"property", NULL};
-static const char *properties_module_types[] = {"source_file", NULL};
+/* tree-sitter-properties roots the tree at `file`, not `source_file`. */
+static const char *properties_module_types[] = {"file", "source_file", NULL};
 static const char *sshconfig_module_types[] = {"source_file", NULL};
 static const char *bibtex_call_types[] = {"command", NULL};
 static const char *bibtex_module_types[] = {"document", NULL};
@@ -1332,7 +1360,8 @@ static const char *vhdl_class_types[] = {
     "interface_declaration",  "package_declaration",     "protected_type_declaration",
     "record_type_definition", "type_declaration",        NULL};
 static const char *vhdl_call_types[] = {"function_call", "procedure_call_statement",
-                                        "component_instantiation_statement", NULL};
+                                        "component_instantiation_statement", "parenthesis_group",
+                                        NULL};
 static const char *vhdl_import_types[] = {"library_clause", "use_clause", NULL};
 static const char *vhdl_branch_types[] = {"if_statement", "case_statement", "loop_statement", NULL};
 static const char *vhdl_var_types[] = {"variable_declaration", "signal_declaration",
@@ -1373,8 +1402,11 @@ static const char *kconfig_class_types[] = {"config", "menuconfig", "choice", "t
 static const char *kconfig_import_types[] = {"source", NULL};
 static const char *kconfig_branch_types[] = {"if", NULL};
 static const char *kconfig_module_types[] = {"source", NULL};
-static const char *bitbake_func_types[] = {"function_definition", "python_function_definition",
-                                           "recipe", NULL};
+/* `anonymous_python_function` is the tree-sitter-bitbake node for a
+ * `python do_foo() {...}` task; `function_definition` is a `do_foo() {...}`
+ * shell task. (`recipe` is the file root, not a function.) */
+static const char *bitbake_func_types[] = {"function_definition", "anonymous_python_function",
+                                           NULL};
 static const char *bitbake_var_types[] = {"variable_assignment", NULL};
 static const char *bitbake_call_types[] = {"call", NULL};
 static const char *bitbake_import_types[] = {
@@ -1434,7 +1466,7 @@ static const char *squirrel_assign_types[] = {"assignment_expression", NULL};
 static const char *squirrel_import_types[] = {"extends", NULL};
 static const char *squirrel_module_types[] = {"source_file", NULL};
 static const char *func_func_types[] = {"function_definition", NULL};
-static const char *func_call_types[] = {"method_call", NULL};
+static const char *func_call_types[] = {"method_call", "function_application", NULL};
 static const char *func_import_types[] = {"include_directive", NULL};
 static const char *func_module_types[] = {"source_file", NULL};
 static const char *regex_module_types[] = {"pattern", NULL};
@@ -1446,7 +1478,8 @@ static const char *mermaid_module_types[] = {"source_file", NULL};
 static const char *puppet_func_types[] = {"function_declaration", "lambda", NULL};
 static const char *puppet_class_types[] = {"class_definition", "node_definition",
                                            "resource_declaration", "type_declaration", NULL};
-static const char *puppet_call_types[] = {"function_call", "resource_declaration", NULL};
+static const char *puppet_call_types[] = {"function_call", "resource_declaration",
+                                          "include_statement", NULL};
 static const char *puppet_import_types[] = {"include_statement", "require_statement", "include",
                                             "require", NULL};
 static const char *puppet_branch_types[] = {"if_statement", "unless_statement", "case_statement",
@@ -1486,7 +1519,7 @@ static const char *wit_import_types[] = {
     "import_item", "toplevel_use_item", "export_item", "import", "include", "include_item", NULL};
 static const char *wit_module_types[] = {"source_file", NULL};
 static const char *tlaplus_func_types[] = {"operator_definition", "function_definition", NULL};
-static const char *tlaplus_call_types[] = {"function_evaluation", "call", NULL};
+static const char *tlaplus_call_types[] = {"function_evaluation", "call", "bound_op", NULL};
 static const char *tlaplus_import_types[] = {"extends", "instance", NULL};
 static const char *tlaplus_branch_types[] = {"if_then_else", "case", NULL};
 static const char *tlaplus_var_types[] = {"variable_declaration", NULL};
@@ -1534,6 +1567,21 @@ static const char *pine_var_types[] = {"variable_definition_statement",
 static const char *pine_branch_types[] = {"if_statement",     "switch_statement", "for_statement",
                                           "for_in_statement", "while_statement",  NULL};
 static const char *pine_assign_types[] = {"reassignment_statement", NULL};
+static const char *mojo_func_types[] = {"function_definition", NULL};
+static const char *mojo_class_types[] = {"class_definition", "trait_definition", NULL};
+static const char *mojo_module_types[] = {"module", NULL};
+static const char *mojo_call_types[] = {"call", NULL};
+static const char *mojo_import_types[] = {"import_statement", "import_from_statement",
+                                          "future_import_statement", NULL};
+static const char *mojo_branch_types[] = {"if_statement",
+                                          "match_statement",
+                                          "for_statement",
+                                          "while_statement",
+                                          "try_statement",
+                                          "with_statement",
+                                          NULL};
+static const char *mojo_var_types[] = {"assignment", NULL};
+static const char *mojo_assign_types[] = {"assignment", "augmented_assignment", NULL};
 // ==================== SPEC TABLE ====================
 
 static const char *js_assign_node_types[] = {"assignment_expression",
@@ -1546,956 +1594,2650 @@ static const std::array<CBMLangSpec, CBM_LANG_COUNT> &lang_specs_table() {
     static const std::array<CBMLangSpec, CBM_LANG_COUNT> tbl = [] {
         std::array<CBMLangSpec, CBM_LANG_COUNT> a{};
 
-    // CBM_LANG_GO
-    a[CBM_LANG_GO] = {CBM_LANG_GO, go_func_types, go_class_types, go_field_types, go_module_types,
-                     go_call_types, go_import_types, go_import_types, go_branch_types, go_var_types,
-                     go_assign_types, empty_types, NULL, empty_types, go_env_funcs, NULL,
-                     tree_sitter_go, NULL};
-
-    // CBM_LANG_PYTHON
-    a[CBM_LANG_PYTHON] = {CBM_LANG_PYTHON, py_func_types, py_class_types, empty_types,
-                         py_module_types, py_call_types, py_import_types, py_import_from_types,
-                         py_branch_types, py_var_types, py_var_types, py_throw_types, NULL,
-                         py_decorator_types, py_env_funcs, py_env_members, tree_sitter_python,
-                         NULL};
-
-    // CBM_LANG_JAVASCRIPT
-    a[CBM_LANG_JAVASCRIPT] =
-        {CBM_LANG_JAVASCRIPT, js_func_types, js_class_types, empty_types, js_module_types,
-         js_call_types, js_import_types, js_import_types, js_branch_types, js_var_types,
-         js_assign_node_types,
-         js_throw_types, NULL, empty_types, NULL, js_env_members, tree_sitter_javascript, NULL};
-
-    // CBM_LANG_TYPESCRIPT
-    a[CBM_LANG_TYPESCRIPT] = {CBM_LANG_TYPESCRIPT, ts_func_types, ts_class_types, empty_types,
-                             js_module_types, js_call_types, js_import_types, js_import_types,
-                             js_branch_types, js_var_types,
-                             js_assign_node_types,
-                             js_throw_types, NULL, ts_decorator_types, NULL, ts_env_members,
-                             tree_sitter_typescript, NULL};
-
-    // CBM_LANG_TSX
-    a[CBM_LANG_TSX] =
-        {CBM_LANG_TSX, ts_func_types, ts_class_types, empty_types, js_module_types, js_call_types,
-         js_import_types, js_import_types, js_branch_types, js_var_types,
-         js_assign_node_types,
-         js_throw_types, NULL, ts_decorator_types, NULL, ts_env_members, tree_sitter_tsx, NULL};
-
-    // CBM_LANG_RUST
-    a[CBM_LANG_RUST] = {CBM_LANG_RUST, rust_func_types, rust_class_types, rust_field_types,
-                       rust_module_types, rust_call_types, rust_import_types,
-                       rust_import_from_types, rust_branch_types, rust_var_types, rust_assign_types,
-                       empty_types, NULL, rust_decorator_types, rust_env_funcs, NULL,
-                       tree_sitter_rust, NULL};
-
-    // CBM_LANG_JAVA
-    a[CBM_LANG_JAVA] = {CBM_LANG_JAVA, java_func_types, java_class_types, java_field_types,
-                       java_module_types, java_call_types, java_import_types, java_import_types,
-                       java_branch_types, java_var_types, java_assign_types, java_throw_types,
-                       "throws", java_decorator_types, java_env_funcs, NULL, tree_sitter_java,
-                       NULL};
-
-    // CBM_LANG_CPP
-    a[CBM_LANG_CPP] = {CBM_LANG_CPP, cpp_func_types, cpp_class_types, cpp_field_types,
-                      cpp_module_types, cpp_call_types, cpp_import_types, cpp_import_types,
-                      cpp_branch_types, cpp_var_types, cpp_assign_types, cpp_throw_types, NULL,
-                      empty_types, cpp_env_funcs, NULL, tree_sitter_cpp, NULL};
-
-    // CBM_LANG_CSHARP
-    a[CBM_LANG_CSHARP] = {CBM_LANG_CSHARP, cs_func_types, cs_class_types, cs_field_types,
-                         cs_module_types, cs_call_types, cs_import_types, cs_import_types,
-                         cs_branch_types, cs_var_types, cs_assign_types, cs_throw_types, NULL,
-                         cs_decorator_types, cs_env_funcs, NULL, tree_sitter_c_sharp, NULL};
-
-    // CBM_LANG_PHP
-    a[CBM_LANG_PHP] = {CBM_LANG_PHP, php_func_types, php_class_types, empty_types, php_module_types,
-                      php_call_types, php_import_types, empty_types, php_branch_types,
-                      php_var_types, php_assign_types, php_throw_types, NULL, php_decorator_types,
-                      php_env_funcs, NULL, tree_sitter_php_only, NULL};
-
-    // CBM_LANG_LUA
-    a[CBM_LANG_LUA] = {CBM_LANG_LUA, lua_func_types, empty_types, empty_types, lua_module_types,
-                      lua_call_types, lua_import_types, empty_types, lua_branch_types,
-                      lua_var_types, lua_assign_types, empty_types, NULL, empty_types,
-                      lua_env_funcs, NULL, tree_sitter_lua, NULL};
-
-    // CBM_LANG_SCALA
-    a[CBM_LANG_SCALA] = {CBM_LANG_SCALA, scala_func_types, scala_class_types, empty_types,
-                        scala_module_types, scala_call_types, scala_import_types,
-                        scala_import_types, scala_branch_types, scala_var_types, scala_assign_types,
-                        scala_throw_types, NULL, scala_decorator_types, scala_env_funcs, NULL,
-                        tree_sitter_scala, NULL};
-
-    // CBM_LANG_KOTLIN
-    a[CBM_LANG_KOTLIN] = {CBM_LANG_KOTLIN, kotlin_func_types, kotlin_class_types, empty_types,
-                         kotlin_module_types, kotlin_call_types, kotlin_import_types,
-                         kotlin_import_types, kotlin_branch_types, kotlin_var_types,
-                         kotlin_assign_types, kotlin_throw_types, NULL, kotlin_decorator_types,
-                         kotlin_env_funcs, NULL, tree_sitter_kotlin, NULL};
-
-    // CBM_LANG_RUBY
-    a[CBM_LANG_RUBY] = {CBM_LANG_RUBY, ruby_func_types, ruby_class_types, empty_types,
-                       ruby_module_types, ruby_call_types, ruby_import_types, empty_types,
-                       ruby_branch_types, ruby_var_types, ruby_assign_types, empty_types, NULL,
-                       empty_types, NULL, ruby_env_members, tree_sitter_ruby, NULL};
-
-    // CBM_LANG_C
-    a[CBM_LANG_C] = {CBM_LANG_C, c_func_types, c_class_types, c_field_types, c_module_types,
-                    c_call_types, c_import_types, empty_types, c_branch_types, c_var_types,
-                    c_assign_types, empty_types, NULL, empty_types, c_env_funcs, NULL,
-                    tree_sitter_c, NULL};
-
-    // CBM_LANG_BASH
-    a[CBM_LANG_BASH] = {CBM_LANG_BASH, bash_func_types, empty_types, empty_types, bash_module_types,
-                       bash_call_types, bash_import_types, empty_types, bash_branch_types,
-                       bash_var_types, bash_var_types, empty_types, NULL, empty_types, NULL, NULL,
-                       tree_sitter_bash, NULL};
-
-    // CBM_LANG_ZIG
-    a[CBM_LANG_ZIG] = {CBM_LANG_ZIG, zig_func_types, zig_class_types, zig_field_types,
-                      zig_module_types, zig_call_types, zig_import_types, empty_types,
-                      zig_branch_types, zig_var_types, zig_assign_types, empty_types, NULL,
-                      empty_types, zig_env_funcs, NULL, tree_sitter_zig, NULL};
-
-    // CBM_LANG_ELIXIR
-    a[CBM_LANG_ELIXIR] = {CBM_LANG_ELIXIR, elixir_func_types, empty_types, empty_types,
-                         elixir_module_types, elixir_call_types, elixir_import_types, empty_types,
-                         elixir_branch_types, elixir_var_types, elixir_var_types, empty_types, NULL,
-                         empty_types, elixir_env_funcs, NULL, tree_sitter_elixir, NULL};
-
-    // CBM_LANG_HASKELL
-    a[CBM_LANG_HASKELL] = {CBM_LANG_HASKELL, haskell_func_types, haskell_class_types, empty_types,
-                          haskell_module_types, haskell_call_types, haskell_import_types,
-                          empty_types, haskell_branch_types, haskell_var_types, haskell_var_types,
-                          empty_types, NULL, empty_types, haskell_env_funcs, NULL,
-                          tree_sitter_haskell, NULL};
-
-    // CBM_LANG_OCAML
-    a[CBM_LANG_OCAML] = {CBM_LANG_OCAML, ocaml_func_types, ocaml_class_types, empty_types,
-                        ocaml_module_types, ocaml_call_types, ocaml_import_types, empty_types,
-                        ocaml_branch_types, ocaml_var_types, ocaml_var_types, empty_types, NULL,
-                        empty_types, ocaml_env_funcs, NULL, tree_sitter_ocaml, NULL};
-
-    // CBM_LANG_OBJC
-    a[CBM_LANG_OBJC] = {CBM_LANG_OBJC, objc_func_types, objc_class_types, objc_field_types,
-                       objc_module_types, objc_call_types, objc_import_types, empty_types,
-                       objc_branch_types, objc_var_types, objc_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_objc, NULL};
-
-    // CBM_LANG_SWIFT
-    a[CBM_LANG_SWIFT] = {CBM_LANG_SWIFT, swift_func_types, swift_class_types, swift_field_types,
-                        swift_module_types, swift_call_types, swift_import_types, empty_types,
-                        swift_branch_types, swift_var_types, swift_assign_types, swift_throw_types,
-                        NULL, swift_decorator_types, NULL, NULL, tree_sitter_swift, NULL};
-
-    // CBM_LANG_DART
-    a[CBM_LANG_DART] = {CBM_LANG_DART, dart_func_types, dart_class_types, dart_field_types,
-                       dart_module_types, dart_call_types, dart_import_types, empty_types,
-                       dart_branch_types, dart_var_types, dart_assign_types, dart_throw_types, NULL,
-                       dart_decorator_types, NULL, NULL, tree_sitter_dart, NULL};
-
-    // CBM_LANG_PERL
-    a[CBM_LANG_PERL] = {CBM_LANG_PERL, perl_func_types, empty_types, empty_types, perl_module_types,
-                       perl_call_types, perl_import_types, empty_types, perl_branch_types,
-                       perl_var_types, perl_assign_types, empty_types, NULL, empty_types,
-                       perl_env_funcs, NULL, tree_sitter_perl, NULL};
-
-    // CBM_LANG_GROOVY
-    a[CBM_LANG_GROOVY] = {CBM_LANG_GROOVY, groovy_func_types, groovy_class_types, empty_types,
-                         groovy_module_types, groovy_call_types, groovy_import_types, empty_types,
-                         groovy_branch_types, groovy_var_types, groovy_assign_types,
-                         groovy_throw_types, NULL, groovy_decorator_types, NULL, NULL,
-                         tree_sitter_groovy, NULL};
-
-    // CBM_LANG_ERLANG
-    a[CBM_LANG_ERLANG] = {CBM_LANG_ERLANG, erlang_func_types, erlang_class_types, empty_types,
-                         erlang_module_types, erlang_call_types, erlang_import_types, empty_types,
-                         erlang_branch_types, erlang_var_types, erlang_assign_types,
-                         erlang_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_erlang,
-                         NULL};
-
-    // CBM_LANG_R
-    a[CBM_LANG_R] = {CBM_LANG_R, r_func_types, empty_types, empty_types, r_module_types,
-                    r_call_types, r_import_types, empty_types, r_branch_types, r_var_types,
-                    r_var_types, empty_types, NULL, empty_types, r_env_funcs, NULL, tree_sitter_r,
-                    NULL};
-
-    // CBM_LANG_HTML
-    a[CBM_LANG_HTML] = {CBM_LANG_HTML, empty_types, empty_types, empty_types, html_module_types,
-                       empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                       empty_types, NULL, empty_types, NULL, NULL, tree_sitter_html,
-                       html_embedded_imports};
-
-    // CBM_LANG_CSS
-    a[CBM_LANG_CSS] = {CBM_LANG_CSS, empty_types, empty_types, empty_types, css_module_types,
-                      css_call_types, css_import_types, empty_types, empty_types, empty_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_css,
-                      NULL};
-
-    // CBM_LANG_SCSS
-    a[CBM_LANG_SCSS] = {CBM_LANG_SCSS, scss_func_types, empty_types, empty_types, scss_module_types,
-                       scss_call_types, scss_import_types, empty_types, scss_branch_types,
-                       scss_var_types, empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                       tree_sitter_scss, NULL};
-
-    // CBM_LANG_YAML
-    a[CBM_LANG_YAML] = {CBM_LANG_YAML, empty_types, empty_types, empty_types, yaml_module_types,
-                       empty_types, empty_types, empty_types, empty_types, yaml_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_yaml,
-                       NULL};
-
-    // CBM_LANG_TOML
-    a[CBM_LANG_TOML] = {CBM_LANG_TOML, empty_types, toml_class_types, empty_types, toml_module_types,
-                       empty_types, empty_types, empty_types, empty_types, toml_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_toml,
-                       NULL};
-
-    // CBM_LANG_HCL
-    a[CBM_LANG_HCL] = {CBM_LANG_HCL, empty_types, hcl_class_types, empty_types, hcl_module_types,
-                      hcl_call_types, empty_types, empty_types, empty_types, hcl_var_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_hcl,
-                      NULL};
-
-    // CBM_LANG_SQL
-    a[CBM_LANG_SQL] = {CBM_LANG_SQL, sql_func_types, sql_class_types, sql_field_types,
-                      sql_module_types, sql_call_types, empty_types, empty_types, sql_branch_types,
-                      sql_var_types, empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                      tree_sitter_sql, NULL};
-
-    // CBM_LANG_DOCKERFILE
-    a[CBM_LANG_DOCKERFILE] = {CBM_LANG_DOCKERFILE, empty_types, empty_types, empty_types,
-                             dockerfile_module_types, empty_types, empty_types, empty_types,
-                             empty_types, dockerfile_var_types, empty_types, empty_types, NULL,
-                             empty_types, NULL, NULL, tree_sitter_dockerfile, NULL};
-
-    // CBM_LANG_CLOJURE
-    a[CBM_LANG_CLOJURE] = {CBM_LANG_CLOJURE, empty_types, empty_types, empty_types,
-                          clojure_module_types, clojure_call_types, empty_types, empty_types,
-                          empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                          NULL, NULL, tree_sitter_clojure, NULL};
-
-    // CBM_LANG_FSHARP
-    a[CBM_LANG_FSHARP] = {CBM_LANG_FSHARP, fsharp_func_types, fsharp_class_types, empty_types,
-                         fsharp_module_types, fsharp_call_types, fsharp_import_types, empty_types,
-                         fsharp_branch_types, fsharp_var_types, fsharp_var_types, empty_types, NULL,
-                         empty_types, fsharp_env_funcs, NULL, tree_sitter_fsharp, NULL};
-
-    // CBM_LANG_JULIA
-    a[CBM_LANG_JULIA] = {CBM_LANG_JULIA, julia_func_types, julia_class_types, empty_types,
-                        julia_module_types, julia_call_types, julia_import_types, empty_types,
-                        julia_branch_types, julia_var_types, julia_assign_types, julia_throw_types,
-                        NULL, empty_types, julia_env_funcs, NULL, tree_sitter_julia, NULL};
-
-    // CBM_LANG_VIMSCRIPT
-    a[CBM_LANG_VIMSCRIPT] = {CBM_LANG_VIMSCRIPT, vim_func_types, empty_types, empty_types,
-                            vim_module_types, vim_call_types, vim_import_types, empty_types,
-                            vim_branch_types, vim_var_types, vim_var_types, empty_types, NULL,
-                            empty_types, NULL, NULL, tree_sitter_vim, NULL};
-
-    // CBM_LANG_NIX
-    a[CBM_LANG_NIX] = {CBM_LANG_NIX, nix_func_types, empty_types, empty_types, nix_module_types,
-                      nix_call_types, empty_types, empty_types, nix_branch_types, nix_var_types,
-                      nix_var_types, empty_types, NULL, empty_types, nix_env_funcs, NULL,
-                      tree_sitter_nix, NULL};
-
-    // CBM_LANG_COMMONLISP
-    a[CBM_LANG_COMMONLISP] = {CBM_LANG_COMMONLISP, commonlisp_func_types, empty_types, empty_types,
-                             commonlisp_module_types, commonlisp_call_types,
-                             commonlisp_import_types, empty_types, empty_types, empty_types,
-                             empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                             tree_sitter_commonlisp, NULL};
-
-    // CBM_LANG_ELM
-    a[CBM_LANG_ELM] = {CBM_LANG_ELM, elm_func_types, elm_class_types, empty_types, elm_module_types,
-                      elm_call_types, elm_import_types, empty_types, elm_branch_types, empty_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_elm,
-                      NULL};
-
-    // CBM_LANG_FORTRAN
-    a[CBM_LANG_FORTRAN] = {CBM_LANG_FORTRAN, fortran_func_types, fortran_class_types, empty_types,
-                          fortran_module_types, fortran_call_types, fortran_import_types,
-                          empty_types, fortran_branch_types, fortran_var_types,
-                          fortran_assign_types, empty_types, NULL, empty_types, fortran_env_funcs,
-                          NULL, tree_sitter_fortran, NULL};
-
-    // CBM_LANG_CUDA (reuses C++ node types)
-    a[CBM_LANG_CUDA] = {CBM_LANG_CUDA, cpp_func_types, cpp_class_types, cpp_field_types,
-                       cpp_module_types, cpp_call_types, cpp_import_types, cpp_import_types,
-                       cpp_branch_types, cpp_var_types, cpp_assign_types, cpp_throw_types, NULL,
-                       empty_types, cpp_env_funcs, NULL, tree_sitter_cuda, NULL};
-
-    // CBM_LANG_COBOL
-    a[CBM_LANG_COBOL] = {CBM_LANG_COBOL, cobol_func_types, empty_types, empty_types,
-                        cobol_module_types, cobol_call_types, cobol_import_types, empty_types,
-                        cobol_branch_types, cobol_var_types, empty_types, empty_types, NULL,
-                        empty_types, NULL, NULL, tree_sitter_COBOL, NULL};
-
-    // CBM_LANG_VERILOG
-    a[CBM_LANG_VERILOG] = {CBM_LANG_VERILOG, verilog_func_types, verilog_class_types, empty_types,
-                          verilog_module_types, verilog_call_types, verilog_import_types,
-                          empty_types, verilog_branch_types, verilog_var_types,
-                          verilog_assign_types, empty_types, NULL, empty_types, NULL, NULL,
-                          tree_sitter_verilog, NULL};
-
-    // CBM_LANG_EMACSLISP
-    a[CBM_LANG_EMACSLISP] = {CBM_LANG_EMACSLISP, elisp_func_types, empty_types, empty_types,
-                            elisp_module_types, elisp_call_types, empty_types, empty_types,
-                            empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                            NULL, NULL, tree_sitter_elisp, NULL};
-
-    // CBM_LANG_JSON
-    a[CBM_LANG_JSON] = {CBM_LANG_JSON, empty_types, empty_types, empty_types, json_module_types,
-                       empty_types, empty_types, empty_types, empty_types, json_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_json,
-                       NULL};
-
-    // CBM_LANG_XML
-    a[CBM_LANG_XML] = {CBM_LANG_XML, empty_types, xml_class_types, empty_types, xml_module_types,
-                      empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                      empty_types, NULL, empty_types, NULL, NULL, tree_sitter_xml, NULL};
-
-    // CBM_LANG_MARKDOWN
-    a[CBM_LANG_MARKDOWN] = {CBM_LANG_MARKDOWN, empty_types, markdown_class_types, empty_types,
-                           markdown_module_types, empty_types, empty_types, empty_types,
-                           empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                           NULL, NULL, tree_sitter_markdown, NULL};
-
-    // CBM_LANG_MAKEFILE
-    a[CBM_LANG_MAKEFILE] = {CBM_LANG_MAKEFILE, makefile_func_types, empty_types, empty_types,
-                           makefile_module_types, makefile_call_types, makefile_import_types,
-                           empty_types, empty_types, makefile_var_types, empty_types, empty_types,
-                           NULL, empty_types, NULL, NULL, tree_sitter_make, NULL};
-
-    // CBM_LANG_CMAKE
-    a[CBM_LANG_CMAKE] = {CBM_LANG_CMAKE, cmake_func_types, empty_types, empty_types,
-                        cmake_module_types, cmake_call_types, make_import_types, empty_types,
-                        empty_types, empty_types, empty_types, empty_types, NULL, empty_types, NULL,
-                        NULL, tree_sitter_cmake, NULL};
-
-    // CBM_LANG_PROTOBUF
-    a[CBM_LANG_PROTOBUF] = {CBM_LANG_PROTOBUF, protobuf_func_types, protobuf_class_types,
-                           protobuf_field_types, protobuf_module_types, empty_types,
-                           protobuf_import_types, empty_types, empty_types, empty_types,
-                           empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                           tree_sitter_proto, NULL};
-
-    // CBM_LANG_GRAPHQL
-    a[CBM_LANG_GRAPHQL] = {CBM_LANG_GRAPHQL, empty_types, graphql_class_types, graphql_field_types,
-                          graphql_module_types, empty_types, empty_types, empty_types, empty_types,
-                          empty_types, empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                          tree_sitter_graphql, NULL};
-
-    // CBM_LANG_VUE
-    a[CBM_LANG_VUE] = {CBM_LANG_VUE, empty_types, empty_types, empty_types, vue_module_types,
-                      empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                      empty_types, NULL, empty_types, NULL, NULL, tree_sitter_vue,
-                      vue_embedded_imports};
-
-    // CBM_LANG_SVELTE
-    a[CBM_LANG_SVELTE] = {CBM_LANG_SVELTE, empty_types, empty_types, empty_types,
-                         svelte_module_types, empty_types, empty_types, empty_types,
-                         svelte_branch_types, empty_types, empty_types, empty_types, NULL,
-                         empty_types, NULL, NULL, tree_sitter_svelte, svelte_embedded_imports};
-
-    // CBM_LANG_MESON
-    a[CBM_LANG_MESON] = {CBM_LANG_MESON, meson_func_types, empty_types, empty_types,
-                        meson_module_types, meson_call_types, empty_types, empty_types,
-                        meson_branch_types, meson_var_types, meson_var_types, empty_types, NULL,
-                        empty_types, NULL, NULL, tree_sitter_meson, NULL};
-
-    // CBM_LANG_GLSL (reuses C node types)
-    a[CBM_LANG_GLSL] = {CBM_LANG_GLSL, c_func_types, c_class_types, c_field_types, c_module_types,
-                       c_call_types, c_import_types, empty_types, c_branch_types, c_var_types,
-                       c_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_glsl,
-                       NULL};
-
-    // CBM_LANG_INI
-    a[CBM_LANG_INI] = {CBM_LANG_INI, empty_types, ini_class_types, empty_types, ini_module_types,
-                      empty_types, empty_types, empty_types, empty_types, ini_var_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_ini,
-                      NULL};
-
-    // CBM_LANG_MATLAB
-    a[CBM_LANG_MATLAB] = {CBM_LANG_MATLAB, matlab_func_types, matlab_class_types, empty_types,
-                         matlab_module_types, matlab_call_types, empty_types, empty_types,
-                         matlab_branch_types, matlab_var_types, matlab_var_types, empty_types, NULL,
-                         empty_types, NULL, NULL, tree_sitter_matlab, NULL};
-
-    // CBM_LANG_LEAN
-    a[CBM_LANG_LEAN] = {CBM_LANG_LEAN, lean_func_types, lean_class_types, empty_types,
-                       lean_module_types, lean_call_types, lean_import_types, empty_types,
-                       lean_branch_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                       NULL, NULL, tree_sitter_lean, NULL};
-
-    // CBM_LANG_FORM
-    a[CBM_LANG_FORM] = {CBM_LANG_FORM, form_func_types, empty_types, empty_types, form_module_types,
-                       form_call_types, form_import_types, empty_types, form_branch_types,
-                       form_var_types, form_assign_types, empty_types, NULL, empty_types, NULL,
-                       NULL, tree_sitter_form, NULL};
-
-    // CBM_LANG_MAGMA
-    a[CBM_LANG_MAGMA] = {CBM_LANG_MAGMA, magma_func_types, empty_types, empty_types,
-                        magma_module_types, magma_call_types, magma_import_types, empty_types,
-                        magma_branch_types, magma_var_types, magma_var_types, empty_types, NULL,
-                        empty_types, NULL, NULL, tree_sitter_magma, NULL};
-
-    // CBM_LANG_WOLFRAM
-    a[CBM_LANG_WOLFRAM] = {CBM_LANG_WOLFRAM, wolfram_func_types, empty_types, empty_types,
-                          wolfram_module_types, wolfram_call_types, wolfram_import_types,
-                          empty_types, empty_types, empty_types, empty_types, empty_types, NULL,
-                          empty_types, NULL, NULL, tree_sitter_wolfram, NULL};
-
-    // CBM_LANG_SOLIDITY
-    a[CBM_LANG_SOLIDITY] = {CBM_LANG_SOLIDITY, solidity_func_types, solidity_class_types,
-                           solidity_field_types, solidity_module_types, solidity_call_types,
-                           solidity_import_types, empty_types, solidity_branch_types,
-                           solidity_var_types, solidity_assign_types, solidity_throw_types, NULL,
-                           empty_types, NULL, NULL, tree_sitter_solidity, NULL};
-
-    // CBM_LANG_TYPST
-    a[CBM_LANG_TYPST] = {CBM_LANG_TYPST, typst_func_types, empty_types, empty_types,
-                        typst_module_types, typst_call_types, typst_import_types, empty_types,
-                        typst_branch_types, typst_var_types, typst_assign_types, empty_types, NULL,
-                        empty_types, NULL, NULL, tree_sitter_typst, NULL};
-
-    // CBM_LANG_GDSCRIPT
-    a[CBM_LANG_GDSCRIPT] = {CBM_LANG_GDSCRIPT, gdscript_func_types, gdscript_class_types,
-                           gdscript_field_types, gdscript_module_types, gdscript_call_types,
-                           gdscript_import_types, empty_types, gdscript_branch_types,
-                           gdscript_var_types, gdscript_assign_types, empty_types, NULL,
-                           gdscript_decorator_types, NULL, NULL, tree_sitter_gdscript, NULL};
-
-    // CBM_LANG_GLEAM
-    a[CBM_LANG_GLEAM] = {CBM_LANG_GLEAM, gleam_func_types, gleam_class_types, gleam_field_types,
-                        gleam_module_types, gleam_call_types, gleam_import_types, empty_types,
-                        gleam_branch_types, gleam_var_types, gleam_assign_types, empty_types, NULL,
-                        empty_types, NULL, NULL, tree_sitter_gleam, NULL};
-
-    // CBM_LANG_POWERSHELL
-    a[CBM_LANG_POWERSHELL] = {CBM_LANG_POWERSHELL, powershell_func_types, powershell_class_types,
-                             empty_types, powershell_module_types, powershell_call_types,
-                             powershell_import_types, empty_types, powershell_branch_types,
-                             powershell_var_types, powershell_assign_types, powershell_throw_types,
-                             NULL, empty_types, NULL, NULL, tree_sitter_powershell, NULL};
-
-    // CBM_LANG_PASCAL
-    a[CBM_LANG_PASCAL] = {CBM_LANG_PASCAL, pascal_func_types, pascal_class_types, pascal_field_types,
-                         pascal_module_types, pascal_call_types, pascal_import_types, empty_types,
-                         pascal_branch_types, pascal_var_types, pascal_assign_types,
-                         pascal_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_pascal,
-                         NULL};
-
-    // CBM_LANG_DLANG
-    a[CBM_LANG_DLANG] = {CBM_LANG_DLANG, d_func_types, d_class_types, d_field_types, d_module_types,
-                        d_call_types, d_import_types, empty_types, d_branch_types, d_var_types,
-                        d_assign_types, d_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_d,
-                        NULL};
-
-    // CBM_LANG_SCHEME
-    a[CBM_LANG_SCHEME] = {CBM_LANG_SCHEME, empty_types, empty_types, empty_types,
-                         scheme_module_types, scheme_call_types, empty_types, empty_types,
-                         empty_types, scheme_var_types, empty_types, empty_types, NULL, empty_types,
-                         NULL, NULL, tree_sitter_scheme, NULL};
-
-    // CBM_LANG_FENNEL
-    a[CBM_LANG_FENNEL] = {CBM_LANG_FENNEL, fennel_func_types, empty_types, empty_types,
-                         fennel_module_types, fennel_call_types, empty_types, empty_types,
-                         fennel_branch_types, fennel_var_types, fennel_assign_types, empty_types,
-                         NULL, empty_types, NULL, NULL, tree_sitter_fennel, NULL};
-
-    // CBM_LANG_FISH
-    a[CBM_LANG_FISH] = {CBM_LANG_FISH, fish_func_types, empty_types, empty_types, fish_module_types,
-                       fish_call_types, empty_types, empty_types, fish_branch_types, fish_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_fish,
-                       NULL};
-
-    // CBM_LANG_AWK
-    a[CBM_LANG_AWK] = {CBM_LANG_AWK, awk_func_types, empty_types, empty_types, awk_module_types,
-                      awk_call_types, empty_types, empty_types, awk_branch_types, awk_var_types,
-                      awk_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_awk,
-                      NULL};
-
-    // CBM_LANG_ZSH
-    a[CBM_LANG_ZSH] = {CBM_LANG_ZSH, zsh_func_types, empty_types, empty_types, zsh_module_types,
-                      zsh_call_types, empty_types, empty_types, zsh_branch_types, zsh_var_types,
-                      zsh_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_zsh,
-                      NULL};
-
-    // CBM_LANG_TCL
-    a[CBM_LANG_TCL] = {CBM_LANG_TCL, tcl_func_types, tcl_class_types, empty_types, tcl_module_types,
-                      tcl_call_types, empty_types, empty_types, tcl_branch_types, tcl_var_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_tcl,
-                      NULL};
-
-    // CBM_LANG_ADA
-    a[CBM_LANG_ADA] = {CBM_LANG_ADA, ada_func_types, ada_class_types, ada_field_types,
-                      ada_module_types, ada_call_types, ada_import_types, empty_types,
-                      ada_branch_types, ada_var_types, ada_assign_types, ada_throw_types, NULL,
-                      empty_types, NULL, NULL, tree_sitter_ada, NULL};
-
-    // CBM_LANG_AGDA
-    a[CBM_LANG_AGDA] = {CBM_LANG_AGDA, agda_func_types, agda_class_types, empty_types,
-                       agda_module_types, agda_call_types, agda_import_types, empty_types,
-                       agda_branch_types, agda_var_types, empty_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_agda, NULL};
-
-    // CBM_LANG_RACKET
-    a[CBM_LANG_RACKET] = {CBM_LANG_RACKET, empty_types, racket_class_types, empty_types,
-                         racket_module_types, racket_call_types, empty_types, empty_types,
-                         empty_types, racket_var_types, empty_types, empty_types, NULL, empty_types,
-                         NULL, NULL, tree_sitter_racket, NULL};
-
-    // CBM_LANG_ODIN
-    a[CBM_LANG_ODIN] = {CBM_LANG_ODIN, odin_func_types, odin_class_types, odin_field_types,
-                       odin_module_types, odin_call_types, odin_import_types, empty_types,
-                       odin_branch_types, odin_var_types, odin_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_odin, NULL};
-
-    // CBM_LANG_RESCRIPT
-    a[CBM_LANG_RESCRIPT] = {CBM_LANG_RESCRIPT, rescript_func_types, rescript_class_types,
-                           empty_types, rescript_module_types, rescript_call_types,
-                           rescript_import_types, empty_types, rescript_branch_types,
-                           rescript_var_types, rescript_assign_types, rescript_throw_types, NULL,
-                           rescript_decorator_types, NULL, NULL, tree_sitter_rescript, NULL};
-
-    // CBM_LANG_PURESCRIPT
-    a[CBM_LANG_PURESCRIPT] = {CBM_LANG_PURESCRIPT, purescript_func_types, purescript_class_types,
-                             empty_types, purescript_module_types, purescript_call_types,
-                             purescript_import_types, empty_types, purescript_branch_types,
-                             purescript_var_types, empty_types, empty_types, NULL, empty_types,
-                             NULL, NULL, tree_sitter_purescript, NULL};
-
-    // CBM_LANG_NICKEL
-    a[CBM_LANG_NICKEL] = {CBM_LANG_NICKEL, nickel_func_types, empty_types, empty_types,
-                         nickel_module_types, nickel_call_types, nickel_import_types, empty_types,
-                         nickel_branch_types, nickel_var_types, empty_types, empty_types, NULL,
-                         empty_types, NULL, NULL, tree_sitter_nickel, NULL};
-
-    // CBM_LANG_CRYSTAL
-    a[CBM_LANG_CRYSTAL] = {CBM_LANG_CRYSTAL, crystal_func_types, crystal_class_types,
-                          crystal_field_types, crystal_module_types, crystal_call_types,
-                          crystal_import_types, empty_types, crystal_branch_types,
-                          crystal_var_types, crystal_assign_types, empty_types, NULL,
-                          crystal_decorator_types, NULL, NULL, tree_sitter_crystal, NULL};
-
-    // CBM_LANG_TEAL
-    a[CBM_LANG_TEAL] = {CBM_LANG_TEAL, teal_func_types, teal_class_types, empty_types,
-                       teal_module_types, teal_call_types, empty_types, empty_types,
-                       teal_branch_types, teal_var_types, teal_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_teal, NULL};
-
-    // CBM_LANG_HARE
-    a[CBM_LANG_HARE] = {CBM_LANG_HARE, hare_func_types, hare_class_types, empty_types,
-                       hare_module_types, hare_call_types, hare_import_types, empty_types,
-                       hare_branch_types, hare_var_types, hare_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_hare, NULL};
-
-    // CBM_LANG_PONY
-    a[CBM_LANG_PONY] = {CBM_LANG_PONY, pony_func_types, pony_class_types, empty_types,
-                       pony_module_types, pony_call_types, pony_import_types, empty_types,
-                       pony_branch_types, pony_var_types, pony_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_pony, NULL};
-
-    // CBM_LANG_LUAU
-    a[CBM_LANG_LUAU] = {CBM_LANG_LUAU, luau_func_types, luau_class_types, empty_types,
-                       luau_module_types, luau_call_types, empty_types, empty_types,
-                       luau_branch_types, luau_var_types, luau_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_luau, NULL};
-
-    // CBM_LANG_JANET
-    a[CBM_LANG_JANET] = {CBM_LANG_JANET, empty_types, empty_types, empty_types, janet_module_types,
-                        empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                        tree_sitter_janet_simple, NULL};
-
-    // CBM_LANG_SWAY
-    a[CBM_LANG_SWAY] = {CBM_LANG_SWAY, sway_func_types, sway_class_types, empty_types,
-                       sway_module_types, sway_call_types, sway_import_types, empty_types,
-                       sway_branch_types, sway_var_types, sway_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_sway, NULL};
-
-    // CBM_LANG_NASM
-    a[CBM_LANG_NASM] = {CBM_LANG_NASM, nasm_func_types, nasm_class_types, empty_types,
-                       nasm_module_types, nasm_call_types, nasm_import_types, empty_types,
-                       empty_types, nasm_var_types, empty_types, empty_types, NULL, empty_types,
-                       NULL, NULL, tree_sitter_nasm, NULL};
-
-    // CBM_LANG_ASSEMBLY
-    a[CBM_LANG_ASSEMBLY] = {CBM_LANG_ASSEMBLY, assembly_func_types, empty_types, empty_types,
-                           assembly_module_types, empty_types, empty_types, empty_types,
-                           empty_types, assembly_var_types, empty_types, empty_types, NULL,
-                           empty_types, NULL, NULL, tree_sitter_asm, NULL};
-
-    // CBM_LANG_ASTRO
-    a[CBM_LANG_ASTRO] = {CBM_LANG_ASTRO, empty_types, empty_types, empty_types, astro_module_types,
-                        empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_astro,
-                        astro_embedded_imports};
-
-    // CBM_LANG_BLADE
-    a[CBM_LANG_BLADE] = {CBM_LANG_BLADE, empty_types, empty_types, empty_types, blade_module_types,
-                        empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_blade,
-                        NULL};
-
-    // CBM_LANG_JUST
-    a[CBM_LANG_JUST] = {CBM_LANG_JUST, just_func_types, empty_types, empty_types, just_module_types,
-                       just_call_types, just_import_types, empty_types, just_branch_types,
-                       empty_types, just_assign_types, empty_types, NULL, empty_types, NULL, NULL,
-                       tree_sitter_just, NULL};
-
-    // CBM_LANG_GOTEMPLATE
-    a[CBM_LANG_GOTEMPLATE] = {CBM_LANG_GOTEMPLATE, empty_types, empty_types, empty_types,
-                             gotemplate_module_types, gotemplate_call_types, empty_types,
-                             empty_types, empty_types, empty_types, empty_types, empty_types, NULL,
-                             empty_types, NULL, NULL, tree_sitter_gotmpl, NULL};
-
-    // CBM_LANG_TEMPL
-    a[CBM_LANG_TEMPL] = {CBM_LANG_TEMPL, templ_func_types, templ_class_types, empty_types,
-                        templ_module_types, templ_call_types, templ_import_types, empty_types,
-                        empty_types, empty_types, empty_types, empty_types, NULL, empty_types, NULL,
-                        NULL, tree_sitter_templ, NULL};
-
-    // CBM_LANG_LIQUID
-    a[CBM_LANG_LIQUID] = {CBM_LANG_LIQUID, empty_types, empty_types, empty_types,
-                         liquid_module_types, empty_types, liquid_import_types, empty_types,
-                         empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                         NULL, NULL, tree_sitter_liquid, NULL};
-
-    // CBM_LANG_JINJA2
-    a[CBM_LANG_JINJA2] = {CBM_LANG_JINJA2, empty_types, empty_types, empty_types,
-                         jinja2_module_types, empty_types, empty_types, empty_types, empty_types,
-                         empty_types, empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                         tree_sitter_jinja2, NULL};
-
-    // CBM_LANG_PRISMA
-    a[CBM_LANG_PRISMA] = {CBM_LANG_PRISMA, empty_types, prisma_class_types, prisma_field_types,
-                         prisma_module_types, prisma_call_types, empty_types, empty_types,
-                         empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                         NULL, NULL, tree_sitter_prisma, NULL};
-
-    // CBM_LANG_HYPRLANG
-    a[CBM_LANG_HYPRLANG] = {CBM_LANG_HYPRLANG, empty_types, empty_types, empty_types,
-                           hyprlang_module_types, empty_types, empty_types, empty_types,
-                           empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                           NULL, NULL, tree_sitter_hyprlang, NULL};
-
-    // CBM_LANG_DOTENV
-    a[CBM_LANG_DOTENV] = {CBM_LANG_DOTENV, empty_types, empty_types, empty_types,
-                         dotenv_module_types, empty_types, empty_types, empty_types, empty_types,
-                         empty_types, empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                         tree_sitter_dotenv, NULL};
-
-    // CBM_LANG_DIFF
-    a[CBM_LANG_DIFF] = {CBM_LANG_DIFF, empty_types, empty_types, empty_types, diff_module_types,
-                       diff_call_types, empty_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_diff,
-                       NULL};
-
-    // CBM_LANG_WGSL
-    a[CBM_LANG_WGSL] = {CBM_LANG_WGSL, wgsl_func_types, wgsl_class_types, empty_types,
-                       wgsl_module_types, wgsl_call_types, wgsl_import_types, empty_types,
-                       wgsl_branch_types, wgsl_var_types, wgsl_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_wgsl, NULL};
-
-    // CBM_LANG_KDL
-    a[CBM_LANG_KDL] = {CBM_LANG_KDL, empty_types, empty_types, empty_types, kdl_module_types,
-                      empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                      empty_types, NULL, empty_types, NULL, NULL, tree_sitter_kdl, NULL};
-
-    // CBM_LANG_JSON5
-    a[CBM_LANG_JSON5] = {CBM_LANG_JSON5, empty_types, empty_types, empty_types, json5_module_types,
-                        empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_json5,
-                        NULL};
-
-    // CBM_LANG_JSONNET
-    a[CBM_LANG_JSONNET] = {CBM_LANG_JSONNET, jsonnet_func_types, empty_types, empty_types,
-                          jsonnet_module_types, jsonnet_call_types, jsonnet_import_types,
-                          empty_types, jsonnet_branch_types, jsonnet_var_types, empty_types,
-                          empty_types, NULL, empty_types, NULL, NULL, tree_sitter_jsonnet, NULL};
-
-    // CBM_LANG_RON
-    a[CBM_LANG_RON] = {CBM_LANG_RON, empty_types, empty_types, empty_types, ron_module_types,
-                      empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                      empty_types, NULL, empty_types, NULL, NULL, tree_sitter_ron, NULL};
-
-    // CBM_LANG_THRIFT
-    a[CBM_LANG_THRIFT] = {CBM_LANG_THRIFT, thrift_func_types, thrift_class_types, thrift_field_types,
-                         thrift_module_types, empty_types, thrift_import_types, empty_types,
-                         empty_types, thrift_var_types, empty_types, empty_types, NULL, empty_types,
-                         NULL, NULL, tree_sitter_thrift, NULL};
-
-    // CBM_LANG_CAPNP
-    a[CBM_LANG_CAPNP] = {CBM_LANG_CAPNP, capnp_func_types, capnp_class_types, capnp_field_types,
-                        capnp_module_types, empty_types, capnp_import_types, empty_types,
-                        empty_types, capnp_var_types, empty_types, empty_types, NULL, empty_types,
-                        NULL, NULL, tree_sitter_capnp, NULL};
-
-    // CBM_LANG_PROPERTIES
-    a[CBM_LANG_PROPERTIES] = {CBM_LANG_PROPERTIES, empty_types, empty_types, empty_types,
-                             properties_module_types, empty_types, empty_types, empty_types,
-                             empty_types, properties_var_types, empty_types, empty_types, NULL,
-                             empty_types, NULL, NULL, tree_sitter_properties, NULL};
-
-    // CBM_LANG_SSHCONFIG
-    a[CBM_LANG_SSHCONFIG] = {CBM_LANG_SSHCONFIG, empty_types, empty_types, empty_types,
-                            sshconfig_module_types, empty_types, empty_types, empty_types,
-                            empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                            NULL, NULL, tree_sitter_ssh_config, NULL};
-
-    // CBM_LANG_BIBTEX
-    a[CBM_LANG_BIBTEX] = {CBM_LANG_BIBTEX, empty_types, empty_types, empty_types,
-                         bibtex_module_types, bibtex_call_types, empty_types, empty_types,
-                         empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                         NULL, NULL, tree_sitter_bibtex, NULL};
-
-    // CBM_LANG_STARLARK
-    a[CBM_LANG_STARLARK] = {CBM_LANG_STARLARK, starlark_func_types, empty_types, empty_types,
-                           starlark_module_types, starlark_call_types, starlark_import_types,
-                           empty_types, starlark_branch_types, starlark_var_types,
-                           starlark_assign_types, empty_types, NULL, empty_types, NULL, NULL,
-                           tree_sitter_starlark, NULL};
-
-    // CBM_LANG_BICEP
-    a[CBM_LANG_BICEP] = {CBM_LANG_BICEP, bicep_func_types, bicep_class_types, empty_types,
-                        bicep_module_types, bicep_call_types, bicep_import_types, empty_types,
-                        empty_types, bicep_var_types, empty_types, empty_types, NULL, empty_types,
-                        NULL, NULL, tree_sitter_bicep, NULL};
-
-    // CBM_LANG_CSV
-    a[CBM_LANG_CSV] = {CBM_LANG_CSV, empty_types, empty_types, empty_types, csv_module_types,
-                      empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                      empty_types, NULL, empty_types, NULL, NULL, tree_sitter_csv, NULL};
-
-    // CBM_LANG_REQUIREMENTS
-    a[CBM_LANG_REQUIREMENTS] = {CBM_LANG_REQUIREMENTS, empty_types, empty_types, empty_types,
-                               requirements_module_types, empty_types, empty_types, empty_types,
-                               empty_types, empty_types, empty_types, empty_types, NULL,
-                               empty_types, NULL, NULL, tree_sitter_requirements, NULL};
-
-    // CBM_LANG_HLSL
-    a[CBM_LANG_HLSL] = {CBM_LANG_HLSL, hlsl_func_types, hlsl_class_types, empty_types,
-                       hlsl_module_types, hlsl_call_types, hlsl_import_types, empty_types,
-                       hlsl_branch_types, hlsl_var_types, hlsl_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_hlsl, NULL};
-
-    // CBM_LANG_VHDL
-    a[CBM_LANG_VHDL] = {CBM_LANG_VHDL, vhdl_func_types, vhdl_class_types, empty_types,
-                       vhdl_module_types, vhdl_call_types, vhdl_import_types, empty_types,
-                       vhdl_branch_types, vhdl_var_types, vhdl_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_vhdl, NULL};
-
-    // CBM_LANG_SYSTEMVERILOG
-    a[CBM_LANG_SYSTEMVERILOG] = {CBM_LANG_SYSTEMVERILOG, systemverilog_func_types,
-                                systemverilog_class_types, empty_types, systemverilog_module_types,
-                                systemverilog_call_types, systemverilog_import_types, empty_types,
-                                systemverilog_branch_types, systemverilog_var_types, empty_types,
-                                empty_types, NULL, empty_types, NULL, NULL,
-                                tree_sitter_systemverilog, NULL};
-
-    // CBM_LANG_DEVICETREE
-    a[CBM_LANG_DEVICETREE] = {CBM_LANG_DEVICETREE, empty_types, empty_types, empty_types,
-                             devicetree_module_types, devicetree_call_types,
-                             devicetree_import_types, empty_types, empty_types, empty_types,
-                             empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                             tree_sitter_devicetree, NULL};
-
-    // CBM_LANG_LINKERSCRIPT
-    a[CBM_LANG_LINKERSCRIPT] = {CBM_LANG_LINKERSCRIPT, empty_types, empty_types, empty_types,
-                               linkerscript_module_types, linkerscript_call_types, empty_types,
-                               empty_types, empty_types, empty_types, empty_types, empty_types,
-                               NULL, empty_types, NULL, NULL, tree_sitter_linkerscript, NULL};
-
-    // CBM_LANG_GN
-    a[CBM_LANG_GN] = {CBM_LANG_GN, empty_types, empty_types, empty_types, gn_module_types,
-                     gn_call_types, gn_import_types, empty_types, gn_branch_types, empty_types,
-                     gn_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_gn,
-                     NULL};
-
-    // CBM_LANG_KCONFIG
-    a[CBM_LANG_KCONFIG] = {CBM_LANG_KCONFIG, empty_types, kconfig_class_types, empty_types,
-                          kconfig_module_types, empty_types, kconfig_import_types, empty_types,
-                          kconfig_branch_types, empty_types, empty_types, empty_types, NULL,
-                          empty_types, NULL, NULL, tree_sitter_kconfig, NULL};
-
-    // CBM_LANG_BITBAKE
-    a[CBM_LANG_BITBAKE] = {CBM_LANG_BITBAKE, bitbake_func_types, empty_types, empty_types,
-                          bitbake_module_types, bitbake_call_types, bitbake_import_types,
-                          empty_types, empty_types, bitbake_var_types, empty_types, empty_types,
-                          NULL, empty_types, NULL, NULL, tree_sitter_bitbake, NULL};
-
-    // CBM_LANG_SMALI
-    a[CBM_LANG_SMALI] = {CBM_LANG_SMALI, smali_func_types, smali_class_types, smali_field_types,
-                        smali_module_types, empty_types, smali_import_types, empty_types,
-                        empty_types, empty_types, empty_types, empty_types, NULL, empty_types, NULL,
-                        NULL, tree_sitter_smali, NULL};
-
-    // CBM_LANG_TABLEGEN
-    a[CBM_LANG_TABLEGEN] = {CBM_LANG_TABLEGEN, tablegen_func_types, tablegen_class_types,
-                           empty_types, tablegen_module_types, empty_types, tablegen_import_types,
-                           empty_types, empty_types, empty_types, empty_types, empty_types, NULL,
-                           empty_types, NULL, NULL, tree_sitter_tablegen, NULL};
-
-    // CBM_LANG_ISPC
-    a[CBM_LANG_ISPC] = {CBM_LANG_ISPC, ispc_func_types, ispc_class_types, empty_types,
-                       ispc_module_types, ispc_call_types, ispc_import_types, empty_types,
-                       ispc_branch_types, ispc_var_types, ispc_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_ispc, NULL};
-
-    // CBM_LANG_CAIRO
-    a[CBM_LANG_CAIRO] = {CBM_LANG_CAIRO, cairo_func_types, cairo_class_types, empty_types,
-                        cairo_module_types, cairo_call_types, cairo_import_types, empty_types,
-                        cairo_branch_types, cairo_var_types, cairo_assign_types, empty_types, NULL,
-                        empty_types, NULL, NULL, tree_sitter_cairo, NULL};
-
-    // CBM_LANG_MOVE
-    a[CBM_LANG_MOVE] = {CBM_LANG_MOVE, move_func_types, empty_types, empty_types, move_module_types,
-                       move_call_types, move_import_types, empty_types, move_branch_types,
-                       move_var_types, move_assign_types, empty_types, NULL, empty_types, NULL,
-                       NULL, tree_sitter_move, NULL};
-
-    // CBM_LANG_SQUIRREL
-    a[CBM_LANG_SQUIRREL] = {CBM_LANG_SQUIRREL, squirrel_func_types, squirrel_class_types,
-                           empty_types, squirrel_module_types, squirrel_call_types,
-                           squirrel_import_types, empty_types, squirrel_branch_types,
-                           squirrel_var_types, squirrel_assign_types, empty_types, NULL,
-                           empty_types, NULL, NULL, tree_sitter_squirrel, NULL};
-
-    // CBM_LANG_FUNC
-    a[CBM_LANG_FUNC] = {CBM_LANG_FUNC, func_func_types, empty_types, empty_types, func_module_types,
-                       func_call_types, func_import_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_func,
-                       NULL};
-
-    // CBM_LANG_REGEX
-    a[CBM_LANG_REGEX] = {CBM_LANG_REGEX, empty_types, empty_types, empty_types, regex_module_types,
-                        empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_regex,
-                        NULL};
-
-    // CBM_LANG_JSDOC
-    a[CBM_LANG_JSDOC] = {CBM_LANG_JSDOC, empty_types, empty_types, empty_types, jsdoc_module_types,
-                        empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_jsdoc,
-                        NULL};
-
-    // CBM_LANG_RST
-    a[CBM_LANG_RST] = {CBM_LANG_RST, empty_types, empty_types, empty_types, rst_module_types,
-                      empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                      empty_types, NULL, empty_types, NULL, NULL, tree_sitter_rst, NULL};
-
-    // CBM_LANG_BEANCOUNT
-    a[CBM_LANG_BEANCOUNT] = {CBM_LANG_BEANCOUNT, empty_types, empty_types, empty_types,
-                            beancount_module_types, empty_types, beancount_import_types,
-                            empty_types, empty_types, empty_types, empty_types, empty_types, NULL,
-                            empty_types, NULL, NULL, tree_sitter_beancount, NULL};
-
-    // CBM_LANG_MERMAID
-    a[CBM_LANG_MERMAID] = {CBM_LANG_MERMAID, empty_types, empty_types, empty_types,
-                          mermaid_module_types, empty_types, empty_types, empty_types, empty_types,
-                          empty_types, empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                          tree_sitter_mermaid, NULL};
-
-    // CBM_LANG_PUPPET
-    a[CBM_LANG_PUPPET] = {CBM_LANG_PUPPET, puppet_func_types, puppet_class_types, empty_types,
-                         puppet_module_types, puppet_call_types, puppet_import_types, empty_types,
-                         puppet_branch_types, puppet_var_types, puppet_assign_types, empty_types,
-                         NULL, empty_types, NULL, NULL, tree_sitter_puppet, NULL};
-
-    // CBM_LANG_PO
-    a[CBM_LANG_PO] = {CBM_LANG_PO, empty_types, empty_types, empty_types, po_module_types,
-                     empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                     empty_types, NULL, empty_types, NULL, NULL, tree_sitter_po, NULL};
-
-    // CBM_LANG_GITATTRIBUTES
-    a[CBM_LANG_GITATTRIBUTES] = {CBM_LANG_GITATTRIBUTES, empty_types, empty_types, empty_types,
-                                gitattributes_module_types, empty_types, empty_types, empty_types,
-                                empty_types, empty_types, empty_types, empty_types, NULL,
-                                empty_types, NULL, NULL, tree_sitter_gitattributes, NULL};
-
-    // CBM_LANG_GITIGNORE
-    a[CBM_LANG_GITIGNORE] = {CBM_LANG_GITIGNORE, empty_types, empty_types, empty_types,
-                            gitignore_module_types, empty_types, empty_types, empty_types,
-                            empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                            NULL, NULL, tree_sitter_gitignore, NULL};
-
-    // CBM_LANG_SLANG
-    a[CBM_LANG_SLANG] = {CBM_LANG_SLANG, slang_func_types, slang_class_types, empty_types,
-                        slang_module_types, slang_call_types, slang_import_types, empty_types,
-                        empty_types, empty_types, empty_types, empty_types, NULL, empty_types, NULL,
-                        NULL, tree_sitter_slang, NULL};
-
-    // CBM_LANG_LLVM_IR
-    a[CBM_LANG_LLVM_IR] = {CBM_LANG_LLVM_IR, llvm_func_types, empty_types, empty_types,
-                          llvm_module_types, llvm_call_types, empty_types, empty_types,
-                          llvm_branch_types, llvm_var_types, empty_types, empty_types, NULL,
-                          empty_types, NULL, NULL, tree_sitter_llvm, NULL};
-
-    // CBM_LANG_SMITHY
-    a[CBM_LANG_SMITHY] = {CBM_LANG_SMITHY, smithy_func_types, smithy_class_types, smithy_field_types,
-                         smithy_module_types, empty_types, smithy_import_types, empty_types,
-                         empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                         NULL, NULL, tree_sitter_smithy, NULL};
-
-    // CBM_LANG_WIT
-    a[CBM_LANG_WIT] = {CBM_LANG_WIT, wit_func_types, wit_class_types, wit_field_types,
-                      wit_module_types, empty_types, wit_import_types, empty_types, empty_types,
-                      empty_types, empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                      tree_sitter_wit, NULL};
-
-    // CBM_LANG_TLAPLUS
-    a[CBM_LANG_TLAPLUS] = {CBM_LANG_TLAPLUS, tlaplus_func_types, empty_types, empty_types,
-                          tlaplus_module_types, tlaplus_call_types, tlaplus_import_types,
-                          empty_types, tlaplus_branch_types, tlaplus_var_types, empty_types,
-                          empty_types, NULL, empty_types, NULL, NULL, tree_sitter_tlaplus, NULL};
-
-    // CBM_LANG_PKL
-    a[CBM_LANG_PKL] = {CBM_LANG_PKL, pkl_func_types, pkl_class_types, empty_types, pkl_module_types,
-                      empty_types, pkl_import_types, empty_types, empty_types, pkl_var_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_pkl,
-                      NULL};
-
-    // CBM_LANG_GOMOD
-    a[CBM_LANG_GOMOD] = {CBM_LANG_GOMOD, empty_types, empty_types, empty_types, gomod_module_types,
-                        empty_types, gomod_import_types, empty_types, empty_types, gomod_var_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_gomod,
-                        NULL};
-
-    // CBM_LANG_APEX
-    a[CBM_LANG_APEX] = {CBM_LANG_APEX, apex_func_types, apex_class_types, apex_field_types,
-                       apex_module_types, apex_call_types, apex_import_types, empty_types,
-                       apex_branch_types, apex_var_types, apex_assign_types, apex_throw_types, NULL,
-                       apex_decorator_types, NULL, NULL, tree_sitter_apex, NULL};
-
-    // CBM_LANG_SOQL
-    a[CBM_LANG_SOQL] = {CBM_LANG_SOQL, empty_types, empty_types, empty_types, soql_module_types,
-                       empty_types, soql_import_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_soql,
-                       NULL};
-
-    // CBM_LANG_SOSL
-    a[CBM_LANG_SOSL] = {CBM_LANG_SOSL, empty_types, empty_types, empty_types, sosl_module_types,
-                       empty_types, sosl_import_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_sosl,
-                       NULL};
-
-    // CBM_LANG_KUSTOMIZE — reuses YAML grammar; semantic extraction via cbm_extract_k8s()
-    a[CBM_LANG_KUSTOMIZE] = {CBM_LANG_KUSTOMIZE, yaml_var_types, empty_types, empty_types,
-                            yaml_module_types, empty_types, empty_types, empty_types, empty_types,
-                            empty_types, empty_types, empty_types, NULL, empty_types, NULL, NULL,
-                            tree_sitter_yaml, NULL};
-
-    // CBM_LANG_K8S — reuses YAML grammar; semantic extraction via cbm_extract_k8s()
-    a[CBM_LANG_K8S] = {CBM_LANG_K8S, yaml_var_types, empty_types, empty_types, yaml_module_types,
-                      empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
-                      empty_types, NULL, empty_types, NULL, NULL, tree_sitter_yaml, NULL};
-
-    // CBM_LANG_PINE — Pine Script (TradingView). kvarenzn/tree-sitter-pine (ISC).
-    a[CBM_LANG_PINE] = {CBM_LANG_PINE, pine_func_types, pine_class_types, empty_types,
-                       pine_module_types, pine_call_types, empty_types, empty_types,
-                       pine_branch_types, pine_var_types, pine_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_pine, NULL};
+        // CBM_LANG_GO
+        a[CBM_LANG_GO] = {CBM_LANG_GO,
+                          go_func_types,
+                          go_class_types,
+                          go_field_types,
+                          go_module_types,
+                          go_call_types,
+                          go_import_types,
+                          go_import_types,
+                          go_branch_types,
+                          go_var_types,
+                          go_assign_types,
+                          empty_types,
+                          NULL,
+                          empty_types,
+                          go_env_funcs,
+                          NULL,
+                          tree_sitter_go,
+                          NULL};
+
+        // CBM_LANG_PYTHON
+        a[CBM_LANG_PYTHON] = {CBM_LANG_PYTHON,
+                              py_func_types,
+                              py_class_types,
+                              empty_types,
+                              py_module_types,
+                              py_call_types,
+                              py_import_types,
+                              py_import_from_types,
+                              py_branch_types,
+                              py_var_types,
+                              py_var_types,
+                              py_throw_types,
+                              NULL,
+                              py_decorator_types,
+                              py_env_funcs,
+                              py_env_members,
+                              tree_sitter_python,
+                              NULL};
+
+        // CBM_LANG_JAVASCRIPT
+        a[CBM_LANG_JAVASCRIPT] = {CBM_LANG_JAVASCRIPT,
+                                  js_func_types,
+                                  js_class_types,
+                                  empty_types,
+                                  js_module_types,
+                                  js_call_types,
+                                  js_import_types,
+                                  js_import_types,
+                                  js_branch_types,
+                                  js_var_types,
+                                  js_assign_node_types,
+                                  js_throw_types,
+                                  NULL,
+                                  empty_types,
+                                  NULL,
+                                  js_env_members,
+                                  tree_sitter_javascript,
+                                  NULL};
+
+        // CBM_LANG_TYPESCRIPT
+        a[CBM_LANG_TYPESCRIPT] = {CBM_LANG_TYPESCRIPT,
+                                  ts_func_types,
+                                  ts_class_types,
+                                  empty_types,
+                                  js_module_types,
+                                  js_call_types,
+                                  js_import_types,
+                                  js_import_types,
+                                  js_branch_types,
+                                  js_var_types,
+                                  js_assign_node_types,
+                                  js_throw_types,
+                                  NULL,
+                                  ts_decorator_types,
+                                  NULL,
+                                  ts_env_members,
+                                  tree_sitter_typescript,
+                                  NULL};
+
+        // CBM_LANG_TSX
+        a[CBM_LANG_TSX] = {CBM_LANG_TSX,
+                           ts_func_types,
+                           ts_class_types,
+                           empty_types,
+                           js_module_types,
+                           js_call_types,
+                           js_import_types,
+                           js_import_types,
+                           js_branch_types,
+                           js_var_types,
+                           js_assign_node_types,
+                           js_throw_types,
+                           NULL,
+                           ts_decorator_types,
+                           NULL,
+                           ts_env_members,
+                           tree_sitter_tsx,
+                           NULL};
+
+        // CBM_LANG_RUST
+        a[CBM_LANG_RUST] = {CBM_LANG_RUST,
+                            rust_func_types,
+                            rust_class_types,
+                            rust_field_types,
+                            rust_module_types,
+                            rust_call_types,
+                            rust_import_types,
+                            rust_import_from_types,
+                            rust_branch_types,
+                            rust_var_types,
+                            rust_assign_types,
+                            empty_types,
+                            NULL,
+                            rust_decorator_types,
+                            rust_env_funcs,
+                            NULL,
+                            tree_sitter_rust,
+                            NULL};
+
+        // CBM_LANG_JAVA
+        a[CBM_LANG_JAVA] = {CBM_LANG_JAVA,     java_func_types,
+                            java_class_types,  java_field_types,
+                            java_module_types, java_call_types,
+                            java_import_types, java_import_types,
+                            java_branch_types, java_var_types,
+                            java_assign_types, java_throw_types,
+                            "throws",          java_decorator_types,
+                            java_env_funcs,    NULL,
+                            tree_sitter_java,  NULL};
+
+        // CBM_LANG_CPP
+        a[CBM_LANG_CPP] = {CBM_LANG_CPP,
+                           cpp_func_types,
+                           cpp_class_types,
+                           cpp_field_types,
+                           cpp_module_types,
+                           cpp_call_types,
+                           cpp_import_types,
+                           cpp_import_types,
+                           cpp_branch_types,
+                           cpp_var_types,
+                           cpp_assign_types,
+                           cpp_throw_types,
+                           NULL,
+                           empty_types,
+                           cpp_env_funcs,
+                           NULL,
+                           tree_sitter_cpp,
+                           NULL};
+
+        // CBM_LANG_CSHARP
+        a[CBM_LANG_CSHARP] = {CBM_LANG_CSHARP,
+                              cs_func_types,
+                              cs_class_types,
+                              cs_field_types,
+                              cs_module_types,
+                              cs_call_types,
+                              cs_import_types,
+                              cs_import_types,
+                              cs_branch_types,
+                              cs_var_types,
+                              cs_assign_types,
+                              cs_throw_types,
+                              NULL,
+                              cs_decorator_types,
+                              cs_env_funcs,
+                              NULL,
+                              tree_sitter_c_sharp,
+                              NULL};
+
+        // CBM_LANG_PHP
+        a[CBM_LANG_PHP] = {CBM_LANG_PHP,
+                           php_func_types,
+                           php_class_types,
+                           empty_types,
+                           php_module_types,
+                           php_call_types,
+                           php_import_types,
+                           empty_types,
+                           php_branch_types,
+                           php_var_types,
+                           php_assign_types,
+                           php_throw_types,
+                           NULL,
+                           php_decorator_types,
+                           php_env_funcs,
+                           NULL,
+                           tree_sitter_php_only,
+                           NULL};
+
+        // CBM_LANG_LUA
+        a[CBM_LANG_LUA] = {CBM_LANG_LUA,
+                           lua_func_types,
+                           empty_types,
+                           empty_types,
+                           lua_module_types,
+                           lua_call_types,
+                           lua_import_types,
+                           empty_types,
+                           lua_branch_types,
+                           lua_var_types,
+                           lua_assign_types,
+                           empty_types,
+                           NULL,
+                           empty_types,
+                           lua_env_funcs,
+                           NULL,
+                           tree_sitter_lua,
+                           NULL};
+
+        // CBM_LANG_SCALA
+        a[CBM_LANG_SCALA] = {CBM_LANG_SCALA,
+                             scala_func_types,
+                             scala_class_types,
+                             empty_types,
+                             scala_module_types,
+                             scala_call_types,
+                             scala_import_types,
+                             scala_import_types,
+                             scala_branch_types,
+                             scala_var_types,
+                             scala_assign_types,
+                             scala_throw_types,
+                             NULL,
+                             scala_decorator_types,
+                             scala_env_funcs,
+                             NULL,
+                             tree_sitter_scala,
+                             NULL};
+
+        // CBM_LANG_KOTLIN
+        a[CBM_LANG_KOTLIN] = {CBM_LANG_KOTLIN,
+                              kotlin_func_types,
+                              kotlin_class_types,
+                              empty_types,
+                              kotlin_module_types,
+                              kotlin_call_types,
+                              kotlin_import_types,
+                              kotlin_import_types,
+                              kotlin_branch_types,
+                              kotlin_var_types,
+                              kotlin_assign_types,
+                              kotlin_throw_types,
+                              NULL,
+                              kotlin_decorator_types,
+                              kotlin_env_funcs,
+                              NULL,
+                              tree_sitter_kotlin,
+                              NULL};
+
+        // CBM_LANG_RUBY
+        a[CBM_LANG_RUBY] = {CBM_LANG_RUBY,
+                            ruby_func_types,
+                            ruby_class_types,
+                            empty_types,
+                            ruby_module_types,
+                            ruby_call_types,
+                            ruby_import_types,
+                            empty_types,
+                            ruby_branch_types,
+                            ruby_var_types,
+                            ruby_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            ruby_env_members,
+                            tree_sitter_ruby,
+                            NULL};
+
+        // CBM_LANG_C
+        a[CBM_LANG_C] = {CBM_LANG_C,     c_func_types, c_class_types,  c_field_types,
+                         c_module_types, c_call_types, c_import_types, empty_types,
+                         c_branch_types, c_var_types,  c_assign_types, empty_types,
+                         NULL,           empty_types,  c_env_funcs,    NULL,
+                         tree_sitter_c,  NULL};
+
+        // CBM_LANG_BASH
+        a[CBM_LANG_BASH] = {CBM_LANG_BASH,
+                            bash_func_types,
+                            empty_types,
+                            empty_types,
+                            bash_module_types,
+                            bash_call_types,
+                            bash_import_types,
+                            empty_types,
+                            bash_branch_types,
+                            bash_var_types,
+                            bash_var_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_bash,
+                            NULL};
+
+        // CBM_LANG_ZIG
+        a[CBM_LANG_ZIG] = {CBM_LANG_ZIG,
+                           zig_func_types,
+                           zig_class_types,
+                           zig_field_types,
+                           zig_module_types,
+                           zig_call_types,
+                           zig_import_types,
+                           empty_types,
+                           zig_branch_types,
+                           zig_var_types,
+                           zig_assign_types,
+                           empty_types,
+                           NULL,
+                           empty_types,
+                           zig_env_funcs,
+                           NULL,
+                           tree_sitter_zig,
+                           NULL};
+
+        // CBM_LANG_ELIXIR
+        a[CBM_LANG_ELIXIR] = {CBM_LANG_ELIXIR,
+                              elixir_func_types,
+                              empty_types,
+                              empty_types,
+                              elixir_module_types,
+                              elixir_call_types,
+                              elixir_import_types,
+                              empty_types,
+                              elixir_branch_types,
+                              elixir_var_types,
+                              elixir_var_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              elixir_env_funcs,
+                              NULL,
+                              tree_sitter_elixir,
+                              NULL};
+
+        // CBM_LANG_HASKELL
+        a[CBM_LANG_HASKELL] = {CBM_LANG_HASKELL,
+                               haskell_func_types,
+                               haskell_class_types,
+                               empty_types,
+                               haskell_module_types,
+                               haskell_call_types,
+                               haskell_import_types,
+                               empty_types,
+                               haskell_branch_types,
+                               haskell_var_types,
+                               haskell_var_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               haskell_env_funcs,
+                               NULL,
+                               tree_sitter_haskell,
+                               NULL};
+
+        // CBM_LANG_OCAML
+        a[CBM_LANG_OCAML] = {CBM_LANG_OCAML,
+                             ocaml_func_types,
+                             ocaml_class_types,
+                             empty_types,
+                             ocaml_module_types,
+                             ocaml_call_types,
+                             ocaml_import_types,
+                             empty_types,
+                             ocaml_branch_types,
+                             ocaml_var_types,
+                             ocaml_var_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             ocaml_env_funcs,
+                             NULL,
+                             tree_sitter_ocaml,
+                             NULL};
+
+        // CBM_LANG_OBJC
+        a[CBM_LANG_OBJC] = {CBM_LANG_OBJC,
+                            objc_func_types,
+                            objc_class_types,
+                            objc_field_types,
+                            objc_module_types,
+                            objc_call_types,
+                            objc_import_types,
+                            empty_types,
+                            objc_branch_types,
+                            objc_var_types,
+                            objc_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_objc,
+                            NULL};
+
+        // CBM_LANG_SWIFT
+        a[CBM_LANG_SWIFT] = {CBM_LANG_SWIFT,
+                             swift_func_types,
+                             swift_class_types,
+                             swift_field_types,
+                             swift_module_types,
+                             swift_call_types,
+                             swift_import_types,
+                             empty_types,
+                             swift_branch_types,
+                             swift_var_types,
+                             swift_assign_types,
+                             swift_throw_types,
+                             NULL,
+                             swift_decorator_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_swift,
+                             NULL};
+
+        // CBM_LANG_DART
+        a[CBM_LANG_DART] = {CBM_LANG_DART,
+                            dart_func_types,
+                            dart_class_types,
+                            dart_field_types,
+                            dart_module_types,
+                            dart_call_types,
+                            dart_import_types,
+                            empty_types,
+                            dart_branch_types,
+                            dart_var_types,
+                            dart_assign_types,
+                            dart_throw_types,
+                            NULL,
+                            dart_decorator_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_dart,
+                            NULL};
+
+        // CBM_LANG_PERL
+        a[CBM_LANG_PERL] = {CBM_LANG_PERL,
+                            perl_func_types,
+                            empty_types,
+                            empty_types,
+                            perl_module_types,
+                            perl_call_types,
+                            perl_import_types,
+                            empty_types,
+                            perl_branch_types,
+                            perl_var_types,
+                            perl_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            perl_env_funcs,
+                            NULL,
+                            tree_sitter_perl,
+                            NULL};
+
+        // CBM_LANG_GROOVY
+        a[CBM_LANG_GROOVY] = {CBM_LANG_GROOVY,
+                              groovy_func_types,
+                              groovy_class_types,
+                              empty_types,
+                              groovy_module_types,
+                              groovy_call_types,
+                              groovy_import_types,
+                              empty_types,
+                              groovy_branch_types,
+                              groovy_var_types,
+                              groovy_assign_types,
+                              groovy_throw_types,
+                              NULL,
+                              groovy_decorator_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_groovy,
+                              NULL};
+
+        // CBM_LANG_ERLANG
+        a[CBM_LANG_ERLANG] = {CBM_LANG_ERLANG,
+                              erlang_func_types,
+                              erlang_class_types,
+                              empty_types,
+                              erlang_module_types,
+                              erlang_call_types,
+                              erlang_import_types,
+                              empty_types,
+                              erlang_branch_types,
+                              erlang_var_types,
+                              erlang_assign_types,
+                              erlang_throw_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_erlang,
+                              NULL};
+
+        // CBM_LANG_R
+        a[CBM_LANG_R] = {CBM_LANG_R,   r_func_types,   empty_types, empty_types,    r_module_types,
+                         r_call_types, r_import_types, empty_types, r_branch_types, r_var_types,
+                         r_var_types,  empty_types,    NULL,        empty_types,    r_env_funcs,
+                         NULL,         tree_sitter_r,  NULL};
+
+        // CBM_LANG_HTML
+        a[CBM_LANG_HTML] = {CBM_LANG_HTML, empty_types,       empty_types,
+                            empty_types,   html_module_types, empty_types,
+                            empty_types,   empty_types,       empty_types,
+                            empty_types,   empty_types,       empty_types,
+                            NULL,          empty_types,       NULL,
+                            NULL,          tree_sitter_html,  html_embedded_imports};
+
+        // CBM_LANG_CSS
+        a[CBM_LANG_CSS] = {
+            CBM_LANG_CSS,   empty_types,      empty_types, empty_types, css_module_types,
+            css_call_types, css_import_types, empty_types, empty_types, empty_types,
+            empty_types,    empty_types,      NULL,        empty_types, NULL,
+            NULL,           tree_sitter_css,  NULL};
+
+        // CBM_LANG_SCSS
+        a[CBM_LANG_SCSS] = {CBM_LANG_SCSS,
+                            scss_func_types,
+                            empty_types,
+                            empty_types,
+                            scss_module_types,
+                            scss_call_types,
+                            scss_import_types,
+                            empty_types,
+                            scss_branch_types,
+                            scss_var_types,
+                            empty_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_scss,
+                            NULL};
+
+        // CBM_LANG_YAML
+        a[CBM_LANG_YAML] = {
+            CBM_LANG_YAML, empty_types, empty_types, empty_types,    yaml_module_types, empty_types,
+            empty_types,   empty_types, empty_types, yaml_var_types, empty_types,       empty_types,
+            NULL,          empty_types, NULL,        NULL,           tree_sitter_yaml,  NULL};
+
+        // CBM_LANG_TOML
+        a[CBM_LANG_TOML] = {CBM_LANG_TOML,  empty_types,       toml_class_types,
+                            empty_types,    toml_module_types, empty_types,
+                            empty_types,    empty_types,       empty_types,
+                            toml_var_types, empty_types,       empty_types,
+                            NULL,           empty_types,       NULL,
+                            NULL,           tree_sitter_toml,  NULL};
+
+        // CBM_LANG_HCL
+        a[CBM_LANG_HCL] = {CBM_LANG_HCL,  empty_types,      hcl_class_types,
+                           empty_types,   hcl_module_types, hcl_call_types,
+                           empty_types,   empty_types,      empty_types,
+                           hcl_var_types, empty_types,      empty_types,
+                           NULL,          empty_types,      NULL,
+                           NULL,          tree_sitter_hcl,  NULL};
+
+        // CBM_LANG_SQL
+        a[CBM_LANG_SQL] = {CBM_LANG_SQL,
+                           sql_func_types,
+                           sql_class_types,
+                           sql_field_types,
+                           sql_module_types,
+                           sql_call_types,
+                           empty_types,
+                           empty_types,
+                           sql_branch_types,
+                           sql_var_types,
+                           empty_types,
+                           empty_types,
+                           NULL,
+                           empty_types,
+                           NULL,
+                           NULL,
+                           tree_sitter_sql,
+                           NULL};
+
+        // CBM_LANG_DOCKERFILE
+        a[CBM_LANG_DOCKERFILE] = {CBM_LANG_DOCKERFILE,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  dockerfile_module_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  dockerfile_var_types,
+                                  empty_types,
+                                  empty_types,
+                                  NULL,
+                                  empty_types,
+                                  NULL,
+                                  NULL,
+                                  tree_sitter_dockerfile,
+                                  NULL};
+
+        // CBM_LANG_CLOJURE
+        a[CBM_LANG_CLOJURE] = {CBM_LANG_CLOJURE,
+                               clojure_func_types,
+                               empty_types,
+                               empty_types,
+                               clojure_module_types,
+                               clojure_call_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_clojure,
+                               NULL};
+
+        // CBM_LANG_FSHARP
+        a[CBM_LANG_FSHARP] = {CBM_LANG_FSHARP,
+                              fsharp_func_types,
+                              fsharp_class_types,
+                              empty_types,
+                              fsharp_module_types,
+                              fsharp_call_types,
+                              fsharp_import_types,
+                              empty_types,
+                              fsharp_branch_types,
+                              fsharp_var_types,
+                              fsharp_var_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              fsharp_env_funcs,
+                              NULL,
+                              tree_sitter_fsharp,
+                              NULL};
+
+        // CBM_LANG_JULIA
+        a[CBM_LANG_JULIA] = {CBM_LANG_JULIA,
+                             julia_func_types,
+                             julia_class_types,
+                             empty_types,
+                             julia_module_types,
+                             julia_call_types,
+                             julia_import_types,
+                             empty_types,
+                             julia_branch_types,
+                             julia_var_types,
+                             julia_assign_types,
+                             julia_throw_types,
+                             NULL,
+                             empty_types,
+                             julia_env_funcs,
+                             NULL,
+                             tree_sitter_julia,
+                             NULL};
+
+        // CBM_LANG_VIMSCRIPT
+        a[CBM_LANG_VIMSCRIPT] = {CBM_LANG_VIMSCRIPT,
+                                 vim_func_types,
+                                 empty_types,
+                                 empty_types,
+                                 vim_module_types,
+                                 vim_call_types,
+                                 vim_import_types,
+                                 empty_types,
+                                 vim_branch_types,
+                                 vim_var_types,
+                                 vim_var_types,
+                                 empty_types,
+                                 NULL,
+                                 empty_types,
+                                 NULL,
+                                 NULL,
+                                 tree_sitter_vim,
+                                 NULL};
+
+        // CBM_LANG_NIX
+        a[CBM_LANG_NIX] = {
+            CBM_LANG_NIX,   nix_func_types,  empty_types, empty_types,      nix_module_types,
+            nix_call_types, empty_types,     empty_types, nix_branch_types, nix_var_types,
+            nix_var_types,  empty_types,     NULL,        empty_types,      nix_env_funcs,
+            NULL,           tree_sitter_nix, NULL};
+
+        // CBM_LANG_COMMONLISP
+        a[CBM_LANG_COMMONLISP] = {CBM_LANG_COMMONLISP,
+                                  commonlisp_func_types,
+                                  empty_types,
+                                  empty_types,
+                                  commonlisp_module_types,
+                                  commonlisp_call_types,
+                                  commonlisp_import_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  NULL,
+                                  empty_types,
+                                  NULL,
+                                  NULL,
+                                  tree_sitter_commonlisp,
+                                  NULL};
+
+        // CBM_LANG_ELM
+        a[CBM_LANG_ELM] = {CBM_LANG_ELM,
+                           elm_func_types,
+                           elm_class_types,
+                           empty_types,
+                           elm_module_types,
+                           elm_call_types,
+                           elm_import_types,
+                           empty_types,
+                           elm_branch_types,
+                           empty_types,
+                           empty_types,
+                           empty_types,
+                           NULL,
+                           empty_types,
+                           NULL,
+                           NULL,
+                           tree_sitter_elm,
+                           NULL};
+
+        // CBM_LANG_FORTRAN
+        a[CBM_LANG_FORTRAN] = {CBM_LANG_FORTRAN,
+                               fortran_func_types,
+                               fortran_class_types,
+                               empty_types,
+                               fortran_module_types,
+                               fortran_call_types,
+                               fortran_import_types,
+                               empty_types,
+                               fortran_branch_types,
+                               fortran_var_types,
+                               fortran_assign_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               fortran_env_funcs,
+                               NULL,
+                               tree_sitter_fortran,
+                               NULL};
+
+        // CBM_LANG_CUDA (reuses C++ node types)
+        a[CBM_LANG_CUDA] = {CBM_LANG_CUDA,
+                            cpp_func_types,
+                            cpp_class_types,
+                            cpp_field_types,
+                            cpp_module_types,
+                            cpp_call_types,
+                            cpp_import_types,
+                            cpp_import_types,
+                            cpp_branch_types,
+                            cpp_var_types,
+                            cpp_assign_types,
+                            cpp_throw_types,
+                            NULL,
+                            empty_types,
+                            cpp_env_funcs,
+                            NULL,
+                            tree_sitter_cuda,
+                            NULL};
+
+        // CBM_LANG_COBOL
+        a[CBM_LANG_COBOL] = {CBM_LANG_COBOL,
+                             cobol_func_types,
+                             empty_types,
+                             empty_types,
+                             cobol_module_types,
+                             cobol_call_types,
+                             cobol_import_types,
+                             empty_types,
+                             cobol_branch_types,
+                             cobol_var_types,
+                             empty_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_COBOL,
+                             NULL};
+
+        // CBM_LANG_VERILOG
+        a[CBM_LANG_VERILOG] = {CBM_LANG_VERILOG,
+                               verilog_func_types,
+                               verilog_class_types,
+                               empty_types,
+                               verilog_module_types,
+                               verilog_call_types,
+                               verilog_import_types,
+                               empty_types,
+                               verilog_branch_types,
+                               verilog_var_types,
+                               verilog_assign_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_verilog,
+                               NULL};
+
+        // CBM_LANG_EMACSLISP
+        a[CBM_LANG_EMACSLISP] = {CBM_LANG_EMACSLISP,
+                                 elisp_func_types,
+                                 empty_types,
+                                 empty_types,
+                                 elisp_module_types,
+                                 elisp_call_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 NULL,
+                                 empty_types,
+                                 NULL,
+                                 NULL,
+                                 tree_sitter_elisp,
+                                 NULL};
+
+        // CBM_LANG_JSON
+        a[CBM_LANG_JSON] = {
+            CBM_LANG_JSON, empty_types, empty_types, empty_types,    json_module_types, empty_types,
+            empty_types,   empty_types, empty_types, json_var_types, empty_types,       empty_types,
+            NULL,          empty_types, NULL,        NULL,           tree_sitter_json,  NULL};
+
+        // CBM_LANG_XML
+        a[CBM_LANG_XML] = {CBM_LANG_XML, empty_types,      xml_class_types,
+                           empty_types,  xml_module_types, empty_types,
+                           empty_types,  empty_types,      empty_types,
+                           empty_types,  empty_types,      empty_types,
+                           NULL,         empty_types,      NULL,
+                           NULL,         tree_sitter_xml,  NULL};
+
+        // CBM_LANG_MARKDOWN
+        a[CBM_LANG_MARKDOWN] = {CBM_LANG_MARKDOWN,
+                                empty_types,
+                                markdown_class_types,
+                                empty_types,
+                                markdown_module_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_markdown,
+                                NULL};
+
+        // CBM_LANG_MAKEFILE
+        a[CBM_LANG_MAKEFILE] = {CBM_LANG_MAKEFILE,
+                                makefile_func_types,
+                                empty_types,
+                                empty_types,
+                                makefile_module_types,
+                                makefile_call_types,
+                                makefile_import_types,
+                                empty_types,
+                                empty_types,
+                                makefile_var_types,
+                                empty_types,
+                                empty_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_make,
+                                NULL};
+
+        // CBM_LANG_CMAKE
+        a[CBM_LANG_CMAKE] = {CBM_LANG_CMAKE,
+                             cmake_func_types,
+                             empty_types,
+                             empty_types,
+                             cmake_module_types,
+                             cmake_call_types,
+                             make_import_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_cmake,
+                             NULL};
+
+        // CBM_LANG_PROTOBUF
+        a[CBM_LANG_PROTOBUF] = {CBM_LANG_PROTOBUF,
+                                protobuf_func_types,
+                                protobuf_class_types,
+                                protobuf_field_types,
+                                protobuf_module_types,
+                                empty_types,
+                                protobuf_import_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_proto,
+                                NULL};
+
+        // CBM_LANG_GRAPHQL
+        a[CBM_LANG_GRAPHQL] = {CBM_LANG_GRAPHQL,
+                               empty_types,
+                               graphql_class_types,
+                               graphql_field_types,
+                               graphql_module_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_graphql,
+                               NULL};
+
+        // CBM_LANG_VUE
+        a[CBM_LANG_VUE] = {CBM_LANG_VUE, empty_types,      empty_types,
+                           empty_types,  vue_module_types, empty_types,
+                           empty_types,  empty_types,      empty_types,
+                           empty_types,  empty_types,      empty_types,
+                           NULL,         empty_types,      NULL,
+                           NULL,         tree_sitter_vue,  vue_embedded_imports};
+
+        // CBM_LANG_SVELTE
+        a[CBM_LANG_SVELTE] = {CBM_LANG_SVELTE,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              svelte_module_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              svelte_branch_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_svelte,
+                              svelte_embedded_imports};
+
+        // CBM_LANG_MESON
+        a[CBM_LANG_MESON] = {CBM_LANG_MESON,
+                             meson_func_types,
+                             empty_types,
+                             empty_types,
+                             meson_module_types,
+                             meson_call_types,
+                             empty_types,
+                             empty_types,
+                             meson_branch_types,
+                             meson_var_types,
+                             meson_var_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_meson,
+                             NULL};
+
+        // CBM_LANG_GLSL (reuses C node types)
+        a[CBM_LANG_GLSL] = {
+            CBM_LANG_GLSL,  c_func_types,     c_class_types, c_field_types,  c_module_types,
+            c_call_types,   c_import_types,   empty_types,   c_branch_types, c_var_types,
+            c_assign_types, empty_types,      NULL,          empty_types,    NULL,
+            NULL,           tree_sitter_glsl, NULL};
+
+        // CBM_LANG_INI
+        a[CBM_LANG_INI] = {CBM_LANG_INI,  empty_types,      ini_class_types,
+                           empty_types,   ini_module_types, empty_types,
+                           empty_types,   empty_types,      empty_types,
+                           ini_var_types, empty_types,      empty_types,
+                           NULL,          empty_types,      NULL,
+                           NULL,          tree_sitter_ini,  NULL};
+
+        // CBM_LANG_MATLAB
+        a[CBM_LANG_MATLAB] = {CBM_LANG_MATLAB,
+                              matlab_func_types,
+                              matlab_class_types,
+                              empty_types,
+                              matlab_module_types,
+                              matlab_call_types,
+                              empty_types,
+                              empty_types,
+                              matlab_branch_types,
+                              matlab_var_types,
+                              matlab_var_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_matlab,
+                              NULL};
+
+        // CBM_LANG_LEAN
+        a[CBM_LANG_LEAN] = {CBM_LANG_LEAN,
+                            lean_func_types,
+                            lean_class_types,
+                            empty_types,
+                            lean_module_types,
+                            lean_call_types,
+                            lean_import_types,
+                            empty_types,
+                            lean_branch_types,
+                            empty_types,
+                            empty_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_lean,
+                            NULL};
+
+        // CBM_LANG_FORM
+        a[CBM_LANG_FORM] = {CBM_LANG_FORM,
+                            form_func_types,
+                            empty_types,
+                            empty_types,
+                            form_module_types,
+                            form_call_types,
+                            form_import_types,
+                            empty_types,
+                            form_branch_types,
+                            form_var_types,
+                            form_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_form,
+                            NULL};
+
+        // CBM_LANG_MAGMA
+        a[CBM_LANG_MAGMA] = {CBM_LANG_MAGMA,
+                             magma_func_types,
+                             empty_types,
+                             empty_types,
+                             magma_module_types,
+                             magma_call_types,
+                             magma_import_types,
+                             empty_types,
+                             magma_branch_types,
+                             magma_var_types,
+                             magma_var_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_magma,
+                             NULL};
+
+        // CBM_LANG_WOLFRAM
+        a[CBM_LANG_WOLFRAM] = {CBM_LANG_WOLFRAM,
+                               wolfram_func_types,
+                               empty_types,
+                               empty_types,
+                               wolfram_module_types,
+                               wolfram_call_types,
+                               wolfram_import_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_wolfram,
+                               NULL};
+
+        // CBM_LANG_SOLIDITY
+        a[CBM_LANG_SOLIDITY] = {CBM_LANG_SOLIDITY,
+                                solidity_func_types,
+                                solidity_class_types,
+                                solidity_field_types,
+                                solidity_module_types,
+                                solidity_call_types,
+                                solidity_import_types,
+                                empty_types,
+                                solidity_branch_types,
+                                solidity_var_types,
+                                solidity_assign_types,
+                                solidity_throw_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_solidity,
+                                NULL};
+
+        // CBM_LANG_TYPST
+        a[CBM_LANG_TYPST] = {CBM_LANG_TYPST,
+                             typst_func_types,
+                             empty_types,
+                             empty_types,
+                             typst_module_types,
+                             typst_call_types,
+                             typst_import_types,
+                             empty_types,
+                             typst_branch_types,
+                             typst_var_types,
+                             typst_assign_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_typst,
+                             NULL};
+
+        // CBM_LANG_GDSCRIPT
+        a[CBM_LANG_GDSCRIPT] = {CBM_LANG_GDSCRIPT,
+                                gdscript_func_types,
+                                gdscript_class_types,
+                                gdscript_field_types,
+                                gdscript_module_types,
+                                gdscript_call_types,
+                                gdscript_import_types,
+                                empty_types,
+                                gdscript_branch_types,
+                                gdscript_var_types,
+                                gdscript_assign_types,
+                                empty_types,
+                                NULL,
+                                gdscript_decorator_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_gdscript,
+                                NULL};
+
+        // CBM_LANG_GLEAM
+        a[CBM_LANG_GLEAM] = {CBM_LANG_GLEAM,
+                             gleam_func_types,
+                             gleam_class_types,
+                             gleam_field_types,
+                             gleam_module_types,
+                             gleam_call_types,
+                             gleam_import_types,
+                             empty_types,
+                             gleam_branch_types,
+                             gleam_var_types,
+                             gleam_assign_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_gleam,
+                             NULL};
+
+        // CBM_LANG_POWERSHELL
+        a[CBM_LANG_POWERSHELL] = {CBM_LANG_POWERSHELL,
+                                  powershell_func_types,
+                                  powershell_class_types,
+                                  empty_types,
+                                  powershell_module_types,
+                                  powershell_call_types,
+                                  powershell_import_types,
+                                  empty_types,
+                                  powershell_branch_types,
+                                  powershell_var_types,
+                                  powershell_assign_types,
+                                  powershell_throw_types,
+                                  NULL,
+                                  empty_types,
+                                  NULL,
+                                  NULL,
+                                  tree_sitter_powershell,
+                                  NULL};
+
+        // CBM_LANG_PASCAL
+        a[CBM_LANG_PASCAL] = {CBM_LANG_PASCAL,
+                              pascal_func_types,
+                              pascal_class_types,
+                              pascal_field_types,
+                              pascal_module_types,
+                              pascal_call_types,
+                              pascal_import_types,
+                              empty_types,
+                              pascal_branch_types,
+                              pascal_var_types,
+                              pascal_assign_types,
+                              pascal_throw_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_pascal,
+                              NULL};
+
+        // CBM_LANG_DLANG
+        a[CBM_LANG_DLANG] = {CBM_LANG_DLANG, d_func_types, d_class_types,  d_field_types,
+                             d_module_types, d_call_types, d_import_types, empty_types,
+                             d_branch_types, d_var_types,  d_assign_types, d_throw_types,
+                             NULL,           empty_types,  NULL,           NULL,
+                             tree_sitter_d,  NULL};
+
+        // CBM_LANG_SCHEME
+        a[CBM_LANG_SCHEME] = {CBM_LANG_SCHEME,
+                              scheme_func_types,
+                              empty_types,
+                              empty_types,
+                              scheme_module_types,
+                              scheme_call_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              scheme_var_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_scheme,
+                              NULL};
+
+        // CBM_LANG_FENNEL
+        a[CBM_LANG_FENNEL] = {CBM_LANG_FENNEL,
+                              fennel_func_types,
+                              empty_types,
+                              empty_types,
+                              fennel_module_types,
+                              fennel_call_types,
+                              empty_types,
+                              empty_types,
+                              fennel_branch_types,
+                              fennel_var_types,
+                              fennel_assign_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_fennel,
+                              NULL};
+
+        // CBM_LANG_FISH
+        a[CBM_LANG_FISH] = {CBM_LANG_FISH,  fish_func_types,   empty_types,
+                            empty_types,    fish_module_types, fish_call_types,
+                            empty_types,    empty_types,       fish_branch_types,
+                            fish_var_types, empty_types,       empty_types,
+                            NULL,           empty_types,       NULL,
+                            NULL,           tree_sitter_fish,  NULL};
+
+        // CBM_LANG_AWK
+        a[CBM_LANG_AWK] = {CBM_LANG_AWK,  awk_func_types,   empty_types,
+                           empty_types,   awk_module_types, awk_call_types,
+                           empty_types,   empty_types,      awk_branch_types,
+                           awk_var_types, awk_assign_types, empty_types,
+                           NULL,          empty_types,      NULL,
+                           NULL,          tree_sitter_awk,  NULL};
+
+        // CBM_LANG_ZSH
+        a[CBM_LANG_ZSH] = {CBM_LANG_ZSH,  zsh_func_types,   empty_types,
+                           empty_types,   zsh_module_types, zsh_call_types,
+                           empty_types,   empty_types,      zsh_branch_types,
+                           zsh_var_types, zsh_assign_types, empty_types,
+                           NULL,          empty_types,      NULL,
+                           NULL,          tree_sitter_zsh,  NULL};
+
+        // CBM_LANG_TCL
+        a[CBM_LANG_TCL] = {CBM_LANG_TCL,  tcl_func_types,   tcl_class_types,
+                           empty_types,   tcl_module_types, tcl_call_types,
+                           empty_types,   empty_types,      tcl_branch_types,
+                           tcl_var_types, empty_types,      empty_types,
+                           NULL,          empty_types,      NULL,
+                           NULL,          tree_sitter_tcl,  NULL};
+
+        // CBM_LANG_ADA
+        a[CBM_LANG_ADA] = {CBM_LANG_ADA,
+                           ada_func_types,
+                           ada_class_types,
+                           ada_field_types,
+                           ada_module_types,
+                           ada_call_types,
+                           ada_import_types,
+                           empty_types,
+                           ada_branch_types,
+                           ada_var_types,
+                           ada_assign_types,
+                           ada_throw_types,
+                           NULL,
+                           empty_types,
+                           NULL,
+                           NULL,
+                           tree_sitter_ada,
+                           NULL};
+
+        // CBM_LANG_AGDA
+        a[CBM_LANG_AGDA] = {CBM_LANG_AGDA,
+                            agda_func_types,
+                            agda_class_types,
+                            empty_types,
+                            agda_module_types,
+                            agda_call_types,
+                            agda_import_types,
+                            empty_types,
+                            agda_branch_types,
+                            agda_var_types,
+                            empty_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_agda,
+                            NULL};
+
+        // CBM_LANG_RACKET
+        a[CBM_LANG_RACKET] = {CBM_LANG_RACKET,
+                              racket_func_types,
+                              racket_class_types,
+                              empty_types,
+                              racket_module_types,
+                              racket_call_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              racket_var_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_racket,
+                              NULL};
+
+        // CBM_LANG_ODIN
+        a[CBM_LANG_ODIN] = {CBM_LANG_ODIN,
+                            odin_func_types,
+                            odin_class_types,
+                            odin_field_types,
+                            odin_module_types,
+                            odin_call_types,
+                            odin_import_types,
+                            empty_types,
+                            odin_branch_types,
+                            odin_var_types,
+                            odin_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_odin,
+                            NULL};
+
+        // CBM_LANG_RESCRIPT
+        a[CBM_LANG_RESCRIPT] = {CBM_LANG_RESCRIPT,
+                                rescript_func_types,
+                                rescript_class_types,
+                                empty_types,
+                                rescript_module_types,
+                                rescript_call_types,
+                                rescript_import_types,
+                                empty_types,
+                                rescript_branch_types,
+                                rescript_var_types,
+                                rescript_assign_types,
+                                rescript_throw_types,
+                                NULL,
+                                rescript_decorator_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_rescript,
+                                NULL};
+
+        // CBM_LANG_PURESCRIPT
+        a[CBM_LANG_PURESCRIPT] = {CBM_LANG_PURESCRIPT,
+                                  purescript_func_types,
+                                  purescript_class_types,
+                                  empty_types,
+                                  purescript_module_types,
+                                  purescript_call_types,
+                                  purescript_import_types,
+                                  empty_types,
+                                  purescript_branch_types,
+                                  purescript_var_types,
+                                  empty_types,
+                                  empty_types,
+                                  NULL,
+                                  empty_types,
+                                  NULL,
+                                  NULL,
+                                  tree_sitter_purescript,
+                                  NULL};
+
+        // CBM_LANG_NICKEL
+        a[CBM_LANG_NICKEL] = {CBM_LANG_NICKEL,
+                              nickel_func_types,
+                              empty_types,
+                              empty_types,
+                              nickel_module_types,
+                              nickel_call_types,
+                              nickel_import_types,
+                              empty_types,
+                              nickel_branch_types,
+                              nickel_var_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_nickel,
+                              NULL};
+
+        // CBM_LANG_CRYSTAL
+        a[CBM_LANG_CRYSTAL] = {CBM_LANG_CRYSTAL,
+                               crystal_func_types,
+                               crystal_class_types,
+                               crystal_field_types,
+                               crystal_module_types,
+                               crystal_call_types,
+                               crystal_import_types,
+                               empty_types,
+                               crystal_branch_types,
+                               crystal_var_types,
+                               crystal_assign_types,
+                               empty_types,
+                               NULL,
+                               crystal_decorator_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_crystal,
+                               NULL};
+
+        // CBM_LANG_TEAL
+        a[CBM_LANG_TEAL] = {CBM_LANG_TEAL,  teal_func_types,   teal_class_types,
+                            empty_types,    teal_module_types, teal_call_types,
+                            empty_types,    empty_types,       teal_branch_types,
+                            teal_var_types, teal_assign_types, empty_types,
+                            NULL,           empty_types,       NULL,
+                            NULL,           tree_sitter_teal,  NULL};
+
+        // CBM_LANG_HARE
+        a[CBM_LANG_HARE] = {CBM_LANG_HARE,
+                            hare_func_types,
+                            hare_class_types,
+                            empty_types,
+                            hare_module_types,
+                            hare_call_types,
+                            hare_import_types,
+                            empty_types,
+                            hare_branch_types,
+                            hare_var_types,
+                            hare_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_hare,
+                            NULL};
+
+        // CBM_LANG_PONY
+        a[CBM_LANG_PONY] = {CBM_LANG_PONY,
+                            pony_func_types,
+                            pony_class_types,
+                            empty_types,
+                            pony_module_types,
+                            pony_call_types,
+                            pony_import_types,
+                            empty_types,
+                            pony_branch_types,
+                            pony_var_types,
+                            pony_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_pony,
+                            NULL};
+
+        // CBM_LANG_LUAU
+        a[CBM_LANG_LUAU] = {CBM_LANG_LUAU,  luau_func_types,   luau_class_types,
+                            empty_types,    luau_module_types, luau_call_types,
+                            empty_types,    empty_types,       luau_branch_types,
+                            luau_var_types, luau_assign_types, empty_types,
+                            NULL,           empty_types,       NULL,
+                            NULL,           tree_sitter_luau,  NULL};
+
+        // CBM_LANG_JANET
+        a[CBM_LANG_JANET] = {CBM_LANG_JANET,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             janet_module_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_janet_simple,
+                             NULL};
+
+        // CBM_LANG_SWAY
+        a[CBM_LANG_SWAY] = {CBM_LANG_SWAY,
+                            sway_func_types,
+                            sway_class_types,
+                            empty_types,
+                            sway_module_types,
+                            sway_call_types,
+                            sway_import_types,
+                            empty_types,
+                            sway_branch_types,
+                            sway_var_types,
+                            sway_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_sway,
+                            NULL};
+
+        // CBM_LANG_NASM
+        a[CBM_LANG_NASM] = {CBM_LANG_NASM,
+                            nasm_func_types,
+                            nasm_class_types,
+                            empty_types,
+                            nasm_module_types,
+                            nasm_call_types,
+                            nasm_import_types,
+                            empty_types,
+                            empty_types,
+                            nasm_var_types,
+                            empty_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_nasm,
+                            NULL};
+
+        // CBM_LANG_ASSEMBLY
+        a[CBM_LANG_ASSEMBLY] = {CBM_LANG_ASSEMBLY,
+                                assembly_func_types,
+                                empty_types,
+                                empty_types,
+                                assembly_module_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                assembly_var_types,
+                                empty_types,
+                                empty_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_asm,
+                                NULL};
+
+        // CBM_LANG_ASTRO
+        a[CBM_LANG_ASTRO] = {CBM_LANG_ASTRO, empty_types,        empty_types,
+                             empty_types,    astro_module_types, empty_types,
+                             empty_types,    empty_types,        empty_types,
+                             empty_types,    empty_types,        empty_types,
+                             NULL,           empty_types,        NULL,
+                             NULL,           tree_sitter_astro,  astro_embedded_imports};
+
+        // CBM_LANG_BLADE
+        a[CBM_LANG_BLADE] = {
+            CBM_LANG_BLADE, empty_types, empty_types, empty_types, blade_module_types, empty_types,
+            empty_types,    empty_types, empty_types, empty_types, empty_types,        empty_types,
+            NULL,           empty_types, NULL,        NULL,        tree_sitter_blade,  NULL};
+
+        // CBM_LANG_JUST
+        a[CBM_LANG_JUST] = {CBM_LANG_JUST,
+                            just_func_types,
+                            empty_types,
+                            empty_types,
+                            just_module_types,
+                            just_call_types,
+                            just_import_types,
+                            empty_types,
+                            just_branch_types,
+                            empty_types,
+                            just_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_just,
+                            NULL};
+
+        // CBM_LANG_GOTEMPLATE
+        a[CBM_LANG_GOTEMPLATE] = {CBM_LANG_GOTEMPLATE,
+                                  gotemplate_func_types,
+                                  empty_types,
+                                  empty_types,
+                                  gotemplate_module_types,
+                                  gotemplate_call_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  NULL,
+                                  empty_types,
+                                  NULL,
+                                  NULL,
+                                  tree_sitter_gotmpl,
+                                  NULL};
+
+        // CBM_LANG_TEMPL
+        a[CBM_LANG_TEMPL] = {CBM_LANG_TEMPL,
+                             templ_func_types,
+                             templ_class_types,
+                             empty_types,
+                             templ_module_types,
+                             templ_call_types,
+                             templ_import_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_templ,
+                             NULL};
+
+        // CBM_LANG_LIQUID
+        a[CBM_LANG_LIQUID] = {CBM_LANG_LIQUID,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              liquid_module_types,
+                              empty_types,
+                              liquid_import_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_liquid,
+                              NULL};
+
+        // CBM_LANG_JINJA2
+        a[CBM_LANG_JINJA2] = {CBM_LANG_JINJA2,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              jinja2_module_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_jinja2,
+                              NULL};
+
+        // CBM_LANG_PRISMA
+        a[CBM_LANG_PRISMA] = {CBM_LANG_PRISMA,
+                              empty_types,
+                              prisma_class_types,
+                              prisma_field_types,
+                              prisma_module_types,
+                              prisma_call_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_prisma,
+                              NULL};
+
+        // CBM_LANG_HYPRLANG
+        a[CBM_LANG_HYPRLANG] = {CBM_LANG_HYPRLANG,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                hyprlang_module_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_hyprlang,
+                                NULL};
+
+        // CBM_LANG_DOTENV
+        a[CBM_LANG_DOTENV] = {CBM_LANG_DOTENV,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              dotenv_module_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_dotenv,
+                              NULL};
+
+        // CBM_LANG_DIFF
+        a[CBM_LANG_DIFF] = {CBM_LANG_DIFF, empty_types,       empty_types,
+                            empty_types,   diff_module_types, diff_call_types,
+                            empty_types,   empty_types,       empty_types,
+                            empty_types,   empty_types,       empty_types,
+                            NULL,          empty_types,       NULL,
+                            NULL,          tree_sitter_diff,  NULL};
+
+        // CBM_LANG_WGSL
+        a[CBM_LANG_WGSL] = {CBM_LANG_WGSL,
+                            wgsl_func_types,
+                            wgsl_class_types,
+                            empty_types,
+                            wgsl_module_types,
+                            wgsl_call_types,
+                            wgsl_import_types,
+                            empty_types,
+                            wgsl_branch_types,
+                            wgsl_var_types,
+                            wgsl_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_wgsl,
+                            NULL};
+
+        // CBM_LANG_KDL
+        a[CBM_LANG_KDL] = {
+            CBM_LANG_KDL, empty_types, empty_types, empty_types, kdl_module_types, empty_types,
+            empty_types,  empty_types, empty_types, empty_types, empty_types,      empty_types,
+            NULL,         empty_types, NULL,        NULL,        tree_sitter_kdl,  NULL};
+
+        // CBM_LANG_JSON5
+        a[CBM_LANG_JSON5] = {
+            CBM_LANG_JSON5, empty_types, empty_types, empty_types, json5_module_types, empty_types,
+            empty_types,    empty_types, empty_types, empty_types, empty_types,        empty_types,
+            NULL,           empty_types, NULL,        NULL,        tree_sitter_json5,  NULL};
+
+        // CBM_LANG_JSONNET
+        a[CBM_LANG_JSONNET] = {CBM_LANG_JSONNET,
+                               jsonnet_func_types,
+                               empty_types,
+                               empty_types,
+                               jsonnet_module_types,
+                               jsonnet_call_types,
+                               jsonnet_import_types,
+                               empty_types,
+                               jsonnet_branch_types,
+                               jsonnet_var_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_jsonnet,
+                               NULL};
+
+        // CBM_LANG_RON
+        a[CBM_LANG_RON] = {
+            CBM_LANG_RON, empty_types, empty_types, empty_types, ron_module_types, empty_types,
+            empty_types,  empty_types, empty_types, empty_types, empty_types,      empty_types,
+            NULL,         empty_types, NULL,        NULL,        tree_sitter_ron,  NULL};
+
+        // CBM_LANG_THRIFT
+        a[CBM_LANG_THRIFT] = {CBM_LANG_THRIFT,
+                              thrift_func_types,
+                              thrift_class_types,
+                              thrift_field_types,
+                              thrift_module_types,
+                              empty_types,
+                              thrift_import_types,
+                              empty_types,
+                              empty_types,
+                              thrift_var_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_thrift,
+                              NULL};
+
+        // CBM_LANG_CAPNP
+        a[CBM_LANG_CAPNP] = {CBM_LANG_CAPNP,
+                             capnp_func_types,
+                             capnp_class_types,
+                             capnp_field_types,
+                             capnp_module_types,
+                             empty_types,
+                             capnp_import_types,
+                             empty_types,
+                             empty_types,
+                             capnp_var_types,
+                             empty_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_capnp,
+                             NULL};
+
+        // CBM_LANG_PROPERTIES
+        a[CBM_LANG_PROPERTIES] = {CBM_LANG_PROPERTIES,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  properties_module_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  properties_var_types,
+                                  empty_types,
+                                  empty_types,
+                                  NULL,
+                                  empty_types,
+                                  NULL,
+                                  NULL,
+                                  tree_sitter_properties,
+                                  NULL};
+
+        // CBM_LANG_SSHCONFIG
+        a[CBM_LANG_SSHCONFIG] = {CBM_LANG_SSHCONFIG,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 sshconfig_module_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 NULL,
+                                 empty_types,
+                                 NULL,
+                                 NULL,
+                                 tree_sitter_ssh_config,
+                                 NULL};
+
+        // CBM_LANG_BIBTEX
+        a[CBM_LANG_BIBTEX] = {CBM_LANG_BIBTEX,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              bibtex_module_types,
+                              bibtex_call_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_bibtex,
+                              NULL};
+
+        // CBM_LANG_STARLARK
+        a[CBM_LANG_STARLARK] = {CBM_LANG_STARLARK,
+                                starlark_func_types,
+                                empty_types,
+                                empty_types,
+                                starlark_module_types,
+                                starlark_call_types,
+                                starlark_import_types,
+                                empty_types,
+                                starlark_branch_types,
+                                starlark_var_types,
+                                starlark_assign_types,
+                                empty_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_starlark,
+                                NULL};
+
+        // CBM_LANG_BICEP
+        a[CBM_LANG_BICEP] = {CBM_LANG_BICEP,
+                             bicep_func_types,
+                             bicep_class_types,
+                             empty_types,
+                             bicep_module_types,
+                             bicep_call_types,
+                             bicep_import_types,
+                             empty_types,
+                             empty_types,
+                             bicep_var_types,
+                             empty_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_bicep,
+                             NULL};
+
+        // CBM_LANG_CSV
+        a[CBM_LANG_CSV] = {
+            CBM_LANG_CSV, empty_types, empty_types, empty_types, csv_module_types, empty_types,
+            empty_types,  empty_types, empty_types, empty_types, empty_types,      empty_types,
+            NULL,         empty_types, NULL,        NULL,        tree_sitter_csv,  NULL};
+
+        // CBM_LANG_REQUIREMENTS
+        a[CBM_LANG_REQUIREMENTS] = {CBM_LANG_REQUIREMENTS,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    requirements_module_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    NULL,
+                                    empty_types,
+                                    NULL,
+                                    NULL,
+                                    tree_sitter_requirements,
+                                    NULL};
+
+        // CBM_LANG_HLSL
+        a[CBM_LANG_HLSL] = {CBM_LANG_HLSL,
+                            hlsl_func_types,
+                            hlsl_class_types,
+                            empty_types,
+                            hlsl_module_types,
+                            hlsl_call_types,
+                            hlsl_import_types,
+                            empty_types,
+                            hlsl_branch_types,
+                            hlsl_var_types,
+                            hlsl_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_hlsl,
+                            NULL};
+
+        // CBM_LANG_VHDL
+        a[CBM_LANG_VHDL] = {CBM_LANG_VHDL,
+                            vhdl_func_types,
+                            vhdl_class_types,
+                            empty_types,
+                            vhdl_module_types,
+                            vhdl_call_types,
+                            vhdl_import_types,
+                            empty_types,
+                            vhdl_branch_types,
+                            vhdl_var_types,
+                            vhdl_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_vhdl,
+                            NULL};
+
+        // CBM_LANG_SYSTEMVERILOG
+        a[CBM_LANG_SYSTEMVERILOG] = {CBM_LANG_SYSTEMVERILOG,
+                                     systemverilog_func_types,
+                                     systemverilog_class_types,
+                                     empty_types,
+                                     systemverilog_module_types,
+                                     systemverilog_call_types,
+                                     systemverilog_import_types,
+                                     empty_types,
+                                     systemverilog_branch_types,
+                                     systemverilog_var_types,
+                                     empty_types,
+                                     empty_types,
+                                     NULL,
+                                     empty_types,
+                                     NULL,
+                                     NULL,
+                                     tree_sitter_systemverilog,
+                                     NULL};
+
+        // CBM_LANG_DEVICETREE
+        a[CBM_LANG_DEVICETREE] = {CBM_LANG_DEVICETREE,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  devicetree_module_types,
+                                  devicetree_call_types,
+                                  devicetree_import_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  empty_types,
+                                  NULL,
+                                  empty_types,
+                                  NULL,
+                                  NULL,
+                                  tree_sitter_devicetree,
+                                  NULL};
+
+        // CBM_LANG_LINKERSCRIPT
+        a[CBM_LANG_LINKERSCRIPT] = {CBM_LANG_LINKERSCRIPT,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    linkerscript_module_types,
+                                    linkerscript_call_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    empty_types,
+                                    NULL,
+                                    empty_types,
+                                    NULL,
+                                    NULL,
+                                    tree_sitter_linkerscript,
+                                    NULL};
+
+        // CBM_LANG_GN
+        a[CBM_LANG_GN] = {CBM_LANG_GN,
+                          empty_types,
+                          empty_types,
+                          empty_types,
+                          gn_module_types,
+                          gn_call_types,
+                          gn_import_types,
+                          empty_types,
+                          gn_branch_types,
+                          empty_types,
+                          gn_assign_types,
+                          empty_types,
+                          NULL,
+                          empty_types,
+                          NULL,
+                          NULL,
+                          tree_sitter_gn,
+                          NULL};
+
+        // CBM_LANG_KCONFIG
+        a[CBM_LANG_KCONFIG] = {CBM_LANG_KCONFIG,
+                               empty_types,
+                               kconfig_class_types,
+                               empty_types,
+                               kconfig_module_types,
+                               empty_types,
+                               kconfig_import_types,
+                               empty_types,
+                               kconfig_branch_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_kconfig,
+                               NULL};
+
+        // CBM_LANG_BITBAKE
+        a[CBM_LANG_BITBAKE] = {CBM_LANG_BITBAKE,
+                               bitbake_func_types,
+                               empty_types,
+                               empty_types,
+                               bitbake_module_types,
+                               bitbake_call_types,
+                               bitbake_import_types,
+                               empty_types,
+                               empty_types,
+                               bitbake_var_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_bitbake,
+                               NULL};
+
+        // CBM_LANG_SMALI
+        a[CBM_LANG_SMALI] = {CBM_LANG_SMALI,
+                             smali_func_types,
+                             smali_class_types,
+                             smali_field_types,
+                             smali_module_types,
+                             empty_types,
+                             smali_import_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_smali,
+                             NULL};
+
+        // CBM_LANG_TABLEGEN
+        a[CBM_LANG_TABLEGEN] = {CBM_LANG_TABLEGEN,
+                                tablegen_func_types,
+                                tablegen_class_types,
+                                empty_types,
+                                tablegen_module_types,
+                                empty_types,
+                                tablegen_import_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                empty_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_tablegen,
+                                NULL};
+
+        // CBM_LANG_ISPC
+        a[CBM_LANG_ISPC] = {CBM_LANG_ISPC,
+                            ispc_func_types,
+                            ispc_class_types,
+                            empty_types,
+                            ispc_module_types,
+                            ispc_call_types,
+                            ispc_import_types,
+                            empty_types,
+                            ispc_branch_types,
+                            ispc_var_types,
+                            ispc_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_ispc,
+                            NULL};
+
+        // CBM_LANG_CAIRO
+        a[CBM_LANG_CAIRO] = {CBM_LANG_CAIRO,
+                             cairo_func_types,
+                             cairo_class_types,
+                             empty_types,
+                             cairo_module_types,
+                             cairo_call_types,
+                             cairo_import_types,
+                             empty_types,
+                             cairo_branch_types,
+                             cairo_var_types,
+                             cairo_assign_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_cairo,
+                             NULL};
+
+        // CBM_LANG_MOVE
+        a[CBM_LANG_MOVE] = {CBM_LANG_MOVE,
+                            move_func_types,
+                            empty_types,
+                            empty_types,
+                            move_module_types,
+                            move_call_types,
+                            move_import_types,
+                            empty_types,
+                            move_branch_types,
+                            move_var_types,
+                            move_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_move,
+                            NULL};
+
+        // CBM_LANG_SQUIRREL
+        a[CBM_LANG_SQUIRREL] = {CBM_LANG_SQUIRREL,
+                                squirrel_func_types,
+                                squirrel_class_types,
+                                empty_types,
+                                squirrel_module_types,
+                                squirrel_call_types,
+                                squirrel_import_types,
+                                empty_types,
+                                squirrel_branch_types,
+                                squirrel_var_types,
+                                squirrel_assign_types,
+                                empty_types,
+                                NULL,
+                                empty_types,
+                                NULL,
+                                NULL,
+                                tree_sitter_squirrel,
+                                NULL};
+
+        // CBM_LANG_FUNC
+        a[CBM_LANG_FUNC] = {CBM_LANG_FUNC,
+                            func_func_types,
+                            empty_types,
+                            empty_types,
+                            func_module_types,
+                            func_call_types,
+                            func_import_types,
+                            empty_types,
+                            empty_types,
+                            empty_types,
+                            empty_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_func,
+                            NULL};
+
+        // CBM_LANG_REGEX
+        a[CBM_LANG_REGEX] = {
+            CBM_LANG_REGEX, empty_types, empty_types, empty_types, regex_module_types, empty_types,
+            empty_types,    empty_types, empty_types, empty_types, empty_types,        empty_types,
+            NULL,           empty_types, NULL,        NULL,        tree_sitter_regex,  NULL};
+
+        // CBM_LANG_JSDOC
+        a[CBM_LANG_JSDOC] = {
+            CBM_LANG_JSDOC, empty_types, empty_types, empty_types, jsdoc_module_types, empty_types,
+            empty_types,    empty_types, empty_types, empty_types, empty_types,        empty_types,
+            NULL,           empty_types, NULL,        NULL,        tree_sitter_jsdoc,  NULL};
+
+        // CBM_LANG_RST
+        a[CBM_LANG_RST] = {
+            CBM_LANG_RST, empty_types, empty_types, empty_types, rst_module_types, empty_types,
+            empty_types,  empty_types, empty_types, empty_types, empty_types,      empty_types,
+            NULL,         empty_types, NULL,        NULL,        tree_sitter_rst,  NULL};
+
+        // CBM_LANG_BEANCOUNT
+        a[CBM_LANG_BEANCOUNT] = {CBM_LANG_BEANCOUNT,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 beancount_module_types,
+                                 empty_types,
+                                 beancount_import_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 NULL,
+                                 empty_types,
+                                 NULL,
+                                 NULL,
+                                 tree_sitter_beancount,
+                                 NULL};
+
+        // CBM_LANG_MERMAID
+        a[CBM_LANG_MERMAID] = {CBM_LANG_MERMAID,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               mermaid_module_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_mermaid,
+                               NULL};
+
+        // CBM_LANG_PUPPET
+        a[CBM_LANG_PUPPET] = {CBM_LANG_PUPPET,
+                              puppet_func_types,
+                              puppet_class_types,
+                              empty_types,
+                              puppet_module_types,
+                              puppet_call_types,
+                              puppet_import_types,
+                              empty_types,
+                              puppet_branch_types,
+                              puppet_var_types,
+                              puppet_assign_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_puppet,
+                              NULL};
+
+        // CBM_LANG_PO
+        a[CBM_LANG_PO] = {CBM_LANG_PO, empty_types,    empty_types, empty_types, po_module_types,
+                          empty_types, empty_types,    empty_types, empty_types, empty_types,
+                          empty_types, empty_types,    NULL,        empty_types, NULL,
+                          NULL,        tree_sitter_po, NULL};
+
+        // CBM_LANG_GITATTRIBUTES
+        a[CBM_LANG_GITATTRIBUTES] = {CBM_LANG_GITATTRIBUTES,
+                                     empty_types,
+                                     empty_types,
+                                     empty_types,
+                                     gitattributes_module_types,
+                                     empty_types,
+                                     empty_types,
+                                     empty_types,
+                                     empty_types,
+                                     empty_types,
+                                     empty_types,
+                                     empty_types,
+                                     NULL,
+                                     empty_types,
+                                     NULL,
+                                     NULL,
+                                     tree_sitter_gitattributes,
+                                     NULL};
+
+        // CBM_LANG_GITIGNORE
+        a[CBM_LANG_GITIGNORE] = {CBM_LANG_GITIGNORE,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 gitignore_module_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 NULL,
+                                 empty_types,
+                                 NULL,
+                                 NULL,
+                                 tree_sitter_gitignore,
+                                 NULL};
+
+        // CBM_LANG_SLANG
+        a[CBM_LANG_SLANG] = {CBM_LANG_SLANG,
+                             slang_func_types,
+                             slang_class_types,
+                             empty_types,
+                             slang_module_types,
+                             slang_call_types,
+                             slang_import_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             empty_types,
+                             NULL,
+                             empty_types,
+                             NULL,
+                             NULL,
+                             tree_sitter_slang,
+                             NULL};
+
+        // CBM_LANG_LLVM_IR
+        a[CBM_LANG_LLVM_IR] = {CBM_LANG_LLVM_IR,
+                               llvm_func_types,
+                               empty_types,
+                               empty_types,
+                               llvm_module_types,
+                               llvm_call_types,
+                               empty_types,
+                               empty_types,
+                               llvm_branch_types,
+                               llvm_var_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_llvm,
+                               NULL};
+
+        // CBM_LANG_SMITHY
+        a[CBM_LANG_SMITHY] = {CBM_LANG_SMITHY,
+                              smithy_func_types,
+                              smithy_class_types,
+                              smithy_field_types,
+                              smithy_module_types,
+                              empty_types,
+                              smithy_import_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              empty_types,
+                              NULL,
+                              empty_types,
+                              NULL,
+                              NULL,
+                              tree_sitter_smithy,
+                              NULL};
+
+        // CBM_LANG_WIT
+        a[CBM_LANG_WIT] = {CBM_LANG_WIT,
+                           wit_func_types,
+                           wit_class_types,
+                           wit_field_types,
+                           wit_module_types,
+                           empty_types,
+                           wit_import_types,
+                           empty_types,
+                           empty_types,
+                           empty_types,
+                           empty_types,
+                           empty_types,
+                           NULL,
+                           empty_types,
+                           NULL,
+                           NULL,
+                           tree_sitter_wit,
+                           NULL};
+
+        // CBM_LANG_TLAPLUS
+        a[CBM_LANG_TLAPLUS] = {CBM_LANG_TLAPLUS,
+                               tlaplus_func_types,
+                               empty_types,
+                               empty_types,
+                               tlaplus_module_types,
+                               tlaplus_call_types,
+                               tlaplus_import_types,
+                               empty_types,
+                               tlaplus_branch_types,
+                               tlaplus_var_types,
+                               empty_types,
+                               empty_types,
+                               NULL,
+                               empty_types,
+                               NULL,
+                               NULL,
+                               tree_sitter_tlaplus,
+                               NULL};
+
+        // CBM_LANG_PKL
+        a[CBM_LANG_PKL] = {CBM_LANG_PKL,
+                           pkl_func_types,
+                           pkl_class_types,
+                           empty_types,
+                           pkl_module_types,
+                           empty_types,
+                           pkl_import_types,
+                           empty_types,
+                           empty_types,
+                           pkl_var_types,
+                           empty_types,
+                           empty_types,
+                           NULL,
+                           empty_types,
+                           NULL,
+                           NULL,
+                           tree_sitter_pkl,
+                           NULL};
+
+        // CBM_LANG_GOMOD
+        a[CBM_LANG_GOMOD] = {
+            CBM_LANG_GOMOD, empty_types,        empty_types, empty_types, gomod_module_types,
+            empty_types,    gomod_import_types, empty_types, empty_types, gomod_var_types,
+            empty_types,    empty_types,        NULL,        empty_types, NULL,
+            NULL,           tree_sitter_gomod,  NULL};
+
+        // CBM_LANG_APEX
+        a[CBM_LANG_APEX] = {CBM_LANG_APEX,
+                            apex_func_types,
+                            apex_class_types,
+                            apex_field_types,
+                            apex_module_types,
+                            apex_call_types,
+                            apex_import_types,
+                            empty_types,
+                            apex_branch_types,
+                            apex_var_types,
+                            apex_assign_types,
+                            apex_throw_types,
+                            NULL,
+                            apex_decorator_types,
+                            NULL,
+                            NULL,
+                            tree_sitter_apex,
+                            NULL};
+
+        // CBM_LANG_SOQL
+        a[CBM_LANG_SOQL] = {
+            CBM_LANG_SOQL, empty_types,       empty_types, empty_types, soql_module_types,
+            empty_types,   soql_import_types, empty_types, empty_types, empty_types,
+            empty_types,   empty_types,       NULL,        empty_types, NULL,
+            NULL,          tree_sitter_soql,  NULL};
+
+        // CBM_LANG_SOSL
+        a[CBM_LANG_SOSL] = {
+            CBM_LANG_SOSL, empty_types,       empty_types, empty_types, sosl_module_types,
+            empty_types,   sosl_import_types, empty_types, empty_types, empty_types,
+            empty_types,   empty_types,       NULL,        empty_types, NULL,
+            NULL,          tree_sitter_sosl,  NULL};
+
+        // CBM_LANG_KUSTOMIZE — reuses YAML grammar; semantic extraction via cbm_extract_k8s()
+        a[CBM_LANG_KUSTOMIZE] = {CBM_LANG_KUSTOMIZE,
+                                 yaml_var_types,
+                                 empty_types,
+                                 empty_types,
+                                 yaml_module_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 empty_types,
+                                 NULL,
+                                 empty_types,
+                                 NULL,
+                                 NULL,
+                                 tree_sitter_yaml,
+                                 NULL};
+
+        // CBM_LANG_K8S — reuses YAML grammar; semantic extraction via cbm_extract_k8s()
+        a[CBM_LANG_K8S] = {
+            CBM_LANG_K8S, yaml_var_types, empty_types, empty_types, yaml_module_types, empty_types,
+            empty_types,  empty_types,    empty_types, empty_types, empty_types,       empty_types,
+            NULL,         empty_types,    NULL,        NULL,        tree_sitter_yaml,  NULL};
+
+        // CBM_LANG_PINE — Pine Script (TradingView). kvarenzn/tree-sitter-pine (ISC).
+        a[CBM_LANG_PINE] = {CBM_LANG_PINE,  pine_func_types,   pine_class_types,
+                            empty_types,    pine_module_types, pine_call_types,
+                            empty_types,    empty_types,       pine_branch_types,
+                            pine_var_types, pine_assign_types, empty_types,
+                            NULL,           empty_types,       NULL,
+                            NULL,           tree_sitter_pine,  NULL};
+
+        // CBM_LANG_MOJO
+        a[CBM_LANG_MOJO] = {CBM_LANG_MOJO,
+                            mojo_func_types,
+                            mojo_class_types,
+                            empty_types,
+                            mojo_module_types,
+                            mojo_call_types,
+                            mojo_import_types,
+                            mojo_import_types,
+                            mojo_branch_types,
+                            mojo_var_types,
+                            mojo_assign_types,
+                            empty_types,
+                            NULL,
+                            empty_types,
+                            NULL,
+                            NULL,
+                            NULL,
+                            NULL};
 
         return a;
     }();

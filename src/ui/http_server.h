@@ -11,6 +11,7 @@
 #define CBM_UI_HTTP_SERVER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +51,14 @@ void cbm_ui_log_append(const char *line);
 
 /* Set the binary path for subprocess spawning (call from main). */
 void cbm_http_server_set_binary_path(const char *path);
+
+/* Resolve the path to this executable into out[0..outsz). If argv0 is a usable
+ * path to an executable it is preferred; otherwise the OS self-executable path
+ * is used. Returns false on failure. Used by the crash-isolating index worker. */
+bool cbm_http_server_resolve_binary_path(const char *argv0, char *out, size_t outsz);
+
+/* Attach a watcher to the server (used by main to enable UI-driven watch mgmt). */
+void cbm_http_server_set_watcher(cbm_http_server_t *srv, struct cbm_watcher *watcher);
 
 #ifdef __cplusplus
 }

@@ -31,8 +31,8 @@ extern "C" {
 /* Ingest a rustdoc JSON document into the registry. `crate_qn` is the
  * QN prefix to use for items (e.g. "serde" for crate `serde`). Returns
  * the number of items registered. */
-int cbm_rust_rustdoc_ingest(CBMTypeRegistry* reg, CBMArena* arena,
-    const char* json, int json_len, const char* crate_qn);
+int cbm_rust_rustdoc_ingest(CBMTypeRegistry *reg, CBMArena *arena, const char *json, int json_len,
+                            const char *crate_qn);
 
 #ifdef __cplusplus
 }

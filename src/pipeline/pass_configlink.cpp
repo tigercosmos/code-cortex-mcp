@@ -105,7 +105,7 @@ static int collect_config_entries(const cbm_gbuf_node_t *const *vars, int var_co
     return n;
 }
 
-/* Collect code nodes (Function/Variable/Class) not from config files. */
+/* Collect code nodes (Function/Variable/Class/Struct) not from config files. */
 typedef struct {
     int64_t node_id;
     char normalized[CBM_SZ_256];
@@ -115,7 +115,9 @@ typedef struct {
  * fixed cap: truncating here made the emitted CONFIGURES edge set depend
  * on parallel-extraction node order — same repo, different edges per run. */
 static int collect_code_entries(cbm_gbuf_t *gb, code_entry_t **out) {
-    static const char *labels[] = {"Function", "Variable", "Class", NULL};
+    /* "Struct" alongside "Class": a config key may name a Go/Rust/Swift/D struct
+     * type, which is now labelled "Struct" — keep it linkable. */
+    static const char *labels[] = {"Function", "Variable", "Class", "Struct", NULL};
 
     int total = 0;
     for (int li = 0; labels[li]; li++) {

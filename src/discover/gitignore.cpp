@@ -12,6 +12,7 @@
  *   - patterns with / are rooted (anchored to base)
  */
 #include "foundation/constants.h"
+#include "foundation/compat_fs.h"
 
 enum { GI_INIT_CAP = 16, GI_CHAR_IDX1 = 1, GI_CHAR_IDX2 = 2, GI_SKIP3 = 3 };
 #include "discover/discover.h"
@@ -288,7 +289,7 @@ cbm_gitignore_t *cbm_gitignore_load(const char *path) {
         return NULL;
     }
 
-    FILE *f = fopen(path, "r");
+    FILE *f = cbm_fopen(path, "r");
     if (!f) {
         return NULL;
     }
@@ -341,16 +342,16 @@ static bool match_unrooted(const char *pattern, const char *rel_path, const char
     return false;
 }
 
-bool cbm_gitignore_matches(const cbm_gitignore_t *gi, const char *rel_path, bool is_dir) {
+int cbm_gitignore_match_result(const cbm_gitignore_t *gi, const char *rel_path, bool is_dir) {
     if (!gi || !rel_path) {
-        return false;
+        return 0;
     }
 
     /* Extract the basename for non-rooted pattern matching */
     const char *basename = strrchr(rel_path, '/');
     basename = basename ? basename + SKIP_ONE : rel_path;
 
-    bool matched = false;
+    int matched = 0;
 
     for (int i = 0; i < gi->count; i++) {
         const gi_pattern_t *p = &gi->patterns[i];
@@ -363,11 +364,15 @@ bool cbm_gitignore_matches(const cbm_gitignore_t *gi, const char *rel_path, bool
                                     : match_unrooted(p->pattern, rel_path, basename);
 
         if (this_match) {
-            matched = !p->negated;
+            matched = p->negated ? -1 : 1;
         }
     }
 
     return matched;
+}
+
+bool cbm_gitignore_matches(const cbm_gitignore_t *gi, const char *rel_path, bool is_dir) {
+    return cbm_gitignore_match_result(gi, rel_path, is_dir) > 0;
 }
 
 void cbm_gitignore_free(cbm_gitignore_t *gi) {
@@ -379,4 +384,49 @@ void cbm_gitignore_free(cbm_gitignore_t *gi) {
     }
     free(gi->patterns);
     free(gi);
+}
+
+/* Test seam: lets a unit test simulate strdup() failure mid-merge so the
+ * atomic-rollback path can be exercised without real OOM. NULL = use strdup. */
+char *(*cbm_gitignore_merge_dup_hook_for_test)(const char *) = NULL;
+
+bool cbm_gitignore_merge(cbm_gitignore_t *dst, const cbm_gitignore_t *src) {
+    if (!dst) {
+        return false;
+    }
+    if (!src || src->count == 0) {
+        return true; /* nothing to merge */
+    }
+    int needed = dst->count + src->count;
+    if (needed > dst->capacity) {
+        gi_pattern_t *grown =
+            (gi_pattern_t *)realloc(dst->patterns, (size_t)needed * sizeof(gi_pattern_t));
+        if (!grown) {
+            return false; /* dst left unchanged */
+        }
+        dst->patterns = grown;
+        dst->capacity = needed;
+    }
+    int start_count = dst->count;
+    for (int i = 0; i < src->count; i++) {
+        char *pat = cbm_gitignore_merge_dup_hook_for_test
+                        ? cbm_gitignore_merge_dup_hook_for_test(src->patterns[i].pattern)
+                        : strdup(src->patterns[i].pattern);
+        if (!pat) {
+            /* Roll back partial copies so dst is unchanged on failure (atomic
+             * merge). A silent partial merge could drop the very exclude
+             * pattern the caller relied on while keeping others. */
+            for (int j = start_count; j < dst->count; j++) {
+                free(dst->patterns[j].pattern);
+            }
+            dst->count = start_count;
+            return false;
+        }
+        dst->patterns[dst->count].pattern = pat;
+        dst->patterns[dst->count].negated = src->patterns[i].negated;
+        dst->patterns[dst->count].dir_only = src->patterns[i].dir_only;
+        dst->patterns[dst->count].rooted = src->patterns[i].rooted;
+        dst->count++;
+    }
+    return true;
 }

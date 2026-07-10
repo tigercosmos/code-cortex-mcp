@@ -300,7 +300,11 @@ set(CBM_FOUNDATION_CXX_SRCS
     src/foundation/mem.cpp
     src/foundation/diagnostics.cpp
     src/foundation/profile.cpp
-    src/foundation/hash_table.cpp)
+    src/foundation/hash_table.cpp
+    src/foundation/subprocess.cpp
+    src/foundation/sha256.cpp
+    src/foundation/limits.cpp
+    src/foundation/dump_verify.cpp)
 cbm_add_cxx_library(cbm_foundation_cxx
     SOURCES ${CBM_FOUNDATION_CXX_SRCS}
     INCLUDES ${CMAKE_SOURCE_DIR}/vendored/mimalloc/include)
@@ -346,7 +350,7 @@ cbm_add_cxx_library(cbm_sqlite_writer SOURCES ${CBM_INTERNAL}/sqlite_writer.cpp)
 # ── src/ subsystems (C++23) ────────────────────────────────────
 cbm_add_cxx_library(cbm_store     SOURCES src/store/store.cpp)
 cbm_add_cxx_library(cbm_cypher    SOURCES src/cypher/cypher.cpp)
-cbm_add_cxx_library(cbm_mcp       SOURCES src/mcp/mcp.cpp)
+cbm_add_cxx_library(cbm_mcp       SOURCES src/mcp/mcp.cpp src/mcp/index_supervisor.cpp)
 cbm_add_cxx_library(cbm_discover  SOURCES
     src/discover/userconfig.cpp
     src/discover/gitignore.cpp
@@ -384,7 +388,7 @@ cbm_add_cxx_library(cbm_pipeline  SOURCES
     src/pipeline/pass_complexity.cpp
     src/pipeline/pass_pkgmap.cpp)
 cbm_add_cxx_library(cbm_simhash   SOURCES src/simhash/minhash.cpp)
-cbm_add_cxx_library(cbm_semantic  SOURCES src/semantic/semantic.cpp src/semantic/ast_profile.cpp)
+cbm_add_cxx_library(cbm_semantic  SOURCES src/semantic/semantic.cpp src/semantic/ast_profile.cpp src/semantic/rotsq.cpp)
 cbm_add_cxx_library(cbm_traces    SOURCES src/traces/traces.cpp)
 cbm_add_cxx_library(cbm_watcher   SOURCES src/watcher/watcher.cpp)
 cbm_add_cxx_library(cbm_git       SOURCES src/git/git_context.cpp)

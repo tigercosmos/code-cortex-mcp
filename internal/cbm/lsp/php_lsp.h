@@ -5,7 +5,7 @@
 #include "scope.h"
 #include "type_registry.h"
 #include "../cbm.h"
-#include "go_lsp.h"  /* CBMLSPDef reused across languages */
+#include "go_lsp.h" /* CBMLSPDef reused across languages */
 
 /* PHPLSPContext — per-file state for PHP type-aware call resolution.
  * Mirrors GoLSPContext / CLSPContext structure. */
@@ -17,11 +17,7 @@ extern "C" {
 /* `use`-kind enumeration. Hoisted to file scope because an anonymous
  * enum inside the struct below would leak its enumerators to the
  * surrounding scope only in C, not C++. */
-typedef enum {
-    CBM_PHP_USE_CLASS = 0,
-    CBM_PHP_USE_FUNCTION,
-    CBM_PHP_USE_CONST
-} CBMPhpUseKind;
+typedef enum { CBM_PHP_USE_CLASS = 0, CBM_PHP_USE_FUNCTION, CBM_PHP_USE_CONST } CBMPhpUseKind;
 
 typedef struct {
     CBMArena *arena;
@@ -44,7 +40,7 @@ typedef struct {
 
     /* Current function/method/class context. */
     const char *enclosing_func_qn;
-    const char *enclosing_class_qn; /* NULL outside class body */
+    const char *enclosing_class_qn;  /* NULL outside class body */
     const char *enclosing_parent_qn; /* parent class QN (for parent::), or NULL */
     const char *module_qn;
 
@@ -56,13 +52,18 @@ typedef struct {
      * type aliases like `@phpstan-type UserId int|string` and references
      * to `UserId` in @var/@param/@return all resolve to the aliased type.
      */
-    const char **phpstan_alias_names;  /* arena-allocated, NULL-terminated */
+    const char **phpstan_alias_names; /* arena-allocated, NULL-terminated */
     const CBMType **phpstan_alias_types;
     int phpstan_alias_count;
     int phpstan_alias_cap;
 
     /* Recursion guard for php_eval_expr_type. */
     int eval_depth;
+
+    /* AST-walk recursion depth for php_resolve_calls_in_node (guards stack
+     * overflow on deeply-nested/cyclic files; see cbm_lsp_max_walk_depth).
+     * Zero via memset. */
+    int walk_depth;
 
     /* Debug mode (CBM_LSP_DEBUG env). */
     bool debug;
@@ -91,12 +92,12 @@ const char *php_resolve_class_name(PHPLSPContext *ctx, const char *name);
 
 /* Look up a method on a class, walking parent chain (registry-based). */
 const CBMRegisteredFunc *php_lookup_method(PHPLSPContext *ctx, const char *class_qn,
-                                            const char *method_name);
+                                           const char *method_name);
 
 /* Entry point: build registry from file defs + stdlib + composer (if present),
  * then run resolution. Called from cbm_extract_file(). */
 void cbm_run_php_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
-                    TSNode root);
+                     TSNode root);
 
 /* Register PHP stdlib + curated framework types into a registry. */
 void cbm_php_stdlib_register(CBMTypeRegistry *reg, CBMArena *arena);
@@ -109,14 +110,11 @@ void cbm_php_stdlib_register(CBMTypeRegistry *reg, CBMArena *arena);
  * `use` declarations from the AST are layered on top by process_file.
  *
  * Reuses go_lsp.h's CBMLSPDef so cross-language registration is uniform. */
-void cbm_run_php_lsp_cross(
-    CBMArena *arena,
-    const char *source, int source_len,
-    const char *module_qn,
-    CBMLSPDef *defs, int def_count,
-    const char **import_names, const char **import_qns, int import_count,
-    TSTree *cached_tree,           /* NULL = parse internally */
-    CBMResolvedCallArray *out);
+void cbm_run_php_lsp_cross(CBMArena *arena, const char *source, int source_len,
+                           const char *module_qn, CBMLSPDef *defs, int def_count,
+                           const char **import_names, const char **import_qns, int import_count,
+                           TSTree *cached_tree, /* NULL = parse internally */
+                           CBMResolvedCallArray *out);
 
 /* --- Batch cross-file LSP --- */
 
@@ -125,20 +123,18 @@ typedef struct {
     const char *source;
     int source_len;
     const char *module_qn;
-    TSTree *cached_tree;            /* NULL = parse internally */
-    CBMLSPDef *defs;                /* combined file-local + cross-file defs */
+    TSTree *cached_tree; /* NULL = parse internally */
+    CBMLSPDef *defs;     /* combined file-local + cross-file defs */
     int def_count;
-    const char **import_names;      /* parallel arrays, import_count long */
+    const char **import_names; /* parallel arrays, import_count long */
     const char **import_qns;
     int import_count;
 } CBMBatchPHPLSPFile;
 
 /* Process multiple PHP files' cross-file LSP in one call. out must point to
  * file_count pre-zeroed CBMResolvedCallArray structs. */
-void cbm_batch_php_lsp_cross(
-    CBMArena *arena,
-    CBMBatchPHPLSPFile *files, int file_count,
-    CBMResolvedCallArray *out);
+void cbm_batch_php_lsp_cross(CBMArena *arena, CBMBatchPHPLSPFile *files, int file_count,
+                             CBMResolvedCallArray *out);
 
 #ifdef __cplusplus
 }

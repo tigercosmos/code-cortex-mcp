@@ -46,6 +46,13 @@ typedef struct {
     const CBMEmbeddedLangSpec *embedded_imports;
 } CBMLangSpec;
 
+// Returns a NULL-terminated list of callee-name suffixes that indicate a
+// string-dispatch call for a given language (e.g. ".classMethodValue" for
+// Python/IRIS), or NULL if the language has no such dispatch pattern.
+// Kept out of CBMLangSpec to avoid -Wmissing-field-initializers across 155
+// language rows; the table lives in extract_calls.c next to the dispatch code.
+const char **cbm_string_dispatch_suffixes(CBMLanguage lang);
+
 // Get the language spec for a given language. Returns NULL for unsupported.
 const CBMLangSpec *cbm_lang_spec(CBMLanguage lang);
 

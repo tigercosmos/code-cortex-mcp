@@ -225,6 +225,154 @@ static char *ha_format_context(const char *envelope, const char *token, bool *is
     return text;
 }
 
+/* ── Read coverage note (#963) ────────────────────────────────────
+ * For Read calls: if the file being read is listed in the project's
+ * index_coverage table (parse_partial or a skip), inject a note so the agent
+ * knows the knowledge graph may under-report this file. Best-effort and
+ * non-blocking like everything else here — no entry, no output. */
+
+/* Parse an index_status envelope (which carries the coverage report) and
+ * return a note when `rel` is listed.
+ * *is_error is set for MCP errors (project not indexed) → caller climbs. */
+static char *ha_coverage_context(const char *envelope, const char *rel, bool *is_error) {
+    *is_error = false;
+    yyjson_doc *edoc = yyjson_read(envelope, strlen(envelope), 0);
+    if (!edoc) {
+        return NULL;
+    }
+    yyjson_val *eroot = yyjson_doc_get_root(edoc);
+    yyjson_val *err = yyjson_obj_get(eroot, "isError");
+    if (err && yyjson_is_true(err)) {
+        *is_error = true;
+        yyjson_doc_free(edoc);
+        return NULL;
+    }
+    yyjson_val *content = yyjson_obj_get(eroot, "content");
+    yyjson_val *item0 = (content && yyjson_is_arr(content)) ? yyjson_arr_get(content, 0) : NULL;
+    const char *inner = ha_obj_str(item0, "text");
+    if (!inner) {
+        yyjson_doc_free(edoc);
+        return NULL;
+    }
+    yyjson_doc *idoc = yyjson_read(inner, strlen(inner), 0);
+    if (!idoc) {
+        yyjson_doc_free(edoc);
+        return NULL;
+    }
+    yyjson_val *iroot = yyjson_doc_get_root(idoc);
+    char *text = NULL;
+
+    yyjson_val *pp = yyjson_obj_get(iroot, "parse_partial");
+    yyjson_val *files = pp ? yyjson_obj_get(pp, "files") : NULL;
+    size_t idx;
+    size_t maxn;
+    yyjson_val *fe;
+    if (files && yyjson_is_arr(files)) {
+        yyjson_arr_foreach(files, idx, maxn, fe) {
+            const char *fp = ha_obj_str(fe, "path");
+            if (fp && strcmp(fp, rel) == 0) {
+                const char *ranges = ha_obj_str(fe, "error_ranges");
+                text = (char *)malloc(1024);
+                if (text) {
+                    snprintf(text, 1024,
+                             "[codebase-memory] Coverage note: this file was only PARTIALLY "
+                             "indexed — line range(s) %s could not be parsed, so constructs "
+                             "there may be missing from the knowledge graph. The file content "
+                             "you are reading is ground truth; graph queries may under-report "
+                             "this file. (best-effort signal)",
+                             ranges && ranges[0] ? ranges : "?");
+                }
+                break;
+            }
+        }
+    }
+    if (!text) {
+        yyjson_val *sk = yyjson_obj_get(iroot, "skipped");
+        files = sk ? yyjson_obj_get(sk, "files") : NULL;
+        if (files && yyjson_is_arr(files)) {
+            yyjson_arr_foreach(files, idx, maxn, fe) {
+                const char *fp = ha_obj_str(fe, "path");
+                if (fp && strcmp(fp, rel) == 0) {
+                    const char *phase = ha_obj_str(fe, "phase");
+                    const char *reason = ha_obj_str(fe, "reason");
+                    text = (char *)malloc(1024);
+                    if (text) {
+                        snprintf(text, 1024,
+                                 "[codebase-memory] Coverage note: this file was NOT indexed "
+                                 "(%s%s%s) — the knowledge graph has no data for it. "
+                                 "(best-effort signal)",
+                                 phase ? phase : "skipped", reason && reason[0] ? ": " : "",
+                                 reason ? reason : "");
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    yyjson_doc_free(idoc);
+    yyjson_doc_free(edoc);
+    return text;
+}
+
+/* Strip the last path component in place. Returns false at a filesystem or
+ * drive root (nothing left to strip). */
+static bool ha_strip_last_component(char *dir) {
+    char *slash = strrchr(dir, '/');
+    if (!slash || slash == dir) {
+        return false; /* POSIX root "/" */
+    }
+    if (slash == dir + 2 && dir[1] == ':') {
+        return false; /* Windows drive root "X:/" — don't strip to "X:" */
+    }
+    *slash = '\0';
+    return true;
+}
+
+/* Walk up from the file's parent directory to find the indexed project, then
+ * check whether the file (repo-relative) is listed in its coverage report.
+ * Mirrors ha_resolve_and_query: an MCP error means "not indexed here" →
+ * climb; a valid project with no entry for this file → stop, no output. */
+static char *ha_resolve_coverage(cbm_mcp_server_t *srv, const char *file_path) {
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", file_path);
+    if (!ha_strip_last_component(dir)) {
+        return NULL; /* file directly at a root — nothing to resolve against */
+    }
+
+    for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
+        char *project = cbm_project_name_from_path(dir);
+        if (project) {
+            yyjson_mut_doc *adoc = yyjson_mut_doc_new(NULL);
+            yyjson_mut_val *aroot = yyjson_mut_obj(adoc);
+            yyjson_mut_doc_set_root(adoc, aroot);
+            yyjson_mut_obj_add_str(adoc, aroot, "project", project);
+            char *args = yyjson_mut_write(adoc, 0, NULL);
+            yyjson_mut_doc_free(adoc);
+            free(project);
+            if (args) {
+                char *res = cbm_mcp_handle_tool(srv, "index_status", args);
+                free(args);
+                if (res) {
+                    bool is_error = false;
+                    const char *rel = file_path + strlen(dir) + 1;
+                    char *ctx = ha_coverage_context(res, rel, &is_error);
+                    free(res);
+                    if (ctx) {
+                        return ctx; /* listed → note */
+                    }
+                    if (!is_error) {
+                        return NULL; /* indexed project, file not listed → stop */
+                    }
+                }
+            }
+        }
+        if (!ha_strip_last_component(dir)) {
+            break;
+        }
+    }
+    return NULL;
+}
+
 /* Emit the PreToolUse additionalContext payload to stdout (exactly once). */
 static void ha_emit(const char *text) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
@@ -243,6 +391,20 @@ static void ha_emit(const char *text) {
     yyjson_mut_doc_free(doc);
 }
 
+/* True for an absolute path we can walk up: POSIX "/..." or a Windows drive
+ * root — "X:/..." or a bare "X:" (callers normalize '\\' to '/' first).
+ * Declared in cli.h so the Windows drive-letter handling (#618) has direct
+ * regression coverage. */
+bool cbm_hook_path_is_abs(const char *d) {
+    if (!d || !d[0]) {
+        return false;
+    }
+    if (d[0] == '/') {
+        return true;
+    }
+    return isalpha((unsigned char)d[0]) && d[1] == ':' && (d[2] == '/' || d[2] == '\0');
+}
+
 /* Walk up from `start`, deriving a project name at each level and querying
  * search_graph until an indexed project is found (or the walk is exhausted).
  * Stops at the first non-error result: a valid project with zero hits is a
@@ -251,7 +413,7 @@ static char *ha_resolve_and_query(cbm_mcp_server_t *srv, const char *start, cons
     char dir[4096];
     snprintf(dir, sizeof(dir), "%s", start);
 
-    for (int level = 0; level < HA_MAX_WALKUP && dir[0] == '/'; level++) {
+    for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
         char *project = cbm_project_name_from_path(dir);
         if (project) {
             char *args = ha_build_args(project, token);
@@ -275,7 +437,10 @@ static char *ha_resolve_and_query(cbm_mcp_server_t *srv, const char *start, cons
         /* Not indexed at this level — climb to the parent. */
         char *slash = strrchr(dir, '/');
         if (!slash || slash == dir) {
-            break;
+            break; /* POSIX root "/" */
+        }
+        if (slash == dir + 2 && dir[1] == ':') {
+            break; /* Windows drive root "X:/" — don't strip to "X:" */
         }
         *slash = '\0';
     }
@@ -297,13 +462,44 @@ int cbm_cmd_hook_augment(void) {
     yyjson_val *root = yyjson_doc_get_root(doc);
 
     const char *tool = ha_obj_str(root, "tool_name");
-    if (!tool || (strcmp(tool, "Grep") != 0 && strcmp(tool, "Glob") != 0)) {
+    if (!tool ||
+        (strcmp(tool, "Grep") != 0 && strcmp(tool, "Glob") != 0 && strcmp(tool, "Read") != 0)) {
         yyjson_doc_free(doc);
         free(input);
         return 0;
     }
 
     yyjson_val *tin = yyjson_obj_get(root, "tool_input");
+
+    /* Read → coverage note (#963): warn when the file being read is listed as
+     * not fully indexed. Independent of the Grep/Glob symbol augment below. */
+    if (strcmp(tool, "Read") == 0) {
+        const char *fp = ha_obj_str(tin, "file_path");
+        char fpbuf[4096];
+        if (fp) {
+            snprintf(fpbuf, sizeof(fpbuf), "%s", fp);
+            for (char *p = fpbuf; *p; p++) {
+                if (*p == '\\') {
+                    *p = '/';
+                }
+            }
+        }
+        if (fp && cbm_hook_path_is_abs(fpbuf)) {
+            cbm_mcp_server_t *rsrv = cbm_mcp_server_new(NULL);
+            if (rsrv) {
+                char *note = ha_resolve_coverage(rsrv, fpbuf);
+                if (note) {
+                    ha_emit(note);
+                    free(note);
+                }
+                cbm_mcp_server_free(rsrv);
+            }
+        }
+        yyjson_doc_free(doc);
+        free(input);
+        return 0;
+    }
+
     const char *pattern = ha_obj_str(tin, "pattern");
     char token[HA_MAX_TOKEN + 1];
     if (!ha_extract_token(pattern, token, sizeof(token))) {
@@ -313,9 +509,9 @@ int cbm_cmd_hook_augment(void) {
     }
 
     const char *cwd = ha_obj_str(root, "cwd");
-#ifndef _WIN32
     char cwdbuf[4096];
-    if (!cwd || cwd[0] != '/') {
+#ifndef _WIN32
+    if (!cwd || !cbm_hook_path_is_abs(cwd)) {
         if (!getcwd(cwdbuf, sizeof(cwdbuf))) {
             yyjson_doc_free(doc);
             free(input);
@@ -324,10 +520,20 @@ int cbm_cmd_hook_augment(void) {
         cwd = cwdbuf;
     }
 #else
-    /* Windows: Claude Code passes cwd in the hook payload. The walk-up loop
-     * below requires POSIX-style absolute paths ('/'-prefixed), so without a
-     * usable cwd there is nothing to augment — fail open cleanly. */
-    if (!cwd || cwd[0] != '/') {
+    /* Windows: Claude Code passes an absolute drive-letter cwd in the hook
+     * payload (e.g. C:\repo). Normalize '\\' -> '/' and require an absolute
+     * path; the walk-up loop handles POSIX and "X:/..." roots alike. Without
+     * a usable cwd there is nothing to augment — fail open cleanly. */
+    if (cwd) {
+        snprintf(cwdbuf, sizeof(cwdbuf), "%s", cwd);
+        for (char *p = cwdbuf; *p; p++) {
+            if (*p == '\\') {
+                *p = '/';
+            }
+        }
+        cwd = cwdbuf;
+    }
+    if (!cwd || !cbm_hook_path_is_abs(cwd)) {
         yyjson_doc_free(doc);
         free(input);
         return 0;

@@ -28,7 +28,6 @@ typedef struct cbm_store cbm_store_t;
 
 typedef struct {
     int64_t id;           /* temp ID (sequential from 1) */
-    const char *project;  /* borrowed from gbuf */
     char *label;          /* heap-owned */
     char *name;           /* heap-owned */
     char *qualified_name; /* heap-owned */
@@ -40,7 +39,6 @@ typedef struct {
 
 typedef struct {
     int64_t id;            /* temp ID */
-    const char *project;   /* borrowed from gbuf */
     int64_t source_id;     /* temp node ID */
     int64_t target_id;     /* temp node ID */
     char *type;            /* heap-owned */

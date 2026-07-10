@@ -18,8 +18,9 @@ millisecond. It full-indexes an average repo in milliseconds and the Linux kerne
 75K files) in ~3 minutes. Ships as a single static binary for macOS, Linux, and Windows.
 
 Parsing is [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across 155
-languages, enhanced with LSP-style hybrid type resolution for Go, C, C++, and
-TypeScript/JavaScript/JSX/TSX. 14 MCP tools, zero runtime dependencies.
+languages, enhanced with LSP-style hybrid type resolution for Go, C, C++,
+TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP, and C#. 14 MCP
+tools, zero runtime dependencies.
 
 ## Why
 
@@ -118,11 +119,14 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
 
 ## Features
 
-- **Graph & analysis** — import-aware, type-inferred call graph; dead-code detection; Louvain
-  community detection; git-diff impact mapping; Cypher-like queries.
+- **Graph & analysis** — import-aware, type-inferred call graph; dead-code detection; Leiden
+  community clusters; complexity / bottleneck metrics; git-diff impact mapping; Cypher-like
+  queries.
 - **Deterministic indexing** — re-indexing the same tree produces a byte-identical graph
   (nodes, labels, edges, and edge directions), independent of worker scheduling. Diff two
   snapshots and only real code changes show up.
+- **Crash-isolated indexing** — an index supervisor contains per-file crashes and hangs so
+  one bad file cannot take down the whole index run.
 - **Search** — semantic vector search (bundled `nomic-embed-code` embeddings, no API key),
   BM25 full-text (FTS5, camelCase/snake_case aware), and structural/code search.
 - **Cross-service linking** — HTTP route ↔ call-site matching; gRPC/GraphQL/tRPC detection;
@@ -157,7 +161,8 @@ Benchmarked on Apple Silicon (M-series):
 ## Language Support
 
 155 languages via vendored tree-sitter grammars. Strongest call/type resolution (LSP-style
-hybrid) for **Go, C, C++, TypeScript/JavaScript/JSX/TSX**. Benchmarked tiers:
+hybrid) for **Go, C, C++, TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP,
+C#**. Benchmarked tiers:
 
 - **Excellent (≥90%)** — C, C++, Lua, Kotlin, Perl, Objective-C, Groovy, Bash, Zig, Swift,
   CSS, YAML, TOML, HTML, SCSS, HCL, Dockerfile
@@ -172,9 +177,10 @@ Plus ~110 more (config, data, and niche languages) parsed structurally.
   `Interface`, `Enum`, `Type`, `Route`, `Resource`
 - **Qualified names** — `get_code_snippet` uses `<project>.<path_parts>.<name>`; discover them
   with `search_graph` first.
-- **Cypher subset** — `MATCH` (labels, relationship types, variable-length paths), `WHERE`
-  (comparisons / regex / `CONTAINS`), `RETURN` (+ `COUNT`/`DISTINCT`), `ORDER BY`, `LIMIT`.
-  Read-only; no `WITH`/`COLLECT`/`OPTIONAL MATCH`/mutations.
+- **Cypher subset** — `MATCH` / `OPTIONAL MATCH` (labels, relationship types, variable-length
+  paths), `WHERE` (comparisons / regex / `CONTAINS` / `EXISTS{}`), `WITH` (+ `DISTINCT`),
+  `RETURN` (+ `COUNT`/`COUNT(DISTINCT)` / aggregates), `ORDER BY`, `LIMIT`. Read-only; no
+  mutations.
 
 ## Configuration
 

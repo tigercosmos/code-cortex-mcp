@@ -820,7 +820,7 @@ TEST(tool_detect_changes_no_project) {
                                    "\"params\":{\"name\":\"detect_changes\","
                                    "\"arguments\":{}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not found"));
+    ASSERT_NOT_NULL(strstr(resp, "missing required argument: project"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -835,7 +835,7 @@ TEST(tool_manage_adr_no_project) {
                                    "\"params\":{\"name\":\"manage_adr\","
                                    "\"arguments\":{}}}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "not found"));
+    ASSERT_NOT_NULL(strstr(resp, "missing required argument: project"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -888,7 +888,7 @@ TEST(tool_manage_adr_get_with_existing_adr) {
     /* ADR content must appear in response */
     ASSERT_NOT_NULL(strstr(resp, "PURPOSE"));
     /* Must not be an error */
-    ASSERT_NULL(strstr(resp, "isError"));
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
     free(resp);
 
     /* Clean up */
@@ -934,7 +934,7 @@ TEST(tool_manage_adr_unified_backend_issue256) {
              "\"mode\":\"get\"}}}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "Unified ADR backend."));
-    ASSERT_NULL(strstr(resp, "isError"));
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
     free(resp);
 
     cbm_mcp_server_free(srv);

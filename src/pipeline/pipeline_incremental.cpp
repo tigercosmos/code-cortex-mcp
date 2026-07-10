@@ -298,6 +298,142 @@ static void free_mode_skipped(cbm_file_hash_t *ms, int count) {
     free(ms);
 }
 
+/* ── Inbound cross-file edge preservation (incremental correctness) ──
+ *
+ * The purge step (cbm_gbuf_delete_by_file) removes a changed file's nodes,
+ * and the cascade then drops every edge referencing them — INCLUDING inbound
+ * edges whose source lives in an UNCHANGED file (e.g. StudyService.grade ->
+ * SM2.review, or a Folder -> File containment edge). Because incremental only
+ * re-parses the changed files, the resolution passes never regenerate those
+ * inbound edges, so the graph silently loses cross-file CALLS / USAGE /
+ * CONTAINS_FILE / INHERITS / ... edges on every edit and diverges from a
+ * clean full reindex (which resolves every file).
+ *
+ * Fix: snapshot the inbound cross-file edges into changed files BEFORE the
+ * purge, keyed by endpoint qualified_name (stable across re-parse), then
+ * re-link them AFTER re-resolution + post-passes. Notes:
+ *   - Only edges whose target is in a changed file and whose source is NOT
+ *     are snapshotted; edges out of a changed file are regenerated when that
+ *     file is re-resolved.
+ *   - Edge types recomputed wholesale by post-passes (SIMILAR_TO,
+ *     SEMANTICALLY_RELATED) are skipped — re-linking a stale snapshot could
+ *     add edges a full reindex would not produce.
+ *   - cbm_gbuf_insert_edge dedups, so re-linking an edge the resolver already
+ *     recreated is a harmless no-op.
+ *   - A target whose qualified_name no longer exists (symbol deleted or
+ *     renamed by the edit) is dropped — matching full-reindex semantics. */
+
+typedef struct {
+    char *source_qn;
+    char *target_qn;
+    char *type;
+    char *props;
+} cbm_saved_edge_t;
+
+typedef struct {
+    cbm_gbuf_t *gbuf;
+    CBMHashTable *changed_paths; /* rel_path -> non-NULL sentinel (membership set) */
+    cbm_saved_edge_t *items;
+    int count;
+    int cap;
+} cbm_edge_capture_t;
+
+/* Edge types that must NOT be re-linked from the pre-purge snapshot, because a
+ * full reindex (re)computes them via a pass whose result can differ from the
+ * snapshot — restoring a stale copy could leave wrong properties or even an
+ * edge a full reindex would not produce:
+ *   - SIMILAR_TO / SEMANTICALLY_RELATED: rebuilt wholesale by the incremental
+ *     post-passes (similarity / semantic_edges) over a drifting corpus.
+ *   - FILE_CHANGES_WITH (git-history coupling) and DATA_FLOWS (route data flow):
+ *     produced only by full-pipeline post-passes (githistory / route_nodes)
+ *     that do NOT run during incremental; they remain a known incremental
+ *     limitation rather than something to restore stale.
+ * Every other edge type IS safe to re-link, by one of two routes that both
+ * match a full reindex: edges re-emitted by the per-file resolution passes that
+ * run incrementally (CALLS, USAGE, DEFINES, DEFINES_METHOD, INHERITS,
+ * IMPLEMENTS) are deduped on re-link, while structural containment edges
+ * (CONTAINS_FILE, CONTAINS_FOLDER) — which the full-only structure pass does
+ * NOT regenerate incrementally — are preserved precisely by this snapshot. */
+static bool incr_edge_type_is_recomputed(const char *type) {
+    return type && (strcmp(type, "SIMILAR_TO") == 0 || strcmp(type, "SEMANTICALLY_RELATED") == 0 ||
+                    strcmp(type, "FILE_CHANGES_WITH") == 0 || strcmp(type, "DATA_FLOWS") == 0);
+}
+
+/* cbm_gbuf_foreach_edge visitor: snapshot inbound cross-file edges into
+ * changed files so they survive the purge and can be re-linked afterward. */
+static void incr_capture_inbound_edge(const cbm_gbuf_edge_t *edge, void *userdata) {
+    cbm_edge_capture_t *cap = (cbm_edge_capture_t *)userdata;
+    if (incr_edge_type_is_recomputed(edge->type)) {
+        return;
+    }
+    const cbm_gbuf_node_t *src = cbm_gbuf_find_by_id(cap->gbuf, edge->source_id);
+    const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_id(cap->gbuf, edge->target_id);
+    if (!src || !tgt || !src->qualified_name || !tgt->qualified_name || !src->file_path ||
+        !tgt->file_path) {
+        return;
+    }
+    /* Keep only edges that the purge would orphan permanently: target is in a
+     * changed file (its node is deleted + re-created), source is NOT (its file
+     * is never re-parsed, so the resolver won't regenerate the edge). */
+    if (!cbm_ht_get(cap->changed_paths, tgt->file_path) ||
+        cbm_ht_get(cap->changed_paths, src->file_path)) {
+        return;
+    }
+    if (cap->count >= cap->cap) {
+        int ncap = (cap->cap > 0) ? cap->cap * PAIR_LEN : CBM_SZ_64;
+        cbm_saved_edge_t *tmp =
+            (cbm_saved_edge_t *)realloc(cap->items, (size_t)ncap * sizeof(*tmp));
+        if (!tmp) {
+            cbm_log_warn("incremental.edge_snapshot_oom", "captured", itoa_buf(cap->count));
+            return; /* best-effort: stop capturing, keep what we have */
+        }
+        cap->items = tmp;
+        cap->cap = ncap;
+    }
+    cbm_saved_edge_t *s = &cap->items[cap->count];
+    s->source_qn = strdup(src->qualified_name);
+    s->target_qn = strdup(tgt->qualified_name);
+    s->type = strdup(edge->type);
+    s->props = strdup(edge->properties_json ? edge->properties_json : "{}");
+    if (!s->source_qn || !s->target_qn || !s->type || !s->props) {
+        free(s->source_qn);
+        free(s->target_qn);
+        free(s->type);
+        free(s->props);
+        return;
+    }
+    cap->count++;
+}
+
+/* Re-link snapshotted inbound edges to the freshly re-created target nodes.
+ * Returns the number of edges re-linked. */
+static int incr_restore_inbound_edges(cbm_gbuf_t *gbuf, cbm_edge_capture_t *cap) {
+    int restored = 0;
+    for (int i = 0; i < cap->count; i++) {
+        cbm_saved_edge_t *s = &cap->items[i];
+        const cbm_gbuf_node_t *src = cbm_gbuf_find_by_qn(gbuf, s->source_qn);
+        const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_qn(gbuf, s->target_qn);
+        if (src && tgt) {
+            cbm_gbuf_insert_edge(gbuf, src->id, tgt->id, s->type, s->props);
+            restored++;
+        }
+    }
+    return restored;
+}
+
+static void incr_free_edge_capture(cbm_edge_capture_t *cap) {
+    for (int i = 0; i < cap->count; i++) {
+        free(cap->items[i].source_qn);
+        free(cap->items[i].target_qn);
+        free(cap->items[i].type);
+        free(cap->items[i].props);
+    }
+    free(cap->items);
+    cap->items = NULL;
+    cap->count = 0;
+    cap->cap = 0;
+}
+
 /* ── Persist file hashes ─────────────────────────────────────────── */
 
 /* Persist file hash rows for the current discovery and any mode-skipped
@@ -369,10 +505,31 @@ static void persist_hashes(cbm_store_t *store, const char *project, cbm_file_inf
 
 /* ── Registry seed visitor ────────────────────────────────────────── */
 
-/* Callback for cbm_gbuf_foreach_node: add each node to the registry
- * so the resolver can find cross-file symbols during incremental. */
+/* Labels the full-index definition pass seeds into the registry
+ * (pass_definitions.c — KEEP IN SYNC). Incremental re-resolution must see the
+ * SAME symbol set, or it diverges from a clean full reindex: seeding extra
+ * container nodes (File / Module / Folder / ...) lets a type usage like `Word`
+ * resolve to the same-named Module node instead of the Class node. Only
+ * callable / declared symbols belong in the registry. */
+static bool incr_label_is_registry_symbol(const char *label) {
+    /* Mirror pass_definitions.c / pass_parallel.c registry seeding EXACTLY:
+     * callables + every type-like container (Class/Struct/Interface/Enum/Type/
+     * Trait) + Variable/Field. Struct included so an incremental re-resolve seeds
+     * the same struct type nodes a full reindex would. */
+    return label && (strcmp(label, "Function") == 0 || strcmp(label, "Method") == 0 ||
+                     cbm_label_is_type_like(label) || strcmp(label, "Variable") == 0 ||
+                     strcmp(label, "Field") == 0);
+}
+
+/* Callback for cbm_gbuf_foreach_node: seed the registry with the existing
+ * project's definition symbols so the resolver can match cross-file symbols
+ * during incremental. Mirrors the full-index registry contents exactly so an
+ * incremental re-resolve picks the same nodes a full reindex would. */
 static void registry_visitor(const cbm_gbuf_node_t *node, void *userdata) {
     cbm_registry_t *r = (cbm_registry_t *)userdata;
+    if (!incr_label_is_registry_symbol(node->label)) {
+        return;
+    }
     cbm_registry_add(r, node->name, node->qualified_name, node->label);
 }
 
@@ -477,7 +634,7 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
 static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *project,
                              cbm_file_info_t *files, int file_count,
                              const cbm_file_hash_t *mode_skipped, int mode_skipped_count,
-                             const char *repo_path) {
+                             const char *repo_path, const cbm_coverage_row_t *cov, int cov_count) {
     struct timespec t;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
 
@@ -496,6 +653,13 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
     if (hash_store) {
         persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
+
+        /* Coverage rows (#963): re-write the merged set into the rebuilt DB
+         * (AFTER hashes, so the deleted-file prune sees the live file set). */
+        if (cov_count > 0 &&
+            cbm_store_coverage_replace(hash_store, project, cov, cov_count) != CBM_STORE_OK) {
+            cbm_log_error("incremental.err", "msg", "persist_coverage", "project", project);
+        }
 
         /* FTS5 rebuild after incremental dump.  The btree dump path bypasses
          * any triggers that could have kept nodes_fts synchronized, so we
@@ -575,6 +739,13 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
 
     cbm_store_free_file_hashes(stored, stored_count);
 
+    /* Coverage rows (#963): the dump below rebuilds the DB file, wiping the
+     * separate index_coverage table — capture the previous rows now (store
+     * still open) so entries for files NOT re-extracted this run survive. */
+    cbm_coverage_row_t *old_cov = NULL;
+    int old_cov_count = 0;
+    (void)cbm_store_coverage_get(store, project, &old_cov, &old_cov_count);
+
     /* Build list of changed files */
     cbm_file_info_t *changed_files =
         (n_changed > 0) ? (cbm_file_info_t *)malloc((size_t)n_changed * sizeof(cbm_file_info_t))
@@ -609,11 +780,31 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         }
         free(deleted);
         free_mode_skipped(mode_skipped, mode_skipped_count);
+        cbm_store_free_coverage(old_cov, old_cov_count);
         cbm_store_close(store);
         return CBM_NOT_FOUND;
     }
 
     cbm_store_close(store);
+
+    /* Snapshot inbound cross-file edges into changed files BEFORE purging, so
+     * the cascade delete doesn't permanently drop edges whose source lives in
+     * an unchanged (never-re-parsed) file. Re-linked after re-resolution. */
+    cbm_edge_capture_t edge_cap = {0};
+    edge_cap.gbuf = existing;
+    {
+        CBMHashTable *changed_paths = cbm_ht_create(ci > 0 ? (size_t)ci * PAIR_LEN : CBM_SZ_64);
+        for (int i = 0; i < ci; i++) {
+            cbm_ht_set(changed_paths, changed_files[i].rel_path, &changed_files[i]);
+        }
+        edge_cap.changed_paths = changed_paths;
+        cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+        cbm_gbuf_foreach_edge(existing, incr_capture_inbound_edge, &edge_cap);
+        edge_cap.changed_paths = NULL;
+        cbm_ht_free(changed_paths); /* keys borrowed from changed_files; not freed here */
+    }
+    cbm_log_info("incremental.edge_snapshot", "captured", itoa_buf(edge_cap.count), "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(t)));
 
     /* Step 2: Purge stale nodes */
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
@@ -634,7 +825,16 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_log_info("incremental.registry_seed", "symbols", itoa_buf(cbm_registry_size(registry)),
                  "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
 
-    cbm_path_alias_collection_t *path_aliases = cbm_load_path_aliases(cbm_pipeline_repo_path(p));
+    /* Discovery exclusions (gitignore + skip dirs) captured by the run that
+     * routed here. Borrowed from the pipeline so the auxiliary repo walks
+     * (pkgmap via merge_pkg_entries, path aliases) skip excluded subtrees on
+     * incremental runs too — same borrow as the full path (#792/#804). */
+    char **excluded_dirs = NULL;
+    int excluded_count = 0;
+    cbm_pipeline_get_excluded(p, &excluded_dirs, &excluded_count);
+
+    cbm_path_alias_collection_t *path_aliases =
+        cbm_load_path_aliases_excluded(cbm_pipeline_repo_path(p), excluded_dirs, excluded_count);
     cbm_cc_index_t *cc_index = cbm_cc_index_build(cbm_pipeline_repo_path(p));
 
     cbm_pipeline_ctx_t ctx = {
@@ -643,9 +843,12 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         .gbuf = existing,
         .registry = registry,
         .cancelled = cbm_pipeline_cancelled_ptr(p),
+        .pipeline = p, /* so passes can record per-file skips (Track B) */
         .mode = cbm_pipeline_get_mode(p),
         .path_aliases = path_aliases,
         .cc_index = cc_index,
+        .excluded_dirs = excluded_dirs,
+        .excluded_count = excluded_count,
     };
 
     for (int i = 0; i < ci; i++) {
@@ -661,17 +864,91 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_pipeline_pass_k8s(&ctx, changed_files, ci);
     run_postpasses(&ctx, changed_files, ci, project);
 
+    /* Coverage rows (#963): merge = previous FAILURE rows for files NOT
+     * re-extracted this run + this run's fresh entries (changed files replace
+     * their old rows — a file that parses cleanly now simply contributes
+     * nothing, so its stale flag dies here). By-design not_indexed_* rows are
+     * NOT carried over: discovery runs completely on every route, so this
+     * run's excluded dirs + ignored files are the fresh, authoritative set.
+     * Rows for deleted files are pruned against file_hashes inside the
+     * replace. Borrowed strings: old_cov and the pipeline own them past the
+     * dump_and_persist call below. */
+    cbm_file_error_t *run_errs = NULL;
+    int run_err_count = 0;
+    cbm_pipeline_get_file_errors(p, &run_errs, &run_err_count);
+    char **run_excluded = NULL;
+    int run_excluded_count = 0;
+    cbm_pipeline_get_excluded(p, &run_excluded, &run_excluded_count);
+    cbm_ignored_file_t *run_ignored = NULL;
+    int run_ignored_count = 0;
+    cbm_pipeline_get_ignored(p, &run_ignored, &run_ignored_count, NULL);
+    cbm_coverage_row_t *cov = NULL;
+    int cov_n = 0;
+    int cov_cap = old_cov_count + run_err_count + run_excluded_count + run_ignored_count;
+    if (cov_cap > 0) {
+        cov = (cbm_coverage_row_t *)malloc((size_t)cov_cap * sizeof(*cov));
+    }
+    if (cov) {
+        CBMHashTable *changed_set = cbm_ht_create(ci > 0 ? (size_t)ci * PAIR_LEN : CBM_SZ_64);
+        for (int i = 0; i < ci; i++) {
+            cbm_ht_set(changed_set, changed_files[i].rel_path, &changed_files[i]);
+        }
+        for (int i = 0; i < old_cov_count; i++) {
+            bool by_design = old_cov[i].kind && strncmp(old_cov[i].kind, "not_indexed", 11) == 0;
+            if (!by_design && old_cov[i].rel_path &&
+                !cbm_ht_get(changed_set, old_cov[i].rel_path)) {
+                cov[cov_n++] = old_cov[i];
+            }
+        }
+        cbm_ht_free(changed_set);
+        for (int i = 0; i < run_err_count; i++) {
+            cov[cov_n].rel_path = run_errs[i].path;
+            cov[cov_n].kind = run_errs[i].phase;
+            cov[cov_n].detail = run_errs[i].reason;
+            cov_n++;
+        }
+        for (int i = 0; i < run_excluded_count; i++) {
+            cov[cov_n].rel_path = run_excluded[i];
+            cov[cov_n].kind = "not_indexed_dir";
+            cov[cov_n].detail = "excluded subtree";
+            cov_n++;
+        }
+        for (int i = 0; i < run_ignored_count; i++) {
+            cov[cov_n].rel_path = run_ignored[i].rel_path;
+            cov[cov_n].kind = "not_indexed_file";
+            cov[cov_n].detail = run_ignored[i].reason;
+            cov_n++;
+        }
+    }
+
     free(changed_files);
     cbm_registry_free(registry);
     cbm_path_alias_collection_free(path_aliases);
     cbm_cc_index_free(cc_index);
 
+    /* Re-link inbound cross-file edges that the purge orphaned. Runs after
+     * re-resolution AND post-passes so the freshly re-created target nodes
+     * exist and nothing downstream clobbers the restored edges; insert_edge
+     * dedups, so any edge the resolver already recreated is a no-op. */
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    int relinked = incr_restore_inbound_edges(existing, &edge_cap);
+    cbm_log_info("incremental.edge_relink", "relinked", itoa_buf(relinked), "captured",
+                 itoa_buf(edge_cap.count), "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
+    incr_free_edge_capture(&edge_cap);
+
     /* Step 7: Dump to disk (preserves mode-skipped hash rows so the next
      * reindex can correctly classify those files instead of seeing them
      * as never-existed; also exports a fast-mode artifact when one is
      * already present alongside the repo). */
+    /* Record committed counts before dump_and_persist (whose dump frees the
+     * gbuf node index, zeroing the count) so the #334 plausibility gate also
+     * covers incremental reindexes, not just full ones. */
+    cbm_pipeline_set_committed_counts(p, cbm_gbuf_node_count(existing),
+                                      cbm_gbuf_edge_count(existing));
     dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
-                     mode_skipped_count, cbm_pipeline_repo_path(p));
+                     mode_skipped_count, cbm_pipeline_repo_path(p), cov, cov_n);
+    free(cov);
+    cbm_store_free_coverage(old_cov, old_cov_count);
     free_mode_skipped(mode_skipped, mode_skipped_count);
     cbm_gbuf_free(existing);
 

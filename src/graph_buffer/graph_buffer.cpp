@@ -51,8 +51,11 @@ static inline void *intptr_to_ptr(intptr_t v) {
 
 /* ── Internal types ──────────────────────────────────────────────── */
 
-/* Edge key for dedup hash table — composite key as string "srcID:tgtID:type" */
-#define EDGE_KEY_BUF CBM_SZ_128
+/* Edge key for dedup hash table — composite key as string "srcID:tgtID:type",
+ * plus ":local_name" for IMPORTS edges (#768). 256 bytes fit two int64s, the
+ * type and a ~200-char local_name verbatim; longer local_names are re-keyed
+ * with a hash of the full name in make_edge_key (never silently truncated). */
+#define EDGE_KEY_BUF CBM_SZ_256
 
 /* Per-type or per-key edge list stored in hash tables as values */
 typedef CBM_DYN_ARRAY(const cbm_gbuf_edge_t *) edge_ptr_array_t;
@@ -73,8 +76,13 @@ struct cbm_gbuf {
 
     /* Primary index: QN → cbm_gbuf_node_t* */
     CBMHashTable *node_by_qn;
-    /* Primary index: "id" string → cbm_gbuf_node_t* */
-    CBMHashTable *node_by_id;
+    /* Dense id → node array (ids are sequential from alloc_next_id, shared
+     * with edges → holes where edges took ids). Replaces a hash table keyed
+     * on STRDUP'D DECIMAL STRINGS of the id — ~0.44 GB of buckets + key
+     * strings at kernel scale, plus a snprintf+strdup+hash on every one of
+     * the ~18 hot find_by_id call sites. */
+    cbm_gbuf_node_t **by_id;
+    int64_t by_id_cap;
 
     /* Secondary node indexes */
     CBMHashTable *nodes_by_label; /* key: label, value: (node_ptr_array_t*) */
@@ -172,12 +180,67 @@ static void make_id_key(char *buf, size_t bufsz, int64_t id) {
     fmt_i64(buf, bufsz, id);
 }
 
-static void make_edge_key(char *buf, size_t bufsz, int64_t src, int64_t tgt, const char *type) {
+/* FNV-1a 64-bit over a byte slice — for re-keying oversized local_names. */
+static uint64_t fnv1a64(const char *s, size_t len) {
+    uint64_t h = 14695981039346656037ULL;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint8_t)s[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* IMPORTS edges carry exactly one imported symbol's local_name (#768): two
+ * named imports from the same specifier resolve to the same (source,
+ * target) pair but are distinct symbols. Key on local_name too so the
+ * second import doesn't dedup-collide with and overwrite the first —
+ * every pass that walks IMPORTS edges (pass_calls.cpp, pass_usages.cpp,
+ * pass_semantic.cpp, pass_lsp_cross.cpp) expects one local_name per edge, so
+ * losing an edge here silently breaks cross-file call resolution for
+ * whichever symbol got dropped, not just "who imports X" queries. Other
+ * edge types keep the plain (source,target,type) key: collapsing repeat
+ * edges of the same type between the same two nodes (e.g. multiple call
+ * sites) into one is the existing, intended dedup behavior there.
+ *
+ * A local_name too long for the key buffer is re-keyed with an FNV-1a hash
+ * of the FULL name instead of being truncated — a truncated key would
+ * collide two long names sharing a prefix and silently drop an edge again.
+ * The hash key is prefixed with byte 0x01, which cannot appear in the raw
+ * JSON slice (control characters must be \u-escaped in JSON), so hash keys
+ * can never collide with verbatim keys. */
+static void make_edge_key(char *buf, size_t bufsz, int64_t src, int64_t tgt, const char *type,
+                          const char *properties_json) {
     size_t w = fmt_i64(buf, bufsz, src);
     w = append_str(buf, bufsz, w, ":");
     w += fmt_i64(buf + w, bufsz - w, tgt);
     w = append_str(buf, bufsz, w, ":");
-    append_str(buf, bufsz, w, type);
+    w = append_str(buf, bufsz, w, type);
+
+    if (properties_json && strcmp(type, "IMPORTS") == 0) {
+        static const char local_name_key[] = "\"local_name\":\"";
+        const char *ln = strstr(properties_json, local_name_key);
+        if (ln) {
+            ln += sizeof(local_name_key) - 1;
+            const char *end = strchr(ln, '"');
+            size_t ln_len = end ? (size_t)(end - ln) : strlen(ln);
+            /* ":" + verbatim local_name if it fits (need ':' + name + NUL),
+             * else ":" + 0x01 + FNV-1a hash of the full name. */
+            if (w + SKIP_ONE + ln_len + SKIP_ONE <= bufsz) {
+                w = append_str(buf, bufsz, w, ":");
+                for (size_t i = 0; i < ln_len && w + SKIP_ONE < bufsz; i++) {
+                    buf[w++] = ln[i];
+                }
+                if (w < bufsz) {
+                    buf[w] = '\0';
+                }
+            } else {
+                char hash[CBM_SZ_32];
+                snprintf(hash, sizeof(hash), ":\x01%016llx",
+                         (unsigned long long)fnv1a64(ln, ln_len));
+                append_str(buf, bufsz, w, hash);
+            }
+        }
+    }
 }
 
 static void make_src_type_key(char *buf, size_t bufsz, int64_t src, const char *type) {
@@ -228,7 +291,7 @@ static void free_edge_array(const char *key, void *value, void *ud) {
     free((void *)key);
 }
 
-/* Free keys only (for node_by_id, edge_by_key) */
+/* Free keys only (for edge_by_key, deleted_set) */
 static void free_key_only(const char *key, void *value, void *ud) {
     (void)value;
     (void)ud;
@@ -287,7 +350,7 @@ static void remove_node_from_ptr_array(node_ptr_array_t *arr, int64_t node_id) {
 static void unindex_edge(cbm_gbuf_t *gb, const cbm_gbuf_edge_t *e) {
     char key[EDGE_KEY_BUF];
 
-    make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type);
+    make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->properties_json);
     const char *ekey = cbm_ht_get_key(gb->edge_by_key, key);
     cbm_ht_delete(gb->edge_by_key, key);
     free((void *)ekey);
@@ -328,13 +391,21 @@ static void cascade_delete_edges(cbm_gbuf_t *gb, CBMHashTable *deleted_set) {
 static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     cbm_ht_set(gb->node_by_qn, node->qualified_name, node);
 
-    char id_buf[CBM_SZ_32];
-    make_id_key(id_buf, sizeof(id_buf), node->id);
-    const char *old_key = cbm_ht_get_key(gb->node_by_id, id_buf);
-    if (old_key) {
-        cbm_ht_set(gb->node_by_id, old_key, node);
-    } else {
-        cbm_ht_set(gb->node_by_id, strdup(id_buf), node);
+    if (node->id >= gb->by_id_cap) {
+        int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : CBM_SZ_1K;
+        while (nc <= node->id) {
+            nc *= 2;
+        }
+        cbm_gbuf_node_t **grown =
+            (cbm_gbuf_node_t **)realloc(gb->by_id, (size_t)nc * sizeof(*grown));
+        if (grown) {
+            memset(grown + gb->by_id_cap, 0, (size_t)(nc - gb->by_id_cap) * sizeof(*grown));
+            gb->by_id = grown;
+            gb->by_id_cap = nc;
+        }
+    }
+    if (node->id >= 0 && node->id < gb->by_id_cap) {
+        gb->by_id[node->id] = node;
     }
 
     node_ptr_array_t *by_label =
@@ -344,48 +415,6 @@ static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     node_ptr_array_t *by_name =
         get_or_create_node_array(gb->nodes_by_name, node->name ? node->name : "");
     cbm_da_push(by_name, (const cbm_gbuf_node_t *)node);
-}
-
-/* Remove `node` from one bucket array of `ht` (linear scan — label/name
- * changes on QN collisions are rare, so this is off the hot path). */
-static void node_array_remove(CBMHashTable *ht, const char *key, const cbm_gbuf_node_t *node) {
-    node_ptr_array_t *arr = (node_ptr_array_t *)cbm_ht_get(ht, key ? key : "");
-    if (!arr) {
-        return;
-    }
-    for (int i = 0; i < arr->count; i++) {
-        if (arr->items[i] == node) {
-            memmove(&arr->items[i], &arr->items[i + 1],
-                    (size_t)(arr->count - i - 1) * sizeof(arr->items[0]));
-            arr->count--;
-            return;
-        }
-    }
-}
-
-/* Keep the label/name secondary indexes consistent when an in-place node
- * update is about to change those fields. Without this, the by-label and
- * by-name arrays retained FIRST-arrival membership while node->label
- * converged to the update winner — so find_by_label consumers (e.g. the
- * semantic-edges pass) saw a node set that depended on worker merge order
- * (redis: the Function/Macro split flapped ±3 between identical runs,
- * rippling into corpus IDF and the SEMANTICALLY_RELATED edge set). Call
- * BEFORE assigning the new label/name. */
-static void reindex_node_on_update(cbm_gbuf_t *gb, cbm_gbuf_node_t *node, const char *new_label,
-                                   const char *new_name) {
-    const char *old_label = node->label ? node->label : "";
-    const char *nl = new_label ? new_label : "";
-    if (strcmp(old_label, nl) != 0) {
-        node_array_remove(gb->nodes_by_label, old_label, node);
-        cbm_da_push(get_or_create_node_array(gb->nodes_by_label, nl),
-                    (const cbm_gbuf_node_t *)node);
-    }
-    const char *old_name = node->name ? node->name : "";
-    const char *nn = new_name ? new_name : "";
-    if (strcmp(old_name, nn) != 0) {
-        node_array_remove(gb->nodes_by_name, old_name, node);
-        cbm_da_push(get_or_create_node_array(gb->nodes_by_name, nn), (const cbm_gbuf_node_t *)node);
-    }
 }
 
 /* Push an edge pointer into a dynamic array (wraps macro to reduce CC contribution). */
@@ -434,9 +463,9 @@ static void rebuild_edge_secondary_indexes(cbm_gbuf_t *gb) {
 static void release_gbuf_indexes(cbm_gbuf_t *gb) {
     cbm_ht_free(gb->node_by_qn);
     gb->node_by_qn = NULL;
-    cbm_ht_foreach(gb->node_by_id, free_key_only, NULL);
-    cbm_ht_free(gb->node_by_id);
-    gb->node_by_id = NULL;
+    free(gb->by_id);
+    gb->by_id = NULL;
+    gb->by_id_cap = 0;
     cbm_ht_foreach(gb->nodes_by_label, free_node_array, NULL);
     cbm_ht_free(gb->nodes_by_label);
     gb->nodes_by_label = NULL;
@@ -471,7 +500,8 @@ cbm_gbuf_t *cbm_gbuf_new(const char *project, const char *root_path) {
     gb->shared_ids = NULL;
 
     gb->node_by_qn = cbm_ht_create(CBM_SZ_256);
-    gb->node_by_id = cbm_ht_create(CBM_SZ_256);
+    gb->by_id = NULL;
+    gb->by_id_cap = 0;
     gb->nodes_by_label = cbm_ht_create(CBM_SZ_32);
     gb->nodes_by_name = cbm_ht_create(CBM_SZ_256);
 
@@ -519,10 +549,7 @@ void cbm_gbuf_free(cbm_gbuf_t *gb) {
     if (gb->node_by_qn) {
         cbm_ht_free(gb->node_by_qn);
     }
-    if (gb->node_by_id) {
-        cbm_ht_foreach(gb->node_by_id, free_key_only, NULL);
-        cbm_ht_free(gb->node_by_id);
-    }
+    free(gb->by_id);
     if (gb->nodes_by_label) {
         cbm_ht_foreach(gb->nodes_by_label, free_node_array, NULL);
         cbm_ht_free(gb->nodes_by_label);
@@ -675,29 +702,79 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
     /* Check if node already exists */
     cbm_gbuf_node_t *existing = (cbm_gbuf_node_t *)cbm_ht_get(gb->node_by_qn, qualified_name);
     if (existing) {
-        /* Same-file re-upserts refresh extraction data (last write wins;
-         * file-internal order is deterministic). CROSS-file collisions on
-         * one qualified name (e.g. a C macro and a function sharing a name
-         * in different files) used to be last-write-wins too — but worker
-         * completion order decides arrival order, so the surviving label
-         * flip-flopped between identical runs (redis: Function vs Macro
-         * counts traded ±3, which rippled into the semantic corpus and
-         * made SEMANTICALLY_RELATED edges nondeterministic). Resolve those
-         * by a stable content key instead: the lexicographically smaller
-         * file path (then lower start line) wins, regardless of order. */
-        const char *efp = existing->file_path ? existing->file_path : "";
-        const char *nfp = file_path ? file_path : "";
-        if (strcmp(nfp, efp) > 0) {
-            return existing->id; /* existing (smaller-path) node wins — keep it */
+        /* Don't let a per-file "Module" def touch a structural directory node
+         * ("Project" root or "Folder"). In a directory-based-module language
+         * (Go/Java) a file's module_qn equals its directory QN: a root file →
+         * the project name (== the "Project" node's QN); a file in pkg/ →
+         * proj.pkg (== the "pkg/" Folder node's QN). Its always-emitted Module
+         * def collides here; the directory node is the package/module container
+         * and must keep its structural label AND its own name/file_path/range.
+         * Updating those in place set the shared node's file_path to whichever
+         * same-package file happened to be processed LAST (worker-order
+         * dependent) — the nondeterministic file attribution behind #787 — and
+         * left the Folder node exposed to delete-nodes-by-file on incremental
+         * reindex of that file. Skip the update entirely. (Both the sequential
+         * upsert and the parallel local-gbuf merge route through this function.) */
+        if (existing->label && label && strcmp(label, "Module") == 0 &&
+            (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0)) {
+            return existing->id;
+        }
+        /* Same-QN arrival: distinct source entities can share a QN (C: a
+         * struct, a function and a macro with one name), and the same entity
+         * can be re-upserted with fresh content. The old code let the LAST
+         * arrival overwrite — under parallel extraction the merge order
+         * varies run to run, so WHICH entity survived flickered (xfs:
+         * Function-node count 4998 vs 5015 across two runs) and every
+         * order-sensitive consumer downstream inherited it. Pick the
+         * survivor by a canonical CONTENT rule instead, a pure function of
+         * the two candidates: smallest file_path, then LARGEST start_line,
+         * then largest name/label (a mixed-direction composite is still a
+         * total order, so the pick is commutative and scheduling-free).
+         * Line-descending within a file keeps the classic upsert contract —
+         * a later definition in the same file (macro redefinition, refresh
+         * of the same entity with new content) replaces the earlier one,
+         * deterministically, because intra-file arrival order is fixed. A
+         * full tie is the same entity re-upserted → refresh in place.
+         * Kind-disambiguated QNs (the real cure) remain a follow-up. */
+        int c = strcmp(file_path ? file_path : "", existing->file_path ? existing->file_path : "");
+        if (c == 0) {
+            c = existing->start_line - start_line;
+        }
+        if (c == 0) {
+            c = strcmp(existing->name ? existing->name : "", name ? name : "");
+        }
+        if (c == 0) {
+            c = strcmp(existing->label ? existing->label : "", label ? label : "");
+        }
+        if (c > 0) {
+            return existing->id; /* existing entity is the canonical winner */
         }
         /* Update in-place. name/properties are strdup'd BEFORE freeing old ones
          * (callers may pass existing->name as an argument). label/file_path are
          * interned: gb_intern returns a stable pool pointer (idempotent even when
-         * label == existing->label), so the old value is replaced, never freed. */
+         * label == existing->label), so the old value is replaced, never freed.
+         * When the surviving label/name changes, keep the secondary indexes
+         * consistent (the old code left the node listed under its ORIGINAL
+         * label/name — cbm_gbuf_find_by_label/name then missed or mis-listed it,
+         * which is how the flickering Function set reached the semantic pass). */
         char *new_name = heap_strdup(name);
         char *new_props = properties_json ? heap_strdup(properties_json) : NULL;
-        reindex_node_on_update(gb, existing, label, name);
-        existing->label = (char *)gb_intern(gb, label);
+        const char *new_label_interned = gb_intern(gb, label);
+        bool label_changed = !existing->label || !new_label_interned ||
+                             strcmp(existing->label, new_label_interned) != 0;
+        bool name_changed = !existing->name || !new_name || strcmp(existing->name, new_name) != 0;
+        if (label_changed) {
+            remove_node_from_ptr_array(
+                (node_ptr_array_t *)cbm_ht_get(gb->nodes_by_label,
+                                               existing->label ? existing->label : ""),
+                existing->id);
+        }
+        if (name_changed) {
+            remove_node_from_ptr_array((node_ptr_array_t *)cbm_ht_get(
+                                           gb->nodes_by_name, existing->name ? existing->name : ""),
+                                       existing->id);
+        }
+        existing->label = (char *)new_label_interned;
         free(existing->name);
         existing->name = new_name;
         existing->file_path = (char *)gb_intern(gb, file_path);
@@ -706,6 +783,16 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
         if (new_props) {
             free(existing->properties_json);
             existing->properties_json = new_props;
+        }
+        if (label_changed) {
+            node_ptr_array_t *by_label = get_or_create_node_array(
+                gb->nodes_by_label, existing->label ? existing->label : "");
+            cbm_da_push(by_label, (const cbm_gbuf_node_t *)existing);
+        }
+        if (name_changed) {
+            node_ptr_array_t *by_name =
+                get_or_create_node_array(gb->nodes_by_name, existing->name ? existing->name : "");
+            cbm_da_push(by_name, (const cbm_gbuf_node_t *)existing);
         }
         return existing->id;
     }
@@ -718,7 +805,6 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
 
     int64_t id = alloc_next_id(gb);
     node->id = id;
-    node->project = gb->project;
     node->label = (char *)gb_intern(gb, label);
     node->name = heap_strdup(name);
     node->qualified_name = heap_strdup(qualified_name);
@@ -742,12 +828,10 @@ const cbm_gbuf_node_t *cbm_gbuf_find_by_qn(const cbm_gbuf_t *gb, const char *qn)
 }
 
 const cbm_gbuf_node_t *cbm_gbuf_find_by_id(const cbm_gbuf_t *gb, int64_t id) {
-    if (!gb) {
+    if (!gb || !gb->by_id || id < 0 || id >= gb->by_id_cap) {
         return NULL;
     }
-    char key[CBM_SZ_32];
-    make_id_key(key, sizeof(key), id);
-    return (const cbm_gbuf_node_t *)cbm_ht_get(gb->node_by_id, key);
+    return gb->by_id[id];
 }
 
 int cbm_gbuf_find_by_label(const cbm_gbuf_t *gb, const char *label, const cbm_gbuf_node_t ***out,
@@ -808,9 +892,9 @@ int cbm_gbuf_delete_by_label(cbm_gbuf_t *gb, const char *label) {
 
         /* Remove from primary indexes */
         cbm_ht_delete(gb->node_by_qn, n->qualified_name);
-        const char *stored_key = cbm_ht_get_key(gb->node_by_id, id_buf);
-        cbm_ht_delete(gb->node_by_id, id_buf);
-        free((void *)stored_key);
+        if (n->id >= 0 && n->id < gb->by_id_cap) {
+            gb->by_id[n->id] = NULL;
+        }
     }
 
     /* Clear the label array */
@@ -856,9 +940,9 @@ int cbm_gbuf_delete_by_file(cbm_gbuf_t *gb, const char *file_path) {
 
         /* Remove from primary indexes */
         cbm_ht_delete(gb->node_by_qn, n->qualified_name);
-        const char *stored_key = cbm_ht_get_key(gb->node_by_id, id_buf);
-        cbm_ht_delete(gb->node_by_id, id_buf);
-        free((void *)stored_key);
+        if (n->id >= 0 && n->id < gb->by_id_cap) {
+            gb->by_id[n->id] = NULL;
+        }
 
         /* NULL out QN so dump's liveness check (cbm_ht_get by QN) fails
          * even if a new node with the same QN is inserted later via merge. */
@@ -1013,7 +1097,7 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
 
     /* Check for dedup */
     char key[EDGE_KEY_BUF];
-    make_edge_key(key, sizeof(key), source_id, target_id, type);
+    make_edge_key(key, sizeof(key), source_id, target_id, type, properties_json);
 
     cbm_gbuf_edge_t *existing = (cbm_gbuf_edge_t *)cbm_ht_get(gb->edge_by_key, key);
     if (existing) {
@@ -1033,7 +1117,6 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
 
     int64_t id = alloc_next_id(gb);
     edge->id = id;
-    edge->project = gb->project;
     edge->source_id = source_id;
     edge->target_id = target_id;
     edge->type = (char *)gb_intern(gb, type);
@@ -1126,7 +1209,8 @@ int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type) {
         cbm_gbuf_edge_t *e = gb->edges.items[i];
         if (strcmp(e->type, type) == 0) {
             char key[EDGE_KEY_BUF];
-            make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type);
+            make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type,
+                          e->properties_json);
             const char *ekey = cbm_ht_get_key(gb->edge_by_key, key);
             cbm_ht_delete(gb->edge_by_key, key);
             free((void *)ekey);
@@ -1157,27 +1241,81 @@ static void free_remap_entry(const char *key, void *val, void *ud) {
  * label/file_path are re-interned into dst's pool (sn's pointers belong to src). */
 static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
                                   const cbm_gbuf_node_t *sn, CBMHashTable **remap) {
-    /* Cross-file QN collisions resolve by stable content key (smaller file
-     * path wins), NOT by merge arrival order: worker-local buffers merge in
-     * completion order, and last-write-wins here made the surviving label
-     * flip between identical runs (see cbm_gbuf_upsert_node). Same-file
-     * updates keep last-write-wins (fresh extraction data). The edge-id
-     * remap below runs either way — src edges must point at the surviving
-     * node regardless of whose fields won. */
-    const char *efp = existing->file_path ? existing->file_path : "";
-    const char *nfp = sn->file_path ? sn->file_path : "";
-    bool keep_existing = strcmp(nfp, efp) > 0;
-    if (!keep_existing) {
-        reindex_node_on_update(dst, existing, sn->label, sn->name);
-        existing->label = (char *)gb_intern(dst, sn->label);
-        free(existing->name);
-        existing->name = heap_strdup(sn->name);
-        existing->file_path = (char *)gb_intern(dst, sn->file_path);
-        existing->start_line = sn->start_line;
-        existing->end_line = sn->end_line;
-        if (sn->properties_json) {
-            free(existing->properties_json);
-            existing->properties_json = heap_strdup(sn->properties_json);
+    /* Same guard as cbm_gbuf_upsert_node: a per-file "Module" def coming from a
+     * worker-local gbuf must not touch the structural directory node ("Project"
+     * root or "Folder") that shares its QN in a directory-based-module language
+     * (Java/Go). pass_structure seeds Folder/Project nodes on the MAIN gbuf
+     * before the parallel extract, so every worker's always-emitted Module def
+     * for that package collides here; unconditional "src wins" relabelled the
+     * directory node to Module and set its file_path to whichever worker merged
+     * LAST — the nondeterministic USAGE-source misattribution of #787. Keep the
+     * structural node intact; the ID remap below still redirects the worker's
+     * edges onto the canonical node. */
+    bool module_on_container =
+        existing->label && sn->label && strcmp(sn->label, "Module") == 0 &&
+        (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0);
+    if (!module_on_container) {
+        /* Canonical collision winner (determinism) — mirrors
+         * cbm_gbuf_upsert_node exactly. Distinct source entities can share a
+         * QN (C: struct/function/macro with one name); unconditional "src
+         * wins" made the survivor depend on worker merge order, flickering
+         * the node set (and every downstream consumer) run to run. Winner =
+         * smallest file_path, then LARGEST start_line, then largest
+         * name/label — one total order, commutative, scheduling-free; a full
+         * tie is the same entity → refresh from src. */
+        int c = strcmp(sn->file_path ? sn->file_path : "",
+                       existing->file_path ? existing->file_path : "");
+        if (c == 0) {
+            c = existing->start_line - sn->start_line;
+        }
+        if (c == 0) {
+            c = strcmp(existing->name ? existing->name : "", sn->name ? sn->name : "");
+        }
+        if (c == 0) {
+            c = strcmp(existing->label ? existing->label : "", sn->label ? sn->label : "");
+        }
+        bool sn_wins = c <= 0;
+        if (sn_wins) {
+            /* Keep the secondary indexes consistent when the surviving
+             * label/name changes (the old code left the node listed under its
+             * original label/name, so find_by_label/name mis-listed it). */
+            const char *new_label = gb_intern(dst, sn->label);
+            bool label_changed =
+                !existing->label || !new_label || strcmp(existing->label, new_label) != 0;
+            bool name_changed =
+                !existing->name || !sn->name || strcmp(existing->name, sn->name) != 0;
+            if (label_changed) {
+                remove_node_from_ptr_array(
+                    (node_ptr_array_t *)cbm_ht_get(dst->nodes_by_label,
+                                                   existing->label ? existing->label : ""),
+                    existing->id);
+            }
+            if (name_changed) {
+                remove_node_from_ptr_array(
+                    (node_ptr_array_t *)cbm_ht_get(dst->nodes_by_name,
+                                                   existing->name ? existing->name : ""),
+                    existing->id);
+            }
+            existing->label = (char *)new_label;
+            free(existing->name);
+            existing->name = heap_strdup(sn->name);
+            existing->file_path = (char *)gb_intern(dst, sn->file_path);
+            existing->start_line = sn->start_line;
+            existing->end_line = sn->end_line;
+            if (sn->properties_json) {
+                free(existing->properties_json);
+                existing->properties_json = heap_strdup(sn->properties_json);
+            }
+            if (label_changed) {
+                node_ptr_array_t *by_label = get_or_create_node_array(
+                    dst->nodes_by_label, existing->label ? existing->label : "");
+                cbm_da_push(by_label, (const cbm_gbuf_node_t *)existing);
+            }
+            if (name_changed) {
+                node_ptr_array_t *by_name = get_or_create_node_array(
+                    dst->nodes_by_name, existing->name ? existing->name : "");
+                cbm_da_push(by_name, (const cbm_gbuf_node_t *)existing);
+            }
         }
     }
 
@@ -1201,7 +1339,6 @@ static void merge_copy_new_node(cbm_gbuf_t *dst, const cbm_gbuf_node_t *sn) {
     }
 
     node->id = sn->id;
-    node->project = dst->project;
     node->label = (char *)gb_intern(dst, sn->label);
     node->name = heap_strdup(sn->name);
     node->qualified_name = heap_strdup(sn->qualified_name);
@@ -1290,15 +1427,16 @@ int cbm_gbuf_merge(cbm_gbuf_t *dst, cbm_gbuf_t *src) {
 
 /* ── Dump / Flush ────────────────────────────────────────────────── */
 
-/* Extract url_path value from a properties JSON string.
+/* Extract a string property from a properties JSON string.
  * Returns heap-allocated string or NULL. Caller must free.
- * Parses real JSON: the dump writer feeds this value into idx_edges_url_path,
- * whose backing column is GENERATED AS json_extract(properties,'$.url_path').
+ * Parses real JSON: the dump writer feeds these values into indexes whose
+ * backing columns are GENERATED AS json_extract(properties,'$.<key>').
  * Naive byte slicing returned the ESCAPED text (and cut at embedded \\")
  * while json_extract yields the unescaped value — the mismatch left rows
- * "missing from index idx_edges_url_path" under PRAGMA integrity_check. */
-static char *extract_url_path(const char *props) {
-    if (!props || !strstr(props, "\"url_path\"")) {
+ * "missing from index idx_edges_url_path" under PRAGMA integrity_check.
+ * key_quoted ("\"key\"") is a fast pre-filter to skip the JSON parse. */
+static char *extract_prop_string(const char *props, const char *key_quoted, const char *key) {
+    if (!props || !strstr(props, key_quoted)) {
         return NULL;
     }
     yyjson_doc *doc = yyjson_read(props, strlen(props), 0);
@@ -1306,13 +1444,23 @@ static char *extract_url_path(const char *props) {
         return NULL;
     }
     char *out = NULL;
-    yyjson_val *v = yyjson_obj_get(yyjson_doc_get_root(doc), "url_path");
+    yyjson_val *v = yyjson_obj_get(yyjson_doc_get_root(doc), key);
     if (v && yyjson_is_str(v)) {
         const char *sv = yyjson_get_str(v);
         out = cbm_strndup(sv, strlen(sv));
     }
     yyjson_doc_free(doc);
     return out;
+}
+
+static char *extract_url_path(const char *props) {
+    return extract_prop_string(props, "\"url_path\"", "url_path");
+}
+
+/* local_name feeds the hand-built sqlite_autoindex_edges_1 — its backing
+ * column local_name_gen is GENERATED only for IMPORTS edges (#768). */
+static char *extract_local_name(const char *props) {
+    return extract_prop_string(props, "\"local_name\"", "local_name");
 }
 
 /* Remap a temp edge ID to its final sequential ID, or 0 if out of range. */
@@ -1371,9 +1519,11 @@ static CBMDumpNode *build_dump_nodes(cbm_gbuf_t *gb, int live_count, int64_t *te
     return dump_nodes;
 }
 
-/* Build dump-ready edge array with remapped IDs. Returns url_paths via out param. */
+/* Build dump-ready edge array with remapped IDs. Returns url_paths and
+ * local_names (heap string arrays owned by the caller) via out params. */
 static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_final,
-                                     int64_t max_temp_id, int *out_count, char ***out_url_paths) {
+                                     int64_t max_temp_id, int *out_count, char ***out_url_paths,
+                                     char ***out_local_names) {
     /* Count valid edges (both endpoints resolved) */
     int valid_edges = 0;
     for (int i = 0; i < gb->edges.count; i++) {
@@ -1388,6 +1538,8 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
         (size_t)(valid_edges > 0 ? valid_edges : SKIP_ONE) * sizeof(CBMDumpEdge));
     char **url_paths =
         (char **)calloc((size_t)(valid_edges > 0 ? valid_edges : SKIP_ONE), sizeof(char *));
+    char **local_names =
+        (char **)calloc((size_t)(valid_edges > 0 ? valid_edges : SKIP_ONE), sizeof(char *));
     int idx = 0;
 
     for (int i = 0; i < gb->edges.count; i++) {
@@ -1401,6 +1553,12 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
         char *url_path = extract_url_path(e->properties_json);
         url_paths[idx] = url_path;
 
+        /* IMPORTS only — mirrors the local_name_gen CASE in the edges DDL. */
+        char *local_name = (e->type && strcmp(e->type, "IMPORTS") == 0)
+                               ? extract_local_name(e->properties_json)
+                               : NULL;
+        local_names[idx] = local_name;
+
         const char *props = e->properties_json ? e->properties_json : "{}";
         dump_edges[idx] = (CBMDumpEdge){
             .id = idx + SKIP_ONE,
@@ -1410,12 +1568,14 @@ static CBMDumpEdge *build_dump_edges(cbm_gbuf_t *gb, const int64_t *temp_to_fina
             .type = e->type,
             .properties = props,
             .url_path = url_path ? url_path : "",
+            .local_name = local_name ? local_name : "",
         };
         idx++;
     }
 
     *out_count = idx;
     *out_url_paths = url_paths;
+    *out_local_names = local_names;
     return dump_edges;
 }
 
@@ -1466,12 +1626,15 @@ static void log_dump_summary(int node_count, int edge_count) {
     cbm_log_info("gbuf.dump", "nodes", b1, "edges", b2);
 }
 
-static void free_dump_resources(char **url_paths, int edge_count, CBMDumpEdge *dump_edges,
-                                CBMDumpNode *dump_nodes, int64_t *temp_to_final) {
+static void free_dump_resources(char **url_paths, char **local_names, int edge_count,
+                                CBMDumpEdge *dump_edges, CBMDumpNode *dump_nodes,
+                                int64_t *temp_to_final) {
     for (int i = 0; i < edge_count; i++) {
         free(url_paths[i]);
+        free(local_names[i]);
     }
     free(url_paths);
+    free(local_names);
     free(dump_edges);
     free(dump_nodes);
     free(temp_to_final);
@@ -1500,10 +1663,6 @@ static void generate_iso_timestamp(char *buf, size_t buf_size) {
 /* Release lookup indexes then remap+sort+dedup vectors for the B-tree writer. */
 static void release_and_remap_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_final,
                                       int64_t max_temp_id) {
-    CBM_PROF_START(t_release_idx);
-    release_gbuf_indexes(gb);
-    CBM_PROF_END("dump", "4_release_gbuf_indexes", t_release_idx);
-
     CBM_PROF_START(t_vec_remap);
     remap_sort_dedup_vectors(gb, temp_to_final, max_temp_id);
     CBM_PROF_END_N("dump", "5_vector_remap_sort", t_vec_remap, gb->dump_vector_count);
@@ -1530,6 +1689,16 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
     CBMDumpNode *dump_nodes =
         build_dump_nodes(gb, live_count, temp_to_final, max_temp_id, &node_idx, &src_nodes);
     CBM_PROF_END_N("dump", "2_build_dump_nodes", t_build_nodes, node_idx);
+
+    /* Release ALL lookup indexes NOW: nothing between here and finalize reads
+     * them (stream-append uses dump_nodes/src_nodes, build_dump_edges uses
+     * temp_to_final + gb->edges, the vector remap uses temp_to_final). At
+     * kernel scale they are ~3.8 GB (hash buckets + key strings + pointer
+     * arrays); releasing them only AFTER edge building made them coexist with
+     * every dump-side transient array — the dump-phase RSS peak. */
+    CBM_PROF_START(t_release_idx);
+    release_gbuf_indexes(gb);
+    CBM_PROF_END("dump", "4_release_gbuf_indexes", t_release_idx);
 
     char indexed_at[CBM_SZ_64];
     generate_iso_timestamp(indexed_at, sizeof(indexed_at));
@@ -1575,10 +1744,12 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
 
     int edge_idx = 0;
     char **url_paths = NULL;
+    char **local_names = NULL;
     CBMDumpEdge *dump_edges = NULL;
     if (rc == 0) {
         CBM_PROF_START(t_build_edges);
-        dump_edges = build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths);
+        dump_edges =
+            build_dump_edges(gb, temp_to_final, max_temp_id, &edge_idx, &url_paths, &local_names);
         CBM_PROF_END_N("dump", "3_build_dump_edges", t_build_edges, edge_idx);
         release_and_remap_vectors(gb, temp_to_final, max_temp_id);
     }
@@ -1595,7 +1766,7 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
     }
 
     log_dump_summary(node_idx, edge_idx);
-    free_dump_resources(url_paths, edge_idx, dump_edges, dump_nodes, temp_to_final);
+    free_dump_resources(url_paths, local_names, edge_idx, dump_edges, dump_nodes, temp_to_final);
     free(src_nodes);
     return rc;
 }
