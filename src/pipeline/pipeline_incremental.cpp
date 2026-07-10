@@ -793,7 +793,8 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_edge_capture_t edge_cap = {0};
     edge_cap.gbuf = existing;
     {
-        CBMHashTable *changed_paths = cbm_ht_create(ci > 0 ? (size_t)ci * PAIR_LEN : CBM_SZ_64);
+        CBMHashTable *changed_paths =
+            cbm_ht_create(ci > 0 ? (size_t)ci * PAIR_LEN : (size_t)CBM_SZ_64);
         for (int i = 0; i < ci; i++) {
             cbm_ht_set(changed_paths, changed_files[i].rel_path, &changed_files[i]);
         }
@@ -889,7 +890,8 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         cov = (cbm_coverage_row_t *)malloc((size_t)cov_cap * sizeof(*cov));
     }
     if (cov) {
-        CBMHashTable *changed_set = cbm_ht_create(ci > 0 ? (size_t)ci * PAIR_LEN : CBM_SZ_64);
+        CBMHashTable *changed_set =
+            cbm_ht_create(ci > 0 ? (size_t)ci * PAIR_LEN : (size_t)CBM_SZ_64);
         for (int i = 0; i < ci; i++) {
             cbm_ht_set(changed_set, changed_files[i].rel_path, &changed_files[i]);
         }
