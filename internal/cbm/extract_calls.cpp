@@ -1852,7 +1852,7 @@ static void extract_java_method_reference(CBMExtractCtx *ctx, TSNode node, const
     if (nc < 1) {
         return;
     }
-    char *mname = NULL;
+    const char *mname = NULL;
     if (nc >= 2) {
         mname = cbm_node_text(ctx->arena, ts_node_named_child(node, nc - 1), ctx->source);
     }
