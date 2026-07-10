@@ -392,7 +392,7 @@ static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     cbm_ht_set(gb->node_by_qn, node->qualified_name, node);
 
     if (node->id >= gb->by_id_cap) {
-        int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : CBM_SZ_1K;
+        int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : (int64_t)CBM_SZ_1K;
         while (nc <= node->id) {
             nc *= 2;
         }
