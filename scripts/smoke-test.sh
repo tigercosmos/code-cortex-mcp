@@ -569,21 +569,24 @@ if ! path_match "$CMD" "$SELF_PATH"; then
 fi
 echo "OK 8c: Claude Code MCP (.claude/.mcp.json)"
 
-# 8d: Claude Code hooks — matcher must be exactly "Grep|Glob" (no Read, no Search).
-# Gating Read breaks Claude Code's read-before-edit invariant (issue #362), so
-# this assertion locks in the matcher to prevent regressions.
+# 8d: Claude Code hooks — matcher must be exactly "Grep|Glob|Read" (no Search).
+# Read is matched for the indexing-coverage note (#963); safe against the old
+# issue-#362 gate hazard because the augmenter is structurally non-blocking
+# (always exit 0, additionalContext only). This assertion locks in the exact
+# matcher to prevent both regressions (Read dropped again) and creep (Search
+# or catch-all matchers sneaking back).
 if ! cat "$FAKE_HOME/.claude/settings.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 hooks = d.get('hooks', {}).get('PreToolUse', [])
-ok = any(h.get('matcher') == 'Grep|Glob' for h in hooks)
-bad = any('Read' in str(h.get('matcher', '')) for h in hooks)
+ok = any(h.get('matcher') == 'Grep|Glob|Read' for h in hooks)
+bad = any('Search' in str(h.get('matcher', '')) for h in hooks)
 sys.exit(0 if (ok and not bad) else 1)
 " 2>/dev/null; then
-  echo "FAIL 8d: PreToolUse hook matcher is not exactly 'Grep|Glob' (or still contains Read)"
+  echo "FAIL 8d: PreToolUse hook matcher is not exactly 'Grep|Glob|Read'"
   exit 1
 fi
-echo "OK 8d: Claude Code PreToolUse hook (matcher=Grep|Glob, Read excluded)"
+echo "OK 8d: Claude Code PreToolUse hook (matcher=Grep|Glob|Read)"
 
 # 8e: Claude Code shim script — must be non-blocking augmenter, not a gate.
 if [ "$(uname -s)" != "MINGW64_NT" ] 2>/dev/null; then
@@ -757,9 +760,14 @@ fi
 echo "OK 8v: VS Code MCP"
 
 # 8w: OpenClaw MCP
-CMD=$(json_get "$FAKE_HOME/.openclaw/openclaw.json" "d['mcpServers']['codebase-memory-mcp']['command']")
+CMD=$(json_get "$FAKE_HOME/.openclaw/openclaw.json" "d['mcp']['servers']['codebase-memory-mcp']['command']")
 if ! path_match "$CMD" "$SELF_PATH"; then
   echo "FAIL 8w: OpenClaw command='$CMD'"
+  exit 1
+fi
+ENABLED=$(json_get "$FAKE_HOME/.openclaw/openclaw.json" "d['mcp']['servers']['codebase-memory-mcp'].get('enabled')")
+if [ "$ENABLED" != "True" ]; then
+  echo "FAIL 8w: OpenClaw enabled='$ENABLED'"
   exit 1
 fi
 echo "OK 8w: OpenClaw MCP"
@@ -868,7 +876,7 @@ fi
 if cat "$FAKE_HOME/.openclaw/openclaw.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-sys.exit(1 if 'codebase-memory-mcp' in d.get('mcpServers', {}) else 0)
+sys.exit(1 if 'codebase-memory-mcp' in d.get('mcp', {}).get('servers', {}) else 0)
 " 2>/dev/null; then
   echo "OK 9k: OpenClaw MCP removed"
 else
