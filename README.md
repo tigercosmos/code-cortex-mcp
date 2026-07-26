@@ -127,6 +127,11 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
   snapshots and only real code changes show up.
 - **Crash-isolated indexing** — an index supervisor contains per-file crashes and hangs so
   one bad file cannot take down the whole index run.
+- **Preprocessor-aware C/C++** — a second pass over preprocessed source recovers definitions
+  whose braces are split across `#ifdef`/`#else` branches (unparseable in raw form) and
+  remaps them to their original lines, verifying every line belongs to the main file. Headers
+  get their own `File` nodes, `#include` resolves to the header, and benign function-like
+  macro calls are not reported as parse gaps.
 - **Search** — semantic vector search (bundled `nomic-embed-code` embeddings, no API key),
   BM25 full-text (FTS5, camelCase/snake_case aware), and structural/code search.
 - **Cross-service linking** — HTTP route ↔ call-site matching; gRPC/GraphQL/tRPC detection;
@@ -135,7 +140,14 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
 - **Infrastructure-as-code** — Dockerfiles, Kubernetes manifests, and Kustomize overlays as
   first-class graph nodes.
 - **Selected edge types** — `CALLS`, `IMPORTS`, `DEFINES`, `IMPLEMENTS`, `INHERITS`,
-  `HTTP_CALLS`, `ASYNC_CALLS`, `DATA_FLOWS`, `SIMILAR_TO` (MinHash/LSH), `SEMANTICALLY_RELATED`.
+  `OVERRIDE`, `HTTP_CALLS`, `ASYNC_CALLS`, `DATA_FLOWS`, `SIMILAR_TO` (MinHash/LSH),
+  `SEMANTICALLY_RELATED`. `IMPLEMENTS` vs `INHERITS` is decided by the resolved base's label
+  (an `Interface` target means `implements`), and `OVERRIDE` links a method to the base
+  method it redefines — for both explicit `implements`/`extends` languages and Go's implicit
+  interface satisfaction.
+- **Identical graphs from either pipeline** — the sequential and parallel (>50 files) paths
+  resolve calls and base-class relations through the same decision points, so a project's
+  graph does not depend on which path its size selected.
 
 ## Team-Shared Graph Artifact
 
@@ -180,7 +192,8 @@ Plus ~110 more (config, data, and niche languages) parsed structurally.
 - **Cypher subset** — `MATCH` / `OPTIONAL MATCH` (labels, relationship types, variable-length
   paths), `WHERE` (comparisons / regex / `CONTAINS` / `EXISTS{}`), `WITH` (+ `DISTINCT`),
   `RETURN` (+ `COUNT`/`COUNT(DISTINCT)` / aggregates), `ORDER BY`, `LIMIT`. Read-only; no
-  mutations.
+  mutations. Queries are bounded by a 100k-row ceiling and a 30 s wall-clock deadline, so an
+  unbounded `OPTIONAL MATCH` fails with an actionable error instead of hanging.
 
 ## Configuration
 
