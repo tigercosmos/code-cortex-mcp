@@ -158,17 +158,25 @@ binary artifact never causes merge conflicts. Optional — gitignore `.codebase-
 
 ## Performance
 
-Benchmarked on Apple Silicon (M-series):
+Benchmarked on Apple Silicon (M-series), release build. Full-index rows were re-measured on
+v0.12.0 against each project's current `main`:
 
 | Operation | Time |
 |-----------|------|
+| RocksDB full index (C++, 62K nodes, 346K edges) | ~7 s |
+| Django full index (Python, 55K nodes, 371K edges) | ~4 s |
+| Redis full index (C, 38K nodes, 148K edges) | ~2.7 s |
+| etcd full index (Go, 15K nodes, 94K edges) | ~1.4 s |
 | Linux kernel full index (28M LOC, 75K files → 2.1M nodes) | ~3 min |
-| RocksDB full index (C++, 62K nodes, 218K edges) | ~6 s |
-| Django full index (Python, 55K nodes, 312K edges) | ~4 s |
-| Redis full index (C, 37K nodes, 95K edges) | ~2 s |
-| etcd full index (Go, 17K nodes, 96K edges) | ~1.3 s |
 | Cypher query / trace path | <1–10 ms |
 | Dead-code detection (full graph) | ~150 ms |
+
+Edge counts rose substantially for the C/C++ projects in v0.12.0 (RocksDB 218K → 346K, Redis
+95K → 148K) as the header `File` nodes, `#include` targets, recovered `#ifdef`-split
+definitions, and restored function-pointer/destructor call resolution all landed. Node counts
+are essentially unchanged. These are not strict before/after deltas — each project is indexed
+at a newer commit than the earlier figures were — but the direction is the corrected graph, not
+drift. The Linux kernel row has not been re-measured on v0.12.0.
 
 ## Language Support
 
