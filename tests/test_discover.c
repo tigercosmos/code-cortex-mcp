@@ -288,6 +288,36 @@ TEST(discover_simple) {
     PASS();
 }
 
+/* A directory with more immediate subdirectories than the walk stack's
+ * initial capacity must still be fully discovered — dotnet/runtime's
+ * src/tests/JIT/Regression/JitBlue holds 855 sibling dirs. Upstream's
+ * walk_push_subdir hard-failed the whole walk at the fixed cap; this tree
+ * silently DROPPED every subdir past it, so the fan-out simply vanished from
+ * the index with no error at all. The stack now grows geometrically. */
+TEST(discover_wide_sibling_fanout_exceeds_initial_walk_stack) {
+    char *base = th_mktempdir("cbm_disc_wide");
+    ASSERT(base != NULL);
+
+    enum { WIDE_SIBLINGS = 600 };
+    for (int i = 0; i < WIDE_SIBLINGS; i++) {
+        char rel[64];
+        (void)snprintf(rel, sizeof(rel), "wide/d%03d/f.py", i);
+        th_write_file(TH_PATH(base, rel), "x = 1\n");
+    }
+
+    cbm_discover_opts_t opts = {0};
+    cbm_file_info_t *files = NULL;
+    int count = 0;
+
+    int rc = cbm_discover(base, &opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(count, WIDE_SIBLINGS);
+
+    cbm_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
 TEST(discover_skips_git_dir) {
     char *base = th_mktempdir("cbm_disc_git");
     ASSERT(base != NULL);
@@ -776,6 +806,7 @@ SUITE(discover) {
 
     /* Integration tests (cross-platform) */
     RUN_TEST(discover_simple);
+    RUN_TEST(discover_wide_sibling_fanout_exceeds_initial_walk_stack);
     RUN_TEST(discover_skips_git_dir);
     RUN_TEST(discover_with_gitignore);
     RUN_TEST(discover_gitignore_dir_excluded_issue234);
