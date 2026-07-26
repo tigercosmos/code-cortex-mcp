@@ -81,6 +81,13 @@ ALLOWED_URLS=(
     "https://bugs.launchpad.net"
     "https://gcc.gnu.org"
     "https://sourceware.org"
+    # MinGW-w64 / CLANG64 runtime bug-report string, linked into the Windows
+    # binary only. Appeared when setup-msys2 went 2.31.1 -> 2.32.0 (PR #6, no
+    # first-party source change); absent from the Linux and macOS binaries and
+    # from this repo's sources. Same class as the gcc/sourceware entries above:
+    # an inert diagnostic string in a runtime library, not an endpoint the
+    # binary contacts.
+    "https://github.com/msys2/MINGW-packages"
     # W3C XML namespace URIs (SVG, MathML, XLink — used in UI bundle)
     "http://www.w3.org/"
     # UI bundle: React, Three.js, Tailwind, Google Fonts, bundled libraries
