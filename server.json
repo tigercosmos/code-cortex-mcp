@@ -7,44 +7,44 @@
     "url": "https://github.com/tigercosmos/cpp-codebase-memory-mcp",
     "source": "github"
   },
-  "version": "0.11.0",
+  "version": "0.12.0",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.11.0/codebase-memory-mcp-darwin-arm64.tar.gz",
-      "fileSha256": "57077ee21f1898a768bca0364bd2bce37c6bcac2977c98ec6d4f06c9f186dd69",
+      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.12.0/codebase-memory-mcp-darwin-arm64.tar.gz",
+      "fileSha256": "8bd277b4aec9b4861f65b0305e21bde3a7a0018cf3165dfcc239e8784cf2b8ec",
       "transport": {
         "type": "stdio"
       }
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.11.0/codebase-memory-mcp-darwin-amd64.tar.gz",
-      "fileSha256": "7a494a896e66045273cb1b723825eb97a9223336cb72797c3e37be27f40456e9",
+      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.12.0/codebase-memory-mcp-darwin-amd64.tar.gz",
+      "fileSha256": "f2f4fcf8ea4c88460e098d6c209aff02ad5c88d88c67d311f75cc0e2280330a9",
       "transport": {
         "type": "stdio"
       }
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.11.0/codebase-memory-mcp-linux-amd64-portable.tar.gz",
-      "fileSha256": "ee73a7b6bdb5aee7ed8aa2b49ebba5e41b8fd80fd48a7ef05bb7ba6c3e5b12bf",
+      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.12.0/codebase-memory-mcp-linux-amd64-portable.tar.gz",
+      "fileSha256": "bf449dcae23bc2676bbe471754dd779422559ee57fa50ef001c6ff25f74e9f50",
       "transport": {
         "type": "stdio"
       }
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.11.0/codebase-memory-mcp-linux-arm64-portable.tar.gz",
-      "fileSha256": "d164319d076044d4031f0035e6a808bbf7de4f7df7a57e42c09ee73adb4b4e8f",
+      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.12.0/codebase-memory-mcp-linux-arm64-portable.tar.gz",
+      "fileSha256": "38177d154490876fbf971459085e2fab92a4ac749664fd47a3ba186b744e2a22",
       "transport": {
         "type": "stdio"
       }
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.11.0/codebase-memory-mcp-windows-amd64.zip",
-      "fileSha256": "f6f43eafaa3907484fd0380912721b0eaa4686f761a95ffd87af54b93ec7e06c",
+      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.12.0/codebase-memory-mcp-windows-amd64.zip",
+      "fileSha256": "1cbe2a54bb62684184b035d118e9f55d4b6c8e948caa6aa1344eaf2b29696d3b",
       "transport": {
         "type": "stdio"
       }
