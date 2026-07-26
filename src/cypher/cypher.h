@@ -329,6 +329,11 @@ int cbm_cypher_parse(const char *query, cbm_query_t **out, char **error);
 /* Free a query AST. */
 void cbm_query_free(cbm_query_t *q);
 
+/* Test-only (#601): force the wall-clock execution budget in milliseconds for
+ * subsequent queries on the calling thread. 0 = trip on the first hot-loop
+ * check; a negative value restores the default budget. */
+void cbm_cypher_test_set_deadline_ms(int64_t budget_ms);
+
 #ifdef __cplusplus
 }
 #endif

@@ -2581,6 +2581,54 @@ TEST(cypher_multi_prop_projection_no_alias) {
     PASS();
 }
 
+/* #601: an unbounded whole-graph OPTIONAL MATCH / GROUP BY does
+ * O(bindings x groups) work and can run for minutes with no wall-clock guard —
+ * the 100k row ceiling never fires because no rows are produced, so query_graph
+ * just hangs. With the execution deadline armed to trip immediately (budget 0),
+ * the runaway query must abort with a clear error instead of returning a
+ * (misleading, possibly partial) result.
+ *
+ * RED on unfixed code: no deadline exists, so the query completes and returns
+ * rc==0 with rows and no error — the assertions below fail. */
+TEST(cypher_exec_deadline_aborts_runaway_query_issue601) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+
+    cbm_cypher_test_set_deadline_ms(0); /* trip on the first hot-loop check */
+    int rc = cbm_cypher_execute(
+        s, "MATCH (a) OPTIONAL MATCH (a)-[:CALLS]->(b) RETURN a.qualified_name, count(b)", "test",
+        0, &r);
+    cbm_cypher_test_set_deadline_ms(-1); /* restore default before asserting (thread-local) */
+
+    ASSERT_TRUE(rc != 0); /* CBM_NOT_FOUND (-1) — query aborted, not success */
+    ASSERT_NOT_NULL(r.error);
+    ASSERT_TRUE(strstr(r.error, "time limit") != NULL);
+    ASSERT_EQ(r.row_count, 0);
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* #601 companion: the default (ample) budget must NOT false-positive on a
+ * normal small query — it still returns its rows. */
+TEST(cypher_exec_deadline_allows_normal_query_issue601) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+
+    int rc = cbm_cypher_execute(
+        s, "MATCH (a) OPTIONAL MATCH (a)-[:CALLS]->(b) RETURN a.qualified_name, count(b)", "test",
+        0, &r);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(r.error == NULL);
+    ASSERT_GT(r.row_count, 0);
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════ */
 
 SUITE(cypher) {
@@ -2613,6 +2661,8 @@ SUITE(cypher) {
     RUN_TEST(cypher_parse_inline_props);
     RUN_TEST(cypher_parse_error);
     /* Execution */
+    RUN_TEST(cypher_exec_deadline_aborts_runaway_query_issue601);
+    RUN_TEST(cypher_exec_deadline_allows_normal_query_issue601);
     RUN_TEST(cypher_exec_match_all_functions);
     RUN_TEST(cypher_issue240_labels_function);
     RUN_TEST(cypher_issue237_distinct_order_limit);

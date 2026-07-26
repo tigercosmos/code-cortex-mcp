@@ -2574,6 +2574,49 @@ static void rb_add_row(result_builder_t *rb, const char **values) {
  * Prevents accidental multi-GB JSON payloads from unbounded MATCH (n) RETURN n. */
 #define CYPHER_RESULT_CEILING 100000
 
+/* Wall-clock execution deadline (#601). The row ceiling above only fires once
+ * rows exist, but an unbounded `OPTIONAL MATCH` over the full node set (or a
+ * GROUP BY with ~one group per node) does O(bindings x groups) work and can run
+ * for minutes — exhausting RAM/CPU — before a single row is produced, so the
+ * ceiling never trips and the caller just hangs. A monotonic deadline aborts
+ * such runaway queries with a clear, actionable error. Checked (throttled) in
+ * the scan, expansion and aggregation hot loops. */
+#define CYPHER_DEADLINE_BUDGET_MS 30000  /* 30s: generous for legit heavy queries */
+#define CYPHER_DEADLINE_CHECK_MASK 0x3FF /* sample the clock every 1024 iterations */
+
+static thread_local uint64_t g_cypher_deadline_ms = 0; /* absolute; 0 = disarmed */
+static thread_local bool g_cypher_timed_out = false;
+static thread_local int64_t g_cypher_deadline_override_ms = -1; /* test hook; <0 = default */
+
+static void cypher_deadline_arm(void) {
+    g_cypher_timed_out = false;
+    int64_t budget = g_cypher_deadline_override_ms >= 0 ? g_cypher_deadline_override_ms
+                                                        : CYPHER_DEADLINE_BUDGET_MS;
+    g_cypher_deadline_ms = cbm_now_ms() + (uint64_t)budget;
+}
+
+/* True once the query has run past its wall-clock budget. Sticky: after the
+ * first trip every subsequent call returns true, so later loops short-circuit. */
+static bool cypher_deadline_exceeded(void) {
+    if (g_cypher_timed_out) {
+        return true;
+    }
+    if (g_cypher_deadline_ms == 0) {
+        return false;
+    }
+    if (cbm_now_ms() >= g_cypher_deadline_ms) {
+        g_cypher_timed_out = true;
+        return true;
+    }
+    return false;
+}
+
+/* Test-only: force the execution budget (ms) for subsequent queries on this
+ * thread. 0 = trip on the first hot-loop check; <0 restores the default. */
+void cbm_cypher_test_set_deadline_ms(int64_t budget_ms) {
+    g_cypher_deadline_override_ms = budget_ms;
+}
+
 /* ── Binding virtual variables (for WITH clause) ──────────────── */
 
 static const char *binding_get_virtual(binding_t *b, const char *var, const char *prop) {
@@ -3037,6 +3080,11 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
 static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_t **bindings,
                                 int *bind_count, const char **var_name, bool is_optional) {
     for (int ri = 0; ri < pat->rel_count; ri++) {
+        /* #601: stop expanding further hops once the wall-clock budget is spent
+         * (an unbounded expansion is exactly what blows up here). */
+        if (cypher_deadline_exceeded()) {
+            return;
+        }
         cbm_rel_pattern_t *rel = &pat->rels[ri];
         cbm_node_pattern_t *target_node = &pat->nodes[ri + SKIP_ONE];
         const char *to_var = target_node->variable ? target_node->variable : "_n_t";
@@ -3046,6 +3094,9 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
         binding_vec_t out = {0};
 
         for (int bi = 0; bi < *bind_count; bi++) {
+            if ((bi & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
+                break;
+            }
             binding_t *b = &(*bindings)[bi];
             cbm_node_t *src = binding_get(b, *var_name);
             if (!src) {
@@ -4160,6 +4211,11 @@ static void execute_return_agg(cbm_return_clause_t *ret, binding_t *bindings, in
     int agg_count = 0;
 
     for (int bi = 0; bi < bind_count; bi++) {
+        /* #601: grouping is O(bindings x groups) — the dominant cost on a
+         * whole-graph GROUP BY. Abort if we blow the wall-clock budget. */
+        if ((bi & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
+            break;
+        }
         char key[CBM_SZ_1K] = "";
         const char *vals[CBM_SZ_32];
         char valbufs[CBM_SZ_32][CBM_SZ_512];
@@ -4448,6 +4504,9 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     const char *var_name = pat0->nodes[0].variable ? pat0->nodes[0].variable : "_n0";
 
     for (int i = 0; i < scan_count && bind_count < bind_cap; i++) {
+        if ((i & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
+            break;
+        }
         binding_t b = {0};
         b.store = store;
         binding_set(&b, var_name, &scanned[i]);
@@ -4494,6 +4553,7 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
 int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *project, int max_rows,
                        cbm_cypher_result_t *out) {
     memset(out, 0, sizeof(*out));
+    cypher_deadline_arm(); /* #601: start the wall-clock budget for this query */
     if (max_rows <= 0) {
         max_rows = CYPHER_RESULT_CEILING;
     }
@@ -4535,6 +4595,18 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
     /* UNION (not ALL) deduplication */
     if (q->union_next && !q->union_all) {
         rb_apply_distinct(&rb);
+    }
+
+    /* #601: abort a runaway query that blew the wall-clock budget before it can
+     * return a misleading partial result. Checked before the row ceiling. */
+    if (g_cypher_timed_out) {
+        rb_free(&rb);
+        cbm_query_free(q);
+        out->error =
+            heap_strdup("query exceeded the execution time limit — narrow the pattern with a WHERE "
+                        "filter, use a directed MATCH instead of an unbounded OPTIONAL MATCH, or "
+                        "add LIMIT");
+        return CBM_NOT_FOUND;
     }
 
     /* Check ceiling */
