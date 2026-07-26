@@ -82,7 +82,7 @@ static bool try_append_ident(const char *source, uint32_t s, int len, uint32_t *
 /* Walk AST body, collect unique identifier text as space-separated string.
  * Returns arena-allocated string or NULL. */
 static char *extract_body_ident_tokens(CBMExtractCtx *ctx, TSNode body) {
-    enum { BT_STACK = 512, BT_BUF = 512, BT_MAX_IDENTS = 40, BT_SEEN = 128, BT_SEEN_MASK = 127 };
+    enum { BT_STACK = 512, BT_BUF = 2048, BT_MAX_IDENTS = 128, BT_SEEN = 256, BT_SEEN_MASK = 255 };
     TSNode bt_stack[BT_STACK];
     int bt_top = 0;
     bt_stack[bt_top++] = body;
@@ -98,7 +98,7 @@ static char *extract_body_ident_tokens(CBMExtractCtx *ctx, TSNode body) {
         if (nc == 0) {
             const char *k = ts_node_type(nd);
             if (strcmp(k, "identifier") == 0 || strcmp(k, "field_identifier") == 0 ||
-                strcmp(k, "property_identifier") == 0) {
+                strcmp(k, "property_identifier") == 0 || strcmp(k, "type_identifier") == 0) {
                 uint32_t s = ts_node_start_byte(nd);
                 int len = (int)(ts_node_end_byte(nd) - s);
                 if (len > 0 && len < CBM_SZ_64 && s < (uint32_t)ctx->source_len) {
@@ -128,6 +128,11 @@ static void compute_fingerprint(CBMExtractCtx *ctx, CBMDefinition *def, TSNode f
     if (ts_node_is_null(body)) {
         body = func_node;
     }
+    /* Extract raw identifier tokens from body for semantic search — before the
+     * MinHash gate so short functions still get body_tokens even without a
+     * fingerprint. */
+    def->body_tokens = extract_body_ident_tokens(ctx, body);
+
     cbm_minhash_t result;
     if (!cbm_minhash_compute(body, ctx->source, (int)ctx->language, &result)) {
         return; /* Too short or empty — no fingerprint */
@@ -155,9 +160,6 @@ static void compute_fingerprint(CBMExtractCtx *ctx, CBMDefinition *def, TSNode f
         cbm_ast_profile_to_str(&profile, sp_buf, sizeof(sp_buf));
         def->structural_profile = cbm_arena_strdup(ctx->arena, sp_buf);
     }
-
-    /* Extract raw identifier tokens from body for semantic search */
-    def->body_tokens = extract_body_ident_tokens(ctx, body);
 }
 
 // Tree-sitter row is 0-based; lines are 1-based.
@@ -1168,10 +1170,15 @@ static bool is_comment_node(const char *kind) {
 }
 
 // Extract comment text, truncating to MAX_COMMENT_LEN.
+// #1017: snap the cut point back to a complete UTF-8 codepoint boundary.
 static char *extract_comment_text(CBMArena *a, TSNode node, const char *source) {
     char *text = cbm_node_text(a, node, source);
     if (text && strlen(text) > MAX_COMMENT_LEN) {
-        text[MAX_COMMENT_LEN] = '\0';
+        size_t cut = MAX_COMMENT_LEN;
+        while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80) {
+            cut--;
+        }
+        text[cut] = '\0';
     }
     return text;
 }

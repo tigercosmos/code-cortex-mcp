@@ -461,6 +461,12 @@ static int create_env_configures_for_file(cbm_pipeline_ctx_t *ctx, const CBMFile
         const cbm_gbuf_node_t *src = nullptr;
         if (ea->enclosing_func_qn && ea->enclosing_func_qn[0]) {
             src = cbm_gbuf_find_by_qn(ctx->gbuf, ea->enclosing_func_qn);
+            /* A class-level env access in a directory-module language carries
+             * the DIRECTORY module QN, which hits the shared Folder/Project
+             * node — attribute to this file's File node instead (#787, #842). */
+            if (cbm_pipeline_node_is_dir_container(src)) {
+                src = nullptr;
+            }
         }
         if (!src) {
             if (!file_qn) {

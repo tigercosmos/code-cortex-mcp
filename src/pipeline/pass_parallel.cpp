@@ -1064,7 +1064,13 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
     CBM_PROF_START(t_init);
     cbm_init();
 
-    /* Slab allocator for tree-sitter (thread-safe via TLS). */
+    /* Slab allocator for tree-sitter (thread-safe via TLS). Destroy any
+     * parser this thread still holds BEFORE switching the global ts
+     * allocator: a parser created in the mimalloc epoch (sequential run,
+     * watcher tick) must be freed by the allocator that created it, or its
+     * teardown after the switch routes mi pointers into plain free()
+     * (#773). */
+    cbm_destroy_thread_parser();
     cbm_slab_install();
     CBM_PROF_END("parallel_extract", "1_init_libs", t_init);
 
@@ -1331,6 +1337,16 @@ static void create_env_configures(cbm_pipeline_ctx_t *ctx, const CBMFileResult *
         const cbm_gbuf_node_t *src = nullptr;
         if (ea->enclosing_func_qn && ea->enclosing_func_qn[0]) {
             src = cbm_gbuf_find_by_qn(ctx->gbuf, ea->enclosing_func_qn);
+            /* A class-level env access in a directory-module language carries
+             * the DIRECTORY module QN, which hits the shared Folder/Project
+             * node — attribute to this file's File node instead (#787, #842).
+             * Fork note: this is the parallel twin of the sequential
+             * create_env_configures_for_file (upstream has no twin, so its
+             * #842 fix lands only on the sequential site); the guard must be
+             * here too or the DEFAULT path keeps the Java/Go clobber. */
+            if (cbm_pipeline_node_is_dir_container(src)) {
+                src = nullptr;
+            }
         }
         if (!src) {
             if (!file_qn) {
@@ -2176,6 +2192,36 @@ static void lsp_idx_free_key(const char *key, void *value, void *ud) {
     free((char *)key);
 }
 
+/* Insert one "caller_qn|name" entry into the per-file LSP index, keeping the
+ * highest-confidence resolution per key (matches the linear scan's "best"
+ * tie-break). Keys that don't fit the buffer are skipped — see the
+ * idx_authoritative note in resolve_file_calls. */
+static void lsp_idx_put(CBMHashTable *lsp_idx, const char *caller_qn, const char *name,
+                        CBMResolvedCall *rc_e) {
+    if (!name || !name[0]) {
+        return;
+    }
+    char key[1024];
+    int kn = snprintf(key, sizeof(key), "%s|%s", caller_qn, name);
+    if (kn <= 0 || kn >= (int)sizeof(key)) {
+        return;
+    }
+    CBMResolvedCall *existing = (CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
+    if (!existing) {
+        /* New entry — strdup so the key outlives the loop body. */
+        char *kdup = strdup(key);
+        if (kdup) {
+            cbm_ht_set(lsp_idx, kdup, rc_e);
+        }
+    } else if (rc_e->confidence > existing->confidence) {
+        /* Update value; reuse stored key pointer to avoid leak. */
+        const char *skey = cbm_ht_get_key(lsp_idx, key);
+        if (skey) {
+            cbm_ht_set(lsp_idx, skey, rc_e);
+        }
+    }
+}
+
 /* Resolve calls for one file and emit CALLS/HTTP_CALLS/ASYNC_CALLS edges. */
 static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFileResult *result,
                                const char *rel, const char *module_qn, const char **imp_keys,
@@ -2191,7 +2237,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
      * entries (lookups would all miss). */
     CBMHashTable *lsp_idx = NULL;
     if (result->calls.count > 0 && result->resolved_calls.count > 0) {
-        lsp_idx = cbm_ht_create((uint32_t)result->resolved_calls.count * 2u + 16u);
+        /* x2 for the reason-alias keys below, so the table stays sparse. */
+        lsp_idx = cbm_ht_create((uint32_t)result->resolved_calls.count * 4u + 16u);
         if (lsp_idx) {
             for (int i = 0; i < result->resolved_calls.count; i++) {
                 CBMResolvedCall *rc_e = &result->resolved_calls.items[i];
@@ -2199,23 +2246,27 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                     rc_e->confidence < CBM_LSP_CONFIDENCE_FLOOR) {
                     continue;
                 }
-                const char *short_name = strrchr(rc_e->callee_qn, '.');
-                short_name = short_name ? short_name + 1 : rc_e->callee_qn;
-                char key[1024];
-                int kn = snprintf(key, sizeof(key), "%s|%s", rc_e->caller_qn, short_name);
-                if (kn <= 0 || kn >= (int)sizeof(key))
-                    continue;
-                CBMResolvedCall *existing = (CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
-                if (!existing) {
-                    /* New entry — strdup so the key outlives the loop body. */
-                    char *kdup = strdup(key);
-                    if (kdup)
-                        cbm_ht_set(lsp_idx, kdup, rc_e);
-                } else if (rc_e->confidence > existing->confidence) {
-                    /* Update value; reuse stored key pointer to avoid leak. */
-                    const char *skey = cbm_ht_get_key(lsp_idx, key);
-                    if (skey)
-                        cbm_ht_set(lsp_idx, skey, rc_e);
+                /* cbm_lsp_bare_segment, NOT strrchr('.'): the matcher splits on
+                 * '.', '::' and '->', and the authoritative-index optimization
+                 * requires the two to key identically (a C++ `Ns::f` callee_qn
+                 * keyed on the whole string would never match the lookup's
+                 * `f`). */
+                const char *short_name = cbm_lsp_bare_segment(rc_e->callee_qn);
+                lsp_idx_put(lsp_idx, rc_e->caller_qn, short_name, rc_e);
+                /* Reason-gated strategies join on the TEXTUAL callee stashed in
+                 * `reason`, not on the callee_qn tail (lsp_resolve.h,
+                 * cbm_lsp_strategy_matches_on_reason). The lookup below keys on
+                 * the call site's textual leaf, so index those entries under
+                 * that name too — otherwise the lookup misses and, because the
+                 * index is authoritative (no linear rescan), the resolution is
+                 * dropped entirely. That silently lost every func-ptr /
+                 * destructor / dict-dispatch / method-ref / php-dynamic /
+                 * import-alias override on the parallel path. */
+                if (rc_e->reason && cbm_lsp_strategy_matches_on_reason(rc_e->strategy)) {
+                    const char *reason_leaf = cbm_lsp_bare_segment(rc_e->reason);
+                    if (reason_leaf && strcmp(reason_leaf, short_name) != 0) {
+                        lsp_idx_put(lsp_idx, rc_e->caller_qn, reason_leaf, rc_e);
+                    }
                 }
             }
         }
@@ -2277,10 +2328,7 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         if (lsp) {
             /* Canonicalise to the gbuf node's QN so res.qualified_name matches
              * the gbuf even when the cross-file fallback had to prefix the
-             * project name. If neither lookup hits, leave res.qualified_name
-             * empty — the LSP was confident but its target isn't in the gbuf
-             * (external/unindexed), so drop the edge rather than fall back to
-             * the registry resolver, matching prior single-lookup semantics. */
+             * project name. */
             lsp_target = cbm_pipeline_lsp_target_node(rc->main_gbuf, rc->project_name,
                                                       lsp->callee_qn, allow_tail);
             if (lsp_target) {
@@ -2290,7 +2338,19 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                 res.candidate_count = 1;
                 ws->lsp_overrides++;
             }
-        } else {
+        }
+        /* #1085: fall back to the registry resolver whenever the LSP did not
+         * yield a gbuf-resolvable target — whether no LSP resolution existed,
+         * OR the LSP was confident but its callee_qn isn't a node in the gbuf
+         * (the JSX-via-tsconfig-alias case: the TS LSP resolves the element
+         * ref to an alias-path QN that never matches a def node, so lsp_target
+         * is NULL). The old `else` ran the registry ONLY when lsp was null, so
+         * an LSP-with-unresolvable-target dropped the edge outright — silently
+         * losing every alias-imported JSX component edge on the parallel path
+         * (~21% of a Next.js call graph) while the sequential pass, which falls
+         * THROUGH to the registry here, kept them. This restores seq/parallel
+         * parity via the import_map / unique_name resolution. */
+        if (!res.qualified_name || !res.qualified_name[0]) {
             res = cbm_registry_resolve(rc->registry, call->callee_name, module_qn, imp_keys,
                                        imp_vals, imp_count);
         }
@@ -2462,14 +2522,18 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
 
 /* Resolve throws/raises for one file. */
 static void resolve_file_throws(resolve_ctx_t *rc, resolve_worker_state_t *ws,
-                                CBMFileResult *result, const char *module_qn, const char **imp_keys,
-                                const char **imp_vals, int imp_count) {
+                                CBMFileResult *result, const char *rel, const char *module_qn,
+                                const char **imp_keys, const char **imp_vals, int imp_count) {
     for (int t = 0; t < result->throws.count; t++) {
         CBMThrow *thr = &result->throws.items[t];
         if (!thr->exception_name || !thr->enclosing_func_qn) {
             continue;
         }
-        const cbm_gbuf_node_t *src = cbm_gbuf_find_by_qn(rc->main_gbuf, thr->enclosing_func_qn);
+        /* find_source_node falls back to the per-file File node when the
+         * lookup lands on a shared Folder/Project node (#787, #842) — same
+         * guard resolve_file_calls/usages/rw already use. */
+        const cbm_gbuf_node_t *src =
+            find_source_node(rc->main_gbuf, rc->project_name, rel, thr->enclosing_func_qn);
         if (!src) {
             continue;
         }
@@ -2529,7 +2593,11 @@ static void resolve_def_inherits(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         }
         const cbm_gbuf_node_t *bn = cbm_gbuf_find_by_qn(rc->main_gbuf, bqn);
         if (bn && node->id != bn->id) {
-            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, bn->id, "INHERITS", "{}");
+            /* Same Interface-label split as the sequential semantic pass —
+             * hardcoding INHERITS here demoted every explicit `implements`
+             * on large (parallel-path) corpora. */
+            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, bn->id,
+                                 cbm_semantic_base_edge_type(bn), "{}");
             ws->semantic_resolved++;
         }
     }
@@ -2878,7 +2946,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         /* ── THROWS / RAISES ───────────────────────────────────── */
         _ph_t0 = extract_now_ns();
-        resolve_file_throws(rc, ws, result, module_qn, imp_keys, imp_vals, imp_count);
+        resolve_file_throws(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count);
         atomic_fetch_add_explicit(&rc->time_ns_throws, extract_now_ns() - _ph_t0,
                                   memory_order_relaxed);
 
@@ -2999,6 +3067,10 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
 
     /* Go-style implicit interface satisfaction (needs full graph, serial) */
     int go_impl = cbm_pipeline_implements_go(ctx);
+
+    /* Explicit-language override detection (same serial full-graph tail the
+     * sequential pipeline runs — the two venues must emit identical graphs). */
+    total_lsp_overrides += cbm_pipeline_override_explicit(ctx);
 
     if (atomic_load(ctx->cancelled)) {
         return CBM_NOT_FOUND;

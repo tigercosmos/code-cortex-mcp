@@ -95,6 +95,33 @@ static inline const char *cbm_pipeline_call_callee_leaf(const char *callee_name)
     return cbm_lsp_bare_segment(callee_name);
 }
 
+/* Strategies for which the call site's TEXTUAL callee name is not the resolved
+ * callee_qn's tail, and the LSP therefore stashed the textual name in `reason`
+ * for the join:
+ *   - lsp_func_ptr / lsp_dll_resolve — callee is the pointer name (`fp`);
+ *   - lsp_destructor — the only anchor is the deleted operand (`p` vs `T.~T`);
+ *   - lsp_dict_dispatch — the dispatch table variable name;
+ *   - lsp_method_ref_ctor{,_synth} — Java constructor method refs;
+ *   - php_method_dynamic — the dynamic method name;
+ *   - lsp_import_alias — `from m import f as g; g()`: textual `g`, QN tail `f`.
+ *
+ * Both join venues MUST agree on this set. The matcher below consults it as a
+ * fallback when the tails differ; the parallel path's O(1) per-file index
+ * (resolve_file_calls in pass_parallel.cpp) must therefore ALSO index these
+ * entries under their `reason` name, because that index is treated as
+ * authoritative — a miss there does NOT fall back to the linear scan. Adding a
+ * strategy here without adding the alias key there silently drops the whole
+ * strategy on the parallel path (the default above 50 files). */
+static inline bool cbm_lsp_strategy_matches_on_reason(const char *strategy) {
+    return strategy &&
+           (strcmp(strategy, "lsp_func_ptr") == 0 || strcmp(strategy, "lsp_dll_resolve") == 0 ||
+            strcmp(strategy, "lsp_method_ref_ctor") == 0 ||
+            strcmp(strategy, "lsp_method_ref_ctor_synth") == 0 ||
+            strcmp(strategy, "lsp_dict_dispatch") == 0 || strcmp(strategy, "lsp_destructor") == 0 ||
+            strcmp(strategy, "php_method_dynamic") == 0 ||
+            strcmp(strategy, "lsp_import_alias") == 0);
+}
+
 /* Gate for the unique-`Class.method`-tail fallbacks below. Tail-matching by
  * leaf is safe where class-per-file package semantics hold — the JVM
  * languages (Java/Kotlin): the declared `package` is ground truth, a class
@@ -169,14 +196,7 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
              * both the LSP stashed the original textual name in `reason`. Match
              * the call site on that name, gated to those strategies so `reason`
              * is never misread as an unresolved-call diagnostic. */
-            if (!(rc->reason && rc->strategy &&
-                  (strcmp(rc->strategy, "lsp_func_ptr") == 0 ||
-                   strcmp(rc->strategy, "lsp_dll_resolve") == 0 ||
-                   strcmp(rc->strategy, "lsp_method_ref_ctor") == 0 ||
-                   strcmp(rc->strategy, "lsp_method_ref_ctor_synth") == 0 ||
-                   strcmp(rc->strategy, "lsp_dict_dispatch") == 0 ||
-                   strcmp(rc->strategy, "lsp_destructor") == 0 ||
-                   strcmp(rc->strategy, "php_method_dynamic") == 0) &&
+            if (!(rc->reason && cbm_lsp_strategy_matches_on_reason(rc->strategy) &&
                   strcmp(cbm_lsp_bare_segment(rc->reason), call_short) == 0)) {
                 continue;
             }
