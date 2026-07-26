@@ -7,6 +7,8 @@
  */
 #include "test_framework.h"
 #include "cbm.h"
+#include "../src/foundation/compat.h"    /* cbm_tmpdir, cbm_mkdtemp */
+#include "../src/foundation/compat_fs.h" /* cbm_fopen, cbm_unlink, cbm_rmdir */
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -148,6 +150,55 @@ TEST(extract_cpp_macros_issue375) {
     ASSERT_FALSE(r->has_error);
     ASSERT(has_def(r, "Macro", "MAX"));
     ASSERT(has_def(r, "Macro", "PI"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* #1071: a function-like macro invocation whose argument is a TYPE token
+ * (SYNTH_ALLOC_ARRAY(char, n)) makes tree-sitter's C++ grammar emit an ERROR
+ * node — it parses `char` in expression position — which cbm_collect_error_regions
+ * records as a `parse_partial` coverage gap, even though the file is a valid,
+ * in-file macro use with nothing actually missing from the graph. */
+TEST(extract_cpp_functionlike_macro_type_arg_no_false_parse_partial_issue1071) {
+    CBMFileResult *r = extract("#include <cstddef>\n"
+                               "#include <cstdlib>\n"
+                               "\n"
+                               "#define SYNTH_ALLOC_ARRAY(Type, Count) \\\n"
+                               "  ((Type*)std::malloc(sizeof(Type) * (Count)))\n"
+                               "\n"
+                               "struct Buffer {\n"
+                               "  char* data;\n"
+                               "  std::size_t size;\n"
+                               "};\n"
+                               "\n"
+                               "Buffer make_buffer(std::size_t n) {\n"
+                               "  Buffer b;\n"
+                               "  b.data = SYNTH_ALLOC_ARRAY(char, n);\n"
+                               "  b.size = n;\n"
+                               "  return b;\n"
+                               "}\n",
+                               CBM_LANG_CPP, "t", "alloc.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete); /* benign in-body macro call — not a coverage gap */
+    ASSERT(has_def(r, "Function", "make_buffer"));
+    ASSERT(has_def(r, "Macro", "SYNTH_ALLOC_ARRAY"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* #1071 guard: the suppression must be tight. A REAL parse error inside a
+ * function (not a macro call) must STILL be flagged, and a top-level macro
+ * invocation is covered by extract_cpp_preproc_macro_generated_callable_skipped_issue949. */
+TEST(extract_cpp_real_in_body_error_still_flagged_issue1071) {
+    /* `int x = ;` is a genuine syntax error inside foo()'s body — no macro
+     * involved, so the coverage gap must not be suppressed. */
+    CBMFileResult *r = extract("int foo() {\n"
+                               "  int x = ;\n"
+                               "  return x;\n"
+                               "}\n",
+                               CBM_LANG_CPP, "t", "broken.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete); /* real gap stays reported */
     cbm_free_result(r);
     PASS();
 }
@@ -2751,6 +2802,196 @@ TEST(complexity_access_depth_and_params) {
     PASS();
 }
 
+/* #961: a C function whose body braces are split across #ifdef/#else
+ * branches (one open brace per branch, a single shared close) parses with
+ * an ERROR region on the raw source — both branches are present at once —
+ * and the defs walk silently dropped the function while its callers stayed
+ * (cbm_path_within_root, handle_process_kill). The preprocessed second
+ * pass (simplecpp picks one branch, same-file token lines stay aligned)
+ * must recover the definition with its original line. */
+TEST(extract_c_ifdef_split_brace_fn_recovered_issue961) {
+    CBMFileResult *r = extract("static int a(void) { return 1; }\n"
+                               "static int b(void) { return 2; }\n"
+                               "int split_brace_fn(int x) {\n"
+                               "#ifdef _WIN32\n"
+                               "    if (a() && b()) {\n"
+                               "#else\n"
+                               "    if (a() || b()) {\n"
+                               "#endif\n"
+                               "        x += 1;\n"
+                               "    }\n"
+                               "    return x;\n"
+                               "}\n"
+                               "int after_fn(int x) { return x; }\n",
+                               CBM_LANG_C, "t", "split.c");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = find_def(r, "split_brace_fn");
+    if (!d) {
+        fprintf(stderr, "  [961] FAIL split_brace_fn dropped (defs walk lost the "
+                        "#ifdef-split function)\n");
+    }
+    ASSERT_NOT_NULL(d);
+    ASSERT_EQ((int)d->start_line, 3);
+    /* Error recovery must stay localized: neighbours extract either way. */
+    ASSERT_NOT_NULL(find_def(r, "a"));
+    ASSERT_NOT_NULL(find_def(r, "after_fn"));
+    cbm_free_result(r);
+    PASS();
+}
+
+static const char *CPP_PREPROC_SIGNATURE_GAP_SRC =
+    "struct Rect {};\n"
+    "struct IBinder {};\n"
+    "struct IRegionSamplingListener {};\n"
+    "typedef int status_t;\n"
+    "\n"
+    "class SurfaceFlinger {\n"
+    "public:\n"
+    "    status_t addRegionSamplingListener(const Rect&, const IBinder&,\n"
+    "                                       const IRegionSamplingListener&, bool);\n"
+    "    status_t addRegionSamplingListener(const Rect&, const IBinder&,\n"
+    "                                       const IRegionSamplingListener&);\n"
+    "    void commit();\n"
+    "    void composite();\n"
+    "};\n"
+    "\n"
+    "#ifdef FLYME_GRAPHICS_EXTEND_LUMARGB\n"
+    "status_t SurfaceFlinger::addRegionSamplingListener(const Rect& samplingArea,\n"
+    "                                                   const IBinder& stopLayerHandle,\n"
+    "                                                   const IRegionSamplingListener& listener,\n"
+    "                                                   const bool rgbSample) {\n"
+    "#else\n"
+    "status_t SurfaceFlinger::addRegionSamplingListener(const Rect& samplingArea,\n"
+    "                                                   const IBinder& stopLayerHandle,\n"
+    "                                                   const IRegionSamplingListener& listener) "
+    "{\n"
+    "#endif\n"
+    "    return 0;\n"
+    "}\n"
+    "\n"
+    "void SurfaceFlinger::commit() {}\n"
+    "\n"
+    "void SurfaceFlinger::composite() {}\n";
+
+/* #946 fixture from the original report: both preprocessor choices must keep
+ * raw definitions primary while recovering later methods at original lines. */
+TEST(extract_cpp_preproc_signature_gap_issue946) {
+    const char *defines[] = {"FLYME_GRAPHICS_EXTEND_LUMARGB", NULL};
+    for (int enabled = 0; enabled < 2; enabled++) {
+        CBMFileResult *r = cbm_extract_file(
+            CPP_PREPROC_SIGNATURE_GAP_SRC, (int)strlen(CPP_PREPROC_SIGNATURE_GAP_SRC), CBM_LANG_CPP,
+            "t", "SurfaceFlinger.cpp", 0, enabled ? defines : NULL, NULL);
+        ASSERT_NOT_NULL(r);
+        const CBMDefinition *add = find_def(r, "addRegionSamplingListener");
+        const CBMDefinition *commit = find_def(r, "commit");
+        const CBMDefinition *composite = find_def(r, "composite");
+        ASSERT_NOT_NULL(add);
+        ASSERT_NOT_NULL(commit);
+        ASSERT_NOT_NULL(composite);
+        ASSERT_EQ(add->start_line, 22u);
+        ASSERT_EQ(add->end_line, 27u);
+        ASSERT_EQ(commit->start_line, 29u);
+        ASSERT_EQ(commit->end_line, 29u);
+        ASSERT_EQ(composite->start_line, 31u);
+        ASSERT_EQ(composite->end_line, 31u);
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
+/* Macro expansion can produce callable-looking AST nodes, but no callable
+ * definition exists in the original span; recovery must fail closed. */
+TEST(extract_cpp_preproc_macro_generated_callable_skipped_issue949) {
+    const char *src = "#define MAKE_FN(name) int name() { return 1; }\n"
+                      "#ifdef ENABLE_GENERATED\n"
+                      "MAKE_FN(generated)\n"
+                      "#endif\n"
+                      "int visible() { return 0; }\n";
+    const char *defines[] = {"ENABLE_GENERATED", NULL};
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)strlen(src), CBM_LANG_CPP, "t", "macro.cpp", 0, defines, NULL);
+    ASSERT_NOT_NULL(r);
+    ASSERT_NULL(find_def(r, "generated"));
+    ASSERT_NOT_NULL(find_def(r, "visible"));
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_GTE(r->error_region_count, 1);
+    ASSERT_NOT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* #949 follow-up: an included header shifts physical lines in simplecpp's
+ * expanded output. The #1050 name-on-same-line guard skipped this recoverable
+ * definition; explicit source ownership mapping must restore its original
+ * coordinates while keeping header definitions out of the main file. */
+TEST(extract_c_ifdef_split_brace_after_include_remapped_issue949) {
+    char tmpdir[512];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cbm_line_map_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+
+    char header_path[512];
+    snprintf(header_path, sizeof(header_path), "%s/padding.h", tmpdir);
+    FILE *header = cbm_fopen(header_path, "wb");
+    ASSERT_NOT_NULL(header);
+    for (int i = 0; i < 40; i++) {
+        ASSERT_GTE(fprintf(header, "static int header_pad_%d(void) { return %d; }\n", i, i), 0);
+    }
+    ASSERT_EQ(fclose(header), 0);
+
+    const char *includes[] = {tmpdir, NULL};
+    const char *src = "#include \"padding.h\"\n"
+                      "static int before(void) { return 1; }\n"
+                      "int shifted_split(int x) {\n"
+                      "#ifdef _WIN32\n"
+                      "    if (before()) {\n"
+                      "#else\n"
+                      "    if (x > 0) {\n"
+                      "#endif\n"
+                      "        x += 1;\n"
+                      "    }\n"
+                      "    return x;\n"
+                      "}\n"
+                      "int after(void) { return 2; }\n";
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)strlen(src), CBM_LANG_C, "t", "shifted.c", 0, NULL, includes);
+    cbm_unlink(header_path);
+    cbm_rmdir(tmpdir);
+
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = find_def(r, "shifted_split");
+    ASSERT_NOT_NULL(d);
+    ASSERT_EQ(d->start_line, 3u);
+    ASSERT_EQ(d->end_line, 12u);
+    ASSERT_NULL(find_def(r, "header_pad_0"));
+    ASSERT_NOT_NULL(find_def(r, "after"));
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* #961 inverse guard: a clean C file must not gain duplicate or phantom
+ * defs from the recovery path (it only engages on raw-parse ERROR regions). */
+TEST(extract_c_clean_file_no_recovery_duplicates_issue961) {
+    CBMFileResult *r = extract("#ifdef _WIN32\n"
+                               "static int w(void) { return 1; }\n"
+                               "#else\n"
+                               "static int u(void) { return 2; }\n"
+                               "#endif\n"
+                               "int use(int x) { return x; }\n",
+                               CBM_LANG_C, "t", "clean.c");
+    ASSERT_NOT_NULL(r);
+    int use_count = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, "use") == 0)
+            use_count++;
+    }
+    ASSERT_EQ(use_count, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
@@ -2765,6 +3006,13 @@ SUITE(extraction) {
     RUN_TEST(extract_ts_factory_object_methods_issue341);
     RUN_TEST(extract_c_macros_issue375);
     RUN_TEST(extract_cpp_macros_issue375);
+    RUN_TEST(extract_cpp_functionlike_macro_type_arg_no_false_parse_partial_issue1071);
+    RUN_TEST(extract_cpp_real_in_body_error_still_flagged_issue1071);
+    RUN_TEST(extract_c_ifdef_split_brace_fn_recovered_issue961);
+    RUN_TEST(extract_cpp_preproc_signature_gap_issue946);
+    RUN_TEST(extract_cpp_preproc_macro_generated_callable_skipped_issue949);
+    RUN_TEST(extract_c_ifdef_split_brace_after_include_remapped_issue949);
+    RUN_TEST(extract_c_clean_file_no_recovery_duplicates_issue961);
     RUN_TEST(extract_gdscript_issue186);
     RUN_TEST(extract_powershell_issue35);
     RUN_TEST(extract_luau_issue39);
