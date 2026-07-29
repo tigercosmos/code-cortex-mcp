@@ -5,7 +5,6 @@ set -euo pipefail
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/tigercosmos/cpp-codebase-memory-mcp/main/install.sh | bash
-#   curl -fsSL ... | bash -s -- --ui          # Install the UI variant
 #   curl -fsSL ... | bash -s -- --dir /path   # Custom install directory
 #
 # Environment:
@@ -19,7 +18,6 @@ main() {
 
 REPO="tigercosmos/cpp-codebase-memory-mcp"
 INSTALL_DIR="$HOME/.local/bin"
-VARIANT="standard"
 SKIP_CONFIG=false
 CBM_DOWNLOAD_URL="${CBM_DOWNLOAD_URL:-https://github.com/${REPO}/releases/latest/download}"
 
@@ -31,14 +29,10 @@ esac
 
 for arg in "$@"; do
     case "$arg" in
-        --ui)           VARIANT="ui" ;;
-        --standard)     VARIANT="standard" ;;
         --dir=*)        INSTALL_DIR="${arg#--dir=}" ;;
         --skip-config)  SKIP_CONFIG=true ;;
         --help|-h)
-            echo "Usage: install.sh [--ui] [--dir=<path>] [--skip-config]"
-            echo "  --ui           Install the UI variant (with graph visualization)"
-            echo "  --standard     Install the standard variant (default)"
+            echo "Usage: install.sh [--dir=<path>] [--skip-config]"
             echo "  --dir PATH     Install directory (default: ~/.local/bin)"
             echo "  --skip-config  Skip automatic agent configuration"
             exit 0
@@ -86,7 +80,6 @@ ARCH=$(detect_arch)
 echo "codebase-memory-mcp installer"
 echo "  os:      $OS"
 echo "  arch:    $ARCH"
-echo "  variant: $VARIANT"
 echo "  target:  $INSTALL_DIR/codebase-memory-mcp"
 echo ""
 
@@ -107,11 +100,7 @@ else
     PORTABLE=""
 fi
 
-if [ "$VARIANT" = "ui" ]; then
-    ARCHIVE="codebase-memory-mcp-ui-${OS}-${ARCH}${PORTABLE}.${EXT}"
-else
-    ARCHIVE="codebase-memory-mcp-${OS}-${ARCH}${PORTABLE}.${EXT}"
-fi
+ARCHIVE="codebase-memory-mcp-${OS}-${ARCH}${PORTABLE}.${EXT}"
 
 URL="${CBM_DOWNLOAD_URL}/${ARCHIVE}"
 

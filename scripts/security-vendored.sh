@@ -4,7 +4,7 @@ set -euo pipefail
 # Layer 8: Vendored dependency integrity — verifies vendored C sources match
 # checked-in checksums. Detects supply chain tampering of vendored libraries.
 #
-# Libraries covered: mimalloc, mongoose, sqlite3, tre, xxhash, yyjson
+# Libraries covered: mimalloc, sqlite3, xxhash, yyjson
 #
 # Usage: scripts/security-vendored.sh
 
@@ -107,17 +107,18 @@ else
     echo "OK: No subprocess calls (system/popen/exec/fork) in vendored code"
 fi
 
-# Network calls: only allowed in mongoose (HTTP library)
+# Network calls: not allowed in any vendored library (mongoose was the only
+# exception; it was replaced by the first-party HTTP server in src/ui/)
 NETWORK_FUNCS='[^a-z_]connect\(|[^a-z_]socket\(|[^a-z_]sendto\(|[^a-z_]bind\('
-NON_MONGOOSE_NETWORK=$(grep -rn -E "$NETWORK_FUNCS" "$ROOT/vendored/" --include='*.c' --include='*.h' 2>/dev/null \
+VENDORED_NETWORK=$(grep -rn -E "$NETWORK_FUNCS" "$ROOT/vendored/" --include='*.c' --include='*.h' 2>/dev/null \
     | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v '#define' | grep -v 'typedef' \
-    | grep -v 'mongoose' | grep -v 'sqlite3.*bind()' || true)
-if [[ -n "$NON_MONGOOSE_NETWORK" ]]; then
-    echo "BLOCKED: Network calls found outside mongoose:"
-    echo "$NON_MONGOOSE_NETWORK" | head -10
+    | grep -v 'sqlite3.*bind()' || true)
+if [[ -n "$VENDORED_NETWORK" ]]; then
+    echo "BLOCKED: Network calls found in vendored code:"
+    echo "$VENDORED_NETWORK" | head -10
     FAIL=1
 else
-    echo "OK: Network calls only in mongoose (expected)"
+    echo "OK: No network calls in vendored code"
 fi
 
 # dlopen/LoadLibrary: only allowed in sqlite3 (extension loading) and mimalloc (Windows APIs)
@@ -134,11 +135,11 @@ else
 fi
 
 # Verify the dangerous call rules cover every vendored library.
-# Known safe: yyjson, xxhash, tre (pure computation, no OS interaction)
-# Known with exceptions: mongoose (network), sqlite3 (dlopen), mimalloc (LoadLibrary)
+# Known safe: yyjson, xxhash (pure computation, no OS interaction)
+# Known with exceptions: sqlite3 (dlopen), mimalloc (LoadLibrary)
 # If a new library appears, the scan above already checks it — but this ensures
 # we've consciously evaluated each library.
-KNOWN_VENDORED="mimalloc mongoose nomic sqlite3 tre xxhash yyjson"
+KNOWN_VENDORED="mimalloc sqlite3 xxhash yyjson"
 while IFS= read -r libdir; do
     libname=$(basename "$libdir")
     found=false
@@ -177,9 +178,10 @@ fi
 if [[ "${1:-}" == "--update" ]]; then
     echo ""
     echo "Updating checksums..."
-    find "$ROOT/vendored" -type f \( -name '*.c' -o -name '*.h' \) | sort | while IFS= read -r f; do
+    # Store repo-relative paths so the file verifies on any checkout
+    (cd "$ROOT" && find vendored -type f \( -name '*.c' -o -name '*.h' \) | sort | while IFS= read -r f; do
         $SHA_CMD "$f"
-    done > "$CHECKSUMS"
+    done) > "$CHECKSUMS"
     echo "Updated: $CHECKSUMS ($(wc -l < "$CHECKSUMS" | tr -d ' ') files)"
     exit 0
 fi

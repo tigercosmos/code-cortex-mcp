@@ -1,7 +1,7 @@
 /*
  * subprocess.h — spawn a child process, supervise it, and classify how it ended.
  *
- * Generalized from the crash-isolating index spawn in src/ui/http_server.c so the
+ * Generalized from the crash-isolating index spawn (formerly in the UI's http_server) so the
  * crash/hang supervisor (Track C) can reuse one primitive across platforms.
  *
  * Beyond a plain spawn+wait it adds the two things a supervisor needs and the
@@ -88,8 +88,8 @@ const char *cbm_proc_outcome_str(cbm_proc_outcome_t o);
  * silently corrupts any element containing a double-quote — e.g. the index worker's
  * JSON arg {"repo_path":"…"} arrives as {repo_path:…}, the Windows index-worker bug.
  * Exposed (and compiled on every platform — it is pure string logic) so the quoting
- * is unit-tested on Linux/macOS CI, and so both spawn sites (cbm_subprocess_run and
- * the UI http_server index spawn) escape through one shared, tested implementation. */
+ * is unit-tested on Linux/macOS CI, and so every spawn site escapes through one
+ * shared, tested implementation. */
 bool cbm_build_win_cmdline(char *buf, size_t cap, const char *const *argv);
 
 #ifdef __cplusplus

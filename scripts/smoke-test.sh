@@ -373,19 +373,20 @@ if ! echo "$UNINSTALL_OUT" | grep -qi 'uninstall\|remov'; then
 fi
 echo "OK: uninstall --dry-run completed"
 
-# 6c: update --dry-run --standard -y
+# 6c: update --dry-run -y
 echo "--- Phase 6c: update --dry-run ---"
-UPDATE_OUT=$("$BINARY" update --dry-run --standard -y 2>&1)
+UPDATE_OUT=$("$BINARY" update --dry-run -y 2>&1)
 if ! echo "$UPDATE_OUT" | grep -qi 'dry-run'; then
   echo "FAIL: update --dry-run did not indicate dry-run mode"
   echo "$UPDATE_OUT"
   exit 1
 fi
-if ! echo "$UPDATE_OUT" | grep -qi 'standard'; then
-  echo "FAIL: update --dry-run did not respect --standard flag"
+if ! echo "$UPDATE_OUT" | grep -q 'codebase-memory-mcp-'; then
+  echo "FAIL: update --dry-run did not print a download asset name"
+  echo "$UPDATE_OUT"
   exit 1
 fi
-echo "OK: update --dry-run --standard completed"
+echo "OK: update --dry-run completed"
 
 # 6d: config set/get/reset round-trip
 echo "--- Phase 6d: config set/get/reset ---"
@@ -954,14 +955,14 @@ HOME="$DBL_HOME" "$BINARY" uninstall -y -n 2>&1 > /dev/null || true
 echo "OK 9b-8: double uninstall doesn't crash"
 rm -rf "$DBL_HOME"
 
-# 9b-9: Non-interactive update without --standard/--ui should fail cleanly (not hang)
+# 9b-9: Non-interactive update should complete a dry-run cleanly (not hang)
 if [ "$(uname -s)" != "MINGW64_NT" ] 2>/dev/null; then
   NONINT_OUT=$(echo "" | "$BINARY" update --dry-run 2>&1) || true
-  if echo "$NONINT_OUT" | grep -qi 'terminal\|requires.*flag\|error'; then
-    echo "OK 9b-9: non-interactive update fails with clear error"
-  else
-    # Dry-run may still complete if no variant prompt needed
+  if echo "$NONINT_OUT" | grep -qi 'dry-run\|error'; then
     echo "OK 9b-9: non-interactive update handled gracefully"
+  else
+    echo "FAIL 9b-9: non-interactive update produced unexpected output"
+    exit 1
   fi
 fi
 
@@ -1087,13 +1088,9 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
   # Pre-install agent config with a WRONG binary path (simulates stale config)
   echo '{"mcpServers":{"codebase-memory-mcp":{"command":"/old/stale/path"}}}' > "$UPDATE_HOME/.claude.json"
 
-  # 14a: Run actual update command (detect variant from available archive)
-  UPDATE_VARIANT="--standard"
-  if curl -sf "$SMOKE_DOWNLOAD_URL/" 2>/dev/null | grep -q "ui-"; then
-    UPDATE_VARIANT="--ui"
-  fi
+  # 14a: Run actual update command
   HOME="$UPDATE_HOME" CBM_DOWNLOAD_URL="$SMOKE_DOWNLOAD_URL" \
-    "$BINARY" update $UPDATE_VARIANT -y 2>&1 || true
+    "$BINARY" update -y 2>&1 || true
 
   # 14b: Verify new binary exists and runs
   if [ ! -f "$UPDATE_HOME/.local/bin/codebase-memory-mcp" ]; then
@@ -1210,20 +1207,13 @@ if [ "$DL_OS" = "darwin" ] || [ "$DL_OS" = "linux" ]; then
 else
   DL_EXT="zip"
 fi
-# Try standard name first, fall back to UI variant
 DL_ARCHIVE="codebase-memory-mcp-${DL_OS}-${DL_ARCH}.${DL_EXT}"
-DL_ARCHIVE_UI="codebase-memory-mcp-ui-${DL_OS}-${DL_ARCH}.${DL_EXT}"
 
-# 12a: curl download (try standard, then UI variant)
+# 12a: curl download
 echo "--- Phase 12a: curl download ---"
 if ! curl -fSL -o "$DL_DIR/$DL_ARCHIVE" "$SMOKE_DOWNLOAD_URL/$DL_ARCHIVE" 2>/dev/null; then
-  # Try UI variant
-  if curl -fSL -o "$DL_DIR/$DL_ARCHIVE_UI" "$SMOKE_DOWNLOAD_URL/$DL_ARCHIVE_UI" 2>/dev/null; then
-    DL_ARCHIVE="$DL_ARCHIVE_UI"
-  else
-    echo "FAIL 12a: curl download failed (tried standard and ui variants)"
-    exit 1
-  fi
+  echo "FAIL 12a: curl download failed"
+  exit 1
 fi
 if [ ! -s "$DL_DIR/$DL_ARCHIVE" ]; then
   echo "FAIL 12a: downloaded archive is empty"
@@ -1418,50 +1408,6 @@ else
   echo ""
   echo "=== Phase 12-13: SKIPPED (SMOKE_DOWNLOAD_URL not set) ==="
 fi
-
-# ── Phase 15: UI HTTP server reachability ──
-# Only runs if the binary was built with embedded UI assets.
-echo ""
-echo "=== Phase 15: UI HTTP server ==="
-
-UI_PORT=19876
-UI_INPUT=$(mktemp)
-"$BINARY" --port "$UI_PORT" < "$UI_INPUT" > /dev/null 2>&1 &
-UI_PID=$!
-sleep 1
-
-if kill -0 "$UI_PID" 2>/dev/null; then
-  # 15a: GET / returns 200 with HTML content
-  UI_BODY=$(curl -sf "http://127.0.0.1:$UI_PORT/" 2>/dev/null || echo "")
-  if echo "$UI_BODY" | grep -qi "<html"; then
-    echo "OK 15a: UI serves HTML at /"
-  elif [ -z "$UI_BODY" ]; then
-    echo "SKIP 15a: UI not reachable (binary may not have embedded assets)"
-  else
-    echo "FAIL 15a: UI root did not return HTML"
-    kill "$UI_PID" 2>/dev/null || true
-    exit 1
-  fi
-
-  # 15b: POST /rpc accepts JSON-RPC and returns JSON
-  RPC_BODY=$(curl -sf -X POST \
-    -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-    "http://127.0.0.1:$UI_PORT/rpc" 2>/dev/null || echo "")
-  if echo "$RPC_BODY" | grep -q "jsonrpc"; then
-    echo "OK 15b: /rpc returns JSON-RPC response"
-  elif [ -z "$RPC_BODY" ]; then
-    echo "SKIP 15b: /rpc not reachable"
-  else
-    echo "FAIL 15b: /rpc did not return JSON-RPC"
-  fi
-
-  kill "$UI_PID" 2>/dev/null || true
-  wait "$UI_PID" 2>/dev/null || true
-else
-  echo "SKIP Phase 15: binary exited immediately (no UI assets embedded)"
-fi
-rm -f "$UI_INPUT"
 
 echo ""
 echo "=== smoke-test: ALL PASSED ==="

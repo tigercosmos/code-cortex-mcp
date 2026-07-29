@@ -16,7 +16,6 @@ scripts/build.sh "$@"
 echo "=== Running security audit suite ==="
 scripts/security-audit.sh
 scripts/security-strings.sh "$BIN"
-scripts/security-ui.sh
 scripts/security-install.sh "$BIN"
 scripts/security-network.sh "$BIN"
 scripts/security-fuzz.sh "$BIN"

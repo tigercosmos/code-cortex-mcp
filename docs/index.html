@@ -12,14 +12,12 @@
     <meta property="og:description" content="120x fewer tokens for AI code exploration. 66 languages, sub-ms queries, 3-min Linux kernel indexing. Single static binary.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://deusdata.github.io/codebase-memory-mcp">
-    <meta property="og:image" content="https://deusdata.github.io/codebase-memory-mcp/graph-ui-screenshot.png">
-
+    
     <!-- Twitter Card -->
-    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="codebase-memory-mcp — High-Performance Code Intelligence for AI Agents">
     <meta name="twitter:description" content="120x fewer tokens for AI code exploration. 66 languages, sub-ms queries, 3-min Linux kernel indexing.">
-    <meta name="twitter:image" content="https://deusdata.github.io/codebase-memory-mcp/graph-ui-screenshot.png">
-
+    
     <link rel="canonical" href="https://deusdata.github.io/codebase-memory-mcp">
 
     <style>
@@ -247,15 +245,10 @@
         </div>
     </section>
 
-    <div class="screenshot">
-        <img src="graph-ui-screenshot.png" alt="3D graph visualization of the codebase-memory-mcp knowledge graph showing 23,827 nodes and 51,526 edges">
-        <p class="caption">Built-in 3D graph visualization (UI variant) — explore your knowledge graph at localhost:9749</p>
-    </div>
-
     <section>
         <h2>Install in 3 steps</h2>
         <div class="install-block">
-            <span class="comment"># 1. Download for your platform (standard or ui variant)</span><br>
+            <span class="comment"># 1. Download for your platform</span><br>
             <span class="cmd">tar xzf codebase-memory-mcp-*.tar.gz</span><br>
             <span class="cmd">mv codebase-memory-mcp ~/.local/bin/</span><br><br>
             <span class="comment"># 2. Auto-configure all detected agents</span><br>
@@ -352,10 +345,6 @@
             <div class="feature">
                 <h3>Extreme Performance</h3>
                 <p>RAM-first pipeline: LZ4 compression, in-memory SQLite, fused Aho-Corasick pattern matching. Linux kernel (28M LOC) indexed in 3 minutes.</p>
-            </div>
-            <div class="feature">
-                <h3>Graph Visualization</h3>
-                <p>Built-in 3D graph UI (optional). Explore nodes, edges, and clusters visually at localhost:9749. Ships as a separate binary variant.</p>
             </div>
             <div class="feature">
                 <h3>Call Graph Tracing</h3>

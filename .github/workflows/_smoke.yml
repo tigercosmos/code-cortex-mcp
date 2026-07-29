@@ -1,4 +1,4 @@
-# Reusable: smoke test every binary (standard + UI, all platforms)
+# Reusable: smoke test every binary (all platforms)
 name: Smoke
 
 on:
@@ -25,7 +25,6 @@ jobs:
           - os: macos-15-intel
             goos: darwin
             goarch: amd64
-        variant: [standard, ui]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -37,8 +36,7 @@ jobs:
 
       - name: Extract binary
         run: |
-          SUFFIX=${{ matrix.variant == 'ui' && '-ui' || '' }}
-          tar -xzf codebase-memory-mcp${SUFFIX}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          tar -xzf codebase-memory-mcp-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
           chmod +x codebase-memory-mcp
 
       - name: Start artifact server
@@ -46,13 +44,8 @@ jobs:
           mkdir -p /tmp/smoke-server
           cp codebase-memory-mcp /tmp/smoke-server/
           OS=${{ matrix.goos }}; ARCH=${{ matrix.goarch }}
-          SUFFIX=${{ matrix.variant == 'ui' && '-ui' || '' }}
-          tar -czf "/tmp/smoke-server/codebase-memory-mcp${SUFFIX}-${OS}-${ARCH}.tar.gz" \
+          tar -czf "/tmp/smoke-server/codebase-memory-mcp-${OS}-${ARCH}.tar.gz" \
             -C /tmp/smoke-server codebase-memory-mcp
-          if [ -n "$SUFFIX" ]; then
-            cp "/tmp/smoke-server/codebase-memory-mcp${SUFFIX}-${OS}-${ARCH}.tar.gz" \
-               "/tmp/smoke-server/codebase-memory-mcp-${OS}-${ARCH}.tar.gz"
-          fi
           cd /tmp/smoke-server
           sha256sum *.tar.gz > checksums.txt 2>/dev/null || shasum -a 256 *.tar.gz > checksums.txt
           python3 -m http.server 18080 -d /tmp/smoke-server &
@@ -68,8 +61,8 @@ jobs:
           scripts/security-install.sh ./codebase-memory-mcp
           scripts/security-network.sh ./codebase-memory-mcp
 
-      - name: MCP robustness test (linux-amd64 standard only)
-        if: matrix.variant == 'standard' && matrix.goos == 'linux' && matrix.goarch == 'amd64'
+      - name: MCP robustness test (linux-amd64 only)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
           scripts/security-fuzz.sh ./codebase-memory-mcp
           scripts/security-fuzz-random.sh ./codebase-memory-mcp 60
@@ -98,10 +91,6 @@ jobs:
           clamscan --no-summary ./codebase-memory-mcp
 
   smoke-windows:
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [standard, ui]
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -124,21 +113,15 @@ jobs:
       - name: Extract binary
         shell: msys2 {0}
         run: |
-          SUFFIX=${{ matrix.variant == 'ui' && '-ui' || '' }}
-          unzip -o "codebase-memory-mcp${SUFFIX}-windows-amd64.zip"
-          [ -n "$SUFFIX" ] && cp "codebase-memory-mcp${SUFFIX}.exe" codebase-memory-mcp.exe || true
+          unzip -o "codebase-memory-mcp-windows-amd64.zip"
 
       - name: Start artifact server
         shell: msys2 {0}
         run: |
           mkdir -p /tmp/smoke-server
           cp codebase-memory-mcp.exe /tmp/smoke-server/
-          SUFFIX=${{ matrix.variant == 'ui' && '-ui' || '' }}
           cd /tmp/smoke-server
-          zip -q "codebase-memory-mcp${SUFFIX}-windows-amd64.zip" codebase-memory-mcp.exe
-          if [ -n "$SUFFIX" ]; then
-            cp "codebase-memory-mcp${SUFFIX}-windows-amd64.zip" "codebase-memory-mcp-windows-amd64.zip"
-          fi
+          zip -q "codebase-memory-mcp-windows-amd64.zip" codebase-memory-mcp.exe
           sha256sum *.zip > checksums.txt
           python3 -m http.server 18080 -d /tmp/smoke-server &
 
@@ -172,7 +155,6 @@ jobs:
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
-        variant: [standard, ui]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
@@ -184,8 +166,7 @@ jobs:
 
       - name: Extract and smoke test
         run: |
-          SUFFIX=${{ matrix.variant == 'ui' && '-ui' || '' }}
-          tar -xzf codebase-memory-mcp${SUFFIX}-linux-${{ matrix.arch }}-portable.tar.gz
+          tar -xzf codebase-memory-mcp-linux-${{ matrix.arch }}-portable.tar.gz
           chmod +x codebase-memory-mcp
           scripts/smoke-test.sh ./codebase-memory-mcp
 

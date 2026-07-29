@@ -166,6 +166,11 @@ int64_t cbm_file_size(const char *path);
  * On POSIX, this is a no-op. Returns the input pointer. */
 char *cbm_normalize_path_sep(char *path);
 
+/* Resolve the path to this executable into out[0..outsz). If argv0 is a usable
+ * path to an executable it is preferred; otherwise the OS self-executable path
+ * is used. Returns false on failure. Used by the crash-isolating index worker. */
+bool cbm_resolve_self_exe_path(const char *argv0, char *out, size_t outsz);
+
 #ifdef __cplusplus
 }
 #endif

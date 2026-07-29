@@ -35,8 +35,8 @@ extern "C" {
 
 /* ── Configuration ───────────────────────────────────────────────── */
 
-/* Random Indexing dimension. 256 is sufficient for <500K functions. */
-/* 768 = nomic-embed-code embedding dimension.  Matches PRETRAINED_DIM. */
+/* Random Indexing dimension. Kept at 768 (the dimension the scoring
+ * thresholds and RaBitQ quantization were validated against). */
 enum { CBM_SEM_DIM = 768 };
 
 /* Random Indexing: non-zero entries per sparse random vector. */
@@ -114,11 +114,6 @@ float cbm_sem_cosine(const cbm_sem_vec_t *a, const cbm_sem_vec_t *b);
 /* Generate a deterministic sparse random vector for a token.
  * Uses xxHash(token) as seed. Output has SEM_SPARSE_NNZE non-zeros. */
 void cbm_sem_random_index(const char *token, cbm_sem_vec_t *out);
-
-/* Eagerly initialize the pretrained token lookup map.
- * Call this BEFORE dispatching parallel work that invokes cbm_sem_random_index,
- * so the lazy init races are avoided entirely on the hot path. */
-void cbm_sem_ensure_ready(void);
 
 /* Normalize a vector to unit length in-place. */
 void cbm_sem_normalize(cbm_sem_vec_t *v);

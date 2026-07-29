@@ -14,7 +14,6 @@
 static CBMLogLevel g_log_level = CBM_LOG_INFO;
 static CBMLogFormat g_log_format = CBM_LOG_FORMAT_TEXT;
 static cbm_log_sink_fn g_log_sink = NULL;
-static CBMLogSinkMode g_log_sink_mode = CBM_LOG_SINK_REPLACE;
 
 /* CBM_LOG_LEVEL support — distilled from #414 (closes #413, thanks @santanusinha). */
 void cbm_log_init_from_env(void) {
@@ -72,12 +71,7 @@ parse_format:;
 }
 
 void cbm_log_set_sink(cbm_log_sink_fn fn) {
-    cbm_log_set_sink_ex(fn, CBM_LOG_SINK_REPLACE);
-}
-
-void cbm_log_set_sink_ex(cbm_log_sink_fn fn, CBMLogSinkMode mode) {
     g_log_sink = fn;
-    g_log_sink_mode = mode;
 }
 
 void cbm_log_set_level(CBMLogLevel level) {
@@ -198,9 +192,7 @@ static void finish_line(char *buf, size_t bufsz, size_t pos) {
 static void emit_line(const char *line) {
     if (g_log_sink) {
         g_log_sink(line);
-        if (g_log_sink_mode == CBM_LOG_SINK_REPLACE) {
-            return;
-        }
+        return;
     }
     (void)fprintf(stderr, "%s\n", line);
 }

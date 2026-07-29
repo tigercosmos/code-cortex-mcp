@@ -1,9 +1,8 @@
 #!/bin/bash
-# build.sh — Clean build of production binary (standard or with UI).
+# build.sh — Clean build of the production binary.
 #
 # Usage:
-#   scripts/build.sh                              # Standard binary
-#   scripts/build.sh --with-ui                    # Binary with embedded UI
+#   scripts/build.sh                              # Production binary
 #   scripts/build.sh --version v0.8.0             # With version stamp
 #   scripts/build.sh --arch x86_64                # Force x86_64 build
 #   scripts/build.sh CC=gcc-14 CXX=g++-14        # Override compiler
@@ -34,7 +33,6 @@ done
 source "$ROOT/scripts/env.sh"
 
 # Parse remaining arguments
-WITH_UI=false
 VERSION=""
 EXTRA_MAKE_ARGS=()
 
@@ -46,9 +44,6 @@ for arg in "$@"; do
         continue
     fi
     case "$arg" in
-        --with-ui)
-            WITH_UI=true
-            ;;
         --version)
             prev_arg="$arg"
             continue
@@ -72,7 +67,7 @@ for arg in "$@"; do
 done
 
 print_env "build.sh"
-echo "  ui=$WITH_UI version=${VERSION:-dev}"
+echo "  version=${VERSION:-dev}"
 
 # Verify compiler supports target arch
 verify_compiler "$CC"
@@ -99,19 +94,10 @@ for a in "${EXTRA_MAKE_ARGS[@]+"${EXTRA_MAKE_ARGS[@]}"}"; do
     esac
 done
 
-# Step 1: Clean C build artifacts only (not node_modules — npm ci handles that)
+# Step 1: Clean C build artifacts
 rm -rf "$ROOT/build/c"
 
-# Step 2 (UI only): build the frontend and embed assets, same prerequisite as
-# the old `cbm-with-ui: embed` rule. Generates src/ui/embedded_assets.c plus
-# embed_*.o linkables in build/embedded, which CMake picks up under CBM_WITH_UI.
-if $WITH_UI; then
-    (cd "$ROOT/graph-ui" && npm ci && npm run build)
-    "$ROOT/scripts/embed-frontend.sh" "$ROOT/graph-ui/dist" "build/embedded"
-    CMAKE_ARGS+=(-DCBM_WITH_UI=ON)
-fi
-
-# Step 3: Configure + build the production binary at build/c/codebase-memory-mcp
+# Step 2: Configure + build the production binary at build/c/codebase-memory-mcp
 $ARCH_PREFIX cmake -S "$ROOT" -B "$ROOT/build/c" "${CMAKE_ARGS[@]}"
 $ARCH_PREFIX cmake --build "$ROOT/build/c" -j"$NPROC" --target codebase-memory-mcp
 

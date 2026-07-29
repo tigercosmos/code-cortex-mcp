@@ -34,11 +34,6 @@ typedef enum {
     CBM_LOG_FORMAT_JSON = 1,
 } CBMLogFormat;
 
-typedef enum {
-    CBM_LOG_SINK_REPLACE = 0,
-    CBM_LOG_SINK_TEE = 1,
-} CBMLogSinkMode;
-
 /* Apply the CBM_LOG_LEVEL environment variable to the runtime log level.
  * Accepts (case-insensitive) "debug", "info", "warn", "error", "none", or
  * the numeric equivalents 0..4 matching CBMLogLevel. Unknown, empty, or
@@ -87,10 +82,10 @@ void cbm_log_mcp_request(const char *method, const char *tool_name, bool is_erro
 void cbm_log_http_request(const char *component, const char *method, const char *path, int status,
                           int64_t duration_ms, size_t request_bytes, size_t response_bytes);
 
-/* Optional log sink callback — called with the formatted log line. */
+/* Optional log sink callback — called with the formatted log line instead of
+ * writing to stderr. Pass NULL to restore stderr output. */
 typedef void (*cbm_log_sink_fn)(const char *line);
 void cbm_log_set_sink(cbm_log_sink_fn fn);
-void cbm_log_set_sink_ex(cbm_log_sink_fn fn, CBMLogSinkMode mode);
 
 #ifdef __cplusplus
 }

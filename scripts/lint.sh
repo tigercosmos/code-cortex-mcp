@@ -42,7 +42,7 @@ mapfile -t LINT_SRCS < <(
     ls src/foundation/*.cpp \
        src/store/*.cpp src/cypher/*.cpp src/mcp/*.cpp \
        src/discover/*.cpp src/graph_buffer/*.cpp src/pipeline/*.cpp \
-       src/simhash/*.cpp src/semantic/*.cpp src/traces/*.cpp \
+       src/simhash/*.cpp src/semantic/*.cpp \
        src/watcher/*.cpp src/cli/*.cpp src/main.cpp \
        "$CBM_DIR"/cbm.cpp "$CBM_DIR"/extract_*.cpp "$CBM_DIR"/ac.cpp \
        "$CBM_DIR"/helpers.cpp "$CBM_DIR"/lz4_store.cpp "$CBM_DIR"/zstd_store.cpp \

@@ -14,7 +14,6 @@
 #include "foundation/compat_thread.h"
 #include "pipeline/worker_pool.h"
 #include "simhash/minhash.h"
-#include "nomic/code_vectors.h"
 
 #define XXH_INLINE_ALL
 #include "xxhash/xxhash.h"
@@ -89,17 +88,6 @@ enum {
     CBM_SEM_ATOMIC_INC = 1,
     CBM_SEM_RI_NONZERO_COUNT = 8,
 };
-
-/* Mutex-init state machine for the lazy-initialized pretrained token map.
- * State 0 = not started, 1 = initializing, 2 = initialized. */
-enum {
-    MTX_STATE_UNINIT = 0,
-    MTX_STATE_INITIALIZING = 1,
-    MTX_STATE_READY = 2,
-};
-
-/* Pretrained map ready flag (signals a one-shot atomic transition 0 → 1). */
-enum { MAP_READY = 1 };
 
 /* Numeric conversion radix for strtol (base 10 decimal). */
 enum { BASE_DECIMAL = 10 };
@@ -388,74 +376,13 @@ float cbm_sem_cosine(const cbm_sem_vec_t *a, const cbm_sem_vec_t *b) {
     return dot / denom;
 }
 
-/* Pretrained token lookup table — built lazily on first use. */
-static CBMHashTable *g_pretrained_map = NULL;
-static std::atomic<int> g_pretrained_ready = 0;
-static cbm_mutex_t g_pretrained_mtx;
-static std::atomic<int> g_pretrained_mtx_init = 0;
-
-/* Thread-safe lazy init of the pretrained token lookup map.
- * Uses double-checked locking: fast path reads an atomic flag. */
-static void ensure_pretrained_map(void) {
-    if (atomic_load_explicit(&g_pretrained_ready, memory_order_acquire)) {
-        return;
-    }
-    /* First-time init of the mutex itself (also needs to be thread-safe) */
-    int expected = MTX_STATE_UNINIT;
-    if (atomic_compare_exchange_strong_explicit(&g_pretrained_mtx_init, &expected,
-                                                MTX_STATE_INITIALIZING, memory_order_acq_rel,
-                                                memory_order_acquire)) {
-        cbm_mutex_init(&g_pretrained_mtx);
-        atomic_store_explicit(&g_pretrained_mtx_init, MTX_STATE_READY, memory_order_release);
-    } else {
-        /* Spin until another thread finishes initializing the mutex */
-        while (atomic_load_explicit(&g_pretrained_mtx_init, memory_order_acquire) !=
-               MTX_STATE_READY) {
-            /* brief spin */
-        }
-    }
-    cbm_mutex_lock(&g_pretrained_mtx);
-    if (!atomic_load_explicit(&g_pretrained_ready, memory_order_acquire)) {
-        g_pretrained_map = cbm_ht_create(PRETRAINED_TOKEN_COUNT);
-        char idx_buf[CBM_SZ_16];
-        for (int i = 0; i < PRETRAINED_TOKEN_COUNT; i++) {
-            const char *tok = PRETRAINED_TOKENS[i];
-            if (tok && tok[0]) {
-                snprintf(idx_buf, sizeof(idx_buf), "%d", i);
-                cbm_ht_set(g_pretrained_map, strdup(tok), strdup(idx_buf));
-            }
-        }
-        atomic_store_explicit(&g_pretrained_ready, MAP_READY, memory_order_release);
-    }
-    cbm_mutex_unlock(&g_pretrained_mtx);
-}
-
-void cbm_sem_ensure_ready(void) {
-    ensure_pretrained_map();
-}
-
 void cbm_sem_random_index(const char *token, cbm_sem_vec_t *out) {
     memset(out, 0, sizeof(*out));
     if (!token) {
         return;
     }
 
-    /* Try pretrained nomic-embed-code vector first (768d, distilled from 7B). */
-    ensure_pretrained_map();
-    const char *idx_str = (const char *)cbm_ht_get(g_pretrained_map, token);
-    if (idx_str) {
-        char *end = NULL;
-        long idx = strtol(idx_str, &end, BASE_DECIMAL);
-        if (end != idx_str && idx >= 0 && idx < PRETRAINED_TOKEN_COUNT) {
-            const int8_t *pvec = pretrained_vec_at((int)idx);
-            for (int d = 0; d < CBM_SEM_DIM && d < PRETRAINED_DIM; d++) {
-                out->v[d] = (float)pvec[d] / CBM_SEM_INT8_MAX;
-            }
-            return;
-        }
-    }
-
-    /* Fallback: sparse random vector for tokens not in pretrained vocab. */
+    /* Deterministic sparse random vector (random indexing). */
     uint64_t seed = XXH3_64bits(token, strlen(token));
     for (int i = 0; i < CBM_SEM_SPARSE_NNZE; i++) {
         uint64_t h = XXH3_64bits_withSeed(&i, sizeof(i), seed + RI_SEED_BASE);
@@ -806,52 +733,28 @@ typedef struct {
     cooccur_pos_t *flat; /* flat array of positions, total = offsets[entry_count] */
 } reverse_index_t;
 
-/* Tagged source vector: sparse (~30% of tokens, 8 inline nonzeros) or dense int8
- * reference into PRETRAINED_VECTOR_BLOB (no copy). Dense path converts int8→float
- * on the fly in the hot loop. Tested with both int8 and float32 blob storage
- * formats — cooccur passes are memory-bandwidth-bound, so the int8 format (4x
- * less source traffic) is equivalent in wall time despite the conversion cost,
- * while saving 90 MB of binary size. */
+/* Sparse source vector: 8 inline nonzeros per token (random indexing).
+ * ~8 operations, ~48 bytes source memory traffic per accumulation. */
 typedef struct {
-    uint8_t is_sparse; /* 1 = sparse path, 0 = dense int8 reference */
-    uint8_t nnz;       /* number of nonzeros used in sparse path */
-    uint16_t _pad;
+    uint8_t nnz; /* number of nonzeros */
+    uint8_t _pad;
     uint16_t indices[CBM_SEM_SPARSE_NNZE]; /* 8 * 2 = 16 bytes */
     float values[CBM_SEM_SPARSE_NNZE];     /* 8 * 4 = 32 bytes */
-    const int8_t *dense_int8;              /* points into PRETRAINED_VECTOR_BLOB */
 } cbm_sem_src_entry_t;
 
-/* Inline helper: initialize a target vector from a sparse/dense source. */
+/* Inline helper: initialize a target vector from a sparse source. */
 static inline void sem_target_init_from_src(cbm_sem_vec_t *dst, const cbm_sem_src_entry_t *src) {
     memset(dst, 0, sizeof(*dst));
-    if (src->is_sparse) {
-        for (int k = 0; k < src->nnz; k++) {
-            dst->v[src->indices[k]] = src->values[k];
-        }
-    } else {
-        const int8_t *s = src->dense_int8;
-        const float inv127 = CBM_SEM_UNIT_POS / CBM_SEM_INT8_MAX;
-        for (int d = 0; d < CBM_SEM_DIM; d++) {
-            dst->v[d] = inv127 * (float)s[d];
-        }
+    for (int k = 0; k < src->nnz; k++) {
+        dst->v[src->indices[k]] = src->values[k];
     }
 }
 
-/* Inline helper: add weighted source into target.
- * Sparse path: ~8 operations, ~48 bytes source memory traffic.
- * Dense path: 768 mul-adds with int8→float conversion, ~768 bytes traffic. */
+/* Inline helper: add weighted source into target. */
 static inline void sem_vec_add_src_scaled(cbm_sem_vec_t *dst, const cbm_sem_src_entry_t *src,
                                           float scale) {
-    if (src->is_sparse) {
-        for (int k = 0; k < src->nnz; k++) {
-            dst->v[src->indices[k]] += scale * src->values[k];
-        }
-    } else {
-        const int8_t *s = src->dense_int8;
-        const float mul = scale * (CBM_SEM_UNIT_POS / CBM_SEM_INT8_MAX);
-        for (int d = 0; d < CBM_SEM_DIM; d++) {
-            dst->v[d] += mul * (float)s[d];
-        }
+    for (int k = 0; k < src->nnz; k++) {
+        dst->v[src->indices[k]] += scale * src->values[k];
     }
 }
 
@@ -1087,30 +990,16 @@ typedef struct {
     std::atomic<int> next_idx;
 } src_build_ctx_t;
 
-/* Build one src_entry for a token: dense float32 reference if in nomic vocab,
- * sparse inline representation otherwise. Collisions in the sparse hash are
- * merged and zeros filtered so the final representation is exactly the same
- * mathematical vector that the old dense path produced. */
+/* Build one src_entry for a token: sparse inline representation. Collisions
+ * in the sparse hash are merged and zeros filtered so the final representation
+ * is exactly the same mathematical vector cbm_sem_random_index produces. */
 static void build_src_entry(const char *token, cbm_sem_src_entry_t *out) {
     memset(out, 0, sizeof(*out));
     if (!token) {
-        out->is_sparse = SKIP_ONE;
         out->nnz = 0;
         return;
     }
-    /* Dense path: direct int8 pointer into pretrained blob (zero-copy). */
-    const char *idx_str = (const char *)cbm_ht_get(g_pretrained_map, token);
-    if (idx_str) {
-        char *end = NULL;
-        long idx = strtol(idx_str, &end, BASE_DECIMAL);
-        if (end != idx_str && idx >= 0 && idx < PRETRAINED_TOKEN_COUNT) {
-            out->is_sparse = 0;
-            out->dense_int8 = pretrained_vec_at((int)idx);
-            return;
-        }
-    }
-    /* Sparse path: compute 8 hash positions with collision merging. */
-    out->is_sparse = SKIP_ONE;
+    /* Compute 8 hash positions with collision merging. */
     uint16_t tmp_idx[CBM_SEM_SPARSE_NNZE];
     float tmp_val[CBM_SEM_SPARSE_NNZE];
     int count = 0;
@@ -1386,9 +1275,6 @@ void cbm_sem_corpus_finalize(cbm_sem_corpus_t *corpus) {
     if (!corpus || corpus->finalized) {
         return;
     }
-
-    /* Eager init before parallel dispatch to avoid lazy-init races */
-    ensure_pretrained_map();
 
     int worker_count = cbm_default_worker_count(false);
     cbm_parallel_for_opts_t opts = {.max_workers = worker_count, .force_pthreads = false};

@@ -1,7 +1,7 @@
 /*
  * subprocess.c — cross-platform spawn + supervise + classify.
- * See subprocess.h. The spawn/reap skeleton mirrors src/ui/http_server.c's
- * index subprocess; this generalizes it and adds crash/hang classification.
+ * See subprocess.h. The spawn/reap skeleton was generalized from the former
+ * UI http_server's index subprocess, adding crash/hang classification.
  */
 #include "subprocess.h"
 
@@ -203,8 +203,8 @@ static size_t cbm_cmdline_append_arg(char *buf, size_t cap, size_t pos, const ch
  *
  * Defined unconditionally (pure string logic, no Windows headers) so the quoting
  * contract is unit-tested on Linux/macOS CI too — even though the real spawn path
- * only runs on Windows. Shared by cbm_run_win AND the UI http_server index spawn
- * so both escape identically; a naive `"%s"` wrap silently corrupts any argument
+ * only runs on Windows. Every spawn site escapes through this one implementation;
+ * a naive `"%s"` wrap silently corrupts any argument
  * containing a quote (e.g. the index JSON {"repo_path":"…"}), corrupting the
  * spawned child's argv. */
 bool cbm_build_win_cmdline(char *buf, size_t cap, const char *const *argv) {

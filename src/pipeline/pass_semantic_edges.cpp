@@ -1171,8 +1171,7 @@ static hyperplane_row_t *phase5a_build_hyperplanes(void) {
 }
 
 /* Phase 1b: decode per-function minhash/profile/API/type/deco vectors in
- * parallel.  Must be called after cbm_sem_ensure_ready() so the pretrained
- * token map is initialized. */
+ * parallel. */
 static void phase1b_decode_and_build(cbm_sem_func_t *funcs, const cbm_gbuf_node_t **node_ptrs,
                                      const cbm_gbuf_t *gbuf, int func_count, int worker_count) {
     if (func_count <= 0) {
@@ -1398,7 +1397,6 @@ int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx) {
     CBM_PROF_END_N("semantic_edges", "1a_scan_seq", t_phase1a, func_count);
 
     /* Phase 1b: Decode minhash + profile + build api/type/deco vectors (PARALLEL). */
-    cbm_sem_ensure_ready();
     CBM_PROF_START(t_phase1b);
     phase1b_decode_and_build(funcs, node_ptrs, gbuf, func_count, cbm_default_worker_count(false));
     CBM_PROF_END_N("semantic_edges", "1b_decode_build_parallel", t_phase1b, func_count);

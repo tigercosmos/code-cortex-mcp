@@ -92,9 +92,18 @@ All C dependencies are vendored in `vendored/` — zero system library dependenc
 |---------|---------|---------|
 | SQLite 3 | Public Domain | [sqlite.org](https://www.sqlite.org/) |
 | mimalloc | MIT | [microsoft/mimalloc](https://github.com/microsoft/mimalloc) |
-| Mongoose | Dual GPLv2 / Commercial | [cesanta/mongoose](https://github.com/cesanta/mongoose) |
 | yyjson | MIT | [ibireme/yyjson](https://github.com/ibireme/yyjson) |
 | xxHash | BSD-2-Clause | [Cyan4973/xxHash](https://github.com/Cyan4973/xxHash) |
+
+## Other Vendored Code
+
+Vendored in `internal/cbm/vendored/`:
+
+| Library | License | Project |
+|---------|---------|---------|
+| LZ4 | BSD-2-Clause | [lz4/lz4](https://github.com/lz4/lz4) |
+| Zstandard | BSD-3-Clause | [facebook/zstd](https://github.com/facebook/zstd) |
+| simplecpp | 0BSD | [danmar/simplecpp](https://github.com/danmar/simplecpp) |
 
 ## Notes
 

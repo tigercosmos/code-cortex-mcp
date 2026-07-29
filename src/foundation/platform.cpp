@@ -417,3 +417,57 @@ const char *cbm_resolve_cache_dir(void) {
     snprintf(buf, sizeof(buf), "%s/.cache/codebase-memory-mcp", home);
     return buf;
 }
+
+/* ── Self-executable path ─────────────────────────────────────── */
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+
+bool cbm_resolve_self_exe_path(const char *argv0, char *out, size_t outsz) {
+    if (!out || outsz == 0) {
+        return false;
+    }
+    out[0] = '\0';
+
+    /* Prefer an explicit, usable argv0 path. */
+#ifndef _WIN32
+    if (argv0 && strchr(argv0, '/')) {
+        snprintf(out, outsz, "%s", argv0);
+        return out[0] != '\0';
+    }
+#else
+    if (argv0 && argv0[0]) {
+        DWORD attrs = GetFileAttributesA(argv0);
+        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            snprintf(out, outsz, "%s", argv0);
+            return out[0] != '\0';
+        }
+    }
+#endif
+
+    /* Fall back to the OS-reported path of this executable. */
+#ifdef _WIN32
+    if (GetModuleFileNameA(NULL, out, (DWORD)outsz) > 0) {
+        return out[0] != '\0';
+    }
+#elif defined(__APPLE__)
+    uint32_t sz = (uint32_t)outsz;
+    if (_NSGetExecutablePath(out, &sz) == 0) {
+        return out[0] != '\0';
+    }
+#else
+    ssize_t len = readlink("/proc/self/exe", out, outsz - 1);
+    if (len > 0) {
+        out[len] = '\0';
+        return true;
+    }
+#endif
+
+    /* Last resort: echo argv0 as-is (may be a bare name resolved via PATH). */
+    if (argv0 && argv0[0]) {
+        snprintf(out, outsz, "%s", argv0);
+        return out[0] != '\0';
+    }
+    return false;
+}

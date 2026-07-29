@@ -41,8 +41,7 @@ The build system is **CMake** (C++23). You need a C/C++ compiler (gcc or clang) 
 ```bash
 git clone https://github.com/tigercosmos/cpp-codebase-memory-mcp.git
 cd cpp-codebase-memory-mcp
-scripts/build.sh                 # standard binary  → build/c/codebase-memory-mcp
-scripts/build.sh --with-ui       # with 3D graph visualization UI
+scripts/build.sh                 # production binary → build/c/codebase-memory-mcp
 ./build/c/codebase-memory-mcp install   # configure your installed agents
 ```
 
@@ -69,7 +68,6 @@ Once a release is published, the binary can also be installed directly:
 ```bash
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/tigercosmos/cpp-codebase-memory-mcp/main/install.sh | bash
-# add --ui for the graph-visualization variant
 ```
 
 ```powershell
@@ -79,7 +77,7 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/tigercosmos/cpp-codebas
 ```
 
 Useful subcommands: `config set auto_index true` (index on session start),
-`--ui=true --port=9749` (graph UI at `http://localhost:9749`), `update`, `uninstall`.
+`update`, `uninstall`.
 
 ## How It Works
 
@@ -132,7 +130,7 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
   remaps them to their original lines, verifying every line belongs to the main file. Headers
   get their own `File` nodes, `#include` resolves to the header, and benign function-like
   macro calls are not reported as parse gaps.
-- **Search** — semantic vector search (bundled `nomic-embed-code` embeddings, no API key),
+- **Search** — semantic similarity edges (algorithmic random-indexing embeddings, no API key),
   BM25 full-text (FTS5, camelCase/snake_case aware), and structural/code search.
 - **Cross-service linking** — HTTP route ↔ call-site matching; gRPC/GraphQL/tRPC detection;
   channel detection (`EMITS`/`LISTENS_ON`) for Socket.IO, EventEmitter, and pub-sub.

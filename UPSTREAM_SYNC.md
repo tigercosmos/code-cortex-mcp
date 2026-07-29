@@ -47,10 +47,20 @@ them to need translation, not a clean apply:
   `lang_specs.cpp`; `cbm_type_args()` instead of compound literals in
   `ts_lsp.cpp`/`cs_lsp.cpp`/`generated/*.cpp`) — context around upstream edits
   there will differ.
-- **Vendored libraries stay C.** sqlite3, mongoose, yyjson, lz4, zstd, tre,
+- **Vendored libraries stay C.** sqlite3, yyjson, mimalloc, xxhash, lz4, zstd,
   ts_runtime, and the tree-sitter `grammar_*.c` are compiled as C (they don't
   port to C++ without forking generated/upstream code). The `grammar_*.c` and
-  `ts_runtime.c` are zero-logic `#include` shims.
+  `ts_runtime.c` are zero-logic `#include` shims. (mongoose and tre were
+  removed earlier; see the removed-features entry below.)
+- **Removed features (2026-07-30 cleanup).** This fork deliberately dropped:
+  the **graph-visualization UI** (`src/ui/`, `graph-ui/`, the `-ui` release
+  variant, `--ui`/`--port` flags — `cbm_http_server_resolve_binary_path` was
+  kept as `cbm_resolve_self_exe_path` in `src/foundation/platform.cpp`), the
+  **nomic embedding blob** (`vendored/nomic/`, ~30 MB `.incbin`; the semantic
+  pass now always uses sparse random indexing), and the dead **`src/traces`**
+  library (the MCP `ingest_traces` stub in `mcp.cpp` remains). Skip upstream
+  commits that only touch these; translate any that mix them with in-scope
+  changes.
 - **`-Werror` is GCC-only** for first-party C++ (clang's extra warnings aren't
   promoted to errors). Lint uses clang-format **20.1.8** + cppcheck in **C++**
   mode (with C-idiom checks suppressed). Run `scripts/lint.sh` before pushing.
