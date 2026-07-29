@@ -1126,7 +1126,11 @@ int cbm_store_dump_to_file(cbm_store_t *s, const char *dest_path) {
      * fresh file at the next open — SQLite validates the WAL against its
      * own header/checksums, not against the main file (#897). */
     cbm_remove_db_sidecars(dest_path);
-    if (rename(tmp_path, dest_path) != 0) {
+    /* cbm_rename_replace, not raw rename: Windows rename() fails with EEXIST
+     * when the destination exists, so installing a second generation over the
+     * first returned CBM_STORE_ERR there (caught by
+     * dump_install_ignores_stale_wal_sidecar on the Windows runner). */
+    if (cbm_rename_replace(tmp_path, dest_path) != 0) {
         store_set_error(s, "dump: rename failed");
         (void)unlink(tmp_path);
         return CBM_STORE_ERR;
