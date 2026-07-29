@@ -219,6 +219,9 @@ const char *cbm_store_db_path(const cbm_store_t *s);
  * (projects table has correct types, no corruption indicators).
  * Returns false if corruption is detected — caller should delete and re-index. */
 bool cbm_store_check_integrity(cbm_store_t *s);
+/* Shallow check + PRAGMA quick_check — catches page-level corruption.
+ * O(db size); use on rare paths (artifact import), not hot opens. */
+bool cbm_store_check_integrity_deep(cbm_store_t *s);
 
 /* Open database for a named project in the default cache dir. */
 cbm_store_t *cbm_store_open(const char *project);
@@ -360,6 +363,13 @@ int64_t cbm_store_insert_edge(cbm_store_t *s, const cbm_edge_t *e);
 /* Insert edges in batch. */
 int cbm_store_insert_edge_batch(cbm_store_t *s, const cbm_edge_t *edges, int count);
 
+/* Fetch all CALLS edges among Function/Method nodes for a project as parallel
+ * (source_id, target_id) arrays (caller frees both). For SCC / cycle analysis.
+ * Stops at max_edges and sets *truncated — never a silent cap. Returns
+ * CBM_STORE_OK (or _ERR); *count is the number returned. */
+int cbm_store_fetch_call_edges(cbm_store_t *s, const char *project, int max_edges,
+                               int64_t **out_src, int64_t **out_tgt, int *count, bool *truncated);
+
 /* Find edges by source node. */
 int cbm_store_find_edges_by_source(cbm_store_t *s, int64_t source_id, cbm_edge_t **out, int *count);
 
@@ -447,6 +457,15 @@ void cbm_store_search_free(cbm_search_output_t *out);
 
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out);
+
+/* Multi-source BFS from ALL seed ids at once (one CTE, temp-table anchored).
+ * Seeds are EXCLUDED from the result (impact semantics); MIN(hop) across the
+ * seed set; canonical (hop,id) order; *truncated set when the max_results
+ * memory-safety ceiling was hit (counting is otherwise uncapped). */
+int cbm_store_bfs_multi(cbm_store_t *s, const int64_t *seed_ids, int seed_count,
+                        const char *direction, const char **edge_types, int edge_type_count,
+                        int max_depth, int max_results, cbm_traverse_result_t *out,
+                        bool *truncated);
 
 /* Free a traverse result's allocated memory. */
 void cbm_store_traverse_free(cbm_traverse_result_t *out);
