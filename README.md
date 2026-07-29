@@ -103,10 +103,10 @@ graph store.
 | `trace_path` | Call-chain traversal (callers / callees / data flow / cross-service) |
 | `query_graph` | Read-only Cypher-subset queries |
 | `get_code_snippet` | Source for a symbol by qualified name |
-| `get_architecture` | Languages, packages, routes, hotspots, clusters, ADRs in one call |
+| `get_architecture` | Languages, packages, routes, hotspots, clusters, ADRs in one call; opt-in `cycles` aspect reports circular call dependencies |
 | `get_graph_schema` | Node/edge counts and property shapes (run first) |
 | `search_code` | Graph-augmented grep over indexed files |
-| `detect_changes` | Map a git diff to affected symbols + blast radius |
+| `detect_changes` | Map a git diff to its blast radius — one multi-source traversal to the transitive impact set, plus a module rollup |
 | `manage_adr` | Architecture Decision Records (CRUD) |
 | `ingest_traces` | Ingest runtime traces to validate `HTTP_CALLS` edges |
 
@@ -120,8 +120,8 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
 ## Features
 
 - **Graph & analysis** — import-aware, type-inferred call graph; dead-code detection; Leiden
-  community clusters; complexity / bottleneck metrics; git-diff impact mapping; Cypher-like
-  queries.
+  community clusters; circular-dependency detection (SCC condensation over the call graph);
+  complexity / bottleneck metrics; git-diff blast-radius analysis; Cypher-like queries.
 - **Deterministic indexing** — re-indexing the same tree produces a byte-identical graph
   (nodes, labels, edges, and edge directions), independent of worker scheduling. Diff two
   snapshots and only real code changes show up.
@@ -155,6 +155,13 @@ Commit `.codebase-memory/graph.db.zst` (a zstd-compressed graph snapshot, typica
 and teammates skip the full reindex: on first run the artifact is imported and incremental
 indexing fills in their local diff. A `.gitattributes` `merge=ours` rule is auto-created so the
 binary artifact never causes merge conflicts. Optional — gitignore `.codebase-memory/` to opt out.
+
+Both export quality levels snapshot the store with `VACUUM INTO` before compressing. The store
+runs in WAL mode, so copying its raw bytes could miss committed rows still in the `-wal` or
+capture a mid-checkpoint torn page — an artifact that imported as a corrupt cache. The fast
+path therefore pays a full consistent copy; correctness beats speed for something teammates
+pull. Import additionally runs `PRAGMA quick_check` and refuses a page-corrupted artifact
+outright rather than installing it.
 
 ## Performance
 
