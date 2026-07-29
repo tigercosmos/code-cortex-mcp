@@ -130,6 +130,16 @@ For each approved commit:
 - **Deliberate absences are not omissions.** If an upstream hunk's context
   contains cfml/cfscript/qml entries missing from our file, preserve the
   absence.
+- **A new `#include` can break Windows even when the code is fine.** Upstream's
+  portability macros (`CBM_TLS`, …) live in headers that pull `<windows.h>` on
+  MinGW, which `#define`s `far`, `near`, `min`, `max`, `small`, `IN`, `OUT`,
+  `DELETE`, `interface`. Adding such an include to a TU that has a local named
+  `far` breaks a file you never edited — and macOS/Linux CI stays green, so it
+  only surfaces in the Windows release job. **Prefer the file's existing
+  idiom over upstream's macro**: this tree is C++23, so write `thread_local`
+  directly rather than importing `CBM_TLS`. Before adding any foundation
+  header to a TU, diff its `#include` block against the last released commit —
+  if the set is unchanged, the exposure is unchanged.
 - Don't hand-edit `lsp_all.cpp` / `CMakeLists.txt` from a fan-out — central
   build wiring is a single deliberate step.
 
