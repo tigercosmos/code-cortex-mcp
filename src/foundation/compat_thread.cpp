@@ -7,6 +7,10 @@
 #include "foundation/constants.h"
 #include "foundation/compat_thread.h"
 
+#include "foundation/platform.h"
+
+#include <mimalloc.h> /* mi_thread_done at thread exit */
+
 #include <pthread.h>
 #include <stdlib.h>
 
@@ -23,6 +27,55 @@ typedef struct {
     void *(*fn)(void *);
     void *arg;
 } win_thread_arg_t;
+
+/* Release each thread's allocator heap at DLL_THREAD_DETACH.
+ *
+ * Doing this from the thread wrapper instead crashes: the wrapper returns
+ * before the CRT's own thread teardown, and abandoning the heap there raced
+ * with frees still in flight (daemon_ipc_wait_forever_is_interruptible
+ * segfaulted, rc=139, reproducibly and only with the release enabled). A TLS
+ * callback is the mechanism mimalloc itself uses under MSVC and runs after all
+ * other thread cleanup, which is the only point where the heap is genuinely
+ * unreferenced.
+ *
+ * Without any of this, a static MinGW link -- no DllMain, no TLS callback --
+ * never releases a thread heap at all: 607 heaps after 300 requests, 170 MiB
+ * held against a ~300 KiB live set, growing without bound (#581). POSIX gets
+ * this from a pthread TSD destructor, which is why only Windows leaked.
+ *
+ * CBM_MI_THREAD_DONE=0 disables it, so one binary can demonstrate both
+ * behaviours rather than requiring a rebuild to establish causality. */
+static bool thread_release_heap_enabled(void) {
+    static int state = -1;
+    if (state < 0) {
+        char buf[CBM_SZ_16];
+        state =
+            (cbm_safe_getenv("CBM_MI_THREAD_DONE", buf, sizeof(buf), NULL) != NULL && buf[0] == '0')
+                ? 0
+                : 1;
+    }
+    return state == 1;
+}
+
+/* C linkage: the loader-facing TLS machinery is C ABI — `_tls_used` must not
+ * be name-mangled, and the callback slot in .CRT$XLB holds a C-linkage
+ * function pointer. (Fork adaptation: this TU is C++ here, upstream's is C.) */
+extern "C" {
+static void NTAPI cbm_thread_detach_callback(PVOID handle, DWORD reason, PVOID reserved) {
+    (void)handle;
+    (void)reserved;
+    if (reason == DLL_THREAD_DETACH && thread_release_heap_enabled()) {
+        mi_thread_done();
+    }
+}
+
+/* Park the callback in .CRT$XLB, the table the loader walks. The linker only
+ * emits a TLS directory when _tls_used is referenced, so anchor it. */
+extern const IMAGE_TLS_DIRECTORY64 _tls_used;
+static const void *const cbm_tls_anchor __attribute__((used)) = &_tls_used;
+__attribute__((section(".CRT$XLB"), used)) PIMAGE_TLS_CALLBACK cbm_thread_detach_tls_cb =
+    cbm_thread_detach_callback;
+} /* extern "C" */
 
 static DWORD WINAPI win_thread_wrapper(LPVOID lpParam) {
     win_thread_arg_t *a = (win_thread_arg_t *)lpParam;
