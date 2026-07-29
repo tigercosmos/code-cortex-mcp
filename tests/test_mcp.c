@@ -1210,6 +1210,138 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     return srv;
 }
 
+/* SCC condensation (get_architecture aspect "cycles"): a 3-function CALLS
+ * cycle A->B->C->A must be reported as one circular dependency of size 3 with
+ * all three members; a separate acyclic chain (D->E) must NOT appear. The
+ * aspect is opt-in — a default get_architecture call must NOT compute it.
+ * (Fork: assertions target the JSON response model — this tree has no TOON /
+ * tree-format output.) */
+TEST(tool_get_architecture_cycles_detects_scc) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "cycproj";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/cyc");
+
+    const char *names[5] = {"A", "B", "C", "D", "E"};
+    int64_t id[5];
+    for (int i = 0; i < 5; i++) {
+        char qn[32];
+        snprintf(qn, sizeof(qn), "cycproj.m.%s", names[i]);
+        cbm_node_t n = {.project = proj,
+                        .label = "Function",
+                        .name = names[i],
+                        .qualified_name = qn,
+                        .file_path = "m.c",
+                        .start_line = i + 1,
+                        .end_line = i + 2};
+        id[i] = cbm_store_upsert_node(st, &n);
+        ASSERT_GT(id[i], 0);
+    }
+    /* cycle A->B->C->A, plus acyclic D->E */
+    struct {
+        int f;
+        int t;
+    } e[] = {{0, 1}, {1, 2}, {2, 0}, {3, 4}};
+    for (size_t i = 0; i < sizeof(e) / sizeof(e[0]); i++) {
+        cbm_edge_t ed = {
+            .project = proj, .source_id = id[e[i].f], .target_id = id[e[i].t], .type = "CALLS"};
+        ASSERT_GT(cbm_store_insert_edge(st, &ed), 0);
+    }
+
+    /* opt-in cycles aspect */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":71,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"get_architecture\",\"arguments\":{\"project\":\"cycproj\","
+             "\"aspects\":[\"cycles\"]}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"cycles\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"size\":3")); /* exactly one SCC, of size 3 */
+    ASSERT_NOT_NULL(strstr(inner, "cycproj.m.A"));
+    ASSERT_NOT_NULL(strstr(inner, "cycproj.m.B"));
+    ASSERT_NOT_NULL(strstr(inner, "cycproj.m.C"));
+    ASSERT_NULL(strstr(inner, "cycproj.m.D")); /* acyclic node not in any cycle */
+    free(inner);
+    free(resp);
+
+    /* default call (no aspects) must NOT run the scan. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"get_architecture\",\"arguments\":{\"project\":\"cycproj\"}}}");
+    ASSERT_NOT_NULL(resp);
+    inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NULL(strstr(inner, "\"cycles\""));
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Context-bomb guard: get_code_snippet on a whole-file node (a Module/File
+ * span) used to read the ENTIRE file into one response — a field-eval agent
+ * that fell back to a Module snippet pulled ~400KB in a single call. The read
+ * must clip at MCP_SNIPPET_MAX_LINES and flag source_clipped, while the exact
+ * start/end range stays in the response for a targeted re-read. */
+TEST(tool_get_code_snippet_clips_whole_file_node) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_snipcap_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char proj_dir[512];
+    snprintf(proj_dir, sizeof(proj_dir), "%s/project", tmp);
+    cbm_mkdir(proj_dir);
+    char src_path[600];
+    snprintf(src_path, sizeof(src_path), "%s/big.py", proj_dir);
+    FILE *fp = fopen(src_path, "w");
+    ASSERT_NOT_NULL(fp);
+    enum { BIG_LINES = 2000 };
+    for (int i = 0; i < BIG_LINES; i++) {
+        fprintf(fp, "line_%04d = %d  # padding to blow up an unclipped read\n", i, i);
+    }
+    fclose(fp);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "test-project";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, proj_dir);
+
+    cbm_node_t mod = {0};
+    mod.project = proj;
+    mod.label = "Module";
+    mod.name = "big";
+    mod.qualified_name = "test-project.big";
+    mod.file_path = "big.py";
+    mod.start_line = 1;
+    mod.end_line = BIG_LINES;
+    ASSERT_GT(cbm_store_upsert_node(st, &mod), 0);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":70,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"get_code_snippet\",\"arguments\":{\"project\":\"test-project\","
+             "\"qualified_name\":\"test-project.big\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"source_clipped\":true"));
+    /* The whole 2000-line file (~100KB) must NOT be in the response. */
+    ASSERT_TRUE(strlen(inner) < 60000);
+    /* The last line must be absent (clipped), the first present. */
+    ASSERT_NOT_NULL(strstr(inner, "line_0000"));
+    ASSERT_NULL(strstr(inner, "line_1999"));
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    unlink(src_path);
+    rmdir(proj_dir);
+    rmdir(tmp);
+    PASS();
+}
+
 /* Cleanup temp files created by setup_snippet_server */
 static void cleanup_snippet_dir(const char *tmp_dir) {
     char path[512];
@@ -2033,6 +2165,8 @@ SUITE(mcp) {
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
     RUN_TEST(tool_search_graph_basic);
+    RUN_TEST(tool_get_architecture_cycles_detects_scc);
+    RUN_TEST(tool_get_code_snippet_clips_whole_file_node);
     RUN_TEST(tool_search_graph_includes_node_properties);
     RUN_TEST(tool_query_graph_basic);
     RUN_TEST(tool_index_status_no_project);

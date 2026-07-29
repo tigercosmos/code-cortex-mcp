@@ -1758,6 +1758,34 @@ TEST(tool_detect_changes_default) {
     PASS();
 }
 
+/* The blast radius is a REAL traversal now: default inbound gives transitive
+ * callers of the changed symbols with an exact impacted_total and a module
+ * rollup. Fixture diff may be empty (shallow clone at HEAD) — the sections and
+ * their accounting must still be present and internally consistent.
+ * (Fork: assertions target the JSON response model; this tree has no
+ * tree-format output, so there is no `format` parameter.) */
+TEST(tool_detect_changes_impact_shape) {
+    double ms;
+    char *r = call_tool_timed("detect_changes", &ms,
+                              "{\"project\":\"%s\",\"base_branch\":\"HEAD\"}", g_project);
+    TOOL_OK(r, ms);
+    ASSERT(strstr(r, "\"direction\":\"inbound\"") != NULL); /* default = blast radius */
+    ASSERT(resp_has_key(r, "seed_count"));
+    ASSERT(resp_has_key(r, "impacted_total"));
+    ASSERT(resp_has_key(r, "impacted_shown"));
+    ASSERT(resp_has_key(r, "impacted_modules"));
+    ASSERT(resp_has_key(r, "base"));
+    free(r);
+    /* An explicit direction is honoured. */
+    r = call_tool_timed("detect_changes", &ms,
+                        "{\"project\":\"%s\",\"base_branch\":\"HEAD\",\"direction\":\"outbound\"}",
+                        g_project);
+    TOOL_OK(r, ms);
+    ASSERT(strstr(r, "\"direction\":\"outbound\"") != NULL);
+    free(r);
+    PASS();
+}
+
 TEST(tool_detect_changes_custom_branch) {
     double ms;
     char *r = call_tool_timed("detect_changes", &ms,
@@ -2960,6 +2988,7 @@ SUITE(incremental) {
 
     /* Phase 15: detect_changes */
     RUN_TEST(tool_detect_changes_default);
+    RUN_TEST(tool_detect_changes_impact_shape);
     RUN_TEST(tool_detect_changes_custom_branch);
     RUN_TEST(tool_detect_changes_depth);
 
