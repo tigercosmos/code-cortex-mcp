@@ -46,6 +46,13 @@ jobs:
           OS=${{ matrix.goos }}; ARCH=${{ matrix.goarch }}
           tar -czf "/tmp/smoke-server/codebase-memory-mcp-${OS}-${ARCH}.tar.gz" \
             -C /tmp/smoke-server codebase-memory-mcp
+          # The binary's update path requests the -portable asset on Linux
+          # (see build_update_url in src/cli/cli.cpp) — publish an alias so
+          # the phase-14 update E2E resolves.
+          if [ "$OS" = "linux" ]; then
+            cp "/tmp/smoke-server/codebase-memory-mcp-${OS}-${ARCH}.tar.gz" \
+               "/tmp/smoke-server/codebase-memory-mcp-${OS}-${ARCH}-portable.tar.gz"
+          fi
           cd /tmp/smoke-server
           sha256sum *.tar.gz > checksums.txt 2>/dev/null || shasum -a 256 *.tar.gz > checksums.txt
           python3 -m http.server 18080 -d /tmp/smoke-server &
