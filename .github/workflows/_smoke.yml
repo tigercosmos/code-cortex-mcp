@@ -78,6 +78,9 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq clamav > /dev/null 2>&1
+          # Installing clamav auto-starts clamav-freshclam, which holds the
+          # freshclam.log lock and races the manual update below — stop it first.
+          sudo systemctl stop clamav-freshclam 2>/dev/null || true
           sudo sed -i 's/^Example/#Example/' /etc/clamav/freshclam.conf 2>/dev/null || true
           grep -q "DatabaseMirror" /etc/clamav/freshclam.conf 2>/dev/null || \
             echo "DatabaseMirror database.clamav.net" | sudo tee -a /etc/clamav/freshclam.conf > /dev/null
