@@ -9,7 +9,7 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 |---|---|
 | **Upstream commit** | `3e2f9a0` (partial — see log) |
 | **Synced on** | 2026-07-29 |
-| **Fork release** | `v0.13.0` |
+| **Fork release** | `v0.14.0` |
 
 > **Partial sync.** The 2026-07-29 pass triaged the full `97ce23f..3e2f9a0`
 > range and found **nothing in scope** there — it is entirely the #581 Windows

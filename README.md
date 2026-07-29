@@ -106,7 +106,7 @@ graph store.
 | `search_code` | Graph-augmented grep over indexed files |
 | `detect_changes` | Map a git diff to its blast radius — one multi-source traversal to the transitive impact set, plus a module rollup |
 | `manage_adr` | Architecture Decision Records (CRUD) |
-| `ingest_traces` | Ingest runtime traces to validate `HTTP_CALLS` edges |
+| `ingest_traces` | Accept runtime traces (stub — counts spans; edge creation not yet implemented) |
 
 Every tool is also available from the CLI:
 
