@@ -3079,7 +3079,7 @@ static int verify_download_checksum(const char *archive_path, const char *archiv
         snprintf(checksum_url, sizeof(checksum_url), "%s/checksums.txt", dl_base);
     } else {
         snprintf(checksum_url, sizeof(checksum_url), "%s",
-                 "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest/download/"
+                 "https://github.com/tigercosmos/code-cortex-mcp/releases/latest/download/"
                  "checksums.txt");
     }
     int rc = cbm_download_to_file_quiet(checksum_url, checksum_file);
@@ -4206,8 +4206,7 @@ static void build_update_url(char *url, int url_sz, const char *os, const char *
     const char *base_url =
         cbm_safe_getenv("CBM_DOWNLOAD_URL", base_url_buf, sizeof(base_url_buf), NULL);
     if (!base_url || !base_url[0]) {
-        base_url =
-            "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest/download";
+        base_url = "https://github.com/tigercosmos/code-cortex-mcp/releases/latest/download";
     }
     /* Linux ships a fully-static "-portable" build; the standard linux binary
      * dynamically links glibc 2.38+ and fails on older distros. macOS/Windows
@@ -4293,10 +4292,9 @@ static bool prefix_icase(const char *s, const char *prefix) {
 /* Fetch latest release tag from GitHub via redirect header.
  * Returns heap-allocated tag (e.g. "v0.5.7") or NULL on failure. */
 static char *fetch_latest_tag(void) {
-    FILE *fp = cbm_popen(
-        "curl -sfI https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest "
-        "2>/dev/null",
-        "r");
+    FILE *fp = cbm_popen("curl -sfI https://github.com/tigercosmos/code-cortex-mcp/releases/latest "
+                         "2>/dev/null",
+                         "r");
     if (!fp) {
         return NULL;
     }

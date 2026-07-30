@@ -112,7 +112,7 @@ jobs:
             'dataLicense': 'CC0-1.0',
             'SPDXID': 'SPDXRef-DOCUMENT',
             'name': 'codebase-memory-mcp-${{ inputs.version || github.ref_name }}',
-            'documentNamespace': 'https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/${{ inputs.version || github.ref_name }}',
+            'documentNamespace': 'https://github.com/tigercosmos/code-cortex-mcp/releases/${{ inputs.version || github.ref_name }}',
             'creationInfo': {
               'created': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
               'creators': ['Tool: codebase-memory-mcp-release-pipeline']

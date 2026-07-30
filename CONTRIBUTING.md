@@ -6,11 +6,11 @@ Contributions are welcome. This guide covers setup, testing, and PR guidelines.
 
 ## Build from Source
 
-**Prerequisites**: C compiler (gcc or clang), make, zlib, Git. Optional: Node.js 22+ (for graph UI).
+**Prerequisites**: C compiler (gcc or clang), make, zlib, Git.
 
 ```bash
-git clone https://github.com/tigercosmos/cpp-codebase-memory-mcp.git
-cd codebase-memory-mcp
+git clone https://github.com/tigercosmos/code-cortex-mcp.git
+cd code-cortex-mcp
 git config core.hooksPath scripts/hooks  # activates pre-commit security checks
 scripts/build.sh
 ```
@@ -46,7 +46,7 @@ Runs clang-tidy, cppcheck, and clang-format. All must pass before committing (al
 scripts/security.sh
 ```
 
-Runs 8 security layers: static allow-list audit, binary string scan, UI audit, install audit, network egress test, MCP robustness (fuzz), vendored dependency integrity, and frontend integrity.
+Runs the security layers: static allow-list audit, binary string scan, install audit, network egress test, MCP robustness (fuzz), and vendored dependency integrity.
 
 ## Project Structure
 
@@ -158,7 +158,7 @@ If you add a new `system()`, `popen()`, `fork()`, or network call, it must be ju
 
 ## Good First Issues
 
-Check [issues labeled `good first issue`](https://github.com/tigercosmos/cpp-codebase-memory-mcp/labels/good%20first%20issue) for beginner-friendly tasks with clear scope and guidance.
+Check [issues labeled `good first issue`](https://github.com/tigercosmos/code-cortex-mcp/labels/good%20first%20issue) for beginner-friendly tasks with clear scope and guidance.
 
 ## License
 

@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.tigercosmos/cpp-codebase-memory-mcp",
+  "name": "io.github.tigercosmos/code-cortex-mcp",
   "title": "Codebase Memory",
   "description": "Persistent codebase knowledge graph — 155 languages, sub-ms queries, 99% fewer tokens than grep. Survives session restarts and context compaction.",
   "repository": {
-    "url": "https://github.com/tigercosmos/cpp-codebase-memory-mcp",
+    "url": "https://github.com/tigercosmos/code-cortex-mcp",
     "source": "github"
   },
   "version": "0.14.0",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.14.0/codebase-memory-mcp-darwin-arm64.tar.gz",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.14.0/codebase-memory-mcp-darwin-arm64.tar.gz",
       "fileSha256": "d9a3e36721d995320197bcb88c5498edb31dd0a226d13aca40f2411a5f27dd92",
       "transport": {
         "type": "stdio"
@@ -19,7 +19,7 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.14.0/codebase-memory-mcp-darwin-amd64.tar.gz",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.14.0/codebase-memory-mcp-darwin-amd64.tar.gz",
       "fileSha256": "403744e2852f894a8721f236badb5e6e0494caad471b0d7fc984b1820dbc25c7",
       "transport": {
         "type": "stdio"
@@ -27,7 +27,7 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.14.0/codebase-memory-mcp-linux-amd64-portable.tar.gz",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.14.0/codebase-memory-mcp-linux-amd64-portable.tar.gz",
       "fileSha256": "e284e5a7f59a8827f790df9f21344a7c2292b0a9f34870aa00726785e731f375",
       "transport": {
         "type": "stdio"
@@ -35,7 +35,7 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.14.0/codebase-memory-mcp-linux-arm64-portable.tar.gz",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.14.0/codebase-memory-mcp-linux-arm64-portable.tar.gz",
       "fileSha256": "06b175a89dcb95feb9d8d59ad2fc38ccf2c99143f6bf4278542bf5ad427657ab",
       "transport": {
         "type": "stdio"
@@ -43,7 +43,7 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/download/v0.14.0/codebase-memory-mcp-windows-amd64.zip",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.14.0/codebase-memory-mcp-windows-amd64.zip",
       "fileSha256": "1e4e171ac2888ec577c2e0c33c8f11d5787bc941c7b136096560c4b8b943a254",
       "transport": {
         "type": "stdio"

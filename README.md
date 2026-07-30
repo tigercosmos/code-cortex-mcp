@@ -1,13 +1,13 @@
-# codebase-memory-mcp — Codebase Knowledge Graph MCP Server for AI Coding Agents (C++23)
+# code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Coding Agents (C++23)
 
-[![Latest release](https://img.shields.io/github/v/release/tigercosmos/cpp-codebase-memory-mcp)](https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/tigercosmos/code-cortex-mcp)](https://github.com/tigercosmos/code-cortex-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)](https://github.com/tigercosmos/cpp-codebase-memory-mcp)
-[![CI](https://img.shields.io/github/actions/workflow/status/tigercosmos/cpp-codebase-memory-mcp/dry-run.yml?label=CI)](https://github.com/tigercosmos/cpp-codebase-memory-mcp/actions)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)](https://github.com/tigercosmos/code-cortex-mcp)
+[![CI](https://img.shields.io/github/actions/workflow/status/tigercosmos/code-cortex-mcp/dry-run.yml?label=CI)](https://github.com/tigercosmos/code-cortex-mcp/actions)
 [![Languages](https://img.shields.io/badge/languages-155-orange)](#language-support-155-languages)
-[![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest)
+[![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](https://github.com/tigercosmos/code-cortex-mcp/releases/latest)
 
-**codebase-memory-mcp** is a fast, local-first **MCP server** ([Model Context
+**code-cortex-mcp** is a fast, local-first **MCP server** ([Model Context
 Protocol](https://modelcontextprotocol.io)) that gives AI coding agents — **Claude Code,
 Codex CLI, Gemini CLI, Zed, OpenCode, Aider, VS Code**, and any other MCP client — a
 persistent **knowledge graph of your codebase**: functions, classes, call graphs, HTTP
@@ -21,13 +21,8 @@ It full-indexes an average repository in milliseconds and the **Linux kernel (28
 AST parsing across **155 languages** with LSP-style hybrid type resolution for Go, C, C++,
 TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP, and C#.
 
-> **A C++23 port of [`codebase-memory-mcp`](https://github.com/DeusData/codebase-memory-mcp).**
-> Same engine and on-disk format; the entire first-party codebase is migrated from C11 to
-> C++23 and built with CMake. Maintained standalone at
-> **<https://github.com/tigercosmos/cpp-codebase-memory-mcp>**.
-
 - [Quick Start](#quick-start)
-- [Why codebase-memory-mcp?](#why-codebase-memory-mcp)
+- [Why code-cortex-mcp?](#why-code-cortex-mcp)
 - [How It Works](#how-it-works)
 - [MCP Tools](#mcp-tools)
 - [Features](#features)
@@ -37,6 +32,7 @@ TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP, and C#.
 - [Team-Shared Graph Artifact](#team-shared-graph-artifact)
 - [Configuration](#configuration)
 - [Build from Source](#build-from-source)
+- [What This Fork Adds](#what-this-fork-adds)
 - [Credits, Citation & License](#credits-citation--license)
 
 ## Quick Start
@@ -46,12 +42,12 @@ machine in one step:
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/tigercosmos/cpp-codebase-memory-mcp/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tigercosmos/code-cortex-mcp/main/install.sh | bash
 ```
 
 ```powershell
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://raw.githubusercontent.com/tigercosmos/cpp-codebase-memory-mcp/main/install.ps1 -OutFile install.ps1
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/tigercosmos/code-cortex-mcp/main/install.ps1 -OutFile install.ps1
 .\install.ps1
 ```
 
@@ -62,7 +58,7 @@ non-blocking pre-tool hooks. Restart your agent and say **“Index this project.
 Useful subcommands: `config set auto_index true` (index on session start), `update`,
 `uninstall`.
 
-## Why codebase-memory-mcp?
+## Why code-cortex-mcp?
 
 - **No LLM, no API keys** — it is the structural backend; your MCP agent (Claude Code,
   etc.) is the language layer. One graph query replaces dozens of grep/read cycles
@@ -227,8 +223,8 @@ codebase-memory-mcp config set auto_index_limit 50000 # max files for auto-index
 The build system is **CMake** (C++23). You need a C/C++ compiler (gcc or clang) and zlib.
 
 ```bash
-git clone https://github.com/tigercosmos/cpp-codebase-memory-mcp.git
-cd cpp-codebase-memory-mcp
+git clone https://github.com/tigercosmos/code-cortex-mcp.git
+cd code-cortex-mcp
 scripts/build.sh                 # production binary → build/c/codebase-memory-mcp
 ./build/c/codebase-memory-mcp install   # configure your installed agents
 ```
@@ -248,11 +244,32 @@ skip sudo.
 Run the test suite with `scripts/test.sh` (CMake + ASan/UBSan) and the linters with
 `scripts/lint.sh`.
 
+## What This Fork Adds
+
+Beyond tracking upstream's indexing, performance, and bug-fix work, this codebase is
+maintained independently with its own direction:
+
+- **Modern C++23 codebase, CMake build** — the entire first-party engine is migrated from
+  C11 to C++23 (`std::unordered_map`-backed tables, RAII, standard atomics) and built with
+  CMake, while staying byte-compatible with the upstream on-disk graph format.
+- **Leaner distribution** — every release binary is ~30 MB smaller: the embedded
+  pretrained-embedding blob was removed in favor of pure algorithmic random-indexing
+  embeddings (no model weights, no API keys), and the optional web UI was retired so there
+  is exactly one binary per platform.
+- **Tighter supply chain** — no GPL-licensed vendored code, a machine-independent vendored
+  checksum audit, a stricter "no network calls in vendored code" rule, and an SBOM that
+  matches what actually ships.
+- **Release CI that proves the matrix** — build, full test suite, and end-to-end smoke
+  (install / update / uninstall, MCP handshake, signature checks, malware scans) genuinely
+  run on linux-amd64, linux-arm64, macOS-arm64, macOS-amd64, and Windows for every release.
+
 ## Credits, Citation & License
 
-This is a community C++23 port. The original engine, design, and research are by
-**[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)** — see the
-preprint *Codebase-Memory: Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*
-([arXiv:2603.27277](https://arxiv.org/abs/2603.27277)).
+This project was originally forked from
+**[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)** (C11),
+whose engine, design, and research it builds on — see the preprint *Codebase-Memory:
+Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*
+([arXiv:2603.27277](https://arxiv.org/abs/2603.27277)). The installed binary keeps the
+upstream-compatible name `codebase-memory-mcp`.
 
 MIT — see [LICENSE](LICENSE). Security policy: [SECURITY.md](SECURITY.md).

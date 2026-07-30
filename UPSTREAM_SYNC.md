@@ -1,6 +1,6 @@
 # Upstream Sync
 
-How to keep this fork (`tigercosmos/cpp-codebase-memory-mcp`, a C++23 port) in
+How to keep this fork (`tigercosmos/code-cortex-mcp`, a C++23 port) in
 sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusData/codebase-memory-mcp)** (C11).
 
 ## Last synced
@@ -64,7 +64,7 @@ them to need translation, not a clean apply:
 - **`-Werror` is GCC-only** for first-party C++ (clang's extra warnings aren't
   promoted to errors). Lint uses clang-format **20.1.8** + cppcheck in **C++**
   mode (with C-idiom checks suppressed). Run `scripts/lint.sh` before pushing.
-- **Fork rebrand.** All repo URLs point to `tigercosmos/cpp-codebase-memory-mcp`
+- **Fork rebrand.** All repo URLs point to `tigercosmos/code-cortex-mcp`
   (README credits upstream). Skip upstream's release/versioning/`pkg/*` and
   registry (`server.json`) changes unless intentionally re-adopting them.
 

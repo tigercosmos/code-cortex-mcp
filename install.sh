@@ -4,7 +4,7 @@ set -euo pipefail
 # install.sh — One-line installer for codebase-memory-mcp.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/tigercosmos/cpp-codebase-memory-mcp/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/tigercosmos/code-cortex-mcp/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --dir /path   # Custom install directory
 #
 # Environment:
@@ -16,7 +16,7 @@ set -euo pipefail
 # called because the final line hasn't arrived yet.
 main() {
 
-REPO="tigercosmos/cpp-codebase-memory-mcp"
+REPO="tigercosmos/code-cortex-mcp"
 INSTALL_DIR="$HOME/.local/bin"
 SKIP_CONFIG=false
 CBM_DOWNLOAD_URL="${CBM_DOWNLOAD_URL:-https://github.com/${REPO}/releases/latest/download}"
@@ -189,8 +189,8 @@ if ! VERSION=$("$DEST" --version 2>&1); then
                     echo "         this system: $(ldd --version 2>/dev/null | head -1)" >&2
                 fi
                 echo "  fix:   build from source on this machine (needs cmake + a C++23 compiler, e.g. gcc>=13):" >&2
-                echo "           git clone https://github.com/tigercosmos/cpp-codebase-memory-mcp" >&2
-                echo "           cd cpp-codebase-memory-mcp && scripts/build.sh   # -> build/c/codebase-memory-mcp" >&2
+                echo "           git clone https://github.com/tigercosmos/code-cortex-mcp" >&2
+                echo "           cd code-cortex-mcp && scripts/build.sh   # -> build/c/codebase-memory-mcp" >&2
                 echo "         or install on a system with glibc >= 2.38." >&2
                 ;;
         esac

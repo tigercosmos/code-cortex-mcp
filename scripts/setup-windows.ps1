@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "tigercosmos/cpp-codebase-memory-mcp"
+$Repo = "tigercosmos/code-cortex-mcp"
 $BinaryName = "codebase-memory-mcp"
 $InstallDir = Join-Path $env:LOCALAPPDATA "codebase-memory-mcp"
 

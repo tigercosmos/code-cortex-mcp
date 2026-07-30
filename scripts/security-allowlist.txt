@@ -44,7 +44,7 @@ src/pipeline/artifact.c:popen:via cbm_popen wrapper calls
 
 # ── Allowed URLs ───────────────────────────────────────────────────────────
 # Format: URL:justification
-URL:https://api.github.com/repos/tigercosmos/cpp-codebase-memory-mcp/releases/latest:update check
-URL:https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest/download:binary download + checksums
-URL:https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest:version check via redirect header
+URL:https://api.github.com/repos/tigercosmos/code-cortex-mcp/releases/latest:update check
+URL:https://github.com/tigercosmos/code-cortex-mcp/releases/latest/download:binary download + checksums
+URL:https://github.com/tigercosmos/code-cortex-mcp/releases/latest:version check via redirect header
 URL:https://www.sqlite.org/c3ref/c_checkpoint_full.html:sqlite WAL checkpoint API doc reference (comment only, not a network call)
