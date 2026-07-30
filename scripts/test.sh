@@ -1,5 +1,5 @@
 #!/bin/bash
-# test.sh — Clean build + run all C tests with ASan + UBSan.
+# test.sh — Clean build + run the C++23 test suite with ASan + UBSan.
 #
 # Usage:
 #   scripts/test.sh                          # Auto-detect everything

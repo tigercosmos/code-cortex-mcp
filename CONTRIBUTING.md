@@ -27,10 +27,10 @@ scripts/test.sh
 ```
 
 This builds with ASan + UBSan and runs all tests (~2040 cases). Key test files:
-- `tests/test_pipeline.c` — pipeline integration tests
-- `tests/test_httplink.c` — HTTP route extraction and linking
-- `tests/test_mcp.c` — MCP protocol and tool handler tests
-- `tests/test_store_*.c` — SQLite graph store tests
+- `tests/test_pipeline.cpp` — pipeline integration tests
+- `tests/test_httplink.cpp` — HTTP route extraction and linking
+- `tests/test_mcp.cpp` — MCP protocol and tool handler tests
+- `tests/test_store_*.cpp` — SQLite graph store tests
 
 ## Run Linter
 
@@ -78,9 +78,9 @@ Language support is split between two layers:
 **Workflow for language fixes:**
 
 1. Check the language spec in `internal/cbm/lang_specs.c`
-2. Use regression tests to verify extraction: `tests/test_extraction.c`
+2. Use regression tests to verify extraction: `tests/test_extraction.cpp`
 3. Check parity tests: `internal/cbm/regression_test.go` (legacy, being migrated)
-4. Add a test case in `tests/test_pipeline.c` for integration-level fixes
+4. Add a test case in `tests/test_pipeline.cpp` for integration-level fixes
 5. Verify with a real open-source repo
 
 ### Infrastructure Languages (Infra-Pass Pattern)
@@ -96,7 +96,7 @@ Languages like **Dockerfile**, **docker-compose**, **Kubernetes manifests**, and
 - Add the `CBM_LANG_<LANG>` enum value in `internal/cbm/cbm.h` and a row in the language table in `lang_specs.c`.
 - Write a custom extractor that returns `CBMFileResult*` — do not add a tree-sitter grammar.
 - Register the pass in `pipeline.c`.
-- Add tests in `tests/test_pipeline.c` following the `TEST(infra_is_dockerfile)` and `TEST(k8s_extract_manifest)` patterns.
+- Add tests in `tests/test_pipeline.cpp` following the `TEST(infra_is_dockerfile)` and `TEST(k8s_extract_manifest)` patterns.
 
 ## Commit Format
 

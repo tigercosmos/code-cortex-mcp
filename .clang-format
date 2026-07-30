@@ -1,5 +1,5 @@
 ---
-# .clang-format — Code formatting for C11 codebase.
+# .clang-format — Code formatting for the C++23 codebase.
 #
 # Style: K&R braces, 4-space indent, 100-column limit.
 # Equivalent to Go's gofmt for consistent formatting.

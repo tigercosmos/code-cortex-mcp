@@ -42,7 +42,7 @@ candidate for Phase 11.x extensions or v1.1.
 
 ### Fast: in-process integration test
 
-`tests/test_py_lsp_bench.c` runs `cbm_extract_file` on a representative
+`tests/test_py_lsp_bench.cpp` runs `cbm_extract_file` on a representative
 Python source string and reports `calls.count` /
 `resolved_calls.count` plus extraction time. Run with:
 

@@ -6,7 +6,7 @@ if [ ! -f "$WHITELIST" ]; then
 fi
 ALLOWED=$(grep -oE '"[a-zA-Z_][a-zA-Z0-9_]*"' "$WHITELIST" | tr -d '"' | sort -u)
 
-HITS=$(grep -rn 'NOLINT(misc-no-recursion)' src/ internal/cbm/*.c internal/cbm/*.h 2>/dev/null \
+HITS=$(grep -rn 'NOLINT(misc-no-recursion)' src/ internal/cbm/*.cpp internal/cbm/*.h 2>/dev/null \
     | grep -v vendored | grep -v recursion_whitelist)
 if [ -z "$HITS" ]; then exit 0; fi
 

@@ -350,7 +350,7 @@ but the receiver class is not indexed (e.g., Composer vendor types like
 recall (no edge instead of a guess) for precision (no wrong edge). The
 pre-flight argued this is the right trade for graph correctness.
 
-**Test coverage**: 100 unit tests in `tests/test_php_lsp.c`, all
+**Test coverage**: 100 unit tests in `tests/test_php_lsp.cpp`, all
 passing. Total project tests: 2913 / 0 failed.
 
 ### Lua (neovim/neovim)

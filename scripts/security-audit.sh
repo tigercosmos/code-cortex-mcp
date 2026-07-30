@@ -56,7 +56,7 @@ while IFS= read -r file; do
             fi
         fi
     done
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" -name '*.cpp' -type f | sort)
 
 # ── 1b. Raw network calls (must not exist) ──────────────────────
 
@@ -64,7 +64,7 @@ echo ""
 echo "--- Scanning for raw network calls (must not exist) ---"
 
 NETWORK_FUNCS='[^a-z_]connect\(|[^a-z_]socket\(|[^a-z_]sendto\('
-if grep -rn -E "$NETWORK_FUNCS" "$ROOT/src/" --include='*.c' 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v 'test'; then
+if grep -rn -E "$NETWORK_FUNCS" "$ROOT/src/" --include='*.cpp' 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' | grep -v 'test'; then
     echo "BLOCKED: Raw network calls found in src/."
     fail
 else
@@ -153,7 +153,7 @@ while IFS= read -r file; do
             fi
         done < <(echo "$match" | grep -oE 'https?://[A-Za-z0-9._/~:@!$&()*+,;=?#%-]+' || true)
     done < <(grep -n 'https\?://' "$file" 2>/dev/null | grep -v '^\s*//' | grep -v '^\s*\*' || true)
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" -name '*.cpp' -type f | sort)
 
 if $URL_OK; then
     echo "OK: All URLs are on the allow-list."
@@ -170,15 +170,15 @@ while IFS= read -r match; do
     file=$(echo "$match" | cut -d: -f1)
     relfile="${file#"$ROOT/"}"
     case "$relfile" in
-        src/cli/cli.c|src/store/store.c|src/pipeline/*.c|src/foundation/log.c|src/foundation/diagnostics.c|src/mcp/mcp.c)
-            ;; # Known safe (diagnostics.c: atomic .tmp+rename metrics dump to configured path)
+        src/cli/cli.cpp|src/store/store.cpp|src/pipeline/*.cpp|src/foundation/log.cpp|src/foundation/diagnostics.cpp|src/mcp/mcp.cpp)
+            ;; # Known safe (diagnostics.cpp: atomic .tmp+rename metrics dump to configured path)
         *)
             echo "REVIEW: ${match}"
             echo "  -> Unexpected fopen(\"w\") in ${relfile}"
             FOPEN_FOUND=true
             ;;
     esac
-done < <(grep -rn 'fopen.*"w' "$ROOT/src/" --include='*.c' 2>/dev/null | grep -v '/test' | grep -v '^\s*//' || true)
+done < <(grep -rn 'fopen.*"w' "$ROOT/src/" --include='*.cpp' 2>/dev/null | grep -v '/test' | grep -v '^\s*//' || true)
 
 if ! $FOPEN_FOUND; then
     echo "OK: All file writes are in expected locations."
@@ -215,25 +215,25 @@ while IFS= read -r file; do
             TIMEBOMB_FOUND=true
         fi
     done
-done < <(find "$ROOT/src" -name '*.c' -type f | sort)
+done < <(find "$ROOT/src" -name '*.cpp' -type f | sort)
 
 if ! $TIMEBOMB_FOUND; then
     echo "OK: No suspicious time-bomb patterns found."
 fi
 
 # ── 5. MCP tool handler file read audit ──────────────────────────
-# The MCP server (mcp.c) handles tool calls that return data to the
+# The MCP server (mcp.cpp) handles tool calls that return data to the
 # client. A malicious PR could add file reads that exfiltrate sensitive
 # data (e.g., ~/.ssh/id_rsa) through the normal tool response channel.
-# Track all file-reading functions in mcp.c against an allow-list.
+# Track all file-reading functions in mcp.cpp against an allow-list.
 
 echo ""
 echo "--- Scanning MCP tool handlers for file reads ---"
 
-MCP_FILE="$ROOT/src/mcp/mcp.c"
+MCP_FILE="$ROOT/src/mcp/mcp.cpp"
 MCP_READS_OK=true
 if [ -f "$MCP_FILE" ]; then
-    # Known safe file reads in mcp.c (with line-range context)
+    # Known safe file reads in mcp.cpp (with line-range context)
     # - search_code: writes pattern to tmpfile, reads grep output
     # - get_code_snippet: reads source via read_file_lines (path-contained)
     # - manage_adr: reads/writes ADR files
@@ -242,12 +242,13 @@ if [ -f "$MCP_FILE" ]; then
     # - HTTP transport: reads the incoming request body (content-length bound)
     # Count fopen/fread calls and compare against expected
     FOPEN_COUNT=$(grep -c 'fopen\|fread\|read_file' "$MCP_FILE" 2>/dev/null || echo "0")
-    # Update this when legitimate reads are added. 13 reads audited as of the
-    # search/ADR/Windows-support commits — all path-contained or transport
-    # reads, no new exfiltration surface.
-    EXPECTED_MAX=13
+    # Update this when legitimate reads are added. 15 sites re-audited when
+    # this check was repointed from the pre-migration mcp.c to mcp.cpp (it had
+    # been silently inert): the two new sites are the artifact/quarantine
+    # machinery — path-contained, no new exfiltration surface.
+    EXPECTED_MAX=15
     if [ "$FOPEN_COUNT" -gt "$EXPECTED_MAX" ]; then
-        echo "REVIEW: src/mcp/mcp.c has $FOPEN_COUNT file read operations (expected max $EXPECTED_MAX)"
+        echo "REVIEW: src/mcp/mcp.cpp has $FOPEN_COUNT file read operations (expected max $EXPECTED_MAX)"
         echo "  New file reads in MCP tool handlers must be reviewed for data exfiltration risk."
         MCP_READS_OK=false
     fi

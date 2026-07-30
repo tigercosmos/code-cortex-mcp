@@ -28,7 +28,7 @@ node and **zero functions/types**. A future grammar refresh that changes these
 node shapes must update the corresponding branch.
 
 Guarded by the `contract_all_grammars_in_graph` graph-breadth test in
-`tests/test_lang_contract.c` (each was reproduced as a failing case before the fix).
+`tests/test_lang_contract.cpp` (each was reproduced as a failing case before the fix).
 
 | grammar | custom handling |
 |---|---|

@@ -2,7 +2,7 @@
 # scale_contract.sh — Real-repo SCALE-TIER contracts for known-bug languages.
 #
 # Some behavioral bugs only manifest at real-repo scale and cannot be reproduced
-# by the small in-process fixtures in tests/test_lang_contract.c:
+# by the small in-process fixtures in tests/test_lang_contract.cpp:
 #   - Java / TypeScript : SIGBUS during parallel extraction on large repos.
 #   - C                 : function-call attribution (calls land on the file's
 #                         Module node instead of the enclosing Function).
