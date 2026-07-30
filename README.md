@@ -1,69 +1,48 @@
-# cpp-codebase-memory-mcp
+# codebase-memory-mcp — Codebase Knowledge Graph MCP Server for AI Coding Agents (C++23)
 
+[![Latest release](https://img.shields.io/github/v/release/tigercosmos/cpp-codebase-memory-mcp)](https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)](https://github.com/tigercosmos/cpp-codebase-memory-mcp)
 [![CI](https://img.shields.io/github/actions/workflow/status/tigercosmos/cpp-codebase-memory-mcp/dry-run.yml?label=CI)](https://github.com/tigercosmos/cpp-codebase-memory-mcp/actions)
-[![Languages](https://img.shields.io/badge/languages-155-orange)](https://github.com/tigercosmos/cpp-codebase-memory-mcp)
-[![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](https://github.com/tigercosmos/cpp-codebase-memory-mcp)
+[![Languages](https://img.shields.io/badge/languages-155-orange)](#language-support-155-languages)
+[![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](https://github.com/tigercosmos/cpp-codebase-memory-mcp/releases/latest)
+
+**codebase-memory-mcp** is a fast, local-first **MCP server** ([Model Context
+Protocol](https://modelcontextprotocol.io)) that gives AI coding agents — **Claude Code,
+Codex CLI, Gemini CLI, Zed, OpenCode, Aider, VS Code**, and any other MCP client — a
+persistent **knowledge graph of your codebase**: functions, classes, call graphs, HTTP
+routes, and cross-service links, queryable in well under a millisecond. One structural
+graph query replaces dozens of grep-and-read cycles (**~120× fewer tokens** on typical
+code exploration), and the whole thing ships as a **single static binary** with zero
+runtime dependencies.
+
+It full-indexes an average repository in milliseconds and the **Linux kernel (28M LOC,
+75K files) in ~3 minutes**, using [tree-sitter](https://tree-sitter.github.io/tree-sitter/)
+AST parsing across **155 languages** with LSP-style hybrid type resolution for Go, C, C++,
+TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP, and C#.
 
 > **A C++23 port of [`codebase-memory-mcp`](https://github.com/DeusData/codebase-memory-mcp).**
 > Same engine and on-disk format; the entire first-party codebase is migrated from C11 to
 > C++23 and built with CMake. Maintained standalone at
 > **<https://github.com/tigercosmos/cpp-codebase-memory-mcp>**.
 
-A fast, dependency-free **code-intelligence engine for AI coding agents**. It builds a
-persistent **knowledge graph** of your codebase — functions, classes, call chains, HTTP
-routes, cross-service links — and answers structural queries over MCP in well under a
-millisecond. It full-indexes an average repo in milliseconds and the Linux kernel (28M LOC,
-75K files) in ~3 minutes. Ships as a single static binary for macOS, Linux, and Windows.
+- [Quick Start](#quick-start)
+- [Why codebase-memory-mcp?](#why-codebase-memory-mcp)
+- [How It Works](#how-it-works)
+- [MCP Tools](#mcp-tools)
+- [Features](#features)
+- [Performance Benchmarks](#performance-benchmarks)
+- [Language Support](#language-support-155-languages)
+- [Graph Data Model & Cypher Queries](#graph-data-model--cypher-queries)
+- [Team-Shared Graph Artifact](#team-shared-graph-artifact)
+- [Configuration](#configuration)
+- [Build from Source](#build-from-source)
+- [Credits, Citation & License](#credits-citation--license)
 
-Parsing is [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across 155
-languages, enhanced with LSP-style hybrid type resolution for Go, C, C++,
-TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP, and C#. 14 MCP
-tools, zero runtime dependencies.
+## Quick Start
 
-## Why
-
-- **No LLM, no API keys** — it's the structural backend; your MCP agent (Claude Code, etc.)
-  is the language layer. One graph query replaces dozens of grep/read cycles (~120× fewer
-  tokens on typical exploration).
-- **Single static binary** — 155 tree-sitter grammars compiled in. No Docker, no runtime deps.
-- **Everything local** — SQLite-backed, persists to `~/.cache/codebase-memory-mcp/`. Your code
-  never leaves the machine.
-- **Plug and play across agents** — `install` auto-detects and configures Claude Code, Codex
-  CLI, Gemini CLI, Zed, OpenCode, Aider, VS Code, and more (MCP entries + instruction files +
-  non-blocking pre-tool hooks).
-
-## Build from Source
-
-The build system is **CMake** (C++23). You need a C/C++ compiler (gcc or clang) and zlib.
-
-```bash
-git clone https://github.com/tigercosmos/cpp-codebase-memory-mcp.git
-cd cpp-codebase-memory-mcp
-scripts/build.sh                 # production binary → build/c/codebase-memory-mcp
-./build/c/codebase-memory-mcp install   # configure your installed agents
-```
-
-Or build, place the binary on your `PATH`, and install the skill in one step:
-
-```bash
-make install PREFIX=$HOME/.local # no sudo; binary → ~/.local/bin
-sudo make install                # system-wide; binary → /usr/local/bin
-```
-
-`make install` builds the binary, installs it under `$(PREFIX)/bin`, then runs the binary's own
-`install` to deploy the embedded skill. `/usr/local` needs root, so use `sudo` (the skill step
-runs as `$SUDO_USER`, landing in *your* `~/.claude`, not root's) — or set `PREFIX=$HOME/.local` to
-skip sudo. `install` auto-detects your coding agents and wires up MCP server
-entries, instruction files, and hooks. Then restart your agent and say **“Index this project.”**
-
-Run the test suite with `scripts/test.sh` (CMake + ASan/UBSan) and the linters with
-`scripts/lint.sh`.
-
-## Install Script
-
-Once a release is published, the binary can also be installed directly:
+Install the latest release binary and auto-configure every MCP coding agent on your
+machine in one step:
 
 ```bash
 # macOS / Linux
@@ -76,8 +55,24 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/tigercosmos/cpp-codebas
 .\install.ps1
 ```
 
-Useful subcommands: `config set auto_index true` (index on session start),
-`update`, `uninstall`.
+The installer detects **Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Aider,
+VS Code**, and more, and wires up MCP server entries, instruction files, and
+non-blocking pre-tool hooks. Restart your agent and say **“Index this project.”**
+
+Useful subcommands: `config set auto_index true` (index on session start), `update`,
+`uninstall`.
+
+## Why codebase-memory-mcp?
+
+- **No LLM, no API keys** — it is the structural backend; your MCP agent (Claude Code,
+  etc.) is the language layer. One graph query replaces dozens of grep/read cycles
+  (~120× fewer tokens on typical exploration).
+- **Single static binary** — 155 tree-sitter grammars compiled in. No Docker, no Node,
+  no Python, no runtime dependencies.
+- **Everything local & private** — SQLite-backed, persists to
+  `~/.cache/codebase-memory-mcp/`. Your code never leaves the machine.
+- **Plug and play across agents** — `install` auto-detects and configures every
+  supported MCP client in one pass.
 
 ## How It Works
 
@@ -88,9 +83,9 @@ Engine: runs the graph traversal, returns structured results
 Agent:  explains the call chain in plain English
 ```
 
-The engine indexes in a RAM-first pipeline (LZ4-compressed reads, in-memory SQLite, single
-dump at the end; memory is released afterward), then serves queries from a persistent SQLite
-graph store.
+The engine indexes in a RAM-first pipeline (LZ4-compressed reads, in-memory SQLite,
+single dump at the end; memory is released afterward), then serves queries from a
+persistent SQLite graph store.
 
 ## MCP Tools
 
@@ -117,9 +112,10 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
 
 ## Features
 
-- **Graph & analysis** — import-aware, type-inferred call graph; dead-code detection; Leiden
-  community clusters; circular-dependency detection (SCC condensation over the call graph);
-  complexity / bottleneck metrics; git-diff blast-radius analysis; Cypher-like queries.
+- **Call graph & static analysis** — import-aware, type-inferred call graph; dead-code
+  detection; Leiden community clusters; circular-dependency detection (SCC condensation
+  over the call graph); complexity / bottleneck metrics; git-diff blast-radius analysis;
+  Cypher-like queries.
 - **Deterministic indexing** — re-indexing the same tree produces a byte-identical graph
   (nodes, labels, edges, and edge directions), independent of worker scheduling. Diff two
   snapshots and only real code changes show up.
@@ -130,8 +126,8 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
   remaps them to their original lines, verifying every line belongs to the main file. Headers
   get their own `File` nodes, `#include` resolves to the header, and benign function-like
   macro calls are not reported as parse gaps.
-- **Search** — semantic similarity edges (algorithmic random-indexing embeddings, no API key),
-  BM25 full-text (FTS5, camelCase/snake_case aware), and structural/code search.
+- **Code search** — semantic similarity edges (algorithmic random-indexing embeddings, no
+  API key), BM25 full-text (FTS5, camelCase/snake_case aware), and structural/code search.
 - **Cross-service linking** — HTTP route ↔ call-site matching; gRPC/GraphQL/tRPC detection;
   channel detection (`EMITS`/`LISTENS_ON`) for Socket.IO, EventEmitter, and pub-sub.
 - **Cross-repo** — `CROSS_*` edges and a combined architecture view across repos in one store.
@@ -147,21 +143,7 @@ codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.nam
   resolve calls and base-class relations through the same decision points, so a project's
   graph does not depend on which path its size selected.
 
-## Team-Shared Graph Artifact
-
-Commit `.codebase-memory/graph.db.zst` (a zstd-compressed graph snapshot, typically 8–13:1)
-and teammates skip the full reindex: on first run the artifact is imported and incremental
-indexing fills in their local diff. A `.gitattributes` `merge=ours` rule is auto-created so the
-binary artifact never causes merge conflicts. Optional — gitignore `.codebase-memory/` to opt out.
-
-Both export quality levels snapshot the store with `VACUUM INTO` before compressing. The store
-runs in WAL mode, so copying its raw bytes could miss committed rows still in the `-wal` or
-capture a mid-checkpoint torn page — an artifact that imported as a corrupt cache. The fast
-path therefore pays a full consistent copy; correctness beats speed for something teammates
-pull. Import additionally runs `PRAGMA quick_check` and refuses a page-corrupted artifact
-outright rather than installing it.
-
-## Performance
+## Performance Benchmarks
 
 Benchmarked on Apple Silicon (M-series), release build. Full-index rows were re-measured on
 v0.12.0 against each project's current `main`:
@@ -183,7 +165,7 @@ are essentially unchanged. These are not strict before/after deltas — each pro
 at a newer commit than the earlier figures were — but the direction is the corrected graph, not
 drift. The Linux kernel row has not been re-measured on v0.12.0.
 
-## Language Support
+## Language Support (155 Languages)
 
 155 languages via vendored tree-sitter grammars. Strongest call/type resolution (LSP-style
 hybrid) for **Go, C, C++, TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP,
@@ -196,7 +178,7 @@ C#**. Benchmarked tiers:
 
 Plus ~110 more (config, data, and niche languages) parsed structurally.
 
-## Graph Data Model
+## Graph Data Model & Cypher Queries
 
 - **Nodes** — `Project`, `Package`, `Folder`, `File`, `Module`, `Class`, `Function`, `Method`,
   `Interface`, `Enum`, `Type`, `Route`, `Resource`
@@ -207,6 +189,20 @@ Plus ~110 more (config, data, and niche languages) parsed structurally.
   `RETURN` (+ `COUNT`/`COUNT(DISTINCT)` / aggregates), `ORDER BY`, `LIMIT`. Read-only; no
   mutations. Queries are bounded by a 100k-row ceiling and a 30 s wall-clock deadline, so an
   unbounded `OPTIONAL MATCH` fails with an actionable error instead of hanging.
+
+## Team-Shared Graph Artifact
+
+Commit `.codebase-memory/graph.db.zst` (a zstd-compressed graph snapshot, typically 8–13:1)
+and teammates skip the full reindex: on first run the artifact is imported and incremental
+indexing fills in their local diff. A `.gitattributes` `merge=ours` rule is auto-created so the
+binary artifact never causes merge conflicts. Optional — gitignore `.codebase-memory/` to opt out.
+
+Both export quality levels snapshot the store with `VACUUM INTO` before compressing. The store
+runs in WAL mode, so copying its raw bytes could miss committed rows still in the `-wal` or
+capture a mid-checkpoint torn page — an artifact that imported as a corrupt cache. The fast
+path therefore pays a full consistent copy; correctness beats speed for something teammates
+pull. Import additionally runs `PRAGMA quick_check` and refuses a page-corrupted artifact
+outright rather than installing it.
 
 ## Configuration
 
@@ -226,7 +222,33 @@ codebase-memory-mcp config set auto_index_limit 50000 # max files for auto-index
 - **Custom extensions** — map extra extensions to languages via `.codebase-memory.json`
   (`{"extra_extensions": {".mjs": "javascript"}}`).
 
-## Credits & License
+## Build from Source
+
+The build system is **CMake** (C++23). You need a C/C++ compiler (gcc or clang) and zlib.
+
+```bash
+git clone https://github.com/tigercosmos/cpp-codebase-memory-mcp.git
+cd cpp-codebase-memory-mcp
+scripts/build.sh                 # production binary → build/c/codebase-memory-mcp
+./build/c/codebase-memory-mcp install   # configure your installed agents
+```
+
+Or build, place the binary on your `PATH`, and install the skill in one step:
+
+```bash
+make install PREFIX=$HOME/.local # no sudo; binary → ~/.local/bin
+sudo make install                # system-wide; binary → /usr/local/bin
+```
+
+`make install` builds the binary, installs it under `$(PREFIX)/bin`, then runs the binary's own
+`install` to deploy the embedded skill. `/usr/local` needs root, so use `sudo` (the skill step
+runs as `$SUDO_USER`, landing in *your* `~/.claude`, not root's) — or set `PREFIX=$HOME/.local` to
+skip sudo.
+
+Run the test suite with `scripts/test.sh` (CMake + ASan/UBSan) and the linters with
+`scripts/lint.sh`.
+
+## Credits, Citation & License
 
 This is a community C++23 port. The original engine, design, and research are by
 **[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)** — see the
