@@ -781,10 +781,16 @@ TEST(cli_migrate_legacy_install) {
         FAIL("cbm_mkdtemp failed");
 
     char path[512];
+    /* The migration looks for the platform-appropriate legacy binary name. */
+    char old_bin[512];
+#ifdef _WIN32
+    snprintf(old_bin, sizeof(old_bin), "%s/.local/bin/codebase-memory-mcp.exe", tmpdir);
+#else
+    snprintf(old_bin, sizeof(old_bin), "%s/.local/bin/codebase-memory-mcp", tmpdir);
+#endif
     snprintf(path, sizeof(path), "%s/.local/bin", tmpdir);
     test_mkdirp(path);
-    snprintf(path, sizeof(path), "%s/.local/bin/codebase-memory-mcp", tmpdir);
-    write_test_file(path, "old binary");
+    write_test_file(old_bin, "old binary");
     snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp", tmpdir);
     test_mkdirp(path);
     snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp/proj.db", tmpdir);
@@ -798,13 +804,12 @@ TEST(cli_migrate_legacy_install) {
     int would = cbm_migrate_legacy_install(tmpdir, true);
     ASSERT_EQ(would, 3);
     struct stat st;
-    snprintf(path, sizeof(path), "%s/.local/bin/codebase-memory-mcp", tmpdir);
-    ASSERT(stat(path, &st) == 0);
+    ASSERT(stat(old_bin, &st) == 0);
 
     /* Real run removes all three */
     int migrated = cbm_migrate_legacy_install(tmpdir, false);
     ASSERT_EQ(migrated, 3);
-    ASSERT(stat(path, &st) != 0);
+    ASSERT(stat(old_bin, &st) != 0);
     snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp", tmpdir);
     ASSERT(stat(path, &st) != 0);
     snprintf(path, sizeof(path), "%s/.claude/skills/codebase-memory", tmpdir);
