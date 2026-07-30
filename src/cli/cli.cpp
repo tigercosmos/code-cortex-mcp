@@ -1466,51 +1466,142 @@ int cbm_remove_instructions(const char *path) {
 
 /* ── Codex MCP config (TOML) ─────────────────────────────────── */
 
-#define CODEX_CMM_SECTION "[mcp_servers.code-cortex-mcp]"
-#define CODEX_LEGACY_SECTION "[mcp_servers.codebase-memory-mcp]" /* pre-rename */
+/* Table-name prefixes, deliberately WITHOUT the closing bracket: a Codex server
+ * owns both its own table ("[mcp_servers.<name>]") and any subtables Codex
+ * itself writes underneath it — "[mcp_servers.<name>.tools.<tool>]" appears as
+ * soon as the user picks an approval mode for a tool. Removal has to take the
+ * whole family: an orphaned subtable implicitly re-declares the server with no
+ * command and no url, which Codex rejects at startup with "invalid transport". */
+#define CODEX_CMM_PREFIX "[mcp_servers.code-cortex-mcp"
+#define CODEX_LEGACY_PREFIX "[mcp_servers.codebase-memory-mcp" /* pre-rename */
+#define CODEX_CMM_SECTION CODEX_CMM_PREFIX "]"
 
-/* Remove one named TOML section from the file (up to the next [section] or
- * EOF). Returns 0 on write, CLI_TRUE when the section is absent. */
-static int codex_remove_section(const char *config_path, const char *section_hdr) {
+/* Length of the line at `p`, including its trailing newline (if any). */
+static size_t toml_line_len(const char *p) {
+    const char *nl = strchr(p, '\n');
+    return nl ? (size_t)(nl - p) + CLI_SKIP_ONE : strlen(p);
+}
+
+/* First non-indent character of a line. */
+static const char *toml_line_body(const char *p) {
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    return p;
+}
+
+/* CLI_TRUE when `body` opens a table named by `prefix` — either the table
+ * itself (next char ']') or, with `include_sub`, one of its subtables ('.'). */
+static int toml_table_matches(const char *body, const char *prefix, int include_sub) {
+    size_t n = strlen(prefix);
+    if (strncmp(body, prefix, n) != 0) {
+        return 0;
+    }
+    if (body[n] == ']') {
+        return CLI_TRUE;
+    }
+    return include_sub && body[n] == '.';
+}
+
+/* Rewrite `content` with every table matching (prefix, include_sub) dropped.
+ * When `replacement` is non-NULL it is emitted once at the position of the
+ * first match, so ordering and neighbouring content are preserved.
+ *
+ * A run of blank/comment lines at the tail of a dropped table is kept: those
+ * lines almost always introduce whatever comes next (our own SessionStart
+ * sentinel comment among them), not the table being removed.
+ *
+ * Returns a malloc'd string the caller frees, or NULL on allocation failure;
+ * *out_changed reports whether anything matched. */
+static char *toml_rewrite_tables(const char *content, const char *prefix, int include_sub,
+                                 const char *replacement, int *out_changed) {
+    size_t cap = strlen(content) + (replacement ? strlen(replacement) : 0) + CLI_SKIP_ONE;
+    char *out = (char *)malloc(cap);
+    if (!out) {
+        return NULL;
+    }
+
+    size_t w = 0;
+    int dropping = 0;
+    int changed = 0;
+    int emitted = 0;
+    const char *pending = NULL; /* blank/comment run seen while dropping */
+    size_t pending_len = 0;
+
+    for (const char *p = content; *p;) {
+        size_t n = toml_line_len(p);
+        const char *body = toml_line_body(p);
+
+        if (*body == '[') {
+            if (toml_table_matches(body, prefix, include_sub)) {
+                if (!emitted && replacement) {
+                    memcpy(out + w, replacement, strlen(replacement));
+                    w += strlen(replacement);
+                    emitted = CLI_TRUE;
+                }
+                pending = NULL; /* interior to the family — goes with it */
+                pending_len = 0;
+                dropping = CLI_TRUE;
+                changed = CLI_TRUE;
+                p += n;
+                continue;
+            }
+            if (pending_len) { /* belongs to this table, not the dropped one */
+                memcpy(out + w, pending, pending_len);
+                w += pending_len;
+            }
+            pending = NULL;
+            pending_len = 0;
+            dropping = 0;
+        }
+
+        if (dropping) {
+            if (*body == '\n' || *body == '\r' || *body == '#' || *body == '\0') {
+                if (!pending) {
+                    pending = p;
+                }
+                pending_len += n;
+            } else {
+                pending = NULL; /* a key line — squarely inside the table */
+                pending_len = 0;
+            }
+            p += n;
+            continue;
+        }
+
+        memcpy(out + w, p, n);
+        w += n;
+        p += n;
+    }
+
+    if (pending_len) { /* trailing run at EOF still belongs to the file */
+        memcpy(out + w, pending, pending_len);
+        w += pending_len;
+    }
+    out[w] = '\0';
+    if (out_changed) {
+        *out_changed = changed;
+    }
+    return out;
+}
+
+/* Remove a server table and every subtable under it. Returns 0 on write,
+ * CLI_TRUE when nothing matched. */
+static int codex_remove_family(const char *config_path, const char *prefix) {
     size_t len = 0;
     char *content = read_file_str(config_path, &len);
     if (!content) {
         return CLI_TRUE;
     }
-
-    char *existing = strstr(content, section_hdr);
-    if (!existing) {
-        free(content);
-        return CLI_TRUE;
-    }
-
-    char *section_end = existing + strlen(section_hdr);
-    char *next_section = strstr(section_end, "\n[");
-    if (next_section) {
-        next_section++;
-    }
-
-    /* Remove leading newline if present */
-    if (existing > content && *(existing - CLI_SKIP_ONE) == '\n') {
-        existing--;
-    }
-
-    size_t prefix_len = (size_t)(existing - content);
-    const char *suffix = next_section ? next_section : "";
-    size_t suffix_len = strlen(suffix);
-    size_t new_len = prefix_len + suffix_len;
-    char *result = (char *)malloc(new_len + CLI_SKIP_ONE);
-    if (!result) {
+    int changed = 0;
+    char *out = toml_rewrite_tables(content, prefix, CLI_TRUE, NULL, &changed);
+    if (!out) {
         free(content);
         return CLI_ERR;
     }
-    memcpy(result, content, prefix_len);
-    memcpy(result + prefix_len, suffix, suffix_len);
-    result[new_len] = '\0';
-
-    int rc = write_file_str(config_path, result);
+    int rc = changed ? write_file_str(config_path, out) : CLI_TRUE;
     free(content);
-    free(result);
+    free(out);
     return rc;
 }
 
@@ -1519,8 +1610,8 @@ int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
         return CLI_ERR;
     }
 
-    /* Migration: drop the pre-rename section before upserting ours. */
-    codex_remove_section(config_path, CODEX_LEGACY_SECTION);
+    /* Migration: the pre-rename server and all of its subtables. */
+    codex_remove_family(config_path, CODEX_LEGACY_PREFIX);
 
     size_t len = 0;
     char *content = read_file_str(config_path, &len);
@@ -1534,41 +1625,26 @@ int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
         return write_file_str(config_path, section);
     }
 
-    /* Check if our section already exists */
-    char *existing = strstr(content, CODEX_CMM_SECTION);
-    if (existing) {
-        /* Remove old section: from [mcp_servers.code-cortex-mcp] to next [section] or EOF */
-        char *section_end = existing + strlen(CODEX_CMM_SECTION);
-        /* Find next [section] header */
-        char *next_section = strstr(section_end, "\n[");
-        if (next_section) {
-            next_section++; /* keep the newline before next section */
-        }
-
-        size_t prefix_len = (size_t)(existing - content);
-        const char *suffix = next_section ? next_section : "";
-        size_t suffix_len = strlen(suffix);
-        size_t new_len = prefix_len + strlen(section) + CLI_SKIP_ONE + suffix_len;
-        char *result = (char *)malloc(new_len + CLI_SKIP_ONE);
-        if (!result) {
-            free(content);
-            return CLI_ERR;
-        }
-        memcpy(result, content, prefix_len);
-        memcpy(result + prefix_len, section, strlen(section));
-        result[prefix_len + strlen(section)] = '\n';
-        memcpy(result + prefix_len + strlen(section) + CLI_SKIP_ONE, suffix, suffix_len);
-        result[new_len] = '\0';
-
+    /* Replace our own table in place. Subtables under it are left alone on
+     * purpose: they hold per-tool approval modes the user set in Codex, and
+     * a reinstall or version bump has no business discarding those. */
+    int changed = 0;
+    char *result = toml_rewrite_tables(content, CODEX_CMM_PREFIX, 0, section, &changed);
+    if (!result) {
+        free(content);
+        return CLI_ERR;
+    }
+    if (changed) {
         int rc = write_file_str(config_path, result);
         free(content);
         free(result);
         return rc;
     }
+    free(result);
 
     /* Append our section */
     size_t new_len = len + CLI_SKIP_ONE + strlen(section);
-    char *result = (char *)malloc(new_len + CLI_SKIP_ONE);
+    result = (char *)malloc(new_len + CLI_SKIP_ONE);
     if (!result) {
         free(content);
         return CLI_ERR;
@@ -1588,8 +1664,8 @@ int cbm_remove_codex_mcp(const char *config_path) {
     if (!config_path) {
         return CLI_ERR;
     }
-    codex_remove_section(config_path, CODEX_LEGACY_SECTION);
-    return codex_remove_section(config_path, CODEX_CMM_SECTION);
+    codex_remove_family(config_path, CODEX_LEGACY_PREFIX);
+    return codex_remove_family(config_path, CODEX_CMM_PREFIX);
 }
 
 /* ── SessionStart reminder hook (Codex / Gemini / Antigravity) ──────
@@ -1608,20 +1684,35 @@ int cbm_remove_codex_mcp(const char *config_path) {
  * array-of-tables (which both start with '['). */
 #define CODEX_HOOK_BEGIN "# >>> code-cortex-mcp SessionStart >>>"
 #define CODEX_HOOK_END "# <<< code-cortex-mcp SessionStart <<<"
+#define CODEX_LEGACY_HOOK_BEGIN "# >>> codebase-memory-mcp SessionStart >>>" /* pre-rename */
+#define CODEX_LEGACY_HOOK_END "# <<< codebase-memory-mcp SessionStart <<<"
 
-/* Splice out an existing [CODEX_HOOK_BEGIN .. CODEX_HOOK_END] block (inclusive,
- * plus a leading newline). Returns a newly-malloc'd string the caller frees, or
- * NULL if no block was present (content is left untouched). */
-static char *codex_hook_strip(const char *content) {
-    const char *begin = strstr(content, CODEX_HOOK_BEGIN);
+/* The tables we write between the sentinels; anything else found in there was
+ * put there by Codex and has to survive removal. */
+#define CODEX_HOOK_TABLE "[[hooks.SessionStart]]"
+#define CODEX_HOOK_SUBTABLE "[[hooks.SessionStart.hooks]]"
+
+/* Splice out an existing [begin .. end] block (inclusive, plus a leading
+ * newline). Returns a newly-malloc'd string the caller frees, or NULL if no
+ * block was present (content is left untouched).
+ *
+ * Codex rewrites config.toml wholesale and appends its own tables ahead of a
+ * trailing comment, so [hooks.state] and friends drift *inside* our sentinels.
+ * Those are hook-trust hashes for every project on the machine — splicing the
+ * region blindly would delete them, so any table we did not author is carried
+ * back out. */
+static char *codex_hook_strip_one(const char *content, const char *begin_marker,
+                                  const char *end_marker) {
+    const char *begin = strstr(content, begin_marker);
     if (!begin) {
         return NULL;
     }
-    const char *end = strstr(begin, CODEX_HOOK_END);
+    const char *end = strstr(begin, end_marker);
     if (!end) {
         return NULL;
     }
-    end += strlen(CODEX_HOOK_END);
+    const char *region_end = end;
+    end += strlen(end_marker);
     if (*end == '\n') {
         end++;
     }
@@ -1632,14 +1723,55 @@ static char *codex_hook_strip(const char *content) {
     }
     size_t prefix_len = (size_t)(cut - content);
     size_t suffix_len = strlen(end);
-    char *out = (char *)malloc(prefix_len + suffix_len + CLI_SKIP_ONE);
+    size_t region_len = (size_t)(region_end - begin);
+    char *out = (char *)malloc(prefix_len + region_len + suffix_len + CLI_PAIR_LEN);
     if (!out) {
         return NULL;
     }
     memcpy(out, content, prefix_len);
-    memcpy(out + prefix_len, end, suffix_len);
-    out[prefix_len + suffix_len] = '\0';
+    size_t w = prefix_len;
+
+    /* Salvage foreign tables from inside the region. Lines ahead of the first
+     * table header are ours (the marker itself). */
+    int owned = CLI_TRUE;
+    int salvaged = 0;
+    for (const char *p = begin; p < region_end;) {
+        size_t n = toml_line_len(p);
+        if (p + n > region_end) {
+            n = (size_t)(region_end - p);
+        }
+        const char *body = toml_line_body(p);
+        if (*body == '[') {
+            owned = strncmp(body, CODEX_HOOK_TABLE, strlen(CODEX_HOOK_TABLE)) == 0 ||
+                    strncmp(body, CODEX_HOOK_SUBTABLE, strlen(CODEX_HOOK_SUBTABLE)) == 0;
+        }
+        if (!owned) {
+            if (!salvaged) {
+                out[w++] = '\n';
+                salvaged = CLI_TRUE;
+            }
+            memcpy(out + w, p, n);
+            w += n;
+        }
+        p += n;
+    }
+
+    memcpy(out + w, end, suffix_len);
+    out[w + suffix_len] = '\0';
     return out;
+}
+
+/* Strip our SessionStart block under either the current or the pre-rename
+ * name. NULL when neither was present. */
+static char *codex_hook_strip(const char *content) {
+    char *legacy = codex_hook_strip_one(content, CODEX_LEGACY_HOOK_BEGIN, CODEX_LEGACY_HOOK_END);
+    char *current =
+        codex_hook_strip_one(legacy ? legacy : content, CODEX_HOOK_BEGIN, CODEX_HOOK_END);
+    if (current) {
+        free(legacy);
+        return current;
+    }
+    return legacy;
 }
 
 /* Install/update the Codex SessionStart reminder hook in config.toml. */

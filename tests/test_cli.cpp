@@ -773,6 +773,113 @@ TEST(cli_codex_mcp_migrates_legacy_section) {
     PASS();
 }
 
+TEST(cli_codex_mcp_migrates_legacy_subtables) {
+    /* Codex writes [mcp_servers.<name>.tools.<tool>] subtables of its own once
+     * a tool gets an approval mode. Leaving one behind after the rename
+     * re-declares the old server with no command — Codex then refuses to start
+     * with "invalid transport". The whole family has to go. */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-mcp-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/config.toml", tmpdir);
+    write_test_file(configpath, "[mcp_servers.codebase-memory-mcp]\n"
+                                "command = \"/old/path\"\n"
+                                "\n"
+                                "[mcp_servers.codebase-memory-mcp.tools.list_projects]\n"
+                                "approval_mode = \"approve\"\n"
+                                "\n"
+                                "[mcp_servers.codebase-memory-mcp.tools.search_graph]\n"
+                                "approval_mode = \"approve\"\n"
+                                "\n"
+                                "[other]\n"
+                                "key = \"value\"\n");
+
+    cbm_upsert_codex_mcp("/usr/local/bin/code-cortex-mcp", configpath);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NULL(strstr(data, "codebase-memory-mcp")); /* no orphan subtable */
+    ASSERT(strstr(data, "[mcp_servers.code-cortex-mcp]") != NULL);
+    ASSERT(strstr(data, "[other]") != NULL);
+    ASSERT(strstr(data, "key = \"value\"") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_codex_mcp_upsert_keeps_tool_subtables) {
+    /* Our own per-tool approval modes are the user's settings — a reinstall
+     * updates the command and leaves them alone. The comment introducing the
+     * next section must survive too: it is the SessionStart sentinel. */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-mcp-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/config.toml", tmpdir);
+    write_test_file(configpath, "[mcp_servers.code-cortex-mcp]\n"
+                                "command = \"/old/path\"\n"
+                                "\n"
+                                "# >>> code-cortex-mcp SessionStart >>>\n"
+                                "[[hooks.SessionStart]]\n"
+                                "matcher = \"startup\"\n"
+                                "# <<< code-cortex-mcp SessionStart <<<\n"
+                                "\n"
+                                "[mcp_servers.code-cortex-mcp.tools.search_graph]\n"
+                                "approval_mode = \"approve\"\n");
+
+    ASSERT_EQ(cbm_upsert_codex_mcp("/new/path/code-cortex-mcp", configpath), 0);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NULL(strstr(data, "/old/path"));
+    ASSERT(strstr(data, "/new/path/code-cortex-mcp") != NULL);
+    /* User's approval setting kept */
+    ASSERT(strstr(data, "[mcp_servers.code-cortex-mcp.tools.search_graph]") != NULL);
+    ASSERT(strstr(data, "approval_mode = \"approve\"") != NULL);
+    /* Sentinel comment not swallowed by the replaced table */
+    ASSERT(strstr(data, "# >>> code-cortex-mcp SessionStart >>>") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_codex_mcp_uninstall_removes_subtables) {
+    /* Same family rule on the way out: uninstall must not strand a subtable. */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-mcp-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/config.toml", tmpdir);
+    write_test_file(configpath, "model = \"gpt-5\"\n"
+                                "\n"
+                                "[mcp_servers.code-cortex-mcp]\n"
+                                "command = \"/usr/local/bin/code-cortex-mcp\"\n"
+                                "\n"
+                                "[mcp_servers.code-cortex-mcp.tools.search_graph]\n"
+                                "approval_mode = \"approve\"\n"
+                                "\n"
+                                "[mcp_servers.other]\n"
+                                "command = \"x\"\n");
+
+    ASSERT_EQ(cbm_remove_codex_mcp(configpath), 0);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NULL(strstr(data, "code-cortex-mcp"));
+    ASSERT(strstr(data, "model = \"gpt-5\"") != NULL);
+    ASSERT(strstr(data, "[mcp_servers.other]") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 TEST(cli_migrate_legacy_install) {
     /* Filesystem migration: legacy binary, cache dir, and skills removed. */
     char tmpdir[256];
@@ -1695,6 +1802,96 @@ TEST(cli_codex_session_hook_issue330) {
     d = read_test_file(cfg);
     ASSERT_NULL(strstr(d, "hooks.SessionStart"));
     ASSERT(strstr(d, "[mcp_servers.other]") != NULL); /* still preserved after removal */
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_codex_hook_migrates_legacy_block) {
+    /* The pre-rename sentinel block has its own markers — without a migration
+     * it accumulates, leaving a second hook that advertises a dead server. */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codexhook-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char cfg[512];
+    snprintf(cfg, sizeof(cfg), "%s/config.toml", tmpdir);
+    write_test_file(cfg, "[mcp_servers.other]\n"
+                         "command = \"x\"\n"
+                         "\n"
+                         "# >>> codebase-memory-mcp SessionStart >>>\n"
+                         "[[hooks.SessionStart]]\n"
+                         "matcher = \"startup|resume|clear|compact\"\n"
+                         "\n"
+                         "[[hooks.SessionStart.hooks]]\n"
+                         "type = \"command\"\n"
+                         "command = 'echo \"prefer codebase-memory-mcp\"'\n"
+                         "# <<< codebase-memory-mcp SessionStart <<<\n");
+
+    ASSERT_EQ(cbm_upsert_codex_hooks(cfg), 0);
+
+    const char *d = read_test_file(cfg);
+    ASSERT_NOT_NULL(d);
+    ASSERT_NULL(strstr(d, "codebase-memory-mcp")); /* legacy block gone */
+    ASSERT(strstr(d, "# >>> code-cortex-mcp SessionStart >>>") != NULL);
+    /* Exactly one hook block remains. */
+    const char *first = strstr(d, "[[hooks.SessionStart]]");
+    ASSERT_NOT_NULL(first);
+    ASSERT_NULL(strstr(first + 1, "[[hooks.SessionStart]]"));
+    ASSERT(strstr(d, "[mcp_servers.other]") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_codex_hook_preserves_foreign_tables) {
+    /* Codex appends its own tables ahead of the file's trailing comment, so
+     * [hooks.state] — hook-trust hashes for every project on the machine —
+     * drifts inside our sentinels. Removing the block must not take them. */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codexhook-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char cfg[512];
+    snprintf(cfg, sizeof(cfg), "%s/config.toml", tmpdir);
+    write_test_file(cfg, "[mcp_servers.other]\n"
+                         "command = \"x\"\n"
+                         "\n"
+                         "# >>> code-cortex-mcp SessionStart >>>\n"
+                         "[[hooks.SessionStart]]\n"
+                         "matcher = \"startup|resume|clear|compact\"\n"
+                         "\n"
+                         "[[hooks.SessionStart.hooks]]\n"
+                         "type = \"command\"\n"
+                         "command = 'echo \"hi\"'\n"
+                         "\n"
+                         "[hooks.state]\n"
+                         "\n"
+                         "[hooks.state.\"/other/project:pre_tool_use:0:0\"]\n"
+                         "trusted_hash = \"sha256:deadbeef\"\n"
+                         "# <<< code-cortex-mcp SessionStart <<<\n");
+
+    ASSERT_EQ(cbm_remove_codex_hooks(cfg), 0);
+
+    const char *d = read_test_file(cfg);
+    ASSERT_NOT_NULL(d);
+    ASSERT_NULL(strstr(d, "hooks.SessionStart"));           /* ours removed */
+    ASSERT_NULL(strstr(d, "code-cortex-mcp SessionStart")); /* sentinels too */
+    /* Codex's bookkeeping survives */
+    ASSERT(strstr(d, "[hooks.state]") != NULL);
+    ASSERT(strstr(d, "trusted_hash = \"sha256:deadbeef\"") != NULL);
+    ASSERT(strstr(d, "[mcp_servers.other]") != NULL);
+
+    /* Re-upserting after the salvage still yields exactly one block. */
+    ASSERT_EQ(cbm_upsert_codex_hooks(cfg), 0);
+    ASSERT_EQ(cbm_upsert_codex_hooks(cfg), 0);
+    d = read_test_file(cfg);
+    const char *first = strstr(d, "[[hooks.SessionStart]]");
+    ASSERT_NOT_NULL(first);
+    ASSERT_NULL(strstr(first + 1, "[[hooks.SessionStart]]"));
+    ASSERT(strstr(d, "trusted_hash = \"sha256:deadbeef\"") != NULL);
 
     test_rmdir_r(tmpdir);
     PASS();
@@ -2744,6 +2941,9 @@ SUITE(cli) {
     RUN_TEST(cli_editor_mcp_migrates_legacy_key);
     RUN_TEST(cli_editor_mcp_uninstall_removes_legacy_key);
     RUN_TEST(cli_codex_mcp_migrates_legacy_section);
+    RUN_TEST(cli_codex_mcp_migrates_legacy_subtables);
+    RUN_TEST(cli_codex_mcp_upsert_keeps_tool_subtables);
+    RUN_TEST(cli_codex_mcp_uninstall_removes_subtables);
     RUN_TEST(cli_migrate_legacy_install);
     RUN_TEST(cli_gemini_mcp_install);
 
@@ -2799,6 +2999,8 @@ SUITE(cli) {
     RUN_TEST(cli_detect_agents_finds_cursor_issue222);
     RUN_TEST(cli_install_plan_receipt_no_mutation_issue388);
     RUN_TEST(cli_codex_session_hook_issue330);
+    RUN_TEST(cli_codex_hook_migrates_legacy_block);
+    RUN_TEST(cli_codex_hook_preserves_foreign_tables);
     RUN_TEST(cli_gemini_session_hook_parity);
     RUN_TEST(cli_detect_agents_finds_gemini);
     RUN_TEST(cli_detect_agents_finds_zed);
