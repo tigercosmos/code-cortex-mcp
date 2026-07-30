@@ -821,6 +821,7 @@ int cbm_install_editor_mcp(const char *binary_path, const char *config_path) {
 
     /* Remove existing entry if present */
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     /* Add our entry */
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
@@ -858,6 +859,7 @@ int cbm_remove_editor_mcp(const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -903,6 +905,7 @@ int cbm_install_openclaw_mcp(const char *binary_path, const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_bool(mdoc, entry, "enabled", true);
@@ -948,6 +951,7 @@ int cbm_remove_openclaw_mcp(const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -987,6 +991,7 @@ int cbm_install_vscode_mcp(const char *binary_path, const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, entry, "type", "stdio");
@@ -1024,6 +1029,7 @@ int cbm_remove_vscode_mcp(const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -1063,6 +1069,7 @@ int cbm_install_zed_mcp(const char *binary_path, const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
@@ -1102,6 +1109,7 @@ int cbm_remove_zed_mcp(const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -1459,11 +1467,60 @@ int cbm_remove_instructions(const char *path) {
 /* ── Codex MCP config (TOML) ─────────────────────────────────── */
 
 #define CODEX_CMM_SECTION "[mcp_servers.code-cortex-mcp]"
+#define CODEX_LEGACY_SECTION "[mcp_servers.codebase-memory-mcp]" /* pre-rename */
+
+/* Remove one named TOML section from the file (up to the next [section] or
+ * EOF). Returns 0 on write, CLI_TRUE when the section is absent. */
+static int codex_remove_section(const char *config_path, const char *section_hdr) {
+    size_t len = 0;
+    char *content = read_file_str(config_path, &len);
+    if (!content) {
+        return CLI_TRUE;
+    }
+
+    char *existing = strstr(content, section_hdr);
+    if (!existing) {
+        free(content);
+        return CLI_TRUE;
+    }
+
+    char *section_end = existing + strlen(section_hdr);
+    char *next_section = strstr(section_end, "\n[");
+    if (next_section) {
+        next_section++;
+    }
+
+    /* Remove leading newline if present */
+    if (existing > content && *(existing - CLI_SKIP_ONE) == '\n') {
+        existing--;
+    }
+
+    size_t prefix_len = (size_t)(existing - content);
+    const char *suffix = next_section ? next_section : "";
+    size_t suffix_len = strlen(suffix);
+    size_t new_len = prefix_len + suffix_len;
+    char *result = (char *)malloc(new_len + CLI_SKIP_ONE);
+    if (!result) {
+        free(content);
+        return CLI_ERR;
+    }
+    memcpy(result, content, prefix_len);
+    memcpy(result + prefix_len, suffix, suffix_len);
+    result[new_len] = '\0';
+
+    int rc = write_file_str(config_path, result);
+    free(content);
+    free(result);
+    return rc;
+}
 
 int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
     if (!binary_path || !config_path) {
         return CLI_ERR;
     }
+
+    /* Migration: drop the pre-rename section before upserting ours. */
+    codex_remove_section(config_path, CODEX_LEGACY_SECTION);
 
     size_t len = 0;
     char *content = read_file_str(config_path, &len);
@@ -1531,47 +1588,8 @@ int cbm_remove_codex_mcp(const char *config_path) {
     if (!config_path) {
         return CLI_ERR;
     }
-
-    size_t len = 0;
-    char *content = read_file_str(config_path, &len);
-    if (!content) {
-        return CLI_TRUE;
-    }
-
-    char *existing = strstr(content, CODEX_CMM_SECTION);
-    if (!existing) {
-        free(content);
-        return CLI_TRUE;
-    }
-
-    char *section_end = existing + strlen(CODEX_CMM_SECTION);
-    char *next_section = strstr(section_end, "\n[");
-    if (next_section) {
-        next_section++;
-    }
-
-    /* Remove leading newline if present */
-    if (existing > content && *(existing - CLI_SKIP_ONE) == '\n') {
-        existing--;
-    }
-
-    size_t prefix_len = (size_t)(existing - content);
-    const char *suffix = next_section ? next_section : "";
-    size_t suffix_len = strlen(suffix);
-    size_t new_len = prefix_len + suffix_len;
-    char *result = (char *)malloc(new_len + CLI_SKIP_ONE);
-    if (!result) {
-        free(content);
-        return CLI_ERR;
-    }
-    memcpy(result, content, prefix_len);
-    memcpy(result + prefix_len, suffix, suffix_len);
-    result[new_len] = '\0';
-
-    int rc = write_file_str(config_path, result);
-    free(content);
-    free(result);
-    return rc;
+    codex_remove_section(config_path, CODEX_LEGACY_SECTION);
+    return codex_remove_section(config_path, CODEX_CMM_SECTION);
 }
 
 /* ── SessionStart reminder hook (Codex / Gemini / Antigravity) ──────
@@ -1717,6 +1735,7 @@ int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(mcp, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(mcp, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_bool(mdoc, entry, "enabled", true);
@@ -1757,6 +1776,7 @@ int cbm_remove_opencode_mcp(const char *config_path) {
     }
 
     yyjson_mut_obj_remove_key(mcp, "code-cortex-mcp");
+    yyjson_mut_obj_remove_key(mcp, "codebase-memory-mcp"); /* legacy pre-rename key */
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -3035,6 +3055,8 @@ static int cbm_macos_adhoc_sign(const char *binary_path) {
 /* ── Kill other MCP server instances ──────────────────────────── */
 
 static int cbm_kill_other_instances(void) {
+    /* Also match the pre-rename binary name so migration can stop (and, on
+     * Windows, delete) legacy servers still running under the old name. */
 #ifdef _WIN32
     /* taskkill /IM kills ALL matching processes INCLUDING self.
      * Use /FI filter to exclude our own PID. */
@@ -3043,24 +3065,31 @@ static int cbm_kill_other_instances(void) {
     const char *argv[] = {"taskkill", "/F",       "/FI", "IMAGENAME eq code-cortex-mcp.exe",
                           "/FI",      pid_filter, NULL};
     (void)cbm_exec_no_shell(argv);
+    const char *argv_legacy[] = {
+        "taskkill", "/F", "/FI", "IMAGENAME eq codebase-memory-mcp.exe", "/FI", pid_filter, NULL};
+    (void)cbm_exec_no_shell(argv_legacy);
     return 0;
 #else
     int killed = 0;
     pid_t self = getpid();
-    FILE *fp = cbm_popen("pgrep -x code-cortex-mcp", "r");
-    if (!fp) {
-        return 0;
-    }
-    char line[CLI_BUF_32];
-    while (fgets(line, sizeof(line), fp)) {
-        pid_t pid = (pid_t)strtol(line, NULL, CLI_STRTOL_BASE);
-        if (pid > 0 && pid != self) {
-            if (kill(pid, SIGTERM) == 0) {
-                killed++;
+    static const char *const pgrep_cmds[] = {"pgrep -x code-cortex-mcp",
+                                             "pgrep -x codebase-memory-mcp", NULL};
+    for (int c = 0; pgrep_cmds[c]; c++) {
+        FILE *fp = cbm_popen(pgrep_cmds[c], "r");
+        if (!fp) {
+            continue;
+        }
+        char line[CLI_BUF_32];
+        while (fgets(line, sizeof(line), fp)) {
+            pid_t pid = (pid_t)strtol(line, NULL, CLI_STRTOL_BASE);
+            if (pid > 0 && pid != self) {
+                if (kill(pid, SIGTERM) == 0) {
+                    killed++;
+                }
             }
         }
+        cbm_pclose(fp);
     }
-    cbm_pclose(fp);
     return killed;
 #endif
 }
@@ -3746,6 +3775,74 @@ char *cbm_build_install_plan_json(const char *home, const char *binary_path) {
     return json; /* malloc'd; caller frees */
 }
 
+/* ── Migration from the pre-rename product (codebase-memory-mcp) ──
+ * Config entries migrate inside the per-agent install/remove helpers (the
+ * legacy server key and Codex TOML section are dropped on upsert); this
+ * handles the filesystem leftovers: the old binary, the old default cache
+ * dir, and the old skill directories. Returns the number of items removed
+ * (or that would be removed under dry_run). */
+int cbm_migrate_legacy_install(const char *home, bool dry_run) {
+    if (!home) {
+        return 0;
+    }
+    int migrated = 0;
+    struct stat st;
+
+    /* Old binary */
+    char old_bin[CLI_BUF_1K];
+#ifdef _WIN32
+    snprintf(old_bin, sizeof(old_bin), "%s/.local/bin/codebase-memory-mcp.exe", home);
+#else
+    snprintf(old_bin, sizeof(old_bin), "%s/.local/bin/codebase-memory-mcp", home);
+#endif
+    if (stat(old_bin, &st) == 0) {
+        if (dry_run) {
+            printf("Would remove legacy binary: %s\n", old_bin);
+            migrated++;
+        } else if (cbm_unlink(old_bin) == 0) {
+            printf("Removed legacy binary: %s\n", old_bin);
+            migrated++;
+        }
+    }
+
+    /* Old default cache dir (indexes rebuild under the new name) */
+    char old_cache[CLI_BUF_1K];
+    snprintf(old_cache, sizeof(old_cache), "%s/.cache/codebase-memory-mcp", home);
+    if (stat(old_cache, &st) == 0) {
+        if (dry_run) {
+            printf("Would remove legacy cache dir: %s\n", old_cache);
+            migrated++;
+        } else if (rmdir_recursive(old_cache) == 0) {
+            printf("Removed legacy cache dir: %s\n", old_cache);
+            migrated++;
+        }
+    }
+
+    /* Old skill directories */
+    static const char *const legacy_skills[] = {
+        "codebase-memory",         "codebase-memory-exploring", "codebase-memory-tracing",
+        "codebase-memory-quality", "codebase-memory-reference",
+    };
+    char config_dir[CLI_BUF_1K];
+    cbm_claude_config_dir(home, config_dir, sizeof(config_dir));
+    for (size_t i = 0; i < sizeof(legacy_skills) / sizeof(legacy_skills[0]); i++) {
+        char skill_path[CLI_BUF_1K];
+        snprintf(skill_path, sizeof(skill_path), "%s/skills/%s", config_dir, legacy_skills[i]);
+        if (stat(skill_path, &st) != 0) {
+            continue;
+        }
+        if (dry_run) {
+            printf("Would remove legacy skill: %s\n", skill_path);
+            migrated++;
+        } else if (rmdir_recursive(skill_path) == 0) {
+            printf("Removed legacy skill: %s\n", skill_path);
+            migrated++;
+        }
+    }
+
+    return migrated;
+}
+
 int cbm_cmd_install(int argc, char **argv) {
     parse_auto_answer(argc, argv);
     bool dry_run = false;
@@ -3800,11 +3897,21 @@ int cbm_cmd_install(int argc, char **argv) {
         return CLI_TRUE;
     }
 
-    /* Step 1b: Kill running MCP server instances so agents pick up new config */
+    /* Step 1b: Kill running MCP server instances so agents pick up new config
+     * (matches the legacy binary name too, so migration can remove it). */
     if (!dry_run) {
         int killed = cbm_kill_other_instances();
         if (killed > 0) {
             printf("Stopped %d running MCP server instance(s).\n\n", killed);
+        }
+    }
+
+    /* Step 1b': Migrate from a pre-rename (codebase-memory-mcp) install. */
+    {
+        int migrated = cbm_migrate_legacy_install(home, dry_run);
+        if (migrated > 0) {
+            printf("%s %d leftover(s) from a codebase-memory-mcp install.\n\n",
+                   dry_run ? "Would migrate" : "Migrated", migrated);
         }
     }
 

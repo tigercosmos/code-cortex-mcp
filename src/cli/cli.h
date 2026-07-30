@@ -314,14 +314,21 @@ int cbm_config_delete(cbm_config_t *cfg, const char *key);
 
 /* ── Subcommands (wired from main.c) ─────────────────────────── */
 
+/* Migration from a pre-rename (codebase-memory-mcp) install: removes the
+ * legacy binary, the legacy default cache dir, and the legacy skill dirs.
+ * Config entries migrate inside the per-agent upsert/remove helpers.
+ * Returns the number of items removed (or reported under dry_run). */
+int cbm_migrate_legacy_install(const char *home, bool dry_run);
+
 /* install: copy binary, install skills, install editor MCP configs, ensure PATH.
- * Prompts to delete old indexes if any exist — rejects on "no". */
+ * Prompts to delete old indexes if any exist — rejects on "no".
+ * Also migrates leftovers from a pre-rename codebase-memory-mcp install. */
 int cbm_cmd_install(int argc, char **argv);
 
 /* uninstall: remove skills, remove editor MCP configs, remove binary. */
 int cbm_cmd_uninstall(int argc, char **argv);
 
-/* update: check latest release, prompt for index deletion, prompt for ui/standard,
+/* update: check latest release, prompt for index deletion,
  * download and replace binary. */
 int cbm_cmd_update(int argc, char **argv);
 

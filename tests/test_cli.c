@@ -695,6 +695,128 @@ TEST(cli_editor_mcp_uninstall) {
     PASS();
 }
 
+TEST(cli_editor_mcp_migrates_legacy_key) {
+    /* Install over a config carrying the pre-rename server key must drop the
+     * legacy entry and write the new one (config migration on upsert). */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-mcp-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/mcp.json", tmpdir);
+    write_test_file(configpath, "{\"mcpServers\": {"
+                                "\"codebase-memory-mcp\": {\"command\": \"/old/path\"},"
+                                "\"other-server\": {\"command\": \"/usr/bin/other\"}}}");
+
+    cbm_install_editor_mcp("/usr/local/bin/code-cortex-mcp", configpath);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "\"codebase-memory-mcp\"") == NULL);
+    ASSERT(strstr(data, "\"code-cortex-mcp\"") != NULL);
+    ASSERT(strstr(data, "other-server") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_editor_mcp_uninstall_removes_legacy_key) {
+    /* Uninstall must clean both the current and the pre-rename server key. */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-mcp-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/mcp.json", tmpdir);
+    write_test_file(configpath, "{\"mcpServers\": {"
+                                "\"codebase-memory-mcp\": {\"command\": \"/old/path\"},"
+                                "\"other-server\": {\"command\": \"/usr/bin/other\"}}}");
+
+    int rc = cbm_remove_editor_mcp(configpath);
+    ASSERT_EQ(rc, 0);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "\"codebase-memory-mcp\"") == NULL);
+    ASSERT(strstr(data, "other-server") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_codex_mcp_migrates_legacy_section) {
+    /* Codex TOML upsert must drop the pre-rename [mcp_servers.*] section. */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-mcp-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/config.toml", tmpdir);
+    write_test_file(configpath, "[mcp_servers.codebase-memory-mcp]\n"
+                                "command = \"/old/path\"\n"
+                                "\n"
+                                "[other]\n"
+                                "key = \"value\"\n");
+
+    cbm_upsert_codex_mcp("/usr/local/bin/code-cortex-mcp", configpath);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "[mcp_servers.codebase-memory-mcp]") == NULL);
+    ASSERT(strstr(data, "[mcp_servers.code-cortex-mcp]") != NULL);
+    ASSERT(strstr(data, "[other]") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_migrate_legacy_install) {
+    /* Filesystem migration: legacy binary, cache dir, and skills removed. */
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-mig-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/.local/bin", tmpdir);
+    test_mkdirp(path);
+    snprintf(path, sizeof(path), "%s/.local/bin/codebase-memory-mcp", tmpdir);
+    write_test_file(path, "old binary");
+    snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp", tmpdir);
+    test_mkdirp(path);
+    snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp/proj.db", tmpdir);
+    write_test_file(path, "old index");
+    snprintf(path, sizeof(path), "%s/.claude/skills/codebase-memory", tmpdir);
+    test_mkdirp(path);
+    snprintf(path, sizeof(path), "%s/.claude/skills/codebase-memory/SKILL.md", tmpdir);
+    write_test_file(path, "old skill");
+
+    /* Dry-run reports but removes nothing */
+    int would = cbm_migrate_legacy_install(tmpdir, true);
+    ASSERT_EQ(would, 3);
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/.local/bin/codebase-memory-mcp", tmpdir);
+    ASSERT(stat(path, &st) == 0);
+
+    /* Real run removes all three */
+    int migrated = cbm_migrate_legacy_install(tmpdir, false);
+    ASSERT_EQ(migrated, 3);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.claude/skills/codebase-memory", tmpdir);
+    ASSERT(stat(path, &st) != 0);
+
+    /* Second run is a no-op */
+    ASSERT_EQ(cbm_migrate_legacy_install(tmpdir, false), 0);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 TEST(cli_gemini_mcp_install) {
     /* Port of TestGeminiMCPInstall */
     char tmpdir[256];
@@ -2614,6 +2736,10 @@ SUITE(cli) {
     RUN_TEST(cli_editor_mcp_idempotent);
     RUN_TEST(cli_editor_mcp_preserves_others);
     RUN_TEST(cli_editor_mcp_uninstall);
+    RUN_TEST(cli_editor_mcp_migrates_legacy_key);
+    RUN_TEST(cli_editor_mcp_uninstall_removes_legacy_key);
+    RUN_TEST(cli_codex_mcp_migrates_legacy_section);
+    RUN_TEST(cli_migrate_legacy_install);
     RUN_TEST(cli_gemini_mcp_install);
 
     /* VS Code MCP (2 tests — install_test.go) */
