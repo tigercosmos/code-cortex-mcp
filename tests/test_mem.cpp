@@ -14,7 +14,7 @@
 #include "discover/discover.h"
 #include "cbm.h"
 
-#include <stdatomic.h>
+#include "../src/foundation/cbm_atomic.h"
 #include <sys/stat.h>
 
 /* ASan detection — mimalloc MI_OVERRIDE=0 under ASan, mi_process_info
@@ -595,11 +595,11 @@ TEST(parallel_extract_with_slab) {
         .cancelled = &cancelled,
     };
 
-    _Atomic int64_t shared_ids;
+    cbm_atomic_int64 shared_ids;
     int64_t gbuf_next = cbm_gbuf_next_id(gbuf);
     atomic_init(&shared_ids, gbuf_next);
 
-    CBMFileResult **result_cache = calloc(file_count, sizeof(CBMFileResult *));
+    CBMFileResult **result_cache = (CBMFileResult **)calloc(file_count, sizeof(CBMFileResult *));
     ASSERT_NOT_NULL(result_cache);
 
     int rc = cbm_parallel_extract(&ctx, files, file_count, result_cache, &shared_ids, 2);

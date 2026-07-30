@@ -83,7 +83,7 @@ TEST(cypher_lex_string_overflow) {
      * overflow the stack buffer in lex_string_literal. */
     const int big = 5000;
     /* query: "AAAA...A"  (quotes included) */
-    char *query = malloc(big + 3); /* quote + big chars + quote + NUL */
+    char *query = (char *)malloc(big + 3); /* quote + big chars + quote + NUL */
     ASSERT_NOT_NULL(query);
     query[0] = '"';
     memset(query + 1, 'A', big);

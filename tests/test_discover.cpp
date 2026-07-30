@@ -265,7 +265,7 @@ TEST(discover_simple) {
     th_write_file(TH_PATH(base, "src/app.py"), "print(1)\n");
     th_write_file(TH_PATH(base, "src/icon.png"), "binary\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -305,7 +305,7 @@ TEST(discover_wide_sibling_fanout_exceeds_initial_walk_stack) {
         th_write_file(TH_PATH(base, rel), "x = 1\n");
     }
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -326,7 +326,7 @@ TEST(discover_skips_git_dir) {
     th_write_file(TH_PATH(base, ".git/config"), "x\n");
     th_write_file(TH_PATH(base, "src/main.go"), "package main\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -348,7 +348,7 @@ TEST(discover_with_gitignore) {
     th_write_file(TH_PATH(base, "src/main.go"), "package main\n");
     th_write_file(TH_PATH(base, "src/debug.log"), "error\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -375,7 +375,7 @@ TEST(discover_gitignore_dir_excluded_issue234) {
     th_write_file(TH_PATH(base, "vendor/autoload.php"), "<?php\nfunction autoload() {}\n");
     th_write_file(TH_PATH(base, "vendor/pkg/lib.php"), "<?php\nfunction lib() {}\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -407,7 +407,7 @@ TEST(discover_max_file_size) {
     }
     fclose(f);
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     opts.max_file_size = 1024;
     cbm_file_info_t *files = NULL;
     int count = 0;
@@ -453,7 +453,7 @@ TEST(discover_skips_worktrees) {
     th_write_file(TH_PATH(base, "src/main.go"), "package main\n");
     th_write_file(TH_PATH(base, ".worktrees/feature/src/app.go"), "package app\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -484,7 +484,7 @@ TEST(discover_cbmignore) {
     th_write_file(TH_PATH(base, "generated/types.go"), "package gen\n");
     th_write_file(TH_PATH(base, "api.pb.go"), "package api\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -508,7 +508,7 @@ TEST(discover_cbmignore_stacks) {
     th_write_file(TH_PATH(base, "main.go"), "package main\n");
     th_write_file(TH_PATH(base, "docs/api.go"), "package docs\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -543,7 +543,7 @@ TEST(discover_symlink_skipped) {
     snprintf(link_path, sizeof(link_path), "%s/link.go", base);
     symlink(real_path, link_path);
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -579,7 +579,7 @@ TEST(discover_new_ignore_patterns) {
     }
     th_write_file(TH_PATH(base, "main.go"), "package main\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -643,7 +643,7 @@ TEST(discover_cbmignore_no_git) {
     th_write_file(TH_PATH(base, "main.go"), "package main\n");
     th_write_file(TH_PATH(base, "scratch/tmp.go"), "package scratch\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
 
@@ -669,7 +669,7 @@ TEST(discover_nested_gitignore) {
     th_write_file(TH_PATH(base, "webapp/src/routes.js"), "export default []\n");
     th_write_file(TH_PATH(base, "webapp/generated/types.js"), "export {}\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
     int rc = cbm_discover(base, &opts, &files, &count);
@@ -703,7 +703,7 @@ TEST(discover_nested_gitignore_stacks_with_root) {
     th_write_file(TH_PATH(base, "webapp/src/app.js"), "const x = 1\n");
     th_write_file(TH_PATH(base, "webapp/.output/data.js"), "output data\n");
 
-    cbm_discover_opts_t opts = {0};
+    cbm_discover_opts_t opts = {};
     cbm_file_info_t *files = NULL;
     int count = 0;
     int rc = cbm_discover(base, &opts, &files, &count);

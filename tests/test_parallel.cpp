@@ -21,7 +21,7 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
+#include "../src/foundation/cbm_atomic.h"
 #include <sys/stat.h>
 
 /* ── Helper: create temp test repo ───────────────────────────────── */
@@ -126,11 +126,11 @@ static cbm_gbuf_t *run_parallel(const char *project, const char *repo_path, cbm_
         .cancelled = &cancelled,
     };
 
-    _Atomic int64_t shared_ids;
+    cbm_atomic_int64 shared_ids;
     int64_t gbuf_next = cbm_gbuf_next_id(gbuf);
     atomic_init(&shared_ids, gbuf_next);
 
-    CBMFileResult **result_cache = calloc(file_count, sizeof(CBMFileResult *));
+    CBMFileResult **result_cache = (CBMFileResult **)calloc(file_count, sizeof(CBMFileResult *));
 
     cbm_init();
     cbm_parallel_extract(&ctx, files, file_count, result_cache, &shared_ids, worker_count);
@@ -328,7 +328,7 @@ TEST(parallel_empty_files) {
         .cancelled = &cancelled,
     };
 
-    _Atomic int64_t shared_ids;
+    cbm_atomic_int64 shared_ids;
     atomic_init(&shared_ids, 1);
 
     CBMFileResult **cache = NULL;
@@ -344,7 +344,7 @@ TEST(parallel_empty_files) {
 /* ── Graph buffer merge tests ─────────────────────────────────────── */
 
 TEST(gbuf_shared_ids_unique) {
-    _Atomic int64_t shared = 1;
+    cbm_atomic_int64 shared = 1;
     cbm_gbuf_t *ga = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *gb = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
@@ -360,7 +360,7 @@ TEST(gbuf_shared_ids_unique) {
 }
 
 TEST(gbuf_merge_nodes) {
-    _Atomic int64_t shared = 1;
+    cbm_atomic_int64 shared = 1;
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
@@ -385,7 +385,7 @@ TEST(gbuf_merge_nodes) {
 }
 
 TEST(gbuf_merge_edges) {
-    _Atomic int64_t shared = 1;
+    cbm_atomic_int64 shared = 1;
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
@@ -409,7 +409,7 @@ TEST(gbuf_merge_edges) {
 }
 
 TEST(gbuf_merge_empty_src) {
-    _Atomic int64_t shared = 1;
+    cbm_atomic_int64 shared = 1;
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
@@ -424,7 +424,7 @@ TEST(gbuf_merge_empty_src) {
 }
 
 TEST(gbuf_merge_src_free_safe) {
-    _Atomic int64_t shared = 1;
+    cbm_atomic_int64 shared = 1;
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("proj", "/", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("proj", "/", &shared);
 
@@ -471,7 +471,7 @@ typedef struct {
 } lsp_edge_count_ctx_t;
 
 static void count_lsp_call_edges(const cbm_gbuf_edge_t *edge, void *ud) {
-    lsp_edge_count_ctx_t *c = ud;
+    lsp_edge_count_ctx_t *c = (lsp_edge_count_ctx_t *)ud;
     if (!edge || !edge->type || strcmp(edge->type, "CALLS") != 0) {
         return;
     }

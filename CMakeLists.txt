@@ -45,19 +45,12 @@ add_compile_definitions(CBM_VERSION="${CBM_VERSION}")
 #   * First-party TUs get -Wall -Wextra (+ -Werror unless CBM_WERROR=OFF).
 #
 # IS_GCC heuristic — needed to enable GCC-only -Wno-* without breaking Clang
-include(CheckCCompilerFlag)
 set(_gcc_only_flags "")
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     list(APPEND _gcc_only_flags
         -Wno-format-truncation -Wno-unused-result
         -Wno-stringop-truncation -Wno-alloc-size-larger-than)
 endif()
-
-set(CBM_FIRSTPARTY_C_FLAGS
-    -D_DEFAULT_SOURCE -D_GNU_SOURCE
-    -Wall -Wextra
-    -Wno-unused-parameter -Wno-sign-compare
-    ${_gcc_only_flags})
 
 # C++23 first-party flags. Designated-init order-mismatch and ext-c99 hits
 # come up when porting C → C++ — silence the noisy false positives but
@@ -80,7 +73,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 if(CBM_WERROR)
-    list(APPEND CBM_FIRSTPARTY_C_FLAGS -Werror)
     # Phase 2 complete: first-party C++ TUs are warning-clean under the
     # first-party flag set, so -Werror is now enabled for them too. (Kept
     # OFF for the prod build via build.sh's -DCBM_WERROR=OFF, where -O2 can
@@ -93,8 +85,8 @@ if(CBM_WERROR)
     # clang (macOS AppleClang, Windows mingw-clang) emits a different, more
     # pedantic warning set; promoting those to errors turns CI into per-platform
     # whack-a-mole for no real benefit. clang still builds with -Wall -Wextra
-    # (warnings visible) and fails only on genuine errors. The C side keeps
-    # -Werror everywhere (it was already clang-clean as C pre-migration).
+    # (warnings visible) and fails only on genuine errors. (The first-party C
+    # side and its unconditional -Werror are gone — tests were the last C TUs.)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         list(APPEND CBM_FIRSTPARTY_CXX_FLAGS -Werror)
     endif()
@@ -393,70 +385,69 @@ set(CBM_FIRSTPARTY_TARGETS
 # test-runner
 # ────────────────────────────────────────────────────────────────
 
-# Test sources — mirror ALL_TEST_SRCS in Makefile.cbm.
+# Test sources — C++23 TUs like the rest of the first-party tree.
 set(CBM_TEST_SRCS
-    tests/test_main.c
+    tests/test_main.cpp
     # foundation
-    tests/test_arena.c tests/test_hash_table.c tests/test_dyn_array.c
-    tests/test_str_intern.c tests/test_log.c tests/test_str_util.c
-    tests/test_platform.c
+    tests/test_arena.cpp tests/test_hash_table.cpp tests/test_dyn_array.cpp
+    tests/test_str_intern.cpp tests/test_log.cpp tests/test_str_util.cpp
+    tests/test_platform.cpp
     # extraction
-    tests/test_extraction.c tests/test_ac.c
+    tests/test_extraction.cpp tests/test_ac.cpp
     # store
-    tests/test_store_nodes.c tests/test_store_edges.c tests/test_store_search.c
-    tests/test_store_arch.c tests/test_store_bulk.c tests/test_store_pragmas.c
-    tests/test_store_checkpoint.c
+    tests/test_store_nodes.cpp tests/test_store_edges.cpp tests/test_store_search.cpp
+    tests/test_store_arch.cpp tests/test_store_bulk.cpp tests/test_store_pragmas.cpp
+    tests/test_store_checkpoint.cpp
     # cypher / mcp
-    tests/test_cypher.c tests/test_mcp.c
+    tests/test_cypher.cpp tests/test_mcp.cpp
     # discover
-    tests/test_language.c tests/test_userconfig.c tests/test_gitignore.c
-    tests/test_discover.c
+    tests/test_language.cpp tests/test_userconfig.cpp tests/test_gitignore.cpp
+    tests/test_discover.cpp
     # graph_buffer / pipeline / watcher
-    tests/test_graph_buffer.c
-    tests/test_registry.c tests/test_pipeline.c tests/test_fqn.c
-    tests/test_path_alias.c tests/test_configlink.c tests/test_infrascan.c
-    tests/test_worker_pool.c tests/test_parallel.c
-    tests/test_watcher.c
+    tests/test_graph_buffer.cpp
+    tests/test_registry.cpp tests/test_pipeline.cpp tests/test_fqn.cpp
+    tests/test_path_alias.cpp tests/test_configlink.cpp tests/test_infrascan.cpp
+    tests/test_worker_pool.cpp tests/test_parallel.cpp
+    tests/test_watcher.cpp
     # vendored format suites
-    tests/test_lz4.c tests/test_zstd.c tests/test_artifact.c
-    tests/test_sqlite_writer.c
+    tests/test_lz4.cpp tests/test_zstd.cpp tests/test_artifact.cpp
+    tests/test_sqlite_writer.cpp
     # lsp suites
-    tests/test_go_lsp.c tests/test_c_lsp.c tests/test_php_lsp.c
-    tests/test_cs_lsp.c tests/test_cs_lsp_bench.c
-    tests/test_scope.c tests/test_type_rep.c
-    tests/test_py_lsp.c tests/test_py_lsp_bench.c tests/test_py_lsp_stress.c
-    tests/test_py_lsp_scale.c tests/test_ts_lsp.c
+    tests/test_go_lsp.cpp tests/test_c_lsp.cpp tests/test_php_lsp.cpp
+    tests/test_cs_lsp.cpp tests/test_cs_lsp_bench.cpp
+    tests/test_scope.cpp tests/test_type_rep.cpp
+    tests/test_py_lsp.cpp tests/test_py_lsp_bench.cpp tests/test_py_lsp_stress.cpp
+    tests/test_py_lsp_scale.cpp tests/test_ts_lsp.cpp
     # cli / mem / security / yaml / simhash
-    tests/test_cli.c tests/test_mem.c
-    tests/test_security.c tests/test_yaml.c tests/test_simhash.c
-    tests/test_stack_overflow.c
+    tests/test_cli.cpp tests/test_mem.cpp
+    tests/test_security.cpp tests/test_yaml.cpp tests/test_simhash.cpp
+    tests/test_stack_overflow.cpp
     # integration
-    tests/test_integration.c tests/test_incremental.c
+    tests/test_integration.cpp tests/test_incremental.cpp
     # hybrid LSP resolvers (java / kotlin / rust)
-    tests/test_java_lsp.c tests/test_java_lsp_coverage.c
-    tests/test_kotlin_lsp.c tests/test_rust_lsp.c
+    tests/test_java_lsp.cpp tests/test_java_lsp_coverage.cpp
+    tests/test_kotlin_lsp.cpp tests/test_rust_lsp.cpp
     # grammar coverage / extraction / edge / probe suites
-    tests/test_lang_contract.c tests/test_grammar_regression.c
-    tests/test_grammar_labels.c tests/test_grammar_imports.c
-    tests/test_extraction_imports.c tests/test_extraction_inheritance.c
-    tests/test_edge_imports.c tests/test_edge_structural.c
-    tests/test_lsp_resolution_probe.c tests/test_node_creation_probe.c
-    tests/test_edge_types_probe.c tests/test_convergence_probe.c
-    tests/test_matrix_known_classes.c tests/test_matrix_new_constructs.c
-    tests/test_grammar_probe_a.c tests/test_grammar_probe_b.c
-    tests/test_grammar_probe_c.c tests/test_grammar_probe_d.c
-    tests/test_grammar_probe_e.c tests/test_grammar_probe_f.c
-    tests/test_grammar_probe_g.c)
+    tests/test_lang_contract.cpp tests/test_grammar_regression.cpp
+    tests/test_grammar_labels.cpp tests/test_grammar_imports.cpp
+    tests/test_extraction_imports.cpp tests/test_extraction_inheritance.cpp
+    tests/test_edge_imports.cpp tests/test_edge_structural.cpp
+    tests/test_lsp_resolution_probe.cpp tests/test_node_creation_probe.cpp
+    tests/test_edge_types_probe.cpp tests/test_convergence_probe.cpp
+    tests/test_matrix_known_classes.cpp tests/test_matrix_new_constructs.cpp
+    tests/test_grammar_probe_a.cpp tests/test_grammar_probe_b.cpp
+    tests/test_grammar_probe_c.cpp tests/test_grammar_probe_d.cpp
+    tests/test_grammar_probe_e.cpp tests/test_grammar_probe_f.cpp
+    tests/test_grammar_probe_g.cpp)
 
 add_executable(test-runner ${CBM_TEST_SRCS})
 
-target_compile_options(test-runner PRIVATE ${CBM_FIRSTPARTY_C_FLAGS})
+target_compile_options(test-runner PRIVATE ${CBM_FIRSTPARTY_CXX_FLAGS})
 target_include_directories(test-runner PRIVATE
     ${CBM_COMMON_INCLUDES}
     ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/vendored/sqlite3)
-set_source_files_properties(${CBM_TEST_SRCS} PROPERTIES LANGUAGE C)
-set_target_properties(test-runner PROPERTIES C_STANDARD 11)
+set_target_properties(test-runner PROPERTIES CXX_STANDARD 23)
 
 # Link foundation + all C subsystems + vendored
 target_link_libraries(test-runner PRIVATE

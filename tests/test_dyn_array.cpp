@@ -138,12 +138,12 @@ TEST(da_push_ptr_struct) {
     } Record;
     CBM_DYN_ARRAY(Record) arr = {0};
 
-    Record *r = cbm_da_push_ptr(&arr);
+    Record *r = (Record *)cbm_da_push_ptr(&arr);
     r->id = 42;
     r->value = 3.14;
     r->tag = "first";
 
-    r = cbm_da_push_ptr(&arr);
+    r = (Record *)cbm_da_push_ptr(&arr);
     r->id = 99;
     r->value = 2.72;
     r->tag = "second";
@@ -429,7 +429,7 @@ TEST(da_push_ptr_growth) {
     /* Verify push_ptr triggers growth correctly */
     CBM_DYN_ARRAY(int) arr = {0};
     for (int i = 0; i < 100; i++) {
-        int *p = cbm_da_push_ptr(&arr);
+        int *p = (int *)cbm_da_push_ptr(&arr);
         *p = i * 7;
     }
     ASSERT_EQ(arr.count, 100);

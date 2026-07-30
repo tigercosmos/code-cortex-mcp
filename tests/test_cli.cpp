@@ -69,7 +69,7 @@ static unsigned char *create_test_targz(const char *filename, const unsigned cha
     /* Build tar data: 512-byte header + content padded to 512-byte boundary + 2x512 zero blocks */
     int data_blocks = (content_len + 511) / 512;
     int tar_size = 512 + data_blocks * 512 + 1024; /* header + data + end-of-archive */
-    unsigned char *tar = calloc(1, (size_t)tar_size);
+    unsigned char *tar = (unsigned char *)calloc(1, (size_t)tar_size);
     if (!tar)
         return NULL;
 
@@ -114,7 +114,7 @@ static unsigned char *create_test_targz(const char *filename, const unsigned cha
     }
 
     size_t gz_cap = (size_t)tar_size + 256;
-    unsigned char *gz = malloc(gz_cap);
+    unsigned char *gz = (unsigned char *)malloc(gz_cap);
     if (!gz) {
         deflateEnd(&strm);
         free(tar);
@@ -1215,7 +1215,7 @@ static unsigned char *create_test_zip_stored(const char *filename, const unsigne
     int cd_hdr_sz = 46 + name_len;
     int eocd_sz = 22;
     int total = local_hdr_sz + content_len + cd_hdr_sz + eocd_sz;
-    unsigned char *zip = calloc(1, (size_t)total);
+    unsigned char *zip = (unsigned char *)calloc(1, (size_t)total);
     if (!zip)
         return NULL;
     int pos = 0;

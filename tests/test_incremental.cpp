@@ -575,7 +575,7 @@ TEST(incr_syntax_error) {
 TEST(incr_huge_single_function) {
     /* A single function with 5000 lines — stress test extraction budget */
     size_t sz = 5000 * 30 + 100;
-    char *content = malloc(sz);
+    char *content = (char *)malloc(sz);
     ASSERT(content != NULL);
     int pos = 0;
     pos += snprintf(content + pos, sz - (size_t)pos, "def huge_func(x):\n");
@@ -625,7 +625,7 @@ TEST(incr_binary_content) {
 }
 
 TEST(incr_large_generated) {
-    char *content = malloc(300 * 80);
+    char *content = (char *)malloc(300 * 80);
     ASSERT(content != NULL);
     content[0] = '\0';
     for (int i = 0; i < 300; i++) {

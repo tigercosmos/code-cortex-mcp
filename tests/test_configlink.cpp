@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdatomic.h>
+#include "../src/foundation/cbm_atomic.h"
 
 /* Helper: wrap old (gb, project, repo_path) call into ctx-based API */
 static int run_configlink(cbm_gbuf_t *gb, const char *project, const char *repo_path) {

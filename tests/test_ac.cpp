@@ -8,9 +8,10 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Declarations from ac.c (no public header yet — these are the C API) */
+/* Declarations from ac.cpp (no public header yet — these are the C API) */
 typedef struct CBMAutomaton CBMAutomaton;
 
+extern "C" {
 CBMAutomaton *cbm_ac_build(const char **patterns, const int *lengths, int count,
                            const uint8_t *alpha_map, int alpha_size);
 void cbm_ac_free(CBMAutomaton *ac);
@@ -26,6 +27,7 @@ typedef struct {
 int cbm_ac_scan_batch(const CBMAutomaton *ac, const char *names_buf, const int *name_offsets,
                       const int *name_lengths, int num_names, CBMMatchResult *out_matches,
                       int max_matches);
+}
 
 /* ── Tests ─────────────────────────────────────────────────────── */
 
@@ -203,8 +205,10 @@ TEST(ac_free_double_call) {
 }
 
 /* --- Ported from ac_test.go: TestACScanLZ4Bitmask --- */
+extern "C" {
 extern int cbm_lz4_compress_hc(const char *src, int srcLen, char *dst, int dstCap);
 extern int cbm_lz4_bound(int inputSize);
+}
 
 /* Structs defined in ac.c */
 typedef struct {
@@ -217,10 +221,12 @@ typedef struct {
     uint64_t bitmask;
 } CBMLz4Match;
 
+extern "C" {
 extern uint64_t cbm_ac_scan_lz4_bitmask(const CBMAutomaton *ac, const char *compressed,
                                         int compressed_len, int original_len);
 extern int cbm_ac_scan_lz4_batch(const CBMAutomaton *ac, const CBMLz4Entry *entries,
                                  int num_entries, CBMLz4Match *out_matches, int max_matches);
+}
 
 TEST(ac_scan_lz4_bitmask) {
     const char *patterns[] = {"http.Get", "fetch("};
@@ -234,7 +240,7 @@ TEST(ac_scan_lz4_bitmask) {
                          "    _ = resp\n    _ = err\n}\n";
     int src_len = (int)strlen(source);
     int bound = cbm_lz4_bound(src_len);
-    char *compressed = malloc(bound);
+    char *compressed = (char *)malloc(bound);
     ASSERT_NOT_NULL(compressed);
     int comp_len = cbm_lz4_compress_hc(source, src_len, compressed, bound);
     ASSERT_GT(comp_len, 0);
@@ -246,7 +252,7 @@ TEST(ac_scan_lz4_bitmask) {
     const char *no_http = "package main\nfunc main() { println(42) }\n";
     int nh_len = (int)strlen(no_http);
     int bound2 = cbm_lz4_bound(nh_len);
-    char *comp2 = malloc(bound2);
+    char *comp2 = (char *)malloc(bound2);
     int comp2_len = cbm_lz4_compress_hc(no_http, nh_len, comp2, bound2);
     mask = cbm_ac_scan_lz4_bitmask(ac, comp2, comp2_len, nh_len);
     ASSERT_EQ(mask, 0ULL);
@@ -273,7 +279,7 @@ TEST(ac_scan_lz4_batch) {
     for (int i = 0; i < 3; i++) {
         int slen = (int)strlen(files[i]);
         int bound = cbm_lz4_bound(slen);
-        comp_bufs[i] = malloc(bound);
+        comp_bufs[i] = (char *)malloc(bound);
         int clen = cbm_lz4_compress_hc(files[i], slen, comp_bufs[i], bound);
         entries[i].data = comp_bufs[i];
         entries[i].compressed_len = clen;
@@ -327,7 +333,7 @@ TEST(ac_large_pattern_set) {
         "producer.send",   "producer.Send",
     };
     int count = sizeof(patterns) / sizeof(patterns[0]);
-    int *lengths = malloc(count * sizeof(int));
+    int *lengths = (int *)malloc(count * sizeof(int));
     for (int i = 0; i < count; i++)
         lengths[i] = (int)strlen(patterns[i]);
 

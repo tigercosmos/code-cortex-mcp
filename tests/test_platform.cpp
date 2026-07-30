@@ -43,20 +43,20 @@ TEST(platform_nprocs) {
 
 TEST(platform_file_exists) {
     /* This test file should exist */
-    ASSERT_TRUE(cbm_file_exists("tests/test_platform.c"));
+    ASSERT_TRUE(cbm_file_exists("tests/test_platform.cpp"));
     ASSERT_FALSE(cbm_file_exists("nonexistent_file_xyz.txt"));
     PASS();
 }
 
 TEST(platform_is_dir) {
     ASSERT_TRUE(cbm_is_dir("tests"));
-    ASSERT_FALSE(cbm_is_dir("tests/test_platform.c"));
+    ASSERT_FALSE(cbm_is_dir("tests/test_platform.cpp"));
     ASSERT_FALSE(cbm_is_dir("nonexistent_dir"));
     PASS();
 }
 
 TEST(platform_file_size) {
-    int64_t sz = cbm_file_size("tests/test_platform.c");
+    int64_t sz = cbm_file_size("tests/test_platform.cpp");
     ASSERT_GT(sz, 0);
     ASSERT_EQ(cbm_file_size("nonexistent_file_xyz.txt"), -1);
     PASS();
@@ -65,7 +65,7 @@ TEST(platform_file_size) {
 TEST(platform_mmap) {
     /* mmap this test file and verify first bytes */
     size_t sz = 0;
-    void *data = cbm_mmap_read("tests/test_platform.c", &sz);
+    void *data = cbm_mmap_read("tests/test_platform.cpp", &sz);
     ASSERT_NOT_NULL(data);
     ASSERT_GT(sz, 0);
     /* First line should be the comment */

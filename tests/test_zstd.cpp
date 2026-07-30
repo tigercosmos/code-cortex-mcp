@@ -3,9 +3,11 @@
  */
 #include "test_framework.h"
 
+extern "C" {
 extern int cbm_zstd_compress(const char *src, int srcLen, char *dst, int dstCap, int level);
 extern int cbm_zstd_decompress(const char *src, int srcLen, char *dst, int dstCap);
 extern size_t cbm_zstd_compress_bound(int inputSize);
+}
 
 TEST(zstd_roundtrip) {
     const char *data = "Hello, zstd compression roundtrip test!";
@@ -14,13 +16,13 @@ TEST(zstd_roundtrip) {
     size_t bound = cbm_zstd_compress_bound(len);
     ASSERT_GT((int)bound, 0);
 
-    char *cbuf = malloc(bound);
+    char *cbuf = (char *)malloc(bound);
     ASSERT_NOT_NULL(cbuf);
 
     int clen = cbm_zstd_compress(data, len, cbuf, (int)bound, 3);
     ASSERT_GT(clen, 0);
 
-    char *dbuf = malloc(len);
+    char *dbuf = (char *)malloc(len);
     ASSERT_NOT_NULL(dbuf);
 
     int dlen = cbm_zstd_decompress(cbuf, clen, dbuf, len);
@@ -34,7 +36,7 @@ TEST(zstd_roundtrip) {
 
 TEST(zstd_roundtrip_large) {
     int len = 100000;
-    char *data = malloc(len);
+    char *data = (char *)malloc(len);
     ASSERT_NOT_NULL(data);
 
     /* Repetitive data — should compress well */
@@ -43,7 +45,7 @@ TEST(zstd_roundtrip_large) {
     }
 
     size_t bound = cbm_zstd_compress_bound(len);
-    char *cbuf = malloc(bound);
+    char *cbuf = (char *)malloc(bound);
     ASSERT_NOT_NULL(cbuf);
 
     int clen = cbm_zstd_compress(data, len, cbuf, (int)bound, 9);
@@ -51,7 +53,7 @@ TEST(zstd_roundtrip_large) {
     /* Repetitive data should compress at least 2:1 */
     ASSERT_LT(clen, len / 2);
 
-    char *dbuf = malloc(len);
+    char *dbuf = (char *)malloc(len);
     ASSERT_NOT_NULL(dbuf);
 
     int dlen = cbm_zstd_decompress(cbuf, clen, dbuf, len);
@@ -68,7 +70,7 @@ TEST(zstd_compress_levels) {
     const char *data = "test data for different compression levels";
     int len = (int)strlen(data);
     size_t bound = cbm_zstd_compress_bound(len);
-    char *cbuf = malloc(bound);
+    char *cbuf = (char *)malloc(bound);
     ASSERT_NOT_NULL(cbuf);
 
     /* Both level 3 (fast) and level 9 (best) should produce valid output */
@@ -86,7 +88,7 @@ TEST(zstd_decompress_too_small_output) {
     const char *data = "this is test data that will be compressed";
     int len = (int)strlen(data);
     size_t bound = cbm_zstd_compress_bound(len);
-    char *cbuf = malloc(bound);
+    char *cbuf = (char *)malloc(bound);
     ASSERT_NOT_NULL(cbuf);
 
     int clen = cbm_zstd_compress(data, len, cbuf, (int)bound, 3);

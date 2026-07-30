@@ -16,7 +16,7 @@
 #include "store/store.h"
 #include "foundation/compat.h"
 
-#include <stdatomic.h>
+#include "../src/foundation/cbm_atomic.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>

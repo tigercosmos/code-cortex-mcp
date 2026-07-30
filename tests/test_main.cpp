@@ -98,7 +98,7 @@ extern void suite_stack_overflow(void);
 /* Free the main thread's thread-local node-type bitset cache before exit so
  * LeakSanitizer (Linux x64) doesn't report it. Worker threads free their own
  * caches at thread teardown (pass_parallel.c). */
-extern void cbm_kind_in_set_free_cache(void);
+extern "C" void cbm_kind_in_set_free_cache(void);
 
 int main(void) {
     printf("\n  code-cortex-mcp  C test suite\n");

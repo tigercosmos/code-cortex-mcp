@@ -8,7 +8,7 @@
 #include "foundation/platform.h"
 #include "pipeline/worker_pool.h"
 
-#include <stdatomic.h>
+#include "../src/foundation/cbm_atomic.h"
 #include <string.h>
 
 /* ── System Info Tests ────────────────────────────────────────────── */
@@ -74,12 +74,12 @@ TEST(default_worker_count_minimum) {
 /* ── Worker Pool Tests ────────────────────────────────────────────── */
 
 static void sum_worker(int idx, void *ctx) {
-    _Atomic int *sum = ctx;
+    cbm_atomic_int *sum = (cbm_atomic_int *)ctx;
     atomic_fetch_add(sum, idx);
 }
 
 TEST(parallel_for_sum) {
-    _Atomic int sum;
+    cbm_atomic_int sum;
     atomic_init(&sum, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 4, .force_pthreads = false};
     cbm_parallel_for(1000, sum_worker, &sum, opts);
@@ -88,17 +88,17 @@ TEST(parallel_for_sum) {
 }
 
 typedef struct {
-    _Atomic int *visited;
+    cbm_atomic_int *visited;
     int count;
 } coverage_ctx_t;
 
 static void coverage_worker(int idx, void *ctx_ptr) {
-    _Atomic int *visited = ctx_ptr;
+    cbm_atomic_int *visited = (cbm_atomic_int *)ctx_ptr;
     atomic_store(&visited[idx], 1);
 }
 
 TEST(parallel_for_coverage) {
-    _Atomic int visited[1000];
+    cbm_atomic_int visited[1000];
     for (int i = 0; i < 1000; i++)
         atomic_init(&visited[i], 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 4, .force_pthreads = false};
@@ -121,7 +121,7 @@ TEST(parallel_for_zero) {
 }
 
 TEST(parallel_for_one) {
-    _Atomic int count;
+    cbm_atomic_int count;
     atomic_init(&count, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 4, .force_pthreads = false};
     cbm_parallel_for(1, sum_worker, &count, opts);
@@ -132,7 +132,7 @@ TEST(parallel_for_one) {
 }
 
 TEST(parallel_for_single_worker) {
-    _Atomic int sum;
+    cbm_atomic_int sum;
     atomic_init(&sum, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 1, .force_pthreads = false};
     cbm_parallel_for(100, sum_worker, &sum, opts);
@@ -141,7 +141,7 @@ TEST(parallel_for_single_worker) {
 }
 
 TEST(parallel_for_force_pthreads) {
-    _Atomic int sum;
+    cbm_atomic_int sum;
     atomic_init(&sum, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 4, .force_pthreads = true};
     cbm_parallel_for(100, sum_worker, &sum, opts);
@@ -150,7 +150,7 @@ TEST(parallel_for_force_pthreads) {
 }
 
 static void slot_writer(int idx, void *ctx) {
-    int *results = ctx;
+    int *results = (int *)ctx;
     results[idx] = idx * 2;
 }
 
@@ -166,13 +166,13 @@ TEST(parallel_for_per_slot_write) {
 }
 
 typedef struct {
-    _Atomic int concurrent_max;
-    _Atomic int concurrent_now;
+    cbm_atomic_int concurrent_max;
+    cbm_atomic_int concurrent_now;
 } concurrency_ctx_t;
 
 static void concurrency_worker(int idx, void *ctx_ptr) {
     (void)idx;
-    concurrency_ctx_t *cc = ctx_ptr;
+    concurrency_ctx_t *cc = (concurrency_ctx_t *)ctx_ptr;
     int cur = atomic_fetch_add(&cc->concurrent_now, 1) + 1;
     /* Spin until at least two workers are concurrently active, so overlap is
      * demonstrated deterministically instead of depending on thread-spawn timing
@@ -207,14 +207,14 @@ TEST(parallel_for_actually_parallel) {
 static void tls_worker(int idx, void *ctx_ptr) {
     (void)idx;
     static _Thread_local int tls_val = 0;
-    _Atomic int *reuse_count = ctx_ptr;
+    cbm_atomic_int *reuse_count = (cbm_atomic_int *)ctx_ptr;
     if (tls_val == 42)
         atomic_fetch_add(reuse_count, 1);
     tls_val = 42;
 }
 
 TEST(tls_persistence_across_dispatch) {
-    _Atomic int reuse_count;
+    cbm_atomic_int reuse_count;
     atomic_init(&reuse_count, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 4, .force_pthreads = false};
     cbm_parallel_for(1000, tls_worker, &reuse_count, opts);
@@ -228,7 +228,7 @@ TEST(tls_persistence_across_dispatch) {
 
 TEST(parallel_for_negative_count) {
     /* count=-1 → no iterations (documented: "If count <= 0, this is a no-op") */
-    _Atomic int sum;
+    cbm_atomic_int sum;
     atomic_init(&sum, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 4, .force_pthreads = false};
     cbm_parallel_for(-1, sum_worker, &sum, opts);
@@ -246,7 +246,7 @@ TEST(parallel_for_null_fn) {
 
 TEST(parallel_for_max_workers_one) {
     /* max_workers=1 → serial execution, correct result */
-    _Atomic int sum;
+    cbm_atomic_int sum;
     atomic_init(&sum, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 1, .force_pthreads = false};
     cbm_parallel_for(50, sum_worker, &sum, opts);
@@ -256,7 +256,7 @@ TEST(parallel_for_max_workers_one) {
 
 TEST(parallel_for_max_workers_zero_auto) {
     /* max_workers=0 → auto-detect, should produce correct result */
-    _Atomic int sum;
+    cbm_atomic_int sum;
     atomic_init(&sum, 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 0, .force_pthreads = false};
     cbm_parallel_for(100, sum_worker, &sum, opts);
@@ -266,7 +266,7 @@ TEST(parallel_for_max_workers_zero_auto) {
 
 TEST(parallel_for_large_count_coverage) {
     /* Large count (1000) → all indices visited exactly once */
-    _Atomic int visited[1000];
+    cbm_atomic_int visited[1000];
     for (int i = 0; i < 1000; i++)
         atomic_init(&visited[i], 0);
     cbm_parallel_for_opts_t opts = {.max_workers = 8, .force_pthreads = false};
@@ -286,11 +286,11 @@ TEST(parallel_for_immediate_return_callback) {
 }
 
 /* Helpers for context_passed_correctly test */
-typedef struct { _Atomic int counter; int magic; } ctx_test_t;
+typedef struct { cbm_atomic_int counter; int magic; } ctx_test_t;
 
 static void count_and_verify_worker(int idx, void *vctx) {
     (void)idx;
-    ctx_test_t *c = vctx;
+    ctx_test_t *c = (ctx_test_t *)vctx;
     if (c->magic == 0xDEAD) {
         atomic_fetch_add(&c->counter, 1);
     }
@@ -311,13 +311,13 @@ TEST(parallel_for_context_passed_correctly) {
 
 /* Helper for no_duplicates test */
 static void count_visit_worker(int idx, void *ctx) {
-    _Atomic int *c = ctx;
+    cbm_atomic_int *c = (cbm_atomic_int *)ctx;
     atomic_fetch_add(&c[idx], 1);
 }
 
 TEST(parallel_for_no_duplicates) {
     /* Verify no index is visited more than once (atomic increment per slot) */
-    _Atomic int counts[500];
+    cbm_atomic_int counts[500];
     for (int i = 0; i < 500; i++)
         atomic_init(&counts[i], 0);
 
@@ -350,7 +350,7 @@ TEST(parallel_for_single_iteration_idx_zero) {
 TEST(parallel_for_serial_matches_parallel) {
     /* Serial (max_workers=1) and parallel (max_workers=8) should produce
      * identical results for a deterministic reduction. */
-    _Atomic int serial_sum, parallel_sum;
+    cbm_atomic_int serial_sum, parallel_sum;
     atomic_init(&serial_sum, 0);
     atomic_init(&parallel_sum, 0);
 

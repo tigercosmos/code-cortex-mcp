@@ -669,7 +669,7 @@ TEST(gbuf_merge_overlapping_qns) {
 }
 
 TEST(gbuf_merge_edge_dedup) {
-    _Atomic int64_t shared = 1;
+    cbm_atomic_int64 shared = 1;
     cbm_gbuf_t *dst = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
     cbm_gbuf_t *src = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
 
@@ -833,7 +833,7 @@ TEST(gbuf_merge_into_store_preserves) {
 /* ── Shared ID tests ──────────────────────────────────────────── */
 
 TEST(gbuf_shared_ids_unique) {
-    _Atomic int64_t shared = 1;
+    cbm_atomic_int64 shared = 1;
     cbm_gbuf_t *gb1 = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
     cbm_gbuf_t *gb2 = cbm_gbuf_new_shared_ids("test", "/tmp", &shared);
 

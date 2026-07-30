@@ -48,11 +48,12 @@ extern "C" {
     } while (0)
 
 /* Push an element with a pointer return (for in-place init). */
-#define cbm_da_push_ptr(da)                                                                        \
-    (((da)->count >= (da)->cap                                                                     \
-          ? ((void)((da)->cap = (da)->cap ? (da)->cap * 2 : 8),                                    \
-             (void)((da)->items = realloc((da)->items, (size_t)(da)->cap * sizeof(*(da)->items)))) \
-          : (void)0),                                                                              \
+#define cbm_da_push_ptr(da)                                                      \
+    (((da)->count >= (da)->cap                                                   \
+          ? ((void)((da)->cap = (da)->cap ? (da)->cap * 2 : 8),                  \
+             (void)((da)->items = (__typeof__((da)->items))realloc(              \
+                        (da)->items, (size_t)(da)->cap * sizeof(*(da)->items)))) \
+          : (void)0),                                                            \
      &(da)->items[(da)->count++])
 
 /* Pop last element. Returns the element. Undefined if empty. */
@@ -79,7 +80,7 @@ extern "C" {
         if ((n) > (da)->cap) {                                                     \
             void *_new = realloc((da)->items, (size_t)(n) * sizeof(*(da)->items)); \
             if (_new) {                                                            \
-                (da)->items = _new;                                                \
+                (da)->items = (__typeof__((da)->items))_new;                       \
                 (da)->cap = (n);                                                   \
             }                                                                      \
         }                                                                          \

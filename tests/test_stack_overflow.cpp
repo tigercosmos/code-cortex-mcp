@@ -18,6 +18,7 @@
 
 /* tree-sitter runtime allocator hooks (ts_runtime/src/alloc.h, TS_PUBLIC) and
  * mimalloc (vendored) — for the #424 allocator-binding regression test. */
+extern "C" {
 extern void *(*ts_current_malloc)(size_t);
 extern void *(*ts_current_calloc)(size_t, size_t);
 extern void *(*ts_current_realloc)(void *, size_t);
@@ -26,6 +27,7 @@ extern void *mi_malloc(size_t);
 extern void *mi_calloc(size_t, size_t);
 extern void *mi_realloc(void *, size_t);
 extern void mi_free(void *);
+}
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -51,7 +53,7 @@ TEST(js_calls_exceed_512) {
     const int FUNCS = 30;
     const int CALLS_PER = CALL_COUNT / FUNCS;
     size_t buf_sz = 256 + (size_t)CALL_COUNT * 48;
-    char *src = malloc(buf_sz);
+    char *src = (char *)malloc(buf_sz);
     ASSERT_NOT_NULL(src);
 
     char *p = src;
@@ -93,7 +95,7 @@ TEST(js_calls_exceed_512) {
 TEST(python_calls_exceed_512) {
     const int CALL_COUNT = 600;
     size_t buf_sz = 256 + (size_t)CALL_COUNT * 32;
-    char *src = malloc(buf_sz);
+    char *src = (char *)malloc(buf_sz);
     ASSERT_NOT_NULL(src);
 
     char *p = src;
@@ -130,7 +132,7 @@ TEST(python_calls_exceed_512) {
 TEST(go_calls_exceed_1024) {
     const int CALL_COUNT = 1024;
     size_t buf_sz = 256 + (size_t)CALL_COUNT * 40;
-    char *src = malloc(buf_sz);
+    char *src = (char *)malloc(buf_sz);
     ASSERT_NOT_NULL(src);
 
     char *p = src;
@@ -170,7 +172,7 @@ TEST(express_routes_exceed_512) {
     const int ROUTE_COUNT = 150;
     /* Each route: app.get('/route_NNN', handler_NNN); */
     size_t buf_sz = 512 + (size_t)ROUTE_COUNT * 80;
-    char *src = malloc(buf_sz);
+    char *src = (char *)malloc(buf_sz);
     ASSERT_NOT_NULL(src);
 
     char *p = src;
@@ -211,7 +213,7 @@ TEST(express_routes_exceed_512) {
 TEST(ts_imports_exceed_512) {
     const int IMPORT_COUNT = 600;
     size_t buf_sz = 256 + (size_t)IMPORT_COUNT * 64;
-    char *src = malloc(buf_sz);
+    char *src = (char *)malloc(buf_sz);
     ASSERT_NOT_NULL(src);
 
     char *p = src;
@@ -244,7 +246,7 @@ TEST(js_deeply_nested_calls) {
     const int DEPTH = 200;
     /* Build: outermost( level_0( level_1( ... level_199() ... ))) */
     size_t buf_sz = 256 + (size_t)DEPTH * 32;
-    char *src = malloc(buf_sz);
+    char *src = (char *)malloc(buf_sz);
     ASSERT_NOT_NULL(src);
 
     char *p = src;
@@ -286,7 +288,7 @@ TEST(js_deeply_nested_calls) {
 TEST(yaml_vars_exceed_256) {
     const int VAR_COUNT = 300;
     size_t buf_sz = (size_t)VAR_COUNT * 32;
-    char *src = malloc(buf_sz);
+    char *src = (char *)malloc(buf_sz);
     ASSERT_NOT_NULL(src);
 
     char *p = src;
@@ -366,7 +368,7 @@ TEST(ts_allocator_bound_to_mimalloc_issue424) {
 TEST(cpp_large_templated_header_no_crash_issue424) {
     const int N = 400; /* ~400 templated structs → ~2400 lines */
     size_t buf_sz = (size_t)N * 600;
-    char *src = malloc(buf_sz);
+    char *src = (char *)malloc(buf_sz);
     ASSERT_NOT_NULL(src);
     char *p = src;
     p += snprintf(p, buf_sz, "#include <cstddef>\nnamespace ns {\n");
@@ -449,7 +451,7 @@ TEST(lsp_java_deep_nesting_no_crash) {
      * the perf-sweep report). */
     const int DEPTH = 30000;
     size_t sz = (size_t)DEPTH * 3 + 256;
-    char *src = malloc(sz);
+    char *src = (char *)malloc(sz);
     ASSERT_NOT_NULL(src);
     char *p = src;
     p += snprintf(p, sz, "class X { static int f(int a) { return a; } static int g() { return ");
@@ -470,7 +472,7 @@ TEST(lsp_cpp_deep_expression_no_crash) {
     /* See lsp_java_deep_nesting_no_crash on the depth choice. */
     const int DEPTH = 30000;
     size_t sz = (size_t)DEPTH * 3 + 256;
-    char *src = malloc(sz);
+    char *src = (char *)malloc(sz);
     ASSERT_NOT_NULL(src);
     char *p = src;
     p += snprintf(p, sz, "int f(int x) { return x; }\nint g() { return ");

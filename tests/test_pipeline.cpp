@@ -16,7 +16,7 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <stdatomic.h>
+#include "../src/foundation/cbm_atomic.h"
 #include "foundation/compat_thread.h"
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -871,10 +871,10 @@ TEST(githistory_limits_to_max) {
     int npairs = nfiles * (nfiles - 1) / 2;
     int ncommits = npairs * 3;
 
-    cbm_commit_files_t *commits = calloc(ncommits, sizeof(cbm_commit_files_t));
-    char **file_strs = calloc(nfiles, sizeof(char *));
+    cbm_commit_files_t *commits = (cbm_commit_files_t *)calloc(ncommits, sizeof(cbm_commit_files_t));
+    char **file_strs = (char **)calloc(nfiles, sizeof(char *));
     for (int i = 0; i < nfiles; i++) {
-        file_strs[i] = malloc(32);
+        file_strs[i] = (char *)malloc(32);
         snprintf(file_strs[i], 32, "f%d.go", i);
     }
 
@@ -882,7 +882,7 @@ TEST(githistory_limits_to_max) {
     for (int i = 0; i < nfiles; i++) {
         for (int j = i + 1; j < nfiles; j++) {
             for (int k = 0; k < 3; k++) {
-                commits[ci].files = malloc(2 * sizeof(char *));
+                commits[ci].files = (char **)malloc(2 * sizeof(char *));
                 commits[ci].files[0] = file_strs[i];
                 commits[ci].files[1] = file_strs[j];
                 commits[ci].count = 2;

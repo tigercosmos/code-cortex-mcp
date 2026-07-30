@@ -203,7 +203,7 @@ TEST(mcp_tools_array_schemas_have_items) {
         ASSERT_NOT_NULL(end);
         /* "items" must appear between p and end */
         size_t span = (size_t)(end - p);
-        char *segment = malloc(span + 1);
+        char *segment = (char *)malloc(span + 1);
         memcpy(segment, p, span);
         segment[span] = '\0';
         ASSERT_NOT_NULL(strstr(segment, "\"items\"")); /* array missing items */

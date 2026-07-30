@@ -415,7 +415,7 @@ static double timed_boundaries_ms(int n_nodes, int n_edges, int n_pkgs) {
     cbm_store_upsert_project(s, "perf", "/tmp/perf");
 
     cbm_store_begin(s);
-    int64_t *ids = malloc((size_t)n_nodes * sizeof(int64_t));
+    int64_t *ids = (int64_t *)malloc((size_t)n_nodes * sizeof(int64_t));
     if (!ids) {
         cbm_store_close(s);
         return -1;
@@ -801,7 +801,7 @@ TEST(adr_update_overflow) {
     ASSERT_EQ(cbm_store_adr_store(s, "test", "## PURPOSE\nShort"), CBM_STORE_OK);
 
     /* Create huge content */
-    char *huge = malloc(CBM_ADR_MAX_LENGTH + 2);
+    char *huge = (char *)malloc(CBM_ADR_MAX_LENGTH + 2);
     memset(huge, 'x', CBM_ADR_MAX_LENGTH + 1);
     huge[CBM_ADR_MAX_LENGTH + 1] = '\0';
 
@@ -993,7 +993,7 @@ TEST(louvain_converges) {
 
 /* Count distinct community labels in a result. */
 static int leiden_count_communities(const cbm_louvain_result_t *r, int n) {
-    int *seen = malloc((size_t)n * sizeof(int));
+    int *seen = (int *)malloc((size_t)n * sizeof(int));
     int nd = 0;
     for (int i = 0; i < n; i++) {
         bool found = false;
@@ -1015,8 +1015,8 @@ static int leiden_count_communities(const cbm_louvain_result_t *r, int n) {
  * property Leiden's refinement guarantees and single-level Louvain does not. */
 static bool leiden_all_communities_connected(const cbm_louvain_result_t *r, int n,
                                              const cbm_louvain_edge_t *edges, int ne) {
-    bool *vis = calloc((size_t)n, sizeof(bool));
-    int *stack = malloc((size_t)n * sizeof(int));
+    bool *vis = (bool *)calloc((size_t)n, sizeof(bool));
+    int *stack = (int *)malloc((size_t)n * sizeof(int));
     bool ok = true;
     for (int s = 0; s < n && ok; s++) {
         int comm = r[s].community;

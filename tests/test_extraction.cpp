@@ -2120,7 +2120,7 @@ TEST(import_stress_go) {
     const int N = 5000;
     /* Each line: import "pkg/NNNNN"\n  = ~20 chars; total ~100KB */
     int buf_size = N * 24 + 64;
-    char *src = malloc((size_t)buf_size);
+    char *src = (char *)malloc((size_t)buf_size);
     ASSERT_NOT_NULL(src);
 
     int pos = 0;

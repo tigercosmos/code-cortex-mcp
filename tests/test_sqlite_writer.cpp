@@ -362,8 +362,8 @@ TEST(sw_long_index_keys_overflow) {
     ASSERT_EQ(make_temp_db(path, sizeof(path)), 0);
 
     enum { LONGN = 20000 };
-    char *longname = malloc(LONGN + 1);
-    char *longqn = malloc(LONGN + 16);
+    char *longname = (char *)malloc(LONGN + 1);
+    char *longqn = (char *)malloc(LONGN + 16);
     ASSERT_NOT_NULL(longname);
     ASSERT_NOT_NULL(longqn);
     memset(longname, 'N', LONGN);

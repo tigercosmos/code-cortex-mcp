@@ -20,9 +20,9 @@
 /* Build a path alias map programmatically (no file I/O), respecting the
  * specificity ordering invariant the loader establishes via qsort. */
 static cbm_path_alias_map_t *make_map(const char *base_url, int count, ...) {
-    cbm_path_alias_map_t *map = calloc(1, sizeof(*map));
+    cbm_path_alias_map_t *map = (cbm_path_alias_map_t *)calloc(1, sizeof(*map));
     map->base_url = base_url ? strdup(base_url) : NULL;
-    map->entries = calloc((size_t)count, sizeof(cbm_path_alias_t));
+    map->entries = (cbm_path_alias_t *)calloc((size_t)count, sizeof(cbm_path_alias_t));
     map->count = count;
 
     va_list args;
@@ -188,8 +188,8 @@ TEST(path_alias_find_for_file_nearest_ancestor) {
     /* Build a synthetic collection by hand: two scopes, "" (root) and
      * "apps/manager". A file inside apps/manager/src/... must pick the
      * deeper scope; a file under packages/utils must fall back to root. */
-    cbm_path_alias_collection_t *coll = calloc(1, sizeof(*coll));
-    coll->scopes = calloc(2, sizeof(cbm_path_alias_scope_t));
+    cbm_path_alias_collection_t *coll = (cbm_path_alias_collection_t *)calloc(1, sizeof(*coll));
+    coll->scopes = (cbm_path_alias_scope_t *)calloc(2, sizeof(cbm_path_alias_scope_t));
     coll->count = 2;
 
     /* Order matters: most specific first (loader does this via qsort). */
