@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BIN="$ROOT/build/c/codebase-memory-mcp"
+BIN="$ROOT/build/c/code-cortex-mcp"
 
 echo "=== Building production binary ==="
 scripts/build.sh "$@"

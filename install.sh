@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# install.sh — One-line installer for codebase-memory-mcp.
+# install.sh — One-line installer for code-cortex-mcp.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/tigercosmos/code-cortex-mcp/main/install.sh | bash
@@ -77,10 +77,10 @@ detect_arch() {
 OS=$(detect_os)
 ARCH=$(detect_arch)
 
-echo "codebase-memory-mcp installer"
+echo "code-cortex-mcp installer"
 echo "  os:      $OS"
 echo "  arch:    $ARCH"
-echo "  target:  $INSTALL_DIR/codebase-memory-mcp"
+echo "  target:  $INSTALL_DIR/code-cortex-mcp"
 echo ""
 
 # Build download URL
@@ -100,7 +100,7 @@ else
     PORTABLE=""
 fi
 
-ARCHIVE="codebase-memory-mcp-${OS}-${ARCH}${PORTABLE}.${EXT}"
+ARCHIVE="code-cortex-mcp-${OS}-${ARCH}${PORTABLE}.${EXT}"
 
 URL="${CBM_DOWNLOAD_URL}/${ARCHIVE}"
 
@@ -150,7 +150,7 @@ else
     tar -xzf "$ARCHIVE"
 fi
 
-DLBIN="$DLDIR/codebase-memory-mcp"
+DLBIN="$DLDIR/code-cortex-mcp"
 if [ ! -f "$DLBIN" ]; then
     echo "error: binary not found after extraction" >&2
     exit 1
@@ -165,7 +165,7 @@ fi
 
 # Install
 mkdir -p "$INSTALL_DIR"
-DEST="$INSTALL_DIR/codebase-memory-mcp"
+DEST="$INSTALL_DIR/code-cortex-mcp"
 if [ -f "$DEST" ]; then
     rm -f "$DEST"
 fi
@@ -190,7 +190,7 @@ if ! VERSION=$("$DEST" --version 2>&1); then
                 fi
                 echo "  fix:   build from source on this machine (needs cmake + a C++23 compiler, e.g. gcc>=13):" >&2
                 echo "           git clone https://github.com/tigercosmos/code-cortex-mcp" >&2
-                echo "           cd code-cortex-mcp && scripts/build.sh   # -> build/c/codebase-memory-mcp" >&2
+                echo "           cd code-cortex-mcp && scripts/build.sh   # -> build/c/code-cortex-mcp" >&2
                 echo "         or install on a system with glibc >= 2.38." >&2
                 ;;
         esac
@@ -209,7 +209,7 @@ else
     "$DEST" install -y 2>&1 || {
         echo ""
         echo "Agent configuration failed (non-fatal)."
-        echo "Run manually: codebase-memory-mcp install"
+        echo "Run manually: code-cortex-mcp install"
     }
 fi
 
@@ -223,7 +223,7 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
 fi
 
 echo ""
-echo "Done! Restart your coding agent to start using codebase-memory-mcp."
+echo "Done! Restart your coding agent to start using code-cortex-mcp."
 
 } # end main()
 

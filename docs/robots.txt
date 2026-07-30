@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://deusdata.github.io/codebase-memory-mcp/sitemap.xml
+Sitemap: https://tigercosmos.github.io/code-cortex-mcp/sitemap.xml

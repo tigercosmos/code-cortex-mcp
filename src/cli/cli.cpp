@@ -1,7 +1,7 @@
 /*
  * cli.c — CLI subcommand handlers for install, uninstall, update, version.
  *
- * Port of Go cmd/codebase-memory-mcp/ install/update logic.
+ * Port of Go cmd/code-cortex-mcp/ install/update logic.
  * All functions accept explicit paths for testability.
  */
 #include "cli/cli.h"
@@ -114,8 +114,8 @@ static void (*cbm_sqlite_transient_fn(void))(void *) {
 #define TAR_SIZE_OFFSET 124 /* octal size field offset */
 #define TAR_SIZE_LEN 13     /* octal size field: bytes 124-135 + NUL */
 #define TAR_TYPE_OFFSET 156 /* type flag byte */
-#define TAR_BINARY_NAME "codebase-memory-mcp"
-#define TAR_BINARY_NAME_LEN 19
+#define TAR_BINARY_NAME "code-cortex-mcp"
+#define TAR_BINARY_NAME_LEN (sizeof(TAR_BINARY_NAME) - 1)
 #define TAR_BLOCK_SIZE CBM_SZ_512 /* tar record alignment */
 #define TAR_BLOCK_MASK 511        /* TAR_BLOCK_SIZE - 1 */
 
@@ -451,7 +451,7 @@ int cbm_replace_binary(const char *path, const unsigned char *data, int len, int
  * Based on PR #81 by @gdilla — factual corrections applied. */
 static const char skill_content[] =
     "---\n"
-    "name: codebase-memory\n"
+    "name: code-cortex\n"
     "description: Use the codebase knowledge graph for structural code queries. "
     "Triggers on: explore the codebase, understand the architecture, what functions exist, "
     "show me the structure, who calls this function, what does X call, trace the call chain, "
@@ -460,7 +460,7 @@ static const char skill_content[] =
     "Cypher query examples, edge types, how to use search_graph.\n"
     "---\n"
     "\n"
-    "# Codebase Memory — Knowledge Graph Tools\n"
+    "# Code Cortex — Knowledge Graph Tools\n"
     "\n"
     "Graph tools return precise structural results in ~500 tokens vs ~80K for grep.\n"
     "\n"
@@ -528,7 +528,7 @@ static const char skill_content[] =
 static const char codex_instructions_content[] =
     "# Codebase Knowledge Graph\n"
     "\n"
-    "This project uses codebase-memory-mcp to maintain a knowledge graph of the codebase.\n"
+    "This project uses code-cortex-mcp to maintain a knowledge graph of the codebase.\n"
     "Use the MCP tools to explore and understand the code:\n"
     "\n"
     "- `search_graph` — find functions, classes, routes by pattern\n"
@@ -541,15 +541,15 @@ static const char codex_instructions_content[] =
 
 /* Old skill names — cleaned up during install to remove stale directories. */
 static const char *old_skill_names[] = {
-    "codebase-memory-exploring",
-    "codebase-memory-tracing",
-    "codebase-memory-quality",
-    "codebase-memory-reference",
+    "code-cortex-exploring",
+    "code-cortex-tracing",
+    "code-cortex-quality",
+    "code-cortex-reference",
 };
 enum { OLD_SKILL_COUNT = 4 };
 
 static const cbm_skill_t skills[CBM_SKILL_COUNT] = {
-    {"codebase-memory", skill_content},
+    {"code-cortex", skill_content},
 };
 
 const cbm_skill_t *cbm_get_skills(void) {
@@ -702,7 +702,7 @@ bool cbm_remove_old_monolithic_skill(const char *skills_dir, bool dry_run) {
     }
 
     char old_path[CLI_BUF_1K];
-    snprintf(old_path, sizeof(old_path), "%s/codebase-memory-mcp", skills_dir);
+    snprintf(old_path, sizeof(old_path), "%s/code-cortex-mcp", skills_dir);
     struct stat st;
     if (stat(old_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
         return false;
@@ -820,12 +820,12 @@ int cbm_install_editor_mcp(const char *binary_path, const char *config_path) {
     }
 
     /* Remove existing entry if present */
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
 
     /* Add our entry */
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
-    yyjson_mut_obj_add_val(mdoc, servers, "codebase-memory-mcp", entry);
+    yyjson_mut_obj_add_val(mdoc, servers, "code-cortex-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -857,7 +857,7 @@ int cbm_remove_editor_mcp(const char *config_path) {
         return 0;
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -902,14 +902,14 @@ int cbm_install_openclaw_mcp(const char *binary_path, const char *config_path) {
         yyjson_mut_obj_add_val(mdoc, mcp, "servers", servers);
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_bool(mdoc, entry, "enabled", true);
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
     yyjson_mut_val *args = yyjson_mut_arr(mdoc);
     yyjson_mut_obj_add_val(mdoc, entry, "args", args);
-    yyjson_mut_obj_add_val(mdoc, servers, "codebase-memory-mcp", entry);
+    yyjson_mut_obj_add_val(mdoc, servers, "code-cortex-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -947,7 +947,7 @@ int cbm_remove_openclaw_mcp(const char *config_path) {
         return 0;
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -986,12 +986,12 @@ int cbm_install_vscode_mcp(const char *binary_path, const char *config_path) {
         yyjson_mut_obj_add_val(mdoc, root, "servers", servers);
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, entry, "type", "stdio");
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
-    yyjson_mut_obj_add_val(mdoc, servers, "codebase-memory-mcp", entry);
+    yyjson_mut_obj_add_val(mdoc, servers, "code-cortex-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -1023,7 +1023,7 @@ int cbm_remove_vscode_mcp(const char *config_path) {
         return 0;
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -1062,14 +1062,14 @@ int cbm_install_zed_mcp(const char *binary_path, const char *config_path) {
         yyjson_mut_obj_add_val(mdoc, root, "context_servers", servers);
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_str(mdoc, entry, "command", binary_path);
     yyjson_mut_val *args = yyjson_mut_arr(mdoc);
     yyjson_mut_arr_add_str(mdoc, args, "");
     yyjson_mut_obj_add_val(mdoc, entry, "args", args);
-    yyjson_mut_obj_add_val(mdoc, servers, "codebase-memory-mcp", entry);
+    yyjson_mut_obj_add_val(mdoc, servers, "code-cortex-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -1101,7 +1101,7 @@ int cbm_remove_zed_mcp(const char *config_path) {
         return 0;
     }
 
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -1244,9 +1244,9 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
 /* ── Shared agent instructions content ────────────────────────── */
 
 static const char agent_instructions_content[] =
-    "# Codebase Knowledge Graph (codebase-memory-mcp)\n"
+    "# Codebase Knowledge Graph (code-cortex-mcp)\n"
     "\n"
-    "This project uses codebase-memory-mcp to maintain a knowledge graph of the codebase.\n"
+    "This project uses code-cortex-mcp to maintain a knowledge graph of the codebase.\n"
     "ALWAYS prefer MCP graph tools over grep/glob/file-search for code discovery.\n"
     "\n"
     "## Priority Order\n"
@@ -1272,8 +1272,8 @@ const char *cbm_get_agent_instructions(void) {
 
 /* ── Instructions file upsert ─────────────────────────────────── */
 
-#define CMM_MARKER_START "<!-- codebase-memory-mcp:start -->"
-#define CMM_MARKER_END "<!-- codebase-memory-mcp:end -->"
+#define CMM_MARKER_START "<!-- code-cortex-mcp:start -->"
+#define CMM_MARKER_END "<!-- code-cortex-mcp:end -->"
 
 /* Read entire file into malloc'd buffer. Returns NULL on error. */
 static char *read_file_str(const char *path, size_t *out_len) {
@@ -1458,7 +1458,7 @@ int cbm_remove_instructions(const char *path) {
 
 /* ── Codex MCP config (TOML) ─────────────────────────────────── */
 
-#define CODEX_CMM_SECTION "[mcp_servers.codebase-memory-mcp]"
+#define CODEX_CMM_SECTION "[mcp_servers.code-cortex-mcp]"
 
 int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
     if (!binary_path || !config_path) {
@@ -1480,7 +1480,7 @@ int cbm_upsert_codex_mcp(const char *binary_path, const char *config_path) {
     /* Check if our section already exists */
     char *existing = strstr(content, CODEX_CMM_SECTION);
     if (existing) {
-        /* Remove old section: from [mcp_servers.codebase-memory-mcp] to next [section] or EOF */
+        /* Remove old section: from [mcp_servers.code-cortex-mcp] to next [section] or EOF */
         char *section_end = existing + strlen(CODEX_CMM_SECTION);
         /* Find next [section] header */
         char *next_section = strstr(section_end, "\n[");
@@ -1577,19 +1577,19 @@ int cbm_remove_codex_mcp(const char *config_path) {
 /* ── SessionStart reminder hook (Codex / Gemini / Antigravity) ──────
  * Same methodology as the Claude Code SessionStart hook: a non-blocking
  * lifecycle hook whose stdout is injected as session context, reminding the
- * agent to use codebase-memory-mcp graph tools first. The command is written
+ * agent to use code-cortex-mcp graph tools first. The command is written
  * so it is valid both inside a TOML single-quoted literal (Codex config.toml)
  * and a JSON string (Gemini settings.json) — i.e. it contains NO single quotes
  * and NO newlines. (issues #330 + Gemini/Antigravity parity) */
-#define CMM_SESSION_REMINDER_CMD                                                    \
-    "echo \"Code discovery: prefer codebase-memory-mcp (search_graph, trace_path, " \
-    "get_code_snippet, query_graph, search_code) over grep/file-read; run "         \
+#define CMM_SESSION_REMINDER_CMD                                                \
+    "echo \"Code discovery: prefer code-cortex-mcp (search_graph, trace_path, " \
+    "get_code_snippet, query_graph, search_code) over grep/file-read; run "     \
     "index_repository first if the project is not indexed.\""
 
 /* Sentinel-delimited block so upsert/remove are robust to the nested TOML
  * array-of-tables (which both start with '['). */
-#define CODEX_HOOK_BEGIN "# >>> codebase-memory-mcp SessionStart >>>"
-#define CODEX_HOOK_END "# <<< codebase-memory-mcp SessionStart <<<"
+#define CODEX_HOOK_BEGIN "# >>> code-cortex-mcp SessionStart >>>"
+#define CODEX_HOOK_END "# <<< code-cortex-mcp SessionStart <<<"
 
 /* Splice out an existing [CODEX_HOOK_BEGIN .. CODEX_HOOK_END] block (inclusive,
  * plus a leading newline). Returns a newly-malloc'd string the caller frees, or
@@ -1716,7 +1716,7 @@ int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
         yyjson_mut_obj_add_val(mdoc, root, "mcp", mcp);
     }
 
-    yyjson_mut_obj_remove_key(mcp, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(mcp, "code-cortex-mcp");
 
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
     yyjson_mut_obj_add_bool(mdoc, entry, "enabled", true);
@@ -1724,7 +1724,7 @@ int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
     yyjson_mut_val *cmd_arr = yyjson_mut_arr(mdoc);
     yyjson_mut_arr_add_str(mdoc, cmd_arr, binary_path);
     yyjson_mut_obj_add_val(mdoc, entry, "command", cmd_arr);
-    yyjson_mut_obj_add_val(mdoc, mcp, "codebase-memory-mcp", entry);
+    yyjson_mut_obj_add_val(mdoc, mcp, "code-cortex-mcp", entry);
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -1756,7 +1756,7 @@ int cbm_remove_opencode_mcp(const char *config_path) {
         return 0;
     }
 
-    yyjson_mut_obj_remove_key(mcp, "codebase-memory-mcp");
+    yyjson_mut_obj_remove_key(mcp, "code-cortex-mcp");
 
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
@@ -2073,7 +2073,7 @@ void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
     }
     (void)fprintf(f,
                   "#!/usr/bin/env bash\n"
-                  "# codebase-memory-mcp search augmenter (Claude Code PreToolUse).\n"
+                  "# code-cortex-mcp search augmenter (Claude Code PreToolUse).\n"
                   "# NOTE: the legacy filename is kept for zero-migration upgrades.\n"
                   "# Despite the name this NEVER blocks a tool call - it only adds\n"
                   "# graph context. Any failure is silent (exit 0, no output).\n"
@@ -2117,11 +2117,11 @@ static void cbm_install_session_reminder_script(const char *home) {
     }
     (void)fprintf(
         f, "#!/usr/bin/env bash\n"
-           "# SessionStart hook: remind agent to use codebase-memory-mcp tools.\n"
-           "# Installed by codebase-memory-mcp. Fires on startup/resume/clear/compact.\n"
+           "# SessionStart hook: remind agent to use code-cortex-mcp tools.\n"
+           "# Installed by code-cortex-mcp. Fires on startup/resume/clear/compact.\n"
            "cat << 'REMINDER'\n"
            "CRITICAL - Code Discovery Protocol:\n"
-           "1. ALWAYS use codebase-memory-mcp tools FIRST for ANY code exploration:\n"
+           "1. ALWAYS use code-cortex-mcp tools FIRST for ANY code exploration:\n"
            "   - search_graph(name_pattern/label/qn_pattern) to find functions/classes/routes\n"
            "   - trace_path(function_name, mode=calls|data_flow|cross_service) for call chains\n"
            "   - get_code_snippet(qualified_name) for exact symbol source (precise ranges)\n"
@@ -2205,12 +2205,12 @@ static void cbm_install_subagent_reminder_script(const char *home) {
      * runtime escaping (and no python3/jq dependency) is required. */
     (void)fprintf(f,
                   "#!/usr/bin/env bash\n"
-                  "# SubagentStart hook: tell subagents to use codebase-memory-mcp tools.\n"
-                  "# Installed by codebase-memory-mcp. Fires when any subagent is spawned.\n"
+                  "# SubagentStart hook: tell subagents to use code-cortex-mcp tools.\n"
+                  "# Installed by code-cortex-mcp. Fires when any subagent is spawned.\n"
                   "# SubagentStart injects context via JSON additionalContext, not plain stdout.\n"
                   "cat << 'REMINDER'\n"
                   "{\"hookSpecificOutput\":{\"hookEventName\":\"SubagentStart\","
-                  "\"additionalContext\":\"Code discovery: prefer codebase-memory-mcp tools "
+                  "\"additionalContext\":\"Code discovery: prefer code-cortex-mcp tools "
                   "(search_graph, trace_path, get_code_snippet, query_graph, get_architecture, "
                   "search_code) over grep/file-read for navigating code. Use Grep/Glob/Read for "
                   "text, configs, and non-code files.\"}}\n"
@@ -2249,8 +2249,8 @@ int cbm_remove_claude_subagent_hooks(const char *settings_path) {
 /* Matcher excludes read_file for consistency with the Claude fix: the hook
  * is an advisory reminder, not a gate over the agent's file reads. */
 #define GEMINI_HOOK_MATCHER "google_search|grep_search"
-#define GEMINI_HOOK_COMMAND                                               \
-    "echo 'Reminder: prefer codebase-memory-mcp search_graph/trace_path/" \
+#define GEMINI_HOOK_COMMAND                                           \
+    "echo 'Reminder: prefer code-cortex-mcp search_graph/trace_path/" \
     "get_code_snippet over grep/file search for code discovery.' >&2"
 
 int cbm_upsert_gemini_hooks(const char *settings_path) {
@@ -2338,7 +2338,7 @@ int cbm_ensure_path(const char *bin_dir, const char *rc_file, bool dry_run) {
         return CLI_ERR;
     }
 
-    (void)fprintf(f, "\n# Added by codebase-memory-mcp install\n%s\n", line);
+    (void)fprintf(f, "\n# Added by code-cortex-mcp install\n%s\n", line);
     (void)fclose(f);
     return 0;
 }
@@ -2454,7 +2454,7 @@ unsigned char *cbm_extract_binary_from_targz(const unsigned char *data, int data
         return NULL;
     }
 
-    /* Parse tar: find entry starting with "codebase-memory-mcp" */
+    /* Parse tar: find entry starting with "code-cortex-mcp" */
     size_t pos = 0;
     while (pos + TAR_BLOCK_SIZE <= total) {
         const unsigned char *hdr = decompressed + pos;
@@ -2602,8 +2602,8 @@ unsigned char *cbm_extract_binary_from_zip(const unsigned char *data, int data_l
         const char *basename = strrchr(fname, '/');
         basename = basename ? basename + CLI_SKIP_ONE : fname;
 
-        if (strcmp(basename, "codebase-memory-mcp") == 0 ||
-            strcmp(basename, "codebase-memory-mcp.exe") == 0) {
+        if (strcmp(basename, "code-cortex-mcp") == 0 ||
+            strcmp(basename, "code-cortex-mcp.exe") == 0) {
             return zip_extract_entry(data + header_end, method, comp_size, uncomp_size, out_len);
         }
 
@@ -2828,7 +2828,7 @@ int cbm_config_delete(cbm_config_t *cfg, const char *key) {
 
 int cbm_cmd_config(int argc, char **argv) {
     if (argc == 0) {
-        printf("Usage: codebase-memory-mcp config <command> [args]\n\n");
+        printf("Usage: code-cortex-mcp config <command> [args]\n\n");
         printf("Commands:\n");
         printf("  list             Show all config values\n");
         printf("  get <key>        Get a config value\n");
@@ -3040,14 +3040,14 @@ static int cbm_kill_other_instances(void) {
      * Use /FI filter to exclude our own PID. */
     char pid_filter[CBM_SZ_64];
     snprintf(pid_filter, sizeof(pid_filter), "PID ne %lu", (unsigned long)GetCurrentProcessId());
-    const char *argv[] = {"taskkill", "/F",       "/FI", "IMAGENAME eq codebase-memory-mcp.exe",
+    const char *argv[] = {"taskkill", "/F",       "/FI", "IMAGENAME eq code-cortex-mcp.exe",
                           "/FI",      pid_filter, NULL};
     (void)cbm_exec_no_shell(argv);
     return 0;
 #else
     int killed = 0;
     pid_t self = getpid();
-    FILE *fp = cbm_popen("pgrep -x codebase-memory-mcp", "r");
+    FILE *fp = cbm_popen("pgrep -x code-cortex-mcp", "r");
     if (!fp) {
         return 0;
     }
@@ -3350,7 +3350,7 @@ static void install_gemini_config(const char *home, const char *binary_path, boo
         cbm_upsert_gemini_hooks(cp);
         cbm_upsert_gemini_session_hooks(cp);
     }
-    printf("  hooks: BeforeTool + SessionStart (codebase-memory-mcp reminder)\n");
+    printf("  hooks: BeforeTool + SessionStart (code-cortex-mcp reminder)\n");
 }
 
 static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const char *home,
@@ -3381,7 +3381,7 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
                     cbm_upsert_codex_hooks(cp);
                 }
             }
-            printf("  hooks: SessionStart (codebase-memory-mcp reminder)\n");
+            printf("  hooks: SessionStart (code-cortex-mcp reminder)\n");
         }
     }
     if (agents->gemini) {
@@ -3420,7 +3420,7 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
             if (!dry_run) {
                 cbm_upsert_gemini_session_hooks(sp);
             }
-            printf("  hooks: SessionStart (codebase-memory-mcp reminder)\n");
+            printf("  hooks: SessionStart (code-cortex-mcp reminder)\n");
         }
     }
     if (agents->aider) {
@@ -3495,7 +3495,7 @@ static void install_editor_agent_configs(const cbm_detected_agents_t *agents, co
                  "%s/Code/User/globalStorage/kilocode.kilo-code/settings/mcp_settings.json",
                  cbm_app_config_dir());
 #endif
-        snprintf(ip, sizeof(ip), "%s/.kilocode/rules/codebase-memory-mcp.md", home);
+        snprintf(ip, sizeof(ip), "%s/.kilocode/rules/code-cortex-mcp.md", home);
         install_generic_agent_config("KiloCode", binary_path, cp, ip, dry_run,
                                      cbm_install_editor_mcp);
     }
@@ -3661,9 +3661,9 @@ static void cbm_detect_self_path(char *buf, size_t buf_sz, const char *home) {
 #endif
     if (!buf[0]) {
 #ifdef _WIN32
-        snprintf(buf, buf_sz, "%s/.local/bin/codebase-memory-mcp.exe", home);
+        snprintf(buf, buf_sz, "%s/.local/bin/code-cortex-mcp.exe", home);
 #else
-        snprintf(buf, buf_sz, "%s/.local/bin/codebase-memory-mcp", home);
+        snprintf(buf, buf_sz, "%s/.local/bin/code-cortex-mcp", home);
 #endif
     }
 }
@@ -3738,7 +3738,7 @@ char *cbm_build_install_plan_json(const char *home, const char *binary_path) {
     yyjson_mut_obj_add_val(doc, root, "hooks_planned", hooks);
     yyjson_mut_obj_add_bool(doc, root, "writes_started", false);
     yyjson_mut_obj_add_bool(doc, root, "network_after_install", false);
-    yyjson_mut_obj_add_str(doc, root, "next_safe_command", "codebase-memory-mcp install -y");
+    yyjson_mut_obj_add_str(doc, root, "next_safe_command", "code-cortex-mcp install -y");
 
     char *json = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY, NULL);
     yyjson_mut_doc_free(doc);
@@ -3791,7 +3791,7 @@ int cbm_cmd_install(int argc, char **argv) {
         return 0;
     }
 
-    printf("codebase-memory-mcp install %s\n\n", CBM_VERSION);
+    printf("code-cortex-mcp install %s\n\n", CBM_VERSION);
 
     /* (#607) Default: preserve existing indexes. `--reset-indexes` opts into
      * the old prompt-and-delete behaviour. The helper returns 0 only when the
@@ -3818,9 +3818,9 @@ int cbm_cmd_install(int argc, char **argv) {
 
     char bin_target[CLI_BUF_1K];
 #ifdef _WIN32
-    snprintf(bin_target, sizeof(bin_target), "%s/.local/bin/codebase-memory-mcp.exe", home);
+    snprintf(bin_target, sizeof(bin_target), "%s/.local/bin/code-cortex-mcp.exe", home);
 #else
-    snprintf(bin_target, sizeof(bin_target), "%s/.local/bin/codebase-memory-mcp", home);
+    snprintf(bin_target, sizeof(bin_target), "%s/.local/bin/code-cortex-mcp", home);
 #endif
 
     if (!cbm_same_file(self_path, bin_target)) {
@@ -4043,7 +4043,7 @@ static void uninstall_editor_agents(const cbm_detected_agents_t *agents, const c
                  "%s/Code/User/globalStorage/kilocode.kilo-code/settings/mcp_settings.json",
                  cbm_app_config_dir());
 #endif
-        snprintf(ip, sizeof(ip), "%s/.kilocode/rules/codebase-memory-mcp.md", home);
+        snprintf(ip, sizeof(ip), "%s/.kilocode/rules/code-cortex-mcp.md", home);
         uninstall_agent_mcp_instr((mcp_uninstall_args_t){"KiloCode", cp, ip}, dry_run,
                                   cbm_remove_editor_mcp);
     }
@@ -4098,7 +4098,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
         return CLI_TRUE;
     }
 
-    printf("codebase-memory-mcp uninstall\n\n");
+    printf("code-cortex-mcp uninstall\n\n");
 
     cbm_detected_agents_t agents = cbm_detect_agents(home);
     if (agents.claude_code) {
@@ -4123,9 +4123,9 @@ int cbm_cmd_uninstall(int argc, char **argv) {
     /* Step 3: Remove binary */
     char bin_path[CLI_BUF_1K];
 #ifdef _WIN32
-    snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/codebase-memory-mcp.exe", home);
+    snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/code-cortex-mcp.exe", home);
 #else
-    snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/codebase-memory-mcp", home);
+    snprintf(bin_path, sizeof(bin_path), "%s/.local/bin/code-cortex-mcp", home);
 #endif
     struct stat st;
     if (stat(bin_path, &st) == 0) {
@@ -4213,7 +4213,7 @@ static void build_update_url(char *url, int url_sz, const char *os, const char *
      * have no such variant. Keep in sync with install.sh / install.js / pypi
      * _cli.py. */
     const char *portable = (strcmp(os, "linux") == 0) ? "-portable" : "";
-    snprintf(url, url_sz, "%s/codebase-memory-mcp-%s-%s%s.%s", base_url, os, arch, portable, ext);
+    snprintf(url, url_sz, "%s/code-cortex-mcp-%s-%s%s.%s", base_url, os, arch, portable, ext);
 }
 
 /* Prompt to delete existing indexes. Returns 0 to continue, 1 to abort. */
@@ -4254,8 +4254,8 @@ static int download_verify_install(const char *url, const char *ext, const char 
     char archive_name[CLI_BUF_256];
     /* Must match build_update_url: linux uses the static "-portable" asset. */
     const char *portable = (strcmp(os, "linux") == 0) ? "-portable" : "";
-    snprintf(archive_name, sizeof(archive_name), "codebase-memory-mcp-%s-%s%s.%s", os, arch,
-             portable, ext);
+    snprintf(archive_name, sizeof(archive_name), "code-cortex-mcp-%s-%s%s.%s", os, arch, portable,
+             ext);
     /* Fail closed: install only a positively-verified download. A mismatch,
      * a missing checksum entry, or an unavailable hash tool (crc != 0) all
      * abort rather than install an unverified binary. */
@@ -4370,7 +4370,7 @@ int cbm_cmd_update(int argc, char **argv) {
         return CLI_TRUE;
     }
 
-    printf("codebase-memory-mcp update (current: %s)\n\n", CBM_VERSION);
+    printf("code-cortex-mcp update (current: %s)\n\n", CBM_VERSION);
 
     /* Version check — skip download if already on latest (not in dry-run). */
     if (!force && !dry_run && check_already_latest()) {
@@ -4398,7 +4398,7 @@ int cbm_cmd_update(int argc, char **argv) {
 
     if (dry_run) {
         printf("\n(dry-run — skipping download, extraction, and binary replacement)\n");
-        printf("  target: %s/.local/bin/codebase-memory-mcp\n", home);
+        printf("  target: %s/.local/bin/code-cortex-mcp\n", home);
         printf("  os/arch: %s/%s\n", os, arch);
         printf("\nUpdate dry-run complete.\n");
         return 0;
@@ -4407,9 +4407,9 @@ int cbm_cmd_update(int argc, char **argv) {
     /* Step 4-5: Download, verify, and install binary */
     char bin_dest[CLI_BUF_1K];
 #ifdef _WIN32
-    snprintf(bin_dest, sizeof(bin_dest), "%s/.local/bin/codebase-memory-mcp.exe", home);
+    snprintf(bin_dest, sizeof(bin_dest), "%s/.local/bin/code-cortex-mcp.exe", home);
 #else
-    snprintf(bin_dest, sizeof(bin_dest), "%s/.local/bin/codebase-memory-mcp", home);
+    snprintf(bin_dest, sizeof(bin_dest), "%s/.local/bin/code-cortex-mcp", home);
 #endif
     char bin_dir[CLI_BUF_1K];
     snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", home);
@@ -4650,10 +4650,10 @@ int cbm_cli_print_tool_help(const char *tool_name) {
     yyjson_val *required = root ? yyjson_obj_get(root, "required") : NULL;
 
     printf("Usage:\n");
-    printf("  codebase-memory-mcp cli %s --flag value [--flag2 value2 ...]\n", tool_name);
-    printf("  codebase-memory-mcp cli %s --args-file <path-to-json>\n", tool_name);
-    printf("  echo '<json>' | codebase-memory-mcp cli %s\n", tool_name);
-    printf("  codebase-memory-mcp cli %s '<raw-json-args>'\n", tool_name);
+    printf("  code-cortex-mcp cli %s --flag value [--flag2 value2 ...]\n", tool_name);
+    printf("  code-cortex-mcp cli %s --args-file <path-to-json>\n", tool_name);
+    printf("  echo '<json>' | code-cortex-mcp cli %s\n", tool_name);
+    printf("  code-cortex-mcp cli %s '<raw-json-args>'\n", tool_name);
 
     printf("\nFlags:\n");
     if (props && yyjson_is_obj(props)) {

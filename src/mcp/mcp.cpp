@@ -345,7 +345,7 @@ static const tool_def_t TOOLS[] = {
      "\"Override the derived project name. Non-ASCII bytes are encoded and unsafe path characters "
      "are normalized.\"},"
      "\"persistence\":{\"type\":\"boolean\",\"default\":false,\"description\":"
-     "\"Write compressed artifact to .codebase-memory/graph.db.zst for team sharing. "
+     "\"Write compressed artifact to .code-cortex/graph.db.zst for team sharing. "
      "Teammates can bootstrap from the artifact instead of full re-indexing.\"}"
      "},\"required\":[\"repo_path\"]}"},
 
@@ -724,7 +724,7 @@ char *cbm_mcp_initialize_response(const char *params_json) {
     yyjson_mut_obj_add_str(doc, root, "protocolVersion", version);
 
     yyjson_mut_val *impl = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, impl, "name", "codebase-memory-mcp");
+    yyjson_mut_obj_add_str(doc, impl, "name", "code-cortex-mcp");
     yyjson_mut_obj_add_str(doc, impl, "version", cbm_cli_get_version());
     yyjson_mut_obj_add_val(doc, root, "serverInfo", impl);
 
@@ -1316,7 +1316,7 @@ static bool project_has_adr(cbm_store_t *store, const char *project, const char 
     }
 
     char adr_path[CBM_SZ_4K];
-    snprintf(adr_path, sizeof(adr_path), "%s/.codebase-memory/adr.md", root_path);
+    snprintf(adr_path, sizeof(adr_path), "%s/.code-cortex/adr.md", root_path);
     struct stat adr_st;
     return stat(adr_path, &adr_st) == 0;
 }
@@ -4092,7 +4092,7 @@ static bool write_skip_logfile(const char *project, const cbm_file_error_t *errs
             partials++;
         }
     }
-    (void)fprintf(f, "# codebase-memory-mcp index coverage report\n");
+    (void)fprintf(f, "# code-cortex-mcp index coverage report\n");
     (void)fprintf(f, "# project=%s skipped=%d parse_partial=%d\n", project ? project : "",
                   count - partials, partials);
     (void)fprintf(f, "# columns: phase\treason\tpath\n");
@@ -4196,7 +4196,7 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
     yyjson_mut_obj_add_bool(doc, root, "artifact_present", has_artifact);
     if (persistence && has_artifact) {
         yyjson_mut_obj_add_str(doc, root, "artifact_hint",
-                               "Persistent artifact written to .codebase-memory/graph.db.zst. "
+                               "Persistent artifact written to .code-cortex/graph.db.zst. "
                                "Commit this file to share the index with teammates.");
     }
 
@@ -6557,7 +6557,7 @@ static void adr_list_sections_from_content(yyjson_mut_doc *doc, yyjson_mut_val *
     yyjson_mut_obj_add_val(doc, root_obj, "sections", sections);
 }
 
-/* Read the legacy file-based ADR (<root>/.codebase-memory/adr.md), used by
+/* Read the legacy file-based ADR (<root>/.code-cortex/adr.md), used by
  * older versions. Returns a heap buffer (caller frees) or NULL if missing/
  * empty. Kept only to migrate old ADRs into the store (#256). */
 static char *adr_read_legacy_file(const char *root_path) {
@@ -6565,7 +6565,7 @@ static char *adr_read_legacy_file(const char *root_path) {
         return NULL;
     }
     char adr_path[CBM_SZ_4K];
-    snprintf(adr_path, sizeof(adr_path), "%s/.codebase-memory/adr.md", root_path);
+    snprintf(adr_path, sizeof(adr_path), "%s/.code-cortex/adr.md", root_path);
     FILE *fp = cbm_fopen(adr_path, "r");
     if (!fp) {
         return NULL;
@@ -6648,7 +6648,7 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
     }
 
     /* One-time migration: older versions wrote ADRs to a file at
-     * <root>/.codebase-memory/adr.md. If the store has no ADR yet but that
+     * <root>/.code-cortex/adr.md. If the store has no ADR yet but that
      * legacy file exists, import it so nothing is lost on upgrade. */
     cbm_adr_t adr;
     memset(&adr, 0, sizeof(adr));
@@ -6936,7 +6936,7 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
 
     if (!auto_index) {
         cbm_log_info("autoindex.skip", "reason", "disabled", "hint",
-                     "run: codebase-memory-mcp config set auto_index true");
+                     "run: code-cortex-mcp config set auto_index true");
         return;
     }
 
@@ -7011,8 +7011,8 @@ static void *update_check_thread(void *arg) {
         const char *current = cbm_cli_get_version();
         if (cbm_compare_versions(tag_str, current) > 0) {
             snprintf(srv->update_notice, sizeof(srv->update_notice),
-                     "Update available: %s -> %s -- run: codebase-memory-mcp update  |  "
-                     "Enjoying codebase-memory-mcp? Please leave a star: "
+                     "Update available: %s -> %s -- run: code-cortex-mcp update  |  "
+                     "Enjoying code-cortex-mcp? Please leave a star: "
                      "https://github.com/tigercosmos/code-cortex-mcp",
                      current, tag_str);
             cbm_log_info("update.available", "current", current, "latest", tag_str);

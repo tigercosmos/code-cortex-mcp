@@ -64,6 +64,16 @@ them to need translation, not a clean apply:
 - **`-Werror` is GCC-only** for first-party C++ (clang's extra warnings aren't
   promoted to errors). Lint uses clang-format **20.1.8** + cppcheck in **C++**
   mode (with C-idiom checks suppressed). Run `scripts/lint.sh` before pushing.
+- **Full product rename (2026-07-30, no backward compatibility).** The fork is
+  **code-cortex-mcp** everywhere user-facing: binary name and CMake target,
+  release asset names, cache dir (`~/.cache/code-cortex-mcp/`), MCP server
+  entry key in agent configs, deployed skill names (`code-cortex*`), hook log
+  prefix (`[code-cortex]`), team artifact dir (`.code-cortex/`), and user
+  config (`.code-cortex.json`). Upstream diffs that touch any
+  `codebase-memory`/`codebase-memory-mcp` string must be translated to the
+  `code-cortex` names. Internal `cbm_`/`CBM_*` code prefixes and env vars are
+  deliberately unchanged (they are the engine acronym and keep diffs
+  appliable). `.cbmignore` also keeps its name.
 - **Fork rebrand.** All repo URLs point to `tigercosmos/code-cortex-mcp`
   (README credits upstream). Skip upstream's release/versioning/`pkg/*` and
   registry (`server.json`) changes unless intentionally re-adopting them.

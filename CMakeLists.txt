@@ -475,26 +475,26 @@ enable_testing()
 add_test(NAME test-runner COMMAND test-runner WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # ────────────────────────────────────────────────────────────────
-# Production binary (codebase-memory-mcp)
+# Production binary (code-cortex-mcp)
 # ────────────────────────────────────────────────────────────────
 # Same library targets as test-runner, with src/main.cpp as the entry
 # point instead of the test sources.
-add_executable(codebase-memory-mcp src/main.cpp)
-target_compile_options(codebase-memory-mcp PRIVATE ${CBM_FIRSTPARTY_CXX_FLAGS})
-target_include_directories(codebase-memory-mcp PRIVATE ${CBM_COMMON_INCLUDES})
-set_target_properties(codebase-memory-mcp PROPERTIES CXX_STANDARD 23)
-target_link_libraries(codebase-memory-mcp PRIVATE
+add_executable(code-cortex-mcp src/main.cpp)
+target_compile_options(code-cortex-mcp PRIVATE ${CBM_FIRSTPARTY_CXX_FLAGS})
+target_include_directories(code-cortex-mcp PRIVATE ${CBM_COMMON_INCLUDES})
+set_target_properties(code-cortex-mcp PROPERTIES CXX_STANDARD 23)
+target_link_libraries(code-cortex-mcp PRIVATE
     ${CBM_FIRSTPARTY_TARGETS}
     ${CBM_VENDORED_TARGETS}
     cbm_yyjson
     pthread m z stdc++ ${CBM_LIBGIT2_LIBS})
 
 if(CBM_STATIC)
-    target_link_options(codebase-memory-mcp PRIVATE -static)
+    target_link_options(code-cortex-mcp PRIVATE -static)
 endif()
 
 if(WIN32)
-    target_link_libraries(codebase-memory-mcp PRIVATE ws2_32 psapi)
-    target_link_options(codebase-memory-mcp PRIVATE
+    target_link_libraries(code-cortex-mcp PRIVATE ws2_32 psapi)
+    target_link_options(code-cortex-mcp PRIVATE
         -Wl,--allow-multiple-definition -Wl,--stack,8388608)
 endif()

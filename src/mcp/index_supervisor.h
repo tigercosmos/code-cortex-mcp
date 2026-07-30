@@ -37,7 +37,7 @@ bool cbm_index_worker_active(void);
 const char *cbm_index_worker_response_out(void);
 
 /* Host marking (#845): the supervisor gate is OPT-IN per process. Only the real
- * codebase-memory-mcp binary calls this (first thing in main(), before any
+ * code-cortex-mcp binary calls this (first thing in main(), before any
  * subcommand dispatch, so MCP server + CLI + HTTP paths are all covered).
  * EMBEDDERS of cbm_mcp_handle_tool (test binaries, future library users) never
  * call it, so they index in-process by default. Without this gate the supervisor

@@ -36,43 +36,43 @@ jobs:
 
       - name: Extract binary
         run: |
-          tar -xzf codebase-memory-mcp-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
-          chmod +x codebase-memory-mcp
+          tar -xzf code-cortex-mcp-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          chmod +x code-cortex-mcp
 
       - name: Start artifact server
         run: |
           mkdir -p /tmp/smoke-server
-          cp codebase-memory-mcp /tmp/smoke-server/
+          cp code-cortex-mcp /tmp/smoke-server/
           OS=${{ matrix.goos }}; ARCH=${{ matrix.goarch }}
-          tar -czf "/tmp/smoke-server/codebase-memory-mcp-${OS}-${ARCH}.tar.gz" \
-            -C /tmp/smoke-server codebase-memory-mcp
+          tar -czf "/tmp/smoke-server/code-cortex-mcp-${OS}-${ARCH}.tar.gz" \
+            -C /tmp/smoke-server code-cortex-mcp
           # The binary's update path requests the -portable asset on Linux
           # (see build_update_url in src/cli/cli.cpp) — publish an alias so
           # the phase-14 update E2E resolves.
           if [ "$OS" = "linux" ]; then
-            cp "/tmp/smoke-server/codebase-memory-mcp-${OS}-${ARCH}.tar.gz" \
-               "/tmp/smoke-server/codebase-memory-mcp-${OS}-${ARCH}-portable.tar.gz"
+            cp "/tmp/smoke-server/code-cortex-mcp-${OS}-${ARCH}.tar.gz" \
+               "/tmp/smoke-server/code-cortex-mcp-${OS}-${ARCH}-portable.tar.gz"
           fi
           cd /tmp/smoke-server
           sha256sum *.tar.gz > checksums.txt 2>/dev/null || shasum -a 256 *.tar.gz > checksums.txt
           python3 -m http.server 18080 -d /tmp/smoke-server &
 
       - name: Smoke test
-        run: scripts/smoke-test.sh ./codebase-memory-mcp
+        run: scripts/smoke-test.sh ./code-cortex-mcp
         env:
           SMOKE_DOWNLOAD_URL: http://localhost:18080
 
       - name: Security audits
         run: |
-          scripts/security-strings.sh ./codebase-memory-mcp
-          scripts/security-install.sh ./codebase-memory-mcp
-          scripts/security-network.sh ./codebase-memory-mcp
+          scripts/security-strings.sh ./code-cortex-mcp
+          scripts/security-install.sh ./code-cortex-mcp
+          scripts/security-network.sh ./code-cortex-mcp
 
       - name: MCP robustness test (linux-amd64 only)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
-          scripts/security-fuzz.sh ./codebase-memory-mcp
-          scripts/security-fuzz-random.sh ./codebase-memory-mcp 60
+          scripts/security-fuzz.sh ./code-cortex-mcp
+          scripts/security-fuzz-random.sh ./code-cortex-mcp 60
 
       - name: ClamAV scan (Linux)
         if: startsWith(matrix.os, 'ubuntu')
@@ -85,7 +85,7 @@ jobs:
           grep -q "DatabaseMirror" /etc/clamav/freshclam.conf 2>/dev/null || \
             echo "DatabaseMirror database.clamav.net" | sudo tee -a /etc/clamav/freshclam.conf > /dev/null
           sudo freshclam --quiet
-          clamscan --no-summary ./codebase-memory-mcp
+          clamscan --no-summary ./code-cortex-mcp
 
       - name: ClamAV scan (macOS)
         if: startsWith(matrix.os, 'macos')
@@ -98,7 +98,7 @@ jobs:
             echo "DatabaseMirror database.clamav.net" >> "$CLAMAV_ETC/freshclam.conf"
           fi
           freshclam --quiet --no-warnings 2>/dev/null || freshclam --quiet 2>/dev/null || echo "WARNING: freshclam update failed"
-          clamscan --no-summary ./codebase-memory-mcp
+          clamscan --no-summary ./code-cortex-mcp
 
   smoke-windows:
     runs-on: windows-latest
@@ -123,35 +123,35 @@ jobs:
       - name: Extract binary
         shell: msys2 {0}
         run: |
-          unzip -o "codebase-memory-mcp-windows-amd64.zip"
+          unzip -o "code-cortex-mcp-windows-amd64.zip"
 
       - name: Start artifact server
         shell: msys2 {0}
         run: |
           mkdir -p /tmp/smoke-server
-          cp codebase-memory-mcp.exe /tmp/smoke-server/
+          cp code-cortex-mcp.exe /tmp/smoke-server/
           cd /tmp/smoke-server
-          zip -q "codebase-memory-mcp-windows-amd64.zip" codebase-memory-mcp.exe
+          zip -q "code-cortex-mcp-windows-amd64.zip" code-cortex-mcp.exe
           sha256sum *.zip > checksums.txt
           python3 -m http.server 18080 -d /tmp/smoke-server &
 
       - name: Smoke test
         shell: msys2 {0}
-        run: scripts/smoke-test.sh ./codebase-memory-mcp.exe
+        run: scripts/smoke-test.sh ./code-cortex-mcp.exe
         env:
           SMOKE_DOWNLOAD_URL: http://localhost:18080
 
       - name: Security audits
         shell: msys2 {0}
         run: |
-          scripts/security-strings.sh ./codebase-memory-mcp.exe
-          scripts/security-install.sh ./codebase-memory-mcp.exe
+          scripts/security-strings.sh ./code-cortex-mcp.exe
+          scripts/security-install.sh ./code-cortex-mcp.exe
 
       - name: Windows Defender scan
         shell: pwsh
         run: |
           & "C:\Program Files\Windows Defender\MpCmdRun.exe" -SignatureUpdate 2>$null
-          $result = & "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "$PWD\codebase-memory-mcp.exe" -DisableRemediation
+          $result = & "C:\Program Files\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File "$PWD\code-cortex-mcp.exe" -DisableRemediation
           Write-Host $result
           if ($LASTEXITCODE -ne 0) { Write-Host "BLOCKED: Windows Defender flagged binary!"; exit 1 }
           Write-Host "=== Windows Defender: clean ==="
@@ -176,12 +176,12 @@ jobs:
 
       - name: Extract and smoke test
         run: |
-          tar -xzf codebase-memory-mcp-linux-${{ matrix.arch }}-portable.tar.gz
-          chmod +x codebase-memory-mcp
-          scripts/smoke-test.sh ./codebase-memory-mcp
+          tar -xzf code-cortex-mcp-linux-${{ matrix.arch }}-portable.tar.gz
+          chmod +x code-cortex-mcp
+          scripts/smoke-test.sh ./code-cortex-mcp
 
       - name: Security audits
         run: |
-          scripts/security-strings.sh ./codebase-memory-mcp
-          scripts/security-install.sh ./codebase-memory-mcp
-          scripts/security-network.sh ./codebase-memory-mcp
+          scripts/security-strings.sh ./code-cortex-mcp
+          scripts/security-install.sh ./code-cortex-mcp
+          scripts/security-network.sh ./code-cortex-mcp

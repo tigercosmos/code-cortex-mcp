@@ -1,6 +1,6 @@
 # C → C++23 migration roadmap
 
-This is the staging plan for migrating `codebase-memory-mcp` from C11 to
+This is the staging plan for migrating `code-cortex-mcp` from C11 to
 C++23. **Phase 1** (compile every first-party TU as C++23 with CMake) is
 **done**, and the follow-on conversion of the files Phase 1 had left as C
 is now **also done**: as of 2026-05-29 **every first-party translation unit
@@ -32,7 +32,7 @@ baseline.
   build system. `Makefile.cbm` has been **deleted**; the CI wrapper scripts
   (`scripts/{build,test,lint,security}.sh`), the pre-commit hook, the Nix
   flake, and the mingw Docker images all drive CMake. The production binary
-  target (`codebase-memory-mcp`) and a `cbm-with-ui` (`-DCBM_WITH_UI=ON`)
+  target (`code-cortex-mcp`) and a `cbm-with-ui` (`-DCBM_WITH_UI=ON`)
   path are wired.
 * **92 first-party `.c` → `.cpp`** ports (64 in `src/`, 28 in
   `internal/cbm/`), total ~226 LOC added vs ~10 deleted across 159
@@ -166,7 +166,7 @@ struct memory layout.
 ## Phase 1 closing tasks (still to do)
 
 1. ✅ **Done (partial):** the **production binary**
-   (`codebase-memory-mcp`) is now wired in CMake (stub-UI `cbm` variant)
+   (`code-cortex-mcp`) is now wired in CMake (stub-UI `cbm` variant)
    and verified to build + run. The embedded-assets `cbm-with-ui` variant
    is still not wired.
 2. ✅ **Done:** the lint pipeline (clang-tidy / cppcheck / clang-format /

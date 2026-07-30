@@ -1,5 +1,5 @@
 /*
- * hook_augment.c — `codebase-memory-mcp hook-augment`
+ * hook_augment.c — `code-cortex-mcp hook-augment`
  *
  * A non-blocking Claude Code PreToolUse augmenter. Reads the hook JSON from
  * stdin, and for Grep/Glob calls injects matching graph symbols as
@@ -200,7 +200,7 @@ static char *ha_format_context(const char *envelope, const char *token, bool *is
         return NULL;
     }
     int off = snprintf(text, 4096,
-                       "[codebase-memory] %zu graph symbol(s) match \"%s\" "
+                       "[code-cortex] %zu graph symbol(s) match \"%s\" "
                        "(structured context; your search results below are "
                        "unaffected):",
                        nres, token);
@@ -275,7 +275,7 @@ static char *ha_coverage_context(const char *envelope, const char *rel, bool *is
                 text = (char *)malloc(1024);
                 if (text) {
                     snprintf(text, 1024,
-                             "[codebase-memory] Coverage note: this file was only PARTIALLY "
+                             "[code-cortex] Coverage note: this file was only PARTIALLY "
                              "indexed — line range(s) %s could not be parsed, so constructs "
                              "there may be missing from the knowledge graph. The file content "
                              "you are reading is ground truth; graph queries may under-report "
@@ -298,7 +298,7 @@ static char *ha_coverage_context(const char *envelope, const char *rel, bool *is
                     text = (char *)malloc(1024);
                     if (text) {
                         snprintf(text, 1024,
-                                 "[codebase-memory] Coverage note: this file was NOT indexed "
+                                 "[code-cortex] Coverage note: this file was NOT indexed "
                                  "(%s%s%s) — the knowledge graph has no data for it. "
                                  "(best-effort signal)",
                                  phase ? phase : "skipped", reason && reason[0] ? ": " : "",

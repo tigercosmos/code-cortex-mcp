@@ -109,11 +109,11 @@ static int integration_setup(void) {
     const char *home = getenv("HOME");
     if (!home)
         home = "/tmp";
-    snprintf(g_dbpath, sizeof(g_dbpath), "%s/.cache/codebase-memory-mcp/%s.db", home, g_project);
+    snprintf(g_dbpath, sizeof(g_dbpath), "%s/.cache/code-cortex-mcp/%s.db", home, g_project);
 
     /* Ensure cache dir exists */
     char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/code-cortex-mcp", home);
     cbm_mkdir(cache_dir);
 
     /* Remove stale db from previous test runs */
@@ -421,8 +421,7 @@ TEST(integ_mcp_trace_path_min_confidence) {
         free(base);
         PASS();
     }
-    bool baseline_has_callee =
-        strstr(base, "Add") || strstr(base, "Multiply");
+    bool baseline_has_callee = strstr(base, "Add") || strstr(base, "Multiply");
     free(base);
     /* If neither expected callee appears, the fixture changed — accept. */
     if (!baseline_has_callee) {

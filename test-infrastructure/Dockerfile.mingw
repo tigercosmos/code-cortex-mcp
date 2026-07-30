@@ -51,5 +51,5 @@ CMD ["rm -rf build/c && \
        -DCMAKE_BUILD_TYPE=None -DCMAKE_C_FLAGS=-O2 -DCMAKE_CXX_FLAGS=-O2 \
        -DCMAKE_C_COMPILER=x86_64-w64-mingw32-clang \
        -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-clang++ && \
-     cmake --build /src/build/c -j4 --target codebase-memory-mcp \
+     cmake --build /src/build/c -j4 --target code-cortex-mcp \
      && echo '=== Windows cross-compile: OK ==='"]

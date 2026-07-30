@@ -6,7 +6,7 @@
 # embedded skill (plus agent MCP config) via the binary's own `install`
 # subcommand.
 #
-#   make                          # build build/c/codebase-memory-mcp
+#   make                          # build build/c/code-cortex-mcp
 #   make install                  # install binary -> $(BINDIR) and the skill
 #   make install PREFIX=$$HOME/.local
 #   sudo make install             # system-wide binary (see skill note below)
@@ -19,13 +19,13 @@
 # use `sudo make install` for a system prefix, or `make install PREFIX=$$HOME/.local`
 # to avoid sudo entirely. With DESTDIR set (staged/packaging installs) only the
 # binary is staged; the skill step is skipped — run
-# `$(BINDIR)/codebase-memory-mcp install` yourself after the package is live.
+# `$(BINDIR)/code-cortex-mcp install` yourself after the package is live.
 
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 DESTDIR ?=
-BIN       := build/c/codebase-memory-mcp
-INSTALLED := $(DESTDIR)$(BINDIR)/codebase-memory-mcp
+BIN       := build/c/code-cortex-mcp
+INSTALLED := $(DESTDIR)$(BINDIR)/code-cortex-mcp
 
 .PHONY: all build install uninstall clean test
 
@@ -44,7 +44,7 @@ install: $(BIN)
 	install -m 0755 "$(BIN)" "$(INSTALLED)"
 	@echo "==> Installed binary: $(INSTALLED)"
 	@if [ -n "$(DESTDIR)" ]; then \
-		echo "==> DESTDIR set; staged binary only. Run '$(BINDIR)/codebase-memory-mcp install' after staging to deploy the skill."; \
+		echo "==> DESTDIR set; staged binary only. Run '$(BINDIR)/code-cortex-mcp install' after staging to deploy the skill."; \
 	elif [ -n "$$SUDO_USER" ]; then \
 		echo "==> Installing skill + agent config as $$SUDO_USER (not root): $(INSTALLED) install"; \
 		sudo -u "$$SUDO_USER" "$(INSTALLED)" install -y; \

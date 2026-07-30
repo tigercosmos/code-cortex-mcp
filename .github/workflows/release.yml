@@ -111,11 +111,11 @@ jobs:
             'spdxVersion': 'SPDX-2.3',
             'dataLicense': 'CC0-1.0',
             'SPDXID': 'SPDXRef-DOCUMENT',
-            'name': 'codebase-memory-mcp-${{ inputs.version || github.ref_name }}',
+            'name': 'code-cortex-mcp-${{ inputs.version || github.ref_name }}',
             'documentNamespace': 'https://github.com/tigercosmos/code-cortex-mcp/releases/${{ inputs.version || github.ref_name }}',
             'creationInfo': {
               'created': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-              'creators': ['Tool: codebase-memory-mcp-release-pipeline']
+              'creators': ['Tool: code-cortex-mcp-release-pipeline']
             },
             'packages': [
               {'SPDXID': 'SPDXRef-Package-sqlite3', 'name': 'sqlite3', 'versionInfo': '3.51.3', 'downloadLocation': 'https://sqlite.org', 'filesAnalyzed': False},
@@ -194,12 +194,12 @@ jobs:
           for f in assets/*.tar.gz; do
             NAME=$(basename "$f" .tar.gz)
             tar -xzf "$f" -C binaries/ 2>/dev/null || true
-            [ -f binaries/codebase-memory-mcp ] && mv binaries/codebase-memory-mcp "binaries/${NAME}"
+            [ -f binaries/code-cortex-mcp ] && mv binaries/code-cortex-mcp "binaries/${NAME}"
           done
           for f in assets/*.zip; do
             NAME=$(basename "$f" .zip)
             unzip -o "$f" -d binaries/ 2>/dev/null || true
-            [ -f binaries/codebase-memory-mcp.exe ] && mv binaries/codebase-memory-mcp.exe "binaries/${NAME}.exe"
+            [ -f binaries/code-cortex-mcp.exe ] && mv binaries/code-cortex-mcp.exe "binaries/${NAME}.exe"
           done
           cp install.sh binaries/ 2>/dev/null || true
           cp install.ps1 binaries/ 2>/dev/null || true

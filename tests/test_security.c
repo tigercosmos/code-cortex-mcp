@@ -94,7 +94,7 @@ TEST(shell_rejects_redirect_in) {
 }
 
 TEST(shell_accepts_clean_path) {
-    ASSERT_TRUE(cbm_validate_shell_arg("/home/user/.local/bin/codebase-memory-mcp"));
+    ASSERT_TRUE(cbm_validate_shell_arg("/home/user/.local/bin/code-cortex-mcp"));
     PASS();
 }
 

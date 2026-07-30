@@ -1,4 +1,4 @@
-# codebase-memory-mcp setup script (Windows)
+# code-cortex-mcp setup script (Windows)
 # Default: download pre-built native Windows binary
 # -FromSource: build from source inside WSL (requires Go + gcc in WSL)
 
@@ -10,8 +10,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "tigercosmos/code-cortex-mcp"
-$BinaryName = "codebase-memory-mcp"
-$InstallDir = Join-Path $env:LOCALAPPDATA "codebase-memory-mcp"
+$BinaryName = "code-cortex-mcp"
+$InstallDir = Join-Path $env:LOCALAPPDATA "code-cortex-mcp"
 
 # --- Helpers ---
 
@@ -55,7 +55,7 @@ function Write-SettingsJson($Path, $Settings) {
 
 function Configure-ClaudeCode($McpConfig) {
     Write-Host ""
-    $answer = Read-Host "Configure Claude Code to use codebase-memory-mcp? [y/N]"
+    $answer = Read-Host "Configure Claude Code to use code-cortex-mcp? [y/N]"
 
     if ($answer -match '^[Yy]$') {
         $settingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
@@ -71,14 +71,14 @@ function Configure-ClaudeCode($McpConfig) {
             $settings["mcpServers"] = [ordered]@{}
         }
 
-        $settings["mcpServers"]["codebase-memory-mcp"] = $McpConfig
+        $settings["mcpServers"]["code-cortex-mcp"] = $McpConfig
         Write-SettingsJson $settingsPath $settings
         Write-Ok "Updated $settingsPath"
     } else {
         Write-Host ""
         Write-Host "  Add this to your .mcp.json or %USERPROFILE%\.claude\settings.json:" -ForegroundColor White
         Write-Host ""
-        $snippet = @{ mcpServers = @{ "codebase-memory-mcp" = $McpConfig } }
+        $snippet = @{ mcpServers = @{ "code-cortex-mcp" = $McpConfig } }
         $snippet | ConvertTo-Json -Depth 10 | Write-Host
     }
 }
@@ -130,7 +130,7 @@ if ($Help) {
 }
 
 Write-Host ""
-Write-Host "codebase-memory-mcp installer (Windows)" -ForegroundColor White
+Write-Host "code-cortex-mcp installer (Windows)" -ForegroundColor White
 Write-Host ""
 
 if ($FromSource) {
@@ -198,7 +198,7 @@ if ($FromSource) {
 
     # Clone or update
     Write-Host ""
-    $sourceDir = "/home/$wslUser/.local/share/codebase-memory-mcp"
+    $sourceDir = "/home/$wslUser/.local/share/code-cortex-mcp"
     try {
         Invoke-WSL "test -d $sourceDir/.git" | Out-Null
         Write-Host "Updating source..." -ForegroundColor White
@@ -213,7 +213,7 @@ if ($FromSource) {
     Write-Host ""
     Write-Host "Building binary (this may take a minute)..." -ForegroundColor White
     $wslBinaryPath = "/home/$wslUser/.local/bin/$BinaryName"
-    Invoke-WSL "mkdir -p /home/$wslUser/.local/bin && cd $sourceDir && scripts/build.sh && cp build/c/codebase-memory-mcp $wslBinaryPath"
+    Invoke-WSL "mkdir -p /home/$wslUser/.local/bin && cd $sourceDir && scripts/build.sh && cp build/c/code-cortex-mcp $wslBinaryPath"
     Write-Ok "Built to $wslBinaryPath (inside WSL)"
 
     # Verify
@@ -240,14 +240,14 @@ if ($FromSource) {
     Write-Host "  To uninstall:" -ForegroundColor White
     Write-Host "    wsl.exe -- rm $wslBinaryPath"
     Write-Host "    wsl.exe -- rm -rf $sourceDir"
-    Write-Host "    wsl.exe -- rm -rf ~/.cache/codebase-memory-mcp/"
+    Write-Host "    wsl.exe -- rm -rf ~/.cache/code-cortex-mcp/"
 
 } else {
     # --- Download pre-built native Windows binary ---
     Write-Host "Fetching latest release..." -ForegroundColor White
 
     $releaseUrl = "https://api.github.com/repos/$Repo/releases/latest"
-    $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "User-Agent" = "codebase-memory-mcp-setup" }
+    $release = Invoke-RestMethod -Uri $releaseUrl -Headers @{ "User-Agent" = "code-cortex-mcp-setup" }
     $tag = $release.tag_name
 
     if (-not $tag) {
@@ -257,7 +257,7 @@ if ($FromSource) {
     }
     Write-Ok "Latest release: $tag"
 
-    $asset = "codebase-memory-mcp-windows-amd64.zip"
+    $asset = "code-cortex-mcp-windows-amd64.zip"
     $downloadUrl = "https://github.com/$Repo/releases/download/$tag/$asset"
 
     Write-Host "Downloading $asset..." -ForegroundColor White
@@ -322,5 +322,5 @@ if ($FromSource) {
     Write-Host ""
     Write-Host "  To uninstall:" -ForegroundColor White
     Write-Host "    Remove-Item -Recurse -Force '$InstallDir'"
-    Write-Host "    Remove-Item -Recurse -Force `"$env:LOCALAPPDATA\codebase-memory-mcp`"  # graph database"
+    Write-Host "    Remove-Item -Recurse -Force `"$env:LOCALAPPDATA\code-cortex-mcp`"  # graph database"
 }

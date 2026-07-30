@@ -85,7 +85,7 @@ services:
     command:
       - |
         scripts/build.sh CC=gcc CXX=g++ &&
-        scripts/smoke-test.sh ./build/c/codebase-memory-mcp
+        scripts/smoke-test.sh ./build/c/code-cortex-mcp
 
   smoke-amd64:
     build:
@@ -98,7 +98,7 @@ services:
     command:
       - |
         scripts/build.sh CC=gcc CXX=g++ &&
-        scripts/smoke-test.sh ./build/c/codebase-memory-mcp
+        scripts/smoke-test.sh ./build/c/code-cortex-mcp
 
   # ── Windows smoke (cross-compile + Wine) ──────────────────
   smoke-windows:
@@ -112,8 +112,8 @@ services:
     command:
       - |
         scripts/build.sh CC=x86_64-w64-mingw32-clang CXX=x86_64-w64-mingw32-clang++ &&
-        mv build/c/codebase-memory-mcp build/c/codebase-memory-mcp.exe 2>/dev/null || true &&
-        WINEDEBUG=-all scripts/smoke-test.sh ./build/c/codebase-memory-mcp.exe
+        mv build/c/code-cortex-mcp build/c/code-cortex-mcp.exe 2>/dev/null || true &&
+        WINEDEBUG=-all scripts/smoke-test.sh ./build/c/code-cortex-mcp.exe
 
   # ── Windows soak (cross-compile + Wine) ───────────────────
   soak-windows:
@@ -127,8 +127,8 @@ services:
     command:
       - |
         scripts/build.sh CC=x86_64-w64-mingw32-clang CXX=x86_64-w64-mingw32-clang++ &&
-        mv build/c/codebase-memory-mcp build/c/codebase-memory-mcp.exe 2>/dev/null || true &&
-        CBM_DIAGNOSTICS=1 WINEDEBUG=-all scripts/soak-test.sh ./build/c/codebase-memory-mcp.exe 10
+        mv build/c/code-cortex-mcp build/c/code-cortex-mcp.exe 2>/dev/null || true &&
+        CBM_DIAGNOSTICS=1 WINEDEBUG=-all scripts/soak-test.sh ./build/c/code-cortex-mcp.exe 10
 
   # ── Linux portable (Alpine musl static) ────────────────────
   test-portable:
@@ -162,9 +162,9 @@ services:
     command:
       - |
         scripts/build.sh CC=gcc CXX=g++ STATIC=1 &&
-        file build/c/codebase-memory-mcp | grep -q "statically linked" &&
+        file build/c/code-cortex-mcp | grep -q "statically linked" &&
         echo "=== Verified: statically linked ===" &&
-        scripts/smoke-test.sh ./build/c/codebase-memory-mcp
+        scripts/smoke-test.sh ./build/c/code-cortex-mcp
 
   # ── Lint ────────────────────────────────────────────────────
   lint:

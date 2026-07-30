@@ -60,10 +60,9 @@ TEST(yaml_single_kv_trailing_newline) {
 /* ── Parsing: multiple key-value pairs ─────────────────────────── */
 
 TEST(yaml_multiple_kv) {
-    const char *yaml =
-        "name: myproject\n"
-        "version: 1.2.3\n"
-        "author: someone\n";
+    const char *yaml = "name: myproject\n"
+                       "version: 1.2.3\n"
+                       "author: someone\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "name"), "myproject");
@@ -76,10 +75,9 @@ TEST(yaml_multiple_kv) {
 /* ── Parsing: nested maps ──────────────────────────────────────── */
 
 TEST(yaml_nested_map_2_levels) {
-    const char *yaml =
-        "database:\n"
-        "  host: localhost\n"
-        "  port: 5432\n";
+    const char *yaml = "database:\n"
+                       "  host: localhost\n"
+                       "  port: 5432\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "database.host"), "localhost");
@@ -89,10 +87,9 @@ TEST(yaml_nested_map_2_levels) {
 }
 
 TEST(yaml_nested_map_3_levels) {
-    const char *yaml =
-        "level1:\n"
-        "  level2:\n"
-        "    level3: deep_value\n";
+    const char *yaml = "level1:\n"
+                       "  level2:\n"
+                       "    level3: deep_value\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "level1.level2.level3"), "deep_value");
@@ -101,13 +98,12 @@ TEST(yaml_nested_map_3_levels) {
 }
 
 TEST(yaml_nested_siblings) {
-    const char *yaml =
-        "server:\n"
-        "  host: 0.0.0.0\n"
-        "  port: 8080\n"
-        "database:\n"
-        "  host: db.local\n"
-        "  port: 3306\n";
+    const char *yaml = "server:\n"
+                       "  host: 0.0.0.0\n"
+                       "  port: 8080\n"
+                       "database:\n"
+                       "  host: db.local\n"
+                       "  port: 3306\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "server.host"), "0.0.0.0");
@@ -121,11 +117,10 @@ TEST(yaml_nested_siblings) {
 /* ── Parsing: string lists ─────────────────────────────────────── */
 
 TEST(yaml_string_list) {
-    const char *yaml =
-        "fruits:\n"
-        "  - apple\n"
-        "  - banana\n"
-        "  - cherry\n";
+    const char *yaml = "fruits:\n"
+                       "  - apple\n"
+                       "  - banana\n"
+                       "  - cherry\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     const char *items[8];
@@ -139,12 +134,11 @@ TEST(yaml_string_list) {
 }
 
 TEST(yaml_list_max_out_limit) {
-    const char *yaml =
-        "items:\n"
-        "  - a\n"
-        "  - b\n"
-        "  - c\n"
-        "  - d\n";
+    const char *yaml = "items:\n"
+                       "  - a\n"
+                       "  - b\n"
+                       "  - c\n"
+                       "  - d\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     const char *items[2];
@@ -159,9 +153,8 @@ TEST(yaml_list_max_out_limit) {
 /* ── Parsing: comments ─────────────────────────────────────────── */
 
 TEST(yaml_comment_only) {
-    const char *yaml =
-        "# This is a comment\n"
-        "# Another comment\n";
+    const char *yaml = "# This is a comment\n"
+                       "# Another comment\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_FALSE(cbm_yaml_has(root, "#"));
@@ -179,10 +172,9 @@ TEST(yaml_inline_comment) {
 }
 
 TEST(yaml_comment_between_keys) {
-    const char *yaml =
-        "a: 1\n"
-        "# skip me\n"
-        "b: 2\n";
+    const char *yaml = "a: 1\n"
+                       "# skip me\n"
+                       "b: 2\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "a"), "1");
@@ -194,13 +186,12 @@ TEST(yaml_comment_between_keys) {
 /* ── Parsing: mixed maps and lists ─────────────────────────────── */
 
 TEST(yaml_mixed_maps_and_lists) {
-    const char *yaml =
-        "project:\n"
-        "  name: myapp\n"
-        "  tags:\n"
-        "    - web\n"
-        "    - api\n"
-        "  version: 2.0\n";
+    const char *yaml = "project:\n"
+                       "  name: myapp\n"
+                       "  tags:\n"
+                       "    - web\n"
+                       "    - api\n"
+                       "  version: 2.0\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "project.name"), "myapp");
@@ -239,9 +230,8 @@ TEST(yaml_multiple_colons) {
 
 TEST(yaml_empty_value_becomes_map) {
     /* "key:" with nothing after becomes a map node (if next line isn't "- ...") */
-    const char *yaml =
-        "parent:\n"
-        "  child: val\n";
+    const char *yaml = "parent:\n"
+                       "  child: val\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_TRUE(cbm_yaml_has(root, "parent"));
@@ -273,10 +263,9 @@ TEST(yaml_get_str_missing) {
 }
 
 TEST(yaml_get_str_nested) {
-    const char *yaml =
-        "a:\n"
-        "  b:\n"
-        "    c: found\n";
+    const char *yaml = "a:\n"
+                       "  b:\n"
+                       "    c: found\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "a.b.c"), "found");
@@ -286,9 +275,8 @@ TEST(yaml_get_str_nested) {
 
 TEST(yaml_get_str_on_map_node) {
     /* Querying a map node (not scalar) returns NULL */
-    const char *yaml =
-        "group:\n"
-        "  key: val\n";
+    const char *yaml = "group:\n"
+                       "  key: val\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_NULL(cbm_yaml_get_str(root, "group"));
@@ -369,9 +357,8 @@ TEST(yaml_get_float_zero) {
 /* ── Query: get_bool ───────────────────────────────────────────── */
 
 TEST(yaml_get_bool_true_false) {
-    const char *yaml =
-        "enabled: true\n"
-        "disabled: false\n";
+    const char *yaml = "enabled: true\n"
+                       "disabled: false\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_TRUE(cbm_yaml_get_bool(root, "enabled", false));
@@ -381,9 +368,8 @@ TEST(yaml_get_bool_true_false) {
 }
 
 TEST(yaml_get_bool_yes_no) {
-    const char *yaml =
-        "feature_a: yes\n"
-        "feature_b: no\n";
+    const char *yaml = "feature_a: yes\n"
+                       "feature_b: no\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_TRUE(cbm_yaml_get_bool(root, "feature_a", false));
@@ -393,9 +379,8 @@ TEST(yaml_get_bool_yes_no) {
 }
 
 TEST(yaml_get_bool_on_off) {
-    const char *yaml =
-        "logging: on\n"
-        "debug: off\n";
+    const char *yaml = "logging: on\n"
+                       "debug: off\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_TRUE(cbm_yaml_get_bool(root, "logging", false));
@@ -405,9 +390,8 @@ TEST(yaml_get_bool_on_off) {
 }
 
 TEST(yaml_get_bool_1_0) {
-    const char *yaml =
-        "flag_on: 1\n"
-        "flag_off: 0\n";
+    const char *yaml = "flag_on: 1\n"
+                       "flag_off: 0\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_TRUE(cbm_yaml_get_bool(root, "flag_on", false));
@@ -417,13 +401,12 @@ TEST(yaml_get_bool_1_0) {
 }
 
 TEST(yaml_get_bool_case_insensitive) {
-    const char *yaml =
-        "a: TRUE\n"
-        "b: False\n"
-        "c: YES\n"
-        "d: No\n"
-        "e: ON\n"
-        "f: Off\n";
+    const char *yaml = "a: TRUE\n"
+                       "b: False\n"
+                       "c: YES\n"
+                       "d: No\n"
+                       "e: ON\n"
+                       "f: Off\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_TRUE(cbm_yaml_get_bool(root, "a", false));
@@ -508,9 +491,8 @@ TEST(yaml_has_missing) {
 }
 
 TEST(yaml_has_nested) {
-    const char *yaml =
-        "a:\n"
-        "  b: val\n";
+    const char *yaml = "a:\n"
+                       "  b: val\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_TRUE(cbm_yaml_has(root, "a"));
@@ -567,12 +549,11 @@ TEST(yaml_equals_in_value) {
 /* ── Edge cases: deeply nested (4+ levels) ─────────────────────── */
 
 TEST(yaml_deeply_nested) {
-    const char *yaml =
-        "l1:\n"
-        "  l2:\n"
-        "    l3:\n"
-        "      l4:\n"
-        "        l5: bottom\n";
+    const char *yaml = "l1:\n"
+                       "  l2:\n"
+                       "    l3:\n"
+                       "      l4:\n"
+                       "        l5: bottom\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "l1.l2.l3.l4.l5"), "bottom");
@@ -599,9 +580,8 @@ TEST(yaml_missing_intermediate) {
 
 TEST(yaml_tab_not_indentation) {
     /* Tabs are not treated as indentation by leading_spaces() */
-    const char *yaml =
-        "key1: val1\n"
-        "\tkey2: val2\n";
+    const char *yaml = "key1: val1\n"
+                       "\tkey2: val2\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "key1"), "val1");
@@ -653,11 +633,10 @@ TEST(yaml_single_quoted_with_hash) {
 /* ── Edge cases: empty lines between content ───────────────────── */
 
 TEST(yaml_empty_lines_between_keys) {
-    const char *yaml =
-        "a: 1\n"
-        "\n"
-        "\n"
-        "b: 2\n";
+    const char *yaml = "a: 1\n"
+                       "\n"
+                       "\n"
+                       "b: 2\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "a"), "1");
@@ -709,10 +688,9 @@ TEST(yaml_no_trailing_newline) {
 /* ── Edge cases: line with no colon ────────────────────────────── */
 
 TEST(yaml_line_without_colon_skipped) {
-    const char *yaml =
-        "valid: yes\n"
-        "this line has no colon\n"
-        "also_valid: sure\n";
+    const char *yaml = "valid: yes\n"
+                       "this line has no colon\n"
+                       "also_valid: sure\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "valid"), "yes");
@@ -736,11 +714,10 @@ TEST(yaml_hash_no_preceding_space) {
 /* ── Edge cases: list after comment lines ──────────────────────── */
 
 TEST(yaml_list_after_comments) {
-    const char *yaml =
-        "paths:\n"
-        "  # some paths to exclude\n"
-        "  - /tmp\n"
-        "  - /var/log\n";
+    const char *yaml = "paths:\n"
+                       "  # some paths to exclude\n"
+                       "  - /tmp\n"
+                       "  - /var/log\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     const char *items[4];
@@ -784,9 +761,8 @@ TEST(yaml_empty_path) {
 /* ── Edge cases: path with trailing dot ────────────────────────── */
 
 TEST(yaml_path_trailing_dot) {
-    const char *yaml =
-        "a:\n"
-        "  b: val\n";
+    const char *yaml = "a:\n"
+                       "  b: val\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     /* "a." -> segment "a", then empty segment -> seg_len 0 -> NULL */
@@ -799,9 +775,8 @@ TEST(yaml_path_trailing_dot) {
 
 TEST(yaml_duplicate_keys) {
     /* Parser stores both; find_child returns the first match */
-    const char *yaml =
-        "key: first\n"
-        "key: second\n";
+    const char *yaml = "key: first\n"
+                       "key: second\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "key"), "first");
@@ -813,10 +788,9 @@ TEST(yaml_duplicate_keys) {
 
 TEST(yaml_indentation_dedent) {
     /* After deep nesting, dedent back to top level */
-    const char *yaml =
-        "outer:\n"
-        "  inner: deep\n"
-        "top: level\n";
+    const char *yaml = "outer:\n"
+                       "  inner: deep\n"
+                       "top: level\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "outer.inner"), "deep");
@@ -828,23 +802,22 @@ TEST(yaml_indentation_dedent) {
 /* ── Smoke: real-world .cgrconfig format ───────────────────────── */
 
 TEST(yaml_smoke_cgrconfig) {
-    const char *yaml =
-        "# codebase-memory config\n"
-        "mode: fast\n"
-        "\n"
-        "http_linker:\n"
-        "  enabled: true\n"
-        "  min_confidence: 0.7\n"
-        "  exclude_paths:\n"
-        "    - /health\n"
-        "    - /metrics\n"
-        "    - /internal/debug\n"
-        "\n"
-        "pipeline:\n"
-        "  workers: 4\n"
-        "  verbose: false\n"
-        "\n"
-        "# End of config\n";
+    const char *yaml = "# code-cortex config\n"
+                       "mode: fast\n"
+                       "\n"
+                       "http_linker:\n"
+                       "  enabled: true\n"
+                       "  min_confidence: 0.7\n"
+                       "  exclude_paths:\n"
+                       "    - /health\n"
+                       "    - /metrics\n"
+                       "    - /internal/debug\n"
+                       "\n"
+                       "pipeline:\n"
+                       "  workers: 4\n"
+                       "  verbose: false\n"
+                       "\n"
+                       "# End of config\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
 
@@ -880,17 +853,16 @@ TEST(yaml_smoke_cgrconfig) {
 /* ── Smoke: parse, query many paths, free ──────────────────────── */
 
 TEST(yaml_smoke_multi_query) {
-    const char *yaml =
-        "app:\n"
-        "  name: testapp\n"
-        "  debug: yes\n"
-        "  port: 9090\n"
-        "  features:\n"
-        "    - auth\n"
-        "    - logging\n"
-        "  db:\n"
-        "    host: pghost\n"
-        "    ssl: on\n";
+    const char *yaml = "app:\n"
+                       "  name: testapp\n"
+                       "  debug: yes\n"
+                       "  port: 9090\n"
+                       "  features:\n"
+                       "    - auth\n"
+                       "    - logging\n"
+                       "  db:\n"
+                       "    host: pghost\n"
+                       "    ssl: on\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
 
@@ -938,11 +910,10 @@ TEST(yaml_partial_len) {
 
 TEST(yaml_top_level_list_items) {
     /* List items after a "key:" become children of that key's list node */
-    const char *yaml =
-        "colors:\n"
-        "- red\n"
-        "- green\n"
-        "- blue\n";
+    const char *yaml = "colors:\n"
+                       "- red\n"
+                       "- green\n"
+                       "- blue\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     const char *items[4];
@@ -959,11 +930,10 @@ TEST(yaml_top_level_list_items) {
 
 TEST(yaml_inconsistent_indentation) {
     /* Parser tracks indentation levels via stack, not fixed width */
-    const char *yaml =
-        "a:\n"
-        "    b:\n"
-        "        c: deep\n"
-        "    d: shallow\n";
+    const char *yaml = "a:\n"
+                       "    b:\n"
+                       "        c: deep\n"
+                       "    d: shallow\n";
     cbm_yaml_node_t *root = cbm_yaml_parse(yaml, (int)strlen(yaml));
     ASSERT_NOT_NULL(root);
     ASSERT_STR_EQ(cbm_yaml_get_str(root, "a.b.c"), "deep");

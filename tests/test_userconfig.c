@@ -31,13 +31,13 @@ static int write_json(const char *path, const char *json) {
 /* ── Tests: project config ───────────────────────────────────────── */
 
 TEST(userconfig_project_basic) {
-    /* Write a .codebase-memory.json in a temp dir */
+    /* Write a .code-cortex.json in a temp dir */
     char dir[256];
     snprintf(dir, sizeof(dir), "%s/uctest_proj_basic", cbm_tmpdir());
     cbm_mkdir_p(dir, 0755); /* from compat_fs.h via compat.h */
 
     char proj[512];
-    snprintf(proj, sizeof(proj), "%s/.codebase-memory.json", dir);
+    snprintf(proj, sizeof(proj), "%s/.code-cortex.json", dir);
     ASSERT_EQ(
         write_json(proj, "{\"extra_extensions\":{\".blade.php\":\"php\",\".mjs\":\"javascript\"}}"),
         0);
@@ -63,14 +63,12 @@ TEST(userconfig_global_via_env) {
     snprintf(cfg_dir, sizeof(cfg_dir), "%s/uctest_global_xdg", cbm_tmpdir());
 
     char app_dir[512];
-    snprintf(app_dir, sizeof(app_dir), "%s/codebase-memory-mcp", cfg_dir);
+    snprintf(app_dir, sizeof(app_dir), "%s/code-cortex-mcp", cfg_dir);
     cbm_mkdir_p(app_dir, 0755);
 
     char global_path[768];
     snprintf(global_path, sizeof(global_path), "%s/config.json", app_dir);
-    ASSERT_EQ(
-        write_json(global_path, "{\"extra_extensions\":{\".twig\":\"html\"}}"),
-        0);
+    ASSERT_EQ(write_json(global_path, "{\"extra_extensions\":{\".twig\":\"html\"}}"), 0);
 
 #ifdef _WIN32
     char old_appdata[512] = "";
@@ -106,24 +104,20 @@ TEST(userconfig_project_wins_over_global) {
     snprintf(xdg_dir, sizeof(xdg_dir), "%s/uctest_priority_xdg", cbm_tmpdir());
 
     char app_dir[512];
-    snprintf(app_dir, sizeof(app_dir), "%s/codebase-memory-mcp", xdg_dir);
+    snprintf(app_dir, sizeof(app_dir), "%s/code-cortex-mcp", xdg_dir);
     cbm_mkdir_p(app_dir, 0755);
 
     char global_path[768];
     snprintf(global_path, sizeof(global_path), "%s/config.json", app_dir);
-    ASSERT_EQ(
-        write_json(global_path, "{\"extra_extensions\":{\".xyz\":\"python\"}}"),
-        0);
+    ASSERT_EQ(write_json(global_path, "{\"extra_extensions\":{\".xyz\":\"python\"}}"), 0);
 
     char proj_dir[256];
     snprintf(proj_dir, sizeof(proj_dir), "%s/uctest_priority_proj", cbm_tmpdir());
     cbm_mkdir_p(proj_dir, 0755);
 
     char proj_path[512];
-    snprintf(proj_path, sizeof(proj_path), "%s/.codebase-memory.json", proj_dir);
-    ASSERT_EQ(
-        write_json(proj_path, "{\"extra_extensions\":{\".xyz\":\"rust\"}}"),
-        0);
+    snprintf(proj_path, sizeof(proj_path), "%s/.code-cortex.json", proj_dir);
+    ASSERT_EQ(write_json(proj_path, "{\"extra_extensions\":{\".xyz\":\"rust\"}}"), 0);
 
     cbm_setenv("XDG_CONFIG_HOME", xdg_dir, 1);
     cbm_userconfig_t *cfg = cbm_userconfig_load(proj_dir);
@@ -147,11 +141,10 @@ TEST(userconfig_unknown_lang_skipped) {
     cbm_mkdir_p(dir, 0755);
 
     char proj[512];
-    snprintf(proj, sizeof(proj), "%s/.codebase-memory.json", dir);
+    snprintf(proj, sizeof(proj), "%s/.code-cortex.json", dir);
     /* "klingon" is not a valid language; ".wasm" should be silently skipped */
     ASSERT_EQ(
-        write_json(proj,
-                   "{\"extra_extensions\":{\".wasm\":\"klingon\",\".mjs\":\"javascript\"}}"),
+        write_json(proj, "{\"extra_extensions\":{\".wasm\":\"klingon\",\".mjs\":\"javascript\"}}"),
         0);
 
     cbm_userconfig_t *cfg = cbm_userconfig_load(dir);
@@ -189,10 +182,8 @@ TEST(userconfig_integration_override) {
     cbm_mkdir_p(dir, 0755);
 
     char proj[512];
-    snprintf(proj, sizeof(proj), "%s/.codebase-memory.json", dir);
-    ASSERT_EQ(
-        write_json(proj, "{\"extra_extensions\":{\".blade.php\":\"php\"}}"),
-        0);
+    snprintf(proj, sizeof(proj), "%s/.code-cortex.json", dir);
+    ASSERT_EQ(write_json(proj, "{\"extra_extensions\":{\".blade.php\":\"php\"}}"), 0);
 
     cbm_userconfig_t *cfg = cbm_userconfig_load(dir);
     ASSERT_NOT_NULL(cfg);

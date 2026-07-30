@@ -61,7 +61,7 @@ jobs:
 
       - name: Ad-hoc sign macOS binary
         if: startsWith(matrix.os, 'macos')
-        run: codesign --sign - --force build/c/codebase-memory-mcp
+        run: codesign --sign - --force build/c/code-cortex-mcp
 
       - name: Archive standard binary
         env:
@@ -69,8 +69,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           cp LICENSE install.sh build/c/
-          tar -czf "codebase-memory-mcp-${GOOS}-${GOARCH}.tar.gz" \
-            -C build/c codebase-memory-mcp LICENSE install.sh
+          tar -czf "code-cortex-mcp-${GOOS}-${GOARCH}.tar.gz" \
+            -C build/c code-cortex-mcp LICENSE install.sh
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -107,10 +107,10 @@ jobs:
       - name: Archive standard binary
         shell: msys2 {0}
         run: |
-          BIN=build/c/codebase-memory-mcp
+          BIN=build/c/code-cortex-mcp
           [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
-          cp "$BIN" codebase-memory-mcp.exe
-          zip codebase-memory-mcp-windows-amd64.zip codebase-memory-mcp.exe LICENSE install.ps1
+          cp "$BIN" code-cortex-mcp.exe
+          zip code-cortex-mcp-windows-amd64.zip code-cortex-mcp.exe LICENSE install.ps1
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -148,16 +148,16 @@ jobs:
 
       - name: Verify static linking
         run: |
-          file build/c/codebase-memory-mcp
-          ldd build/c/codebase-memory-mcp 2>&1 | grep -q "not a dynamic executable" || ldd build/c/codebase-memory-mcp 2>&1 | grep -q "statically linked"
+          file build/c/code-cortex-mcp
+          ldd build/c/code-cortex-mcp 2>&1 | grep -q "not a dynamic executable" || ldd build/c/code-cortex-mcp 2>&1 | grep -q "statically linked"
 
       - name: Archive standard binary
         env:
           ARCH: ${{ matrix.arch }}
         run: |
           cp LICENSE install.sh build/c/
-          tar -czf "codebase-memory-mcp-linux-${ARCH}-portable.tar.gz" \
-            -C build/c codebase-memory-mcp LICENSE install.sh
+          tar -czf "code-cortex-mcp-linux-${ARCH}-portable.tar.gz" \
+            -C build/c code-cortex-mcp LICENSE install.sh
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

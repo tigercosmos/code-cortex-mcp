@@ -1,4 +1,4 @@
-# install.ps1 — One-line installer for codebase-memory-mcp (Windows).
+# install.ps1 — One-line installer for code-cortex-mcp (Windows).
 #
 # Usage: see README.md for install instructions.
 #
@@ -11,8 +11,8 @@ $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
 $Repo = "tigercosmos/code-cortex-mcp"
-$InstallDir = "$env:LOCALAPPDATA\Programs\codebase-memory-mcp"
-$BinName = "codebase-memory-mcp.exe"
+$InstallDir = "$env:LOCALAPPDATA\Programs\code-cortex-mcp"
+$BinName = "code-cortex-mcp.exe"
 $BaseUrl = if ($env:CBM_DOWNLOAD_URL) { $env:CBM_DOWNLOAD_URL } else { "https://github.com/$Repo/releases/latest/download" }
 
 # Security: reject non-HTTPS download URLs (defense-in-depth)
@@ -31,16 +31,16 @@ foreach ($arg in $args) {
     if ($arg -like "--dir=*") { $InstallDir = $arg.Substring(6) }
 }
 
-Write-Host "codebase-memory-mcp installer (Windows)"
+Write-Host "code-cortex-mcp installer (Windows)"
 Write-Host "  variant: $Variant"
 Write-Host "  target:  $InstallDir\$BinName"
 Write-Host ""
 
 # Build download URL
 if ($Variant -eq "ui") {
-    $Archive = "codebase-memory-mcp-ui-windows-amd64.zip"
+    $Archive = "code-cortex-mcp-ui-windows-amd64.zip"
 } else {
-    $Archive = "codebase-memory-mcp-windows-amd64.zip"
+    $Archive = "code-cortex-mcp-windows-amd64.zip"
 }
 $Url = "$BaseUrl/$Archive"
 
@@ -86,7 +86,7 @@ Expand-Archive -Path "$TmpDir\$Archive" -DestinationPath $TmpDir -Force
 $DlBin = Join-Path $TmpDir $BinName
 if (-not (Test-Path $DlBin)) {
     # UI variant may have different name in zip
-    $UiBin = Join-Path $TmpDir "codebase-memory-mcp-ui.exe"
+    $UiBin = Join-Path $TmpDir "code-cortex-mcp-ui.exe"
     if (Test-Path $UiBin) {
         Rename-Item $UiBin $BinName
         $DlBin = Join-Path $TmpDir $BinName
@@ -135,7 +135,7 @@ if ($SkipConfig) {
         & $Dest install -y 2>&1 | Write-Host
     } catch {
         Write-Host "Agent configuration failed (non-fatal)."
-        Write-Host "Run manually: codebase-memory-mcp install"
+        Write-Host "Run manually: code-cortex-mcp install"
     }
 }
 
@@ -151,4 +151,4 @@ if ($UserPath -notlike "*$InstallDir*") {
 Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
 
 Write-Host ""
-Write-Host "Done! Restart your terminal and coding agent to start using codebase-memory-mcp."
+Write-Host "Done! Restart your terminal and coding agent to start using code-cortex-mcp."

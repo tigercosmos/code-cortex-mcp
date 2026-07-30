@@ -56,7 +56,7 @@ jobs:
       - name: Build
         run: scripts/build.sh ${{ inputs.version && format('--version {0}', inputs.version) || '' }} CC=${{ matrix.cc }} CXX=${{ matrix.cxx }}
       - name: Soak (${{ inputs.duration_minutes }} min)
-        run: scripts/soak-test.sh build/c/codebase-memory-mcp ${{ inputs.duration_minutes }}
+        run: scripts/soak-test.sh build/c/code-cortex-mcp ${{ inputs.duration_minutes }}
       - name: Upload metrics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -87,7 +87,7 @@ jobs:
       - name: Soak (${{ inputs.duration_minutes }} min)
         shell: msys2 {0}
         run: |
-          BIN=build/c/codebase-memory-mcp
+          BIN=build/c/code-cortex-mcp
           [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
           scripts/soak-test.sh "$BIN" ${{ inputs.duration_minutes }}
       - name: Upload metrics
@@ -138,7 +138,7 @@ jobs:
       - name: ASan soak (15 min)
         env:
           ASAN_OPTIONS: "detect_leaks=1:halt_on_error=0:log_path=soak-results/asan"
-        run: scripts/soak-test.sh build/c/codebase-memory-mcp 15
+        run: scripts/soak-test.sh build/c/code-cortex-mcp 15
       - name: Upload metrics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -174,7 +174,7 @@ jobs:
         env:
           ASAN_OPTIONS: "detect_leaks=0:halt_on_error=0:log_path=soak-results/asan"
         run: |
-          BIN=build/c/codebase-memory-mcp
+          BIN=build/c/code-cortex-mcp
           [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
           scripts/soak-test.sh "$BIN" 15
       - name: Upload metrics

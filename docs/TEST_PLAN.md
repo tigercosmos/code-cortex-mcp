@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Compare codebase-memory-mcp's structured graph queries against Claude Code's Explore agent (Grep/Glob/Read only) across all supported languages. Both phases use AI agents with the same 12-question set — the MCP agent gets MCP tools, the Explorer agent gets Grep/Glob/Read. Same questions, fair comparison.
+Compare code-cortex-mcp's structured graph queries against Claude Code's Explore agent (Grep/Glob/Read only) across all supported languages. Both phases use AI agents with the same 12-question set — the MCP agent gets MCP tools, the Explorer agent gets Grep/Glob/Read. Same questions, fair comparison.
 
 ## Prerequisites
 
-- Built `codebase-memory-mcp` binary at `~/.local/bin/codebase-memory-mcp`
+- Built `code-cortex-mcp` binary at `~/.local/bin/code-cortex-mcp`
 - Internet access for cloning repositories
 - ~5GB disk space for repos in `/tmp/bench/`
 - Claude Code session for both agent phases
@@ -103,7 +103,7 @@ Delete all existing project databases so every language gets a **cold, fresh ind
 
 ```bash
 # Remove all project DBs (per-project .db files in cache dir)
-rm -f ~/.cache/codebase-memory-mcp/*.db
+rm -f ~/.cache/code-cortex-mcp/*.db
 
 # Remove stale bench-results metrics from previous runs
 rm -rf /tmp/bench-results
@@ -118,7 +118,7 @@ mkdir -p /tmp/bench-results
 ALL_LANGS="go python javascript typescript tsx java kotlin scala rust c cpp csharp php ruby lua bash zig haskell ocaml elixir erlang objc swift dart perl groovy r clojure fsharp julia vimscript nix commonlisp elm fortran cuda cobol verilog emacslisp matlab lean form magma wolfram yaml hcl scss dockerfile html css toml sql json xml markdown makefile cmake protobuf graphql vue svelte meson glsl ini kubernetes kustomize"
 
 for lang in $ALL_LANGS; do
-  scripts/benchmark-index.sh ~/.local/bin/codebase-memory-mcp "$lang" /tmp/bench/"$lang" /tmp/bench-results
+  scripts/benchmark-index.sh ~/.local/bin/code-cortex-mcp "$lang" /tmp/bench/"$lang" /tmp/bench-results
 done
 ```
 
@@ -126,7 +126,7 @@ done
 
 1. **Count LOC** (lines of code across all source files, excluding .git/node_modules/vendor/target/build/dist)
 2. **Count source files** (same file extensions as LOC)
-3. **Index repository** via `codebase-memory-mcp cli --raw index_repository` — timed end-to-end
+3. **Index repository** via `code-cortex-mcp cli --raw index_repository` — timed end-to-end
 4. **Save all metrics** to `/tmp/bench-results/<lang>/`
 
 ### Output files per language
@@ -282,7 +282,7 @@ With only 5 MCP calls for 12 questions, the agent **must** choose calls that cov
 
 | Turn | Tool | Questions covered |
 |------|------|-------------------|
-| 1 | ToolSearch("+codebase-memory") | — loads tools |
+| 1 | ToolSearch("+code-cortex") | — loads tools |
 | 2 | get_architecture(aspects=["all"]) | Q7, Q8, Q12 (init, layers, structure) |
 | 3 | search_graph(label="Function", min_degree=3) | Q1, Q9 (public API, fan-out hotspots) |
 | 4 | search_graph(label="Interface"/"Trait"/"Type") | Q2, Q10 (interfaces, validation patterns) |
@@ -310,7 +310,7 @@ TOTAL TOOL BUDGET: 7 turns. Spend them wisely.
 FORBIDDEN (calling these invalidates the run):
   Grep, Glob, Read, Edit, Write, WebSearch, WebFetch
 
-You are a benchmark agent for codebase-memory-mcp on <LANGUAGE>.
+You are a benchmark agent for code-cortex-mcp on <LANGUAGE>.
 Project: <PROJECT> | LOC: <LOC> | Nodes: <NODES> | Edges: <EDGES>
 
 STRATEGY — cover multiple questions per call:
@@ -623,7 +623,7 @@ or wasn't matched, and what a fix would look like in the pipeline.>
 This file is the public-facing benchmark report. It presents aggregate quality, token efficiency, and speed metrics. No internal improvement suggestions — keep it factual and clean, suitable for README references and external sharing.
 
 ```markdown
-# codebase-memory-mcp Benchmark — v<x>
+# code-cortex-mcp Benchmark — v<x>
 
 <date> | <n> languages | <n> repositories
 
@@ -815,7 +815,7 @@ mkdir -p /tmp/bench-results
 ALL_LANGS="go python javascript typescript tsx java kotlin scala rust c cpp csharp php ruby lua bash zig haskell ocaml elixir erlang objc swift dart perl groovy r clojure fsharp julia vimscript nix commonlisp elm fortran cuda cobol verilog emacslisp matlab lean form magma wolfram yaml hcl scss dockerfile html css toml sql json xml markdown makefile cmake protobuf graphql vue svelte meson glsl ini kubernetes kustomize"
 
 for lang in $ALL_LANGS; do
-  scripts/benchmark-index.sh ~/.local/bin/codebase-memory-mcp "$lang" /tmp/bench/"$lang" /tmp/bench-results
+  scripts/benchmark-index.sh ~/.local/bin/code-cortex-mcp "$lang" /tmp/bench/"$lang" /tmp/bench-results
 done
 
 # 3. Run MCP agent phase (in Claude Code session)

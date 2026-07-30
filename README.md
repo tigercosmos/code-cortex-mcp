@@ -66,7 +66,7 @@ Useful subcommands: `config set auto_index true` (index on session start), `upda
 - **Single static binary** — 155 tree-sitter grammars compiled in. No Docker, no Node,
   no Python, no runtime dependencies.
 - **Everything local & private** — SQLite-backed, persists to
-  `~/.cache/codebase-memory-mcp/`. Your code never leaves the machine.
+  `~/.cache/code-cortex-mcp/`. Your code never leaves the machine.
 - **Plug and play across agents** — `install` auto-detects and configures every
   supported MCP client in one pass.
 
@@ -102,8 +102,8 @@ persistent SQLite graph store.
 Every tool is also available from the CLI:
 
 ```bash
-codebase-memory-mcp cli search_graph '{"name_pattern": ".*Handler.*", "label": "Function"}'
-codebase-memory-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LIMIT 5"}'
+code-cortex-mcp cli search_graph '{"name_pattern": ".*Handler.*", "label": "Function"}'
+code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LIMIT 5"}'
 ```
 
 ## Features
@@ -188,10 +188,10 @@ Plus ~110 more (config, data, and niche languages) parsed structurally.
 
 ## Team-Shared Graph Artifact
 
-Commit `.codebase-memory/graph.db.zst` (a zstd-compressed graph snapshot, typically 8–13:1)
+Commit `.code-cortex/graph.db.zst` (a zstd-compressed graph snapshot, typically 8–13:1)
 and teammates skip the full reindex: on first run the artifact is imported and incremental
 indexing fills in their local diff. A `.gitattributes` `merge=ours` rule is auto-created so the
-binary artifact never causes merge conflicts. Optional — gitignore `.codebase-memory/` to opt out.
+binary artifact never causes merge conflicts. Optional — gitignore `.code-cortex/` to opt out.
 
 Both export quality levels snapshot the store with `VACUUM INTO` before compressing. The store
 runs in WAL mode, so copying its raw bytes could miss committed rows still in the `-wal` or
@@ -203,19 +203,19 @@ outright rather than installing it.
 ## Configuration
 
 ```bash
-codebase-memory-mcp config list
-codebase-memory-mcp config set auto_index true        # index on MCP session start
-codebase-memory-mcp config set auto_index_limit 50000 # max files for auto-index
+code-cortex-mcp config list
+code-cortex-mcp config set auto_index true        # index on MCP session start
+code-cortex-mcp config set auto_index_limit 50000 # max files for auto-index
 ```
 
-- **Index storage** — `~/.cache/codebase-memory-mcp/` (override with `CBM_CACHE_DIR`). WAL-mode
-  SQLite, ACID-safe across restarts. Reset with `rm -rf ~/.cache/codebase-memory-mcp/`.
+- **Index storage** — `~/.cache/code-cortex-mcp/` (override with `CBM_CACHE_DIR`). WAL-mode
+  SQLite, ACID-safe across restarts. Reset with `rm -rf ~/.cache/code-cortex-mcp/`.
 - **Indexing parallelism** — auto-detected (cgroup-aware on Linux); override with `CBM_WORKERS`
   (range 1–256, invalid values ignored). Useful in containers where the host CPU count differs
   from the effective quota.
 - **Ignore rules** — hardcoded patterns → `.gitignore` hierarchy → `.cbmignore` (gitignore
   syntax). Symlinks always skipped.
-- **Custom extensions** — map extra extensions to languages via `.codebase-memory.json`
+- **Custom extensions** — map extra extensions to languages via `.code-cortex.json`
   (`{"extra_extensions": {".mjs": "javascript"}}`).
 
 ## Build from Source
@@ -225,8 +225,8 @@ The build system is **CMake** (C++23). You need a C/C++ compiler (gcc or clang) 
 ```bash
 git clone https://github.com/tigercosmos/code-cortex-mcp.git
 cd code-cortex-mcp
-scripts/build.sh                 # production binary → build/c/codebase-memory-mcp
-./build/c/codebase-memory-mcp install   # configure your installed agents
+scripts/build.sh                 # production binary → build/c/code-cortex-mcp
+./build/c/code-cortex-mcp install   # configure your installed agents
 ```
 
 Or build, place the binary on your `PATH`, and install the skill in one step:
@@ -270,6 +270,6 @@ This project was originally forked from
 whose engine, design, and research it builds on — see the preprint *Codebase-Memory:
 Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*
 ([arXiv:2603.27277](https://arxiv.org/abs/2603.27277)). The installed binary keeps the
-upstream-compatible name `codebase-memory-mcp`.
+upstream-compatible name `code-cortex-mcp`.
 
 MIT — see [LICENSE](LICENSE). Security policy: [SECURITY.md](SECURITY.md).

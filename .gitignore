@@ -1,6 +1,6 @@
 # Binaries
 code-graph-mcp
-/codebase-memory-mcp
+/code-cortex-mcp
 bin/
 *.exe
 *.dll
@@ -54,7 +54,7 @@ soak-results/
 
 # Claude Code tooling + local session/index artifacts (not part of the repo)
 .claude/
-.codebase-memory/
+.code-cortex/
 /issue.md
 /plan.md
 /pr.md

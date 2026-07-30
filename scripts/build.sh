@@ -97,8 +97,8 @@ done
 # Step 1: Clean C build artifacts
 rm -rf "$ROOT/build/c"
 
-# Step 2: Configure + build the production binary at build/c/codebase-memory-mcp
+# Step 2: Configure + build the production binary at build/c/code-cortex-mcp
 $ARCH_PREFIX cmake -S "$ROOT" -B "$ROOT/build/c" "${CMAKE_ARGS[@]}"
-$ARCH_PREFIX cmake --build "$ROOT/build/c" -j"$NPROC" --target codebase-memory-mcp
+$ARCH_PREFIX cmake --build "$ROOT/build/c" -j"$NPROC" --target code-cortex-mcp
 
-echo "=== Build complete: build/c/codebase-memory-mcp ==="
+echo "=== Build complete: build/c/code-cortex-mcp ==="

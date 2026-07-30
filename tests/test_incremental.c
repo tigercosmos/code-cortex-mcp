@@ -230,10 +230,10 @@ static int incremental_setup(void) {
     const char *home = getenv("HOME");
     if (!home)
         home = "/tmp";
-    snprintf(g_dbpath, sizeof(g_dbpath), "%s/.cache/codebase-memory-mcp/%s.db", home, g_project);
+    snprintf(g_dbpath, sizeof(g_dbpath), "%s/.cache/code-cortex-mcp/%s.db", home, g_project);
 
     char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/code-cortex-mcp", home);
     cbm_mkdir(cache_dir);
 
     unlink(g_dbpath);
@@ -405,8 +405,8 @@ TEST(incr_modify_file) {
 
     /* Single-file incremental should be faster than full */
     if ((int)ms > (int)(g_full_index_ms * 1.5)) {
-        printf("    [PERF WARNING] incremental slower than 1.5x full: %.0fms vs %.0fms\n",
-               ms, g_full_index_ms);
+        printf("    [PERF WARNING] incremental slower than 1.5x full: %.0fms vs %.0fms\n", ms,
+               g_full_index_ms);
     }
 
     printf("    [perf] modify 1 file: %.0fms (full was %.0fms)\n", ms, g_full_index_ms);
@@ -915,12 +915,12 @@ static int resp_lacks_key(const char *resp, const char *key) {
 }
 
 /* Helper: assert tool call succeeds, warn if slow */
-#define TOOL_OK(resp, ms)                                                              \
-    do {                                                                               \
-        ASSERT((resp) != NULL);                                                        \
-        if ((int)(ms) > PERF_WARN_MS) {                                                \
+#define TOOL_OK(resp, ms)                                                                 \
+    do {                                                                                  \
+        ASSERT((resp) != NULL);                                                           \
+        if ((int)(ms) > PERF_WARN_MS) {                                                   \
             printf("    [PERF WARNING] tool call: %.0fms (>%dms)\n", (ms), PERF_WARN_MS); \
-        }                                                                              \
+        }                                                                                 \
     } while (0)
 
 /* Helper: assert response is not an error */

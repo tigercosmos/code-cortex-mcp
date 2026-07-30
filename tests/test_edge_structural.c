@@ -174,7 +174,7 @@ static cbm_store_t *es_lang_open_indexed(ES_LangProj *lp) {
         home = "/tmp";
     }
     char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/code-cortex-mcp", home);
     cbm_mkdir(cache_dir);
     snprintf(lp->dbpath, sizeof(lp->dbpath), "%s/%s.db", cache_dir, lp->project);
     unlink(lp->dbpath);
@@ -239,13 +239,12 @@ static void es_lang_cleanup(ES_LangProj *lp, cbm_store_t *store) {
 
 /* Every graph edge type the pipeline can emit — used in diagnostic dumps. */
 static const char *ES_ALL_EDGE_TYPES[] = {
-    "CALLS",        "CONFIGURES",    "CONTAINS_FILE", "CONTAINS_FOLDER",
-    "DATA_FLOWS",   "DECORATES",     "DEFINES",       "DEFINES_METHOD",
-    "DEPENDS_ON",   "FILE_CHANGES_WITH", "GRAPHQL_CALLS", "GRPC_CALLS",
-    "HANDLES",      "HTTP_CALLS",    "IMPLEMENTS",    "IMPORTS",
-    "INHERITS",     "INFRA_MAPS",    "OVERRIDE",      "SEMANTICALLY_RELATED",
-    "SIMILAR_TO",   "TESTS_FILE",    "TESTS",         "TRPC_CALLS",
-    "USAGE",        "ASYNC_CALLS",   NULL};
+    "CALLS",         "CONFIGURES", "CONTAINS_FILE",  "CONTAINS_FOLDER", "DATA_FLOWS",
+    "DECORATES",     "DEFINES",    "DEFINES_METHOD", "DEPENDS_ON",      "FILE_CHANGES_WITH",
+    "GRAPHQL_CALLS", "GRPC_CALLS", "HANDLES",        "HTTP_CALLS",      "IMPLEMENTS",
+    "IMPORTS",       "INHERITS",   "INFRA_MAPS",     "OVERRIDE",        "SEMANTICALLY_RELATED",
+    "SIMILAR_TO",    "TESTS_FILE", "TESTS",          "TRPC_CALLS",      "USAGE",
+    "ASYNC_CALLS",   NULL};
 
 static void es_dump_edge_histogram(cbm_store_t *store, const char *project) {
     if (!store) {
@@ -289,10 +288,8 @@ static int es_edge_present(const ES_LangFile *files, int nfiles, const char *edg
 /* Go: caller in main.go, callee in util.go — same package. */
 TEST(es_calls_crossfile_go) {
     static const ES_LangFile f[] = {
-        {"util.go",
-         "package svc\n\nfunc Compute(x int) int {\n\treturn x * 2\n}\n"},
-        {"main.go",
-         "package svc\n\nfunc Run(y int) int {\n\treturn Compute(y + 1)\n}\n"}};
+        {"util.go", "package svc\n\nfunc Compute(x int) int {\n\treturn x * 2\n}\n"},
+        {"main.go", "package svc\n\nfunc Run(y int) int {\n\treturn Compute(y + 1)\n}\n"}};
     ASSERT_TRUE(es_edge_present(f, 2, "CALLS", 1)); /* Run -> Compute */
     PASS();
 }
@@ -300,10 +297,8 @@ TEST(es_calls_crossfile_go) {
 /* C: caller in main.c, callee declared/defined in util.c. */
 TEST(es_calls_crossfile_c) {
     static const ES_LangFile f[] = {
-        {"util.c",
-         "int add(int a, int b) {\n    return a + b;\n}\n"},
-        {"main.c",
-         "int add(int a, int b);\n\nint run(int x) {\n    return add(x, 1);\n}\n"}};
+        {"util.c", "int add(int a, int b) {\n    return a + b;\n}\n"},
+        {"main.c", "int add(int a, int b);\n\nint run(int x) {\n    return add(x, 1);\n}\n"}};
     ASSERT_TRUE(es_edge_present(f, 2, "CALLS", 1)); /* run -> add */
     PASS();
 }
@@ -311,8 +306,7 @@ TEST(es_calls_crossfile_c) {
 /* C++: caller in main.cpp, callee in util.cpp. */
 TEST(es_calls_crossfile_cpp) {
     static const ES_LangFile f[] = {
-        {"util.cpp",
-         "int multiply(int a, int b) {\n    return a * b;\n}\n"},
+        {"util.cpp", "int multiply(int a, int b) {\n    return a * b;\n}\n"},
         {"main.cpp",
          "int multiply(int a, int b);\n\nint run(int x) {\n    return multiply(x, 3);\n}\n"}};
     ASSERT_TRUE(es_edge_present(f, 2, "CALLS", 1)); /* run -> multiply */
@@ -322,10 +316,8 @@ TEST(es_calls_crossfile_cpp) {
 /* Rust: caller in main.rs, callee in lib.rs (pub fn). */
 TEST(es_calls_crossfile_rust) {
     static const ES_LangFile f[] = {
-        {"lib.rs",
-         "pub fn square(x: i32) -> i32 {\n    x * x\n}\n"},
-        {"main.rs",
-         "mod lib;\n\nfn run(n: i32) -> i32 {\n    lib::square(n)\n}\n"}};
+        {"lib.rs", "pub fn square(x: i32) -> i32 {\n    x * x\n}\n"},
+        {"main.rs", "mod lib;\n\nfn run(n: i32) -> i32 {\n    lib::square(n)\n}\n"}};
     ASSERT_TRUE(es_edge_present(f, 2, "CALLS", 1)); /* run -> square */
     PASS();
 }
@@ -333,10 +325,8 @@ TEST(es_calls_crossfile_rust) {
 /* Python: caller in main.py calls function from util.py via relative import. */
 TEST(es_calls_crossfile_python) {
     static const ES_LangFile f[] = {
-        {"util.py",
-         "def transform(x):\n    return x * 3\n"},
-        {"main.py",
-         "from .util import transform\n\n\ndef run(y):\n    return transform(y)\n"}};
+        {"util.py", "def transform(x):\n    return x * 3\n"},
+        {"main.py", "from .util import transform\n\n\ndef run(y):\n    return transform(y)\n"}};
     ASSERT_TRUE(es_edge_present(f, 2, "CALLS", 1)); /* run -> transform */
     PASS();
 }
@@ -344,8 +334,7 @@ TEST(es_calls_crossfile_python) {
 /* TypeScript: caller in main.ts calls function from util.ts. */
 TEST(es_calls_crossfile_typescript) {
     static const ES_LangFile f[] = {
-        {"util.ts",
-         "export function format(s: string): string {\n    return s.trim();\n}\n"},
+        {"util.ts", "export function format(s: string): string {\n    return s.trim();\n}\n"},
         {"main.ts",
          "import { format } from './util';\n\n"
          "export function run(input: string): string {\n    return format(input);\n}\n"}};
@@ -366,11 +355,8 @@ TEST(es_calls_crossfile_java) {
 
 /* Kotlin: caller in Main.kt calls top-level function from Util.kt. */
 TEST(es_calls_crossfile_kotlin) {
-    static const ES_LangFile f[] = {
-        {"Util.kt",
-         "fun double(x: Int): Int = x * 2\n"},
-        {"Main.kt",
-         "fun run(n: Int): Int = double(n)\n"}};
+    static const ES_LangFile f[] = {{"Util.kt", "fun double(x: Int): Int = x * 2\n"},
+                                    {"Main.kt", "fun run(n: Int): Int = double(n)\n"}};
     ASSERT_TRUE(es_edge_present(f, 2, "CALLS", 1)); /* run -> double */
     PASS();
 }
@@ -378,12 +364,10 @@ TEST(es_calls_crossfile_kotlin) {
 /* C#: caller in Main.cs calls static method from Util.cs (same namespace). */
 TEST(es_calls_crossfile_csharp) {
     static const ES_LangFile f[] = {
-        {"Util.cs",
-         "namespace App {\n    class Util {\n"
-         "        public static int Square(int x) { return x * x; }\n    }\n}\n"},
-        {"Main.cs",
-         "namespace App {\n    class Main {\n"
-         "        public int Run(int n) { return Util.Square(n); }\n    }\n}\n"}};
+        {"Util.cs", "namespace App {\n    class Util {\n"
+                    "        public static int Square(int x) { return x * x; }\n    }\n}\n"},
+        {"Main.cs", "namespace App {\n    class Main {\n"
+                    "        public int Run(int n) { return Util.Square(n); }\n    }\n}\n"}};
     ASSERT_TRUE(es_edge_present(f, 2, "CALLS", 1)); /* Run -> Square */
     PASS();
 }
@@ -403,8 +387,7 @@ TEST(es_calls_crossfile_csharp) {
  * Animal in Animal.java, Dog extends Animal in Dog.java, same package. */
 TEST(es_inherits_crossfile_java) {
     static const ES_LangFile f[] = {
-        {"Animal.java",
-         "package zoo;\n\nclass Animal {\n    int speak() { return 0; }\n}\n"},
+        {"Animal.java", "package zoo;\n\nclass Animal {\n    int speak() { return 0; }\n}\n"},
         {"Dog.java",
          "package zoo;\n\nclass Dog extends Animal {\n    int speak() { return 1; }\n}\n"}};
     /* GREEN: Java extraction correct; registry resolves cross-file same-package. */
@@ -418,9 +401,8 @@ TEST(es_inherits_crossfile_csharp) {
     static const ES_LangFile f[] = {
         {"Base.cs",
          "namespace App {\n    class Base {\n        public int Value() { return 0; }\n    }\n}\n"},
-        {"Derived.cs",
-         "namespace App {\n    class Derived : Base {\n"
-         "        public int Extra() { return 1; }\n    }\n}\n"}};
+        {"Derived.cs", "namespace App {\n    class Derived : Base {\n"
+                       "        public int Extra() { return 1; }\n    }\n}\n"}};
     /* GREEN: C# extraction confirmed correct. */
     ASSERT_TRUE(es_edge_present(f, 2, "INHERITS", 1)); /* Derived -> Base */
     PASS();
@@ -430,11 +412,9 @@ TEST(es_inherits_crossfile_csharp) {
  * Shape in shape.cpp, Circle extends Shape in circle.cpp. */
 TEST(es_inherits_crossfile_cpp) {
     static const ES_LangFile f[] = {
-        {"shape.cpp",
-         "class Shape {\npublic:\n    virtual int area() { return 0; }\n};\n"},
-        {"circle.cpp",
-         "class Shape;\n\nclass Circle : public Shape {\npublic:\n"
-         "    int area() { return 3; }\n};\n"}};
+        {"shape.cpp", "class Shape {\npublic:\n    virtual int area() { return 0; }\n};\n"},
+        {"circle.cpp", "class Shape;\n\nclass Circle : public Shape {\npublic:\n"
+                       "    int area() { return 3; }\n};\n"}};
     /* GREEN: C++ extraction confirmed correct. */
     ASSERT_TRUE(es_edge_present(f, 2, "INHERITS", 1)); /* Circle -> Shape */
     PASS();
@@ -445,10 +425,9 @@ TEST(es_inherits_crossfile_cpp) {
  * Reproduction: confirms the end-to-end gap from extraction to graph edge. */
 TEST(es_inherits_crossfile_python_red) {
     static const ES_LangFile f[] = {
-        {"animal.py",
-         "class Animal:\n    def speak(self):\n        return 0\n"},
-        {"dog.py",
-         "from .animal import Animal\n\n\nclass Dog(Animal):\n    def speak(self):\n        return 1\n"}};
+        {"animal.py", "class Animal:\n    def speak(self):\n        return 0\n"},
+        {"dog.py", "from .animal import Animal\n\n\nclass Dog(Animal):\n    def speak(self):\n     "
+                   "   return 1\n"}};
     /* RED: base_classes extraction broken for Python plain identifier nodes.
      * Root cause: collect_bases_from_field does not match bare `identifier`
      * nodes from tree-sitter-python; stores "(Animal)" with parens.
@@ -458,11 +437,15 @@ TEST(es_inherits_crossfile_python_red) {
     cbm_store_t *store = es_lang_index_files(&lp, f, 2);
     int got = store ? cbm_store_count_edges_by_type(store, lp.project, "INHERITS") : -1;
     if (got >= 1) {
-        fprintf(stderr, "  [ES-EDGE] UNEXPECTED PASS: Python cross-file INHERITS got=%d "
-                        "(extraction bug may have been fixed — promote to GREEN)\n", got);
+        fprintf(stderr,
+                "  [ES-EDGE] UNEXPECTED PASS: Python cross-file INHERITS got=%d "
+                "(extraction bug may have been fixed — promote to GREEN)\n",
+                got);
     } else {
-        fprintf(stderr, "  [ES-EDGE] CONFIRMED RED: Python cross-file INHERITS got=%d "
-                        "(extraction bug reproduces end-to-end)\n", got);
+        fprintf(stderr,
+                "  [ES-EDGE] CONFIRMED RED: Python cross-file INHERITS got=%d "
+                "(extraction bug reproduces end-to-end)\n",
+                got);
     }
     es_lang_cleanup(&lp, store);
     /* Assert the CORRECT outcome: edge should be present.
@@ -475,8 +458,7 @@ TEST(es_inherits_crossfile_python_red) {
  * keyword instead of the base type name). */
 TEST(es_inherits_crossfile_typescript_red) {
     static const ES_LangFile f[] = {
-        {"base.ts",
-         "export class Base {\n    value(): number { return 0; }\n}\n"},
+        {"base.ts", "export class Base {\n    value(): number { return 0; }\n}\n"},
         {"derived.ts",
          "import { Base } from './base';\n\n"
          "export class Derived extends Base {\n    extra(): number { return 1; }\n}\n"}};
@@ -489,8 +471,10 @@ TEST(es_inherits_crossfile_typescript_red) {
     cbm_store_t *store = es_lang_index_files(&lp, f, 2);
     int got = store ? cbm_store_count_edges_by_type(store, lp.project, "INHERITS") : -1;
     if (got >= 1) {
-        fprintf(stderr, "  [ES-EDGE] UNEXPECTED PASS: TypeScript cross-file INHERITS got=%d "
-                        "(promote to GREEN if extraction fixed)\n", got);
+        fprintf(stderr,
+                "  [ES-EDGE] UNEXPECTED PASS: TypeScript cross-file INHERITS got=%d "
+                "(promote to GREEN if extraction fixed)\n",
+                got);
     } else {
         fprintf(stderr, "  [ES-EDGE] CONFIRMED RED: TypeScript cross-file INHERITS got=%d\n", got);
     }
@@ -502,11 +486,9 @@ TEST(es_inherits_crossfile_typescript_red) {
 /* PHP cross-file INHERITS — expected RED (base_classes never populated). */
 TEST(es_inherits_crossfile_php_red) {
     static const ES_LangFile f[] = {
-        {"Base.php",
-         "<?php\nclass Base {\n    public function value() { return 0; }\n}\n"},
-        {"Child.php",
-         "<?php\nrequire_once 'Base.php';\n\nclass Child extends Base {\n"
-         "    public function extra() { return 1; }\n}\n"}};
+        {"Base.php", "<?php\nclass Base {\n    public function value() { return 0; }\n}\n"},
+        {"Child.php", "<?php\nrequire_once 'Base.php';\n\nclass Child extends Base {\n"
+                      "    public function extra() { return 1; }\n}\n"}};
     /* RED: PHP extractor does not populate base_classes for `extends`.
      * Fix location: extract_defs.c PHP class heritage clause.
      * FAILS (RED) until fixed. */
@@ -514,8 +496,10 @@ TEST(es_inherits_crossfile_php_red) {
     cbm_store_t *store = es_lang_index_files(&lp, f, 2);
     int got = store ? cbm_store_count_edges_by_type(store, lp.project, "INHERITS") : -1;
     if (got >= 1) {
-        fprintf(stderr, "  [ES-EDGE] UNEXPECTED PASS: PHP cross-file INHERITS got=%d "
-                        "(promote to GREEN)\n", got);
+        fprintf(stderr,
+                "  [ES-EDGE] UNEXPECTED PASS: PHP cross-file INHERITS got=%d "
+                "(promote to GREEN)\n",
+                got);
     } else {
         fprintf(stderr, "  [ES-EDGE] CONFIRMED RED: PHP cross-file INHERITS got=%d\n", got);
     }
@@ -527,10 +511,8 @@ TEST(es_inherits_crossfile_php_red) {
 /* Kotlin cross-file INHERITS — expected RED (`:` supertype syntax not parsed). */
 TEST(es_inherits_crossfile_kotlin_red) {
     static const ES_LangFile f[] = {
-        {"Base.kt",
-         "open class Base {\n    open fun value(): Int = 0\n}\n"},
-        {"Child.kt",
-         "class Child : Base() {\n    override fun value(): Int = 1\n}\n"}};
+        {"Base.kt", "open class Base {\n    open fun value(): Int = 0\n}\n"},
+        {"Child.kt", "class Child : Base() {\n    override fun value(): Int = 1\n}\n"}};
     /* RED: Kotlin extractor does not parse `:` supertype syntax → base_classes empty.
      * Fix location: extract_defs.c Kotlin class body / supertype_list handling.
      * FAILS (RED) until fixed. */
@@ -538,8 +520,10 @@ TEST(es_inherits_crossfile_kotlin_red) {
     cbm_store_t *store = es_lang_index_files(&lp, f, 2);
     int got = store ? cbm_store_count_edges_by_type(store, lp.project, "INHERITS") : -1;
     if (got >= 1) {
-        fprintf(stderr, "  [ES-EDGE] UNEXPECTED PASS: Kotlin cross-file INHERITS got=%d "
-                        "(promote to GREEN)\n", got);
+        fprintf(stderr,
+                "  [ES-EDGE] UNEXPECTED PASS: Kotlin cross-file INHERITS got=%d "
+                "(promote to GREEN)\n",
+                got);
     } else {
         fprintf(stderr, "  [ES-EDGE] CONFIRMED RED: Kotlin cross-file INHERITS got=%d\n", got);
     }
@@ -559,12 +543,10 @@ TEST(es_inherits_crossfile_kotlin_red) {
 /* Rust cross-file IMPLEMENTS: trait in trait.rs, impl in impl.rs. */
 TEST(es_implements_crossfile_rust) {
     static const ES_LangFile f[] = {
-        {"trait.rs",
-         "pub trait Greet {\n    fn hello(&self) -> String;\n}\n"},
-        {"impl.rs",
-         "use crate::trait::Greet;\n\npub struct English;\n\n"
-         "impl Greet for English {\n"
-         "    fn hello(&self) -> String {\n        String::from(\"hi\")\n    }\n}\n"}};
+        {"trait.rs", "pub trait Greet {\n    fn hello(&self) -> String;\n}\n"},
+        {"impl.rs", "use crate::trait::Greet;\n\npub struct English;\n\n"
+                    "impl Greet for English {\n"
+                    "    fn hello(&self) -> String {\n        String::from(\"hi\")\n    }\n}\n"}};
     /* GREEN: resolve_impl_traits() uses project-wide registry; both Greet
      * (trait.rs) and English (impl.rs) should resolve after definitions pass. */
     ASSERT_TRUE(es_edge_present(f, 2, "IMPLEMENTS", 1)); /* English implements Greet */
@@ -582,9 +564,8 @@ TEST(es_implements_crossfile_rust) {
  * target in base_classes.  Uncertain — annotated but tested. */
 TEST(es_implements_samefile_java) {
     static const ES_LangFile f[] = {
-        {"Service.java",
-         "package app;\n\ninterface Runnable {\n    void run();\n}\n\n"
-         "class Service implements Runnable {\n    public void run() {}\n}\n"}};
+        {"Service.java", "package app;\n\ninterface Runnable {\n    void run();\n}\n\n"
+                         "class Service implements Runnable {\n    public void run() {}\n}\n"}};
     /* Uncertain: Java extraction stores both `extends` and `implements` targets
      * in base_classes[].  The semantic pass may emit INHERITS (not IMPLEMENTS)
      * for all of them, or it may check the target node's label.  If the
@@ -597,9 +578,8 @@ TEST(es_implements_samefile_java) {
 /* C# same-file class implements interface. */
 TEST(es_implements_samefile_csharp) {
     static const ES_LangFile f[] = {
-        {"Worker.cs",
-         "namespace App {\n    interface IWorker {\n        void Work();\n    }\n\n"
-         "    class Worker : IWorker {\n        public void Work() {}\n    }\n}\n"}};
+        {"Worker.cs", "namespace App {\n    interface IWorker {\n        void Work();\n    }\n\n"
+                      "    class Worker : IWorker {\n        public void Work() {}\n    }\n}\n"}};
     /* Uncertain: C# `:` syntax used for both inheritance and interface impl.
      * The semantic pass must check whether the resolved node is an Interface.
      * Assert the correct outcome; RED if pass doesn't distinguish. */
@@ -611,11 +591,9 @@ TEST(es_implements_samefile_csharp) {
  * cbm_pipeline_implements_go() checks method-set coverage. */
 TEST(es_implements_go_implicit) {
     static const ES_LangFile f[] = {
-        {"iface.go",
-         "package app\n\ntype Stringer interface {\n    String() string\n}\n"},
-        {"impl.go",
-         "package app\n\ntype MyType struct{ val string }\n\n"
-         "func (m MyType) String() string {\n    return m.val\n}\n"}};
+        {"iface.go", "package app\n\ntype Stringer interface {\n    String() string\n}\n"},
+        {"impl.go", "package app\n\ntype MyType struct{ val string }\n\n"
+                    "func (m MyType) String() string {\n    return m.val\n}\n"}};
     /* GREEN: cbm_pipeline_implements_go() finds MyType satisfies Stringer
      * (both methods present in the same index), emits IMPLEMENTS. */
     ASSERT_TRUE(es_edge_present(f, 2, "IMPLEMENTS", 1)); /* MyType implements Stringer */
@@ -631,11 +609,9 @@ TEST(es_implements_go_implicit) {
 
 TEST(es_override_go_implicit) {
     static const ES_LangFile f[] = {
-        {"iface.go",
-         "package app\n\ntype Namer interface {\n    Name() string\n}\n"},
-        {"impl.go",
-         "package app\n\ntype Entity struct{ name string }\n\n"
-         "func (e Entity) Name() string {\n    return e.name\n}\n"}};
+        {"iface.go", "package app\n\ntype Namer interface {\n    Name() string\n}\n"},
+        {"impl.go", "package app\n\ntype Entity struct{ name string }\n\n"
+                    "func (e Entity) Name() string {\n    return e.name\n}\n"}};
     /* GREEN: cbm_pipeline_implements_go() emits OVERRIDE for Entity.Name -> Namer.Name. */
     ASSERT_TRUE(es_edge_present(f, 2, "OVERRIDE", 1));
     PASS();
@@ -653,12 +629,10 @@ TEST(es_override_go_implicit) {
  * applied in service.py via relative import. */
 TEST(es_decorates_crossfile_python) {
     static const ES_LangFile f[] = {
-        {"decorators.py",
-         "def log_call(func):\n    def wrapper(*args, **kwargs):\n"
-         "        return func(*args, **kwargs)\n    return wrapper\n"},
-        {"service.py",
-         "from .decorators import log_call\n\n\n"
-         "@log_call\ndef process(x):\n    return x * 2\n"}};
+        {"decorators.py", "def log_call(func):\n    def wrapper(*args, **kwargs):\n"
+                          "        return func(*args, **kwargs)\n    return wrapper\n"},
+        {"service.py", "from .decorators import log_call\n\n\n"
+                       "@log_call\ndef process(x):\n    return x * 2\n"}};
     /* GREEN: relative import resolves (Python OK per P3), decorator name
      * resolves in registry → DECORATES edge process -> log_call. */
     ASSERT_TRUE(es_edge_present(f, 2, "DECORATES", 1));
@@ -683,10 +657,10 @@ TEST(es_decorates_samefile_typescript) {
  * pipeline emits a DECORATES edge for Java @Annotation. */
 TEST(es_decorates_annotation_java) {
     static const ES_LangFile f[] = {
-        {"Service.java",
-         "package app;\n\nimport java.lang.annotation.*;\n\n"
-         "@Retention(RetentionPolicy.RUNTIME)\n@interface Override {}\n\n"
-         "class Service {\n    @Override\n    public String toString() { return \"service\"; }\n}\n"}};
+        {"Service.java", "package app;\n\nimport java.lang.annotation.*;\n\n"
+                         "@Retention(RetentionPolicy.RUNTIME)\n@interface Override {}\n\n"
+                         "class Service {\n    @Override\n    public String toString() { return "
+                         "\"service\"; }\n}\n"}};
     /* Uncertain/RED: Java extraction likely does not populate decorators[] for
      * @Annotation syntax (no Java branch in the decorator extractor confirmed).
      * This test probes whether any DECORATES edge is created.
@@ -694,8 +668,10 @@ TEST(es_decorates_annotation_java) {
     ES_LangProj lp;
     cbm_store_t *store = es_lang_index_files(&lp, f, 1);
     int got = store ? cbm_store_count_edges_by_type(store, lp.project, "DECORATES") : -1;
-    fprintf(stderr, "  [ES-EDGE] Java annotation DECORATES got=%d (expected 0 if unimplemented; "
-                    "promote to GREEN if edge appears)\n", got);
+    fprintf(stderr,
+            "  [ES-EDGE] Java annotation DECORATES got=%d (expected 0 if unimplemented; "
+            "promote to GREEN if edge appears)\n",
+            got);
     es_lang_cleanup(&lp, store);
     /* Assert the CORRECT outcome: annotated method should produce DECORATES. */
     ASSERT_TRUE(got >= 1); /* RED until Java annotation extraction implemented */
@@ -704,10 +680,8 @@ TEST(es_decorates_annotation_java) {
 
 /* Kotlin annotation — same-file. */
 TEST(es_decorates_annotation_kotlin) {
-    static const ES_LangFile f[] = {
-        {"Service.kt",
-         "annotation class Log\n\n"
-         "@Log\nfun process(x: Int): Int = x * 2\n"}};
+    static const ES_LangFile f[] = {{"Service.kt", "annotation class Log\n\n"
+                                                   "@Log\nfun process(x: Int): Int = x * 2\n"}};
     /* Uncertain/RED: Kotlin decorator/annotation extraction unclear.
      * FAILS (RED) until Kotlin annotation DECORATES is implemented. */
     ES_LangProj lp;
@@ -722,10 +696,10 @@ TEST(es_decorates_annotation_kotlin) {
 /* C# attribute — same-file. */
 TEST(es_decorates_attribute_csharp) {
     static const ES_LangFile f[] = {
-        {"Service.cs",
-         "using System;\n\n[AttributeUsage(AttributeTargets.Method)]\nclass LogAttribute : Attribute {}\n\n"
-         "namespace App {\n    class Service {\n        [Log]\n"
-         "        public int Process(int x) { return x * 2; }\n    }\n}\n"}};
+        {"Service.cs", "using System;\n\n[AttributeUsage(AttributeTargets.Method)]\nclass "
+                       "LogAttribute : Attribute {}\n\n"
+                       "namespace App {\n    class Service {\n        [Log]\n"
+                       "        public int Process(int x) { return x * 2; }\n    }\n}\n"}};
     /* Uncertain/RED: C# attribute extraction unclear.
      * FAILS (RED) until C# attribute DECORATES is implemented. */
     ES_LangProj lp;
@@ -747,8 +721,7 @@ TEST(es_decorates_attribute_csharp) {
 /* Python cross-file USAGE: main.py uses a class from models.py. */
 TEST(es_usage_crossfile_python) {
     static const ES_LangFile f[] = {
-        {"models.py",
-         "class User:\n    def __init__(self, name):\n        self.name = name\n"},
+        {"models.py", "class User:\n    def __init__(self, name):\n        self.name = name\n"},
         {"main.py",
          "from .models import User\n\n\ndef create_user(name):\n    return User(name)\n"}};
     /* Uncertain: USAGE edges for type instantiation may or may not be
@@ -760,8 +733,7 @@ TEST(es_usage_crossfile_python) {
 /* TypeScript cross-file USAGE: main.ts uses a type from types.ts. */
 TEST(es_usage_crossfile_typescript) {
     static const ES_LangFile f[] = {
-        {"types.ts",
-         "export interface Config {\n    timeout: number;\n}\n"},
+        {"types.ts", "export interface Config {\n    timeout: number;\n}\n"},
         {"main.ts",
          "import { Config } from './types';\n\n"
          "export function create(cfg: Config): string {\n    return String(cfg.timeout);\n}\n"}};
@@ -774,10 +746,8 @@ TEST(es_usage_crossfile_typescript) {
 /* Go cross-file USAGE: main.go references a struct type from types.go. */
 TEST(es_usage_crossfile_go) {
     static const ES_LangFile f[] = {
-        {"types.go",
-         "package app\n\ntype Config struct {\n    Timeout int\n}\n"},
-        {"main.go",
-         "package app\n\nfunc Create(cfg Config) int {\n    return cfg.Timeout\n}\n"}};
+        {"types.go", "package app\n\ntype Config struct {\n    Timeout int\n}\n"},
+        {"main.go", "package app\n\nfunc Create(cfg Config) int {\n    return cfg.Timeout\n}\n"}};
     /* Uncertain: Go USAGE edges for struct type references in function
      * signatures.  Assert the correct outcome. */
     ASSERT_TRUE(es_edge_present(f, 2, "USAGE", 1));
@@ -794,12 +764,10 @@ TEST(es_usage_crossfile_go) {
 
 TEST(es_data_flows_crossfile_python) {
     static const ES_LangFile f[] = {
-        {"app.py",
-         "from flask import Flask\n\napp = Flask(__name__)\n\n\n"
-         "@app.route(\"/items\")\ndef list_items():\n    return {\"items\": []}\n"},
-        {"client.py",
-         "def requests_get(url, params=None):\n    return {\"url\": url}\n\n\n"
-         "def fetch_items():\n    return requests_get(\"/items\")\n"}};
+        {"app.py", "from flask import Flask\n\napp = Flask(__name__)\n\n\n"
+                   "@app.route(\"/items\")\ndef list_items():\n    return {\"items\": []}\n"},
+        {"client.py", "def requests_get(url, params=None):\n    return {\"url\": url}\n\n\n"
+                      "def fetch_items():\n    return requests_get(\"/items\")\n"}};
     /* GREEN: HANDLES created from app.py route decorator; HTTP_CALLS from
      * client.py requests_get("/items"); DATA_FLOWS links them via the same
      * route path.  Cross-file should work as well as same-file (P6 confirms
@@ -836,10 +804,9 @@ TEST(es_tests_crossfile_typescript) {
         {"service.ts",
          "export function divide(a: number, b: number): number {\n    return a / b;\n}\n\n"
          "export function subtract(a: number, b: number): number {\n    return a - b;\n}\n"},
-        {"service.test.ts",
-         "import { divide, subtract } from './service';\n\n"
-         "function testDivide() {\n    const r = divide(6, 2);\n}\n\n"
-         "function testSubtract() {\n    const r = subtract(5, 3);\n}\n"}};
+        {"service.test.ts", "import { divide, subtract } from './service';\n\n"
+                            "function testDivide() {\n    const r = divide(6, 2);\n}\n\n"
+                            "function testSubtract() {\n    const r = subtract(5, 3);\n}\n"}};
     /* GREEN: TS .test. prefix convention; TESTS_FILE + TESTS expected. */
     ASSERT_TRUE(es_edge_present(f, 2, "TESTS", 1)); /* testDivide->divide etc. */
     PASS();

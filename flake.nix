@@ -1,5 +1,5 @@
 {
-  description = "codebase-memory-mcp — C11 MCP server for codebase indexing";
+  description = "code-cortex-mcp — C11 MCP server for codebase indexing";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -11,7 +11,7 @@
     {
       packages = forAllSystems (pkgs: {
         default = pkgs.stdenv.mkDerivation {
-          pname = "codebase-memory-mcp";
+          pname = "code-cortex-mcp";
           version = "0.6.0";
 
           src = ./.;
@@ -28,18 +28,18 @@
           buildPhase = ''
             cmake -S . -B build/c -DCBM_SANITIZE=OFF -DCBM_WERROR=OFF \
               -DCMAKE_BUILD_TYPE=None -DCMAKE_C_FLAGS=-O2 -DCMAKE_CXX_FLAGS=-O2
-            cmake --build build/c -j$NIX_BUILD_CORES --target codebase-memory-mcp
+            cmake --build build/c -j$NIX_BUILD_CORES --target code-cortex-mcp
           '';
 
           installPhase = ''
-            install -Dm755 build/c/codebase-memory-mcp $out/bin/codebase-memory-mcp
+            install -Dm755 build/c/code-cortex-mcp $out/bin/code-cortex-mcp
           '';
 
           meta = {
             description = "MCP server that builds and queries a semantic graph of your codebase";
             homepage = "https://github.com/tigercosmos/code-cortex-mcp";
             license = nixpkgs.lib.licenses.mit;
-            mainProgram = "codebase-memory-mcp";
+            mainProgram = "code-cortex-mcp";
             platforms = systems;
           };
         };

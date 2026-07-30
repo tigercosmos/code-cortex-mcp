@@ -65,13 +65,13 @@ TEST(artifact_export_fast_roundtrip) {
 
     /* Verify artifact files exist */
     char zst[1024];
-    snprintf(zst, sizeof(zst), "%s/.codebase-memory/graph.db.zst", g_repo);
+    snprintf(zst, sizeof(zst), "%s/.code-cortex/graph.db.zst", g_repo);
     struct stat st;
     ASSERT_EQ(stat(zst, &st), 0);
     ASSERT_GT((int)st.st_size, 0);
 
     char meta[1024];
-    snprintf(meta, sizeof(meta), "%s/.codebase-memory/artifact.json", g_repo);
+    snprintf(meta, sizeof(meta), "%s/.code-cortex/artifact.json", g_repo);
     ASSERT_EQ(stat(meta, &st), 0);
 
     /* Import to a new path */
@@ -160,7 +160,7 @@ TEST(artifact_schema_version_mismatch) {
 
     /* Overwrite artifact.json with incompatible schema version */
     char meta[1024];
-    snprintf(meta, sizeof(meta), "%s/.codebase-memory/artifact.json", g_repo);
+    snprintf(meta, sizeof(meta), "%s/.code-cortex/artifact.json", g_repo);
     FILE *fp = fopen(meta, "w");
     ASSERT_NOT_NULL(fp);
     fprintf(fp, "{\"schema_version\": 999, \"original_size\": 1000}");
@@ -199,7 +199,7 @@ TEST(artifact_gitattributes_created) {
     cbm_artifact_export(g_db, g_repo, "test-proj", CBM_ARTIFACT_FAST);
 
     char ga[1024];
-    snprintf(ga, sizeof(ga), "%s/.codebase-memory/.gitattributes", g_repo);
+    snprintf(ga, sizeof(ga), "%s/.code-cortex/.gitattributes", g_repo);
     struct stat st;
     ASSERT_EQ(stat(ga, &st), 0);
 
@@ -277,8 +277,7 @@ TEST(store_deep_integrity_detects_page_corruption) {
         char name[64];
         char qn[192];
         snprintf(name, sizeof(name), "deep_probe_%04d", i);
-        snprintf(qn, sizeof(qn), "deep.rather.long.module.path.for.page.fill.%s_pad_pad_pad",
-                 name);
+        snprintf(qn, sizeof(qn), "deep.rather.long.module.path.for.page.fill.%s_pad_pad_pad", name);
         cbm_node_t n = {.project = "deep",
                         .label = "Function",
                         .name = name,

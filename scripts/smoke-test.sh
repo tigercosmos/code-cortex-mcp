@@ -201,10 +201,10 @@ echo "OK: clean shutdown"
 if command -v pgrep &>/dev/null && [ "$(uname)" != "MINGW64_NT" ] 2>/dev/null; then
   # Give a moment for any child processes to clean up
   sleep 1
-  RESIDUAL=$(pgrep -f "codebase-memory-mcp.*cli" 2>/dev/null | wc -l | tr -d ' \n' || echo "0")
+  RESIDUAL=$(pgrep -f "code-cortex-mcp.*cli" 2>/dev/null | wc -l | tr -d ' \n' || echo "0")
   RESIDUAL="${RESIDUAL:-0}"
   if [ "$RESIDUAL" -gt 0 ]; then
-    echo "WARNING: $RESIDUAL residual codebase-memory-mcp process(es) found"
+    echo "WARNING: $RESIDUAL residual code-cortex-mcp process(es) found"
   else
     echo "OK: no residual processes"
   fi
@@ -381,7 +381,7 @@ if ! echo "$UPDATE_OUT" | grep -qi 'dry-run'; then
   echo "$UPDATE_OUT"
   exit 1
 fi
-if ! echo "$UPDATE_OUT" | grep -q 'codebase-memory-mcp-'; then
+if ! echo "$UPDATE_OUT" | grep -q 'code-cortex-mcp-'; then
   echo "FAIL: update --dry-run did not print a download asset name"
   echo "$UPDATE_OUT"
   exit 1
@@ -408,11 +408,11 @@ INSTALL_DIR="$REPLACE_DIR/install"
 mkdir -p "$INSTALL_DIR"
 
 # 1. Copy binary to "install dir" as the "currently installed" version
-cp "$BINARY" "$INSTALL_DIR/codebase-memory-mcp"
-chmod 755 "$INSTALL_DIR/codebase-memory-mcp"
+cp "$BINARY" "$INSTALL_DIR/code-cortex-mcp"
+chmod 755 "$INSTALL_DIR/code-cortex-mcp"
 
 # Verify installed binary works
-INSTALLED_VER=$("$INSTALL_DIR/codebase-memory-mcp" --version 2>&1)
+INSTALLED_VER=$("$INSTALL_DIR/code-cortex-mcp" --version 2>&1)
 if ! echo "$INSTALLED_VER" | grep -qE 'v?[0-9]+\.[0-9]+|dev'; then
   echo "FAIL: installed binary --version failed: $INSTALLED_VER"
   rm -rf "$REPLACE_DIR"
@@ -420,15 +420,15 @@ if ! echo "$INSTALLED_VER" | grep -qE 'v?[0-9]+\.[0-9]+|dev'; then
 fi
 
 # 2. Copy binary as the "downloaded" new version
-cp "$BINARY" "$REPLACE_DIR/smoke-codebase-memory-mcp"
+cp "$BINARY" "$REPLACE_DIR/smoke-code-cortex-mcp"
 
 # 3. Simulate cbm_replace_binary: unlink old, copy new
-rm -f "$INSTALL_DIR/codebase-memory-mcp"
-cp "$REPLACE_DIR/smoke-codebase-memory-mcp" "$INSTALL_DIR/codebase-memory-mcp"
-chmod 755 "$INSTALL_DIR/codebase-memory-mcp"
+rm -f "$INSTALL_DIR/code-cortex-mcp"
+cp "$REPLACE_DIR/smoke-code-cortex-mcp" "$INSTALL_DIR/code-cortex-mcp"
+chmod 755 "$INSTALL_DIR/code-cortex-mcp"
 
 # 4. Verify replaced binary works
-REPLACED_VER=$("$INSTALL_DIR/codebase-memory-mcp" --version 2>&1)
+REPLACED_VER=$("$INSTALL_DIR/code-cortex-mcp" --version 2>&1)
 if ! echo "$REPLACED_VER" | grep -qE 'v?[0-9]+\.[0-9]+|dev'; then
   echo "FAIL: replaced binary --version failed: $REPLACED_VER"
   rm -rf "$REPLACE_DIR"
@@ -438,11 +438,11 @@ echo "OK: binary replacement succeeded (version: $REPLACED_VER)"
 
 # 5. Test replacement of read-only binary (edge case — cbm_replace_binary
 #    handles this via unlink-before-write, which works even on read-only files)
-chmod 444 "$INSTALL_DIR/codebase-memory-mcp"
-rm -f "$INSTALL_DIR/codebase-memory-mcp"
-cp "$REPLACE_DIR/smoke-codebase-memory-mcp" "$INSTALL_DIR/codebase-memory-mcp"
-chmod 755 "$INSTALL_DIR/codebase-memory-mcp"
-READONLY_VER=$("$INSTALL_DIR/codebase-memory-mcp" --version 2>&1)
+chmod 444 "$INSTALL_DIR/code-cortex-mcp"
+rm -f "$INSTALL_DIR/code-cortex-mcp"
+cp "$REPLACE_DIR/smoke-code-cortex-mcp" "$INSTALL_DIR/code-cortex-mcp"
+chmod 755 "$INSTALL_DIR/code-cortex-mcp"
+READONLY_VER=$("$INSTALL_DIR/code-cortex-mcp" --version 2>&1)
 if ! echo "$READONLY_VER" | grep -qE 'v?[0-9]+\.[0-9]+|dev'; then
   echo "FAIL: read-only replacement --version failed: $READONLY_VER"
   rm -rf "$REPLACE_DIR"
@@ -511,11 +511,11 @@ fi
 mkdir -p "$FAKE_HOME/.local/bin"
 # Copy binary with correct name for platform
 if [[ "$BINARY" == *.exe ]]; then
-  cp "$BINARY" "$FAKE_HOME/.local/bin/codebase-memory-mcp.exe"
-  SELF_PATH="$FAKE_HOME/.local/bin/codebase-memory-mcp.exe"
+  cp "$BINARY" "$FAKE_HOME/.local/bin/code-cortex-mcp.exe"
+  SELF_PATH="$FAKE_HOME/.local/bin/code-cortex-mcp.exe"
 else
-  cp "$BINARY" "$FAKE_HOME/.local/bin/codebase-memory-mcp"
-  SELF_PATH="$FAKE_HOME/.local/bin/codebase-memory-mcp"
+  cp "$BINARY" "$FAKE_HOME/.local/bin/code-cortex-mcp"
+  SELF_PATH="$FAKE_HOME/.local/bin/code-cortex-mcp"
 fi
 printf '#!/bin/sh\necho stub\n' > "$FAKE_HOME/.local/bin/aider" && chmod +x "$FAKE_HOME/.local/bin/aider" 2>/dev/null || true
 printf '#!/bin/sh\necho stub\n' > "$FAKE_HOME/.local/bin/opencode" && chmod +x "$FAKE_HOME/.local/bin/opencode" 2>/dev/null || true
@@ -545,7 +545,7 @@ path_match() {
 }
 
 # 8a: Claude Code MCP (new path) — correct command
-CMD=$(json_get "$FAKE_HOME/.claude.json" "d.get('mcpServers',{}).get('codebase-memory-mcp',{}).get('command','')")
+CMD=$(json_get "$FAKE_HOME/.claude.json" "d.get('mcpServers',{}).get('code-cortex-mcp',{}).get('command','')")
 if [ -z "$CMD" ] || ! path_match "$CMD" "$SELF_PATH"; then
   echo "DEBUG 8a: file=$FAKE_HOME/.claude.json"
   cat "$FAKE_HOME/.claude.json" 2>/dev/null | head -5 || echo "(file not found)"
@@ -563,7 +563,7 @@ fi
 echo "OK 8b: .claude.json preserved existing keys"
 
 # 8c: Claude Code MCP (legacy path)
-CMD=$(json_get "$FAKE_HOME/.claude/.mcp.json" "d['mcpServers']['codebase-memory-mcp']['command']")
+CMD=$(json_get "$FAKE_HOME/.claude/.mcp.json" "d['mcpServers']['code-cortex-mcp']['command']")
 if ! path_match "$CMD" "$SELF_PATH"; then
   echo "FAIL 8c: .claude/.mcp.json command='$CMD'"
   exit 1
@@ -608,7 +608,7 @@ if [ "$(uname -s)" != "MINGW64_NT" ] 2>/dev/null; then
 fi
 
 # 8f-8h: Codex TOML
-if ! grep -q '\[mcp_servers.codebase-memory-mcp\]' "$FAKE_HOME/.codex/config.toml"; then
+if ! grep -q '\[mcp_servers.code-cortex-mcp\]' "$FAKE_HOME/.codex/config.toml"; then
   echo "FAIL 8f: Codex TOML missing MCP section"
   exit 1
 fi
@@ -619,14 +619,14 @@ fi
 echo "OK 8f-h: Codex TOML (MCP + preserved existing)"
 
 # 8i: Codex instructions
-if [ ! -f "$FAKE_HOME/.codex/AGENTS.md" ] || ! grep -q 'codebase-memory-mcp' "$FAKE_HOME/.codex/AGENTS.md"; then
+if [ ! -f "$FAKE_HOME/.codex/AGENTS.md" ] || ! grep -q 'code-cortex-mcp' "$FAKE_HOME/.codex/AGENTS.md"; then
   echo "FAIL 8i: Codex AGENTS.md missing"
   exit 1
 fi
 echo "OK 8i: Codex instructions"
 
 # 8j-l: Gemini MCP + hooks + merge
-CMD=$(json_get "$FAKE_HOME/.gemini/settings.json" "d['mcpServers']['codebase-memory-mcp']['command']")
+CMD=$(json_get "$FAKE_HOME/.gemini/settings.json" "d['mcpServers']['code-cortex-mcp']['command']")
 if ! path_match "$CMD" "$SELF_PATH"; then
   echo "FAIL 8j: Gemini MCP command='$CMD'"
   exit 1
@@ -670,7 +670,7 @@ else
   ZED_CFG="$FAKE_HOME/.config/zed/settings.json"
 fi
 if [ -f "$ZED_CFG" ]; then
-  CMD=$(json_get "$ZED_CFG" "d['context_servers']['codebase-memory-mcp']['command']")
+  CMD=$(json_get "$ZED_CFG" "d['context_servers']['code-cortex-mcp']['command']")
   if ! path_match "$CMD" "$SELF_PATH"; then
     echo "FAIL 8n: Zed command='$CMD'"
     exit 1
@@ -682,7 +682,7 @@ fi
 
 # 8o-p: OpenCode MCP + instructions
 # OpenCode detection requires binary on PATH — may not be found on Windows
-CMD=$(json_get "$FAKE_HOME/.config/opencode/opencode.json" "d['mcp']['codebase-memory-mcp']['command'][0]")
+CMD=$(json_get "$FAKE_HOME/.config/opencode/opencode.json" "d['mcp']['code-cortex-mcp']['command'][0]")
 if [ -n "$CMD" ]; then
   if ! path_match "$CMD" "$SELF_PATH"; then
     echo "FAIL 8o: OpenCode command='$CMD'"
@@ -700,7 +700,7 @@ fi
 
 # 8q-r: Antigravity (2026 layout: shared ~/.gemini/config/mcp_config.json,
 # instructions under ~/.gemini/antigravity-cli/)
-CMD=$(json_get "$FAKE_HOME/.gemini/config/mcp_config.json" "d['mcpServers']['codebase-memory-mcp']['command']")
+CMD=$(json_get "$FAKE_HOME/.gemini/config/mcp_config.json" "d['mcpServers']['code-cortex-mcp']['command']")
 if ! path_match "$CMD" "$SELF_PATH"; then
   echo "FAIL 8q: Antigravity command='$CMD'"
   exit 1
@@ -714,7 +714,7 @@ echo "OK 8r: Antigravity instructions"
 
 # 8s: Aider instructions (detection requires binary on PATH)
 if [ -f "$FAKE_HOME/CONVENTIONS.md" ]; then
-  if ! grep -q 'codebase-memory-mcp' "$FAKE_HOME/CONVENTIONS.md"; then
+  if ! grep -q 'code-cortex-mcp' "$FAKE_HOME/CONVENTIONS.md"; then
     echo "FAIL 8s: Aider CONVENTIONS.md missing content"
     exit 1
   fi
@@ -731,7 +731,7 @@ elif [[ "$BINARY" == *.exe ]]; then
 else
   KILO_CFG="$FAKE_HOME/.config/Code/User/globalStorage/kilocode.kilo-code/settings/mcp_settings.json"
 fi
-CMD=$(json_get "$KILO_CFG" "d['mcpServers']['codebase-memory-mcp']['command']")
+CMD=$(json_get "$KILO_CFG" "d['mcpServers']['code-cortex-mcp']['command']")
 if ! path_match "$CMD" "$SELF_PATH"; then
   echo "FAIL 8t: KiloCode command='$CMD'"
   exit 1
@@ -739,7 +739,7 @@ fi
 echo "OK 8t: KiloCode MCP"
 
 # 8u: KiloCode instructions
-if [ ! -f "$FAKE_HOME/.kilocode/rules/codebase-memory-mcp.md" ]; then
+if [ ! -f "$FAKE_HOME/.kilocode/rules/code-cortex-mcp.md" ]; then
   echo "FAIL 8u: KiloCode rules file missing"
   exit 1
 fi
@@ -753,7 +753,7 @@ elif [[ "$BINARY" == *.exe ]]; then
 else
   VSCODE_CFG="$FAKE_HOME/.config/Code/User/mcp.json"
 fi
-CMD=$(json_get "$VSCODE_CFG" "d['servers']['codebase-memory-mcp']['command']")
+CMD=$(json_get "$VSCODE_CFG" "d['servers']['code-cortex-mcp']['command']")
 if ! path_match "$CMD" "$SELF_PATH"; then
   echo "FAIL 8v: VS Code command='$CMD'"
   exit 1
@@ -761,12 +761,12 @@ fi
 echo "OK 8v: VS Code MCP"
 
 # 8w: OpenClaw MCP
-CMD=$(json_get "$FAKE_HOME/.openclaw/openclaw.json" "d['mcp']['servers']['codebase-memory-mcp']['command']")
+CMD=$(json_get "$FAKE_HOME/.openclaw/openclaw.json" "d['mcp']['servers']['code-cortex-mcp']['command']")
 if ! path_match "$CMD" "$SELF_PATH"; then
   echo "FAIL 8w: OpenClaw command='$CMD'"
   exit 1
 fi
-ENABLED=$(json_get "$FAKE_HOME/.openclaw/openclaw.json" "d['mcp']['servers']['codebase-memory-mcp'].get('enabled')")
+ENABLED=$(json_get "$FAKE_HOME/.openclaw/openclaw.json" "d['mcp']['servers']['code-cortex-mcp'].get('enabled')")
 if [ "$ENABLED" != "True" ]; then
   echo "FAIL 8w: OpenClaw enabled='$ENABLED'"
   exit 1
@@ -774,9 +774,9 @@ fi
 echo "OK 8w: OpenClaw MCP"
 
 # 8x: Consolidated skill (old 4-skill dirs cleaned up, replaced by 1)
-SKILL_FILE="$FAKE_HOME/.claude/skills/codebase-memory/SKILL.md"
+SKILL_FILE="$FAKE_HOME/.claude/skills/code-cortex/SKILL.md"
 if [ ! -s "$SKILL_FILE" ]; then
-  echo "FAIL 8x: skill codebase-memory missing or empty"
+  echo "FAIL 8x: skill code-cortex missing or empty"
   exit 1
 fi
 echo "OK 8x: skill installed"
@@ -796,7 +796,7 @@ HOME="$FAKE_HOME" \
 if cat "$FAKE_HOME/.claude.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-if 'codebase-memory-mcp' in d.get('mcpServers', {}):
+if 'code-cortex-mcp' in d.get('mcpServers', {}):
     sys.exit(1)
 if not d.get('existingKey', False):
     sys.exit(2)
@@ -812,7 +812,7 @@ fi
 if cat "$FAKE_HOME/.claude/.mcp.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-sys.exit(1 if 'codebase-memory-mcp' in d.get('mcpServers', {}) else 0)
+sys.exit(1 if 'code-cortex-mcp' in d.get('mcpServers', {}) else 0)
 " 2>/dev/null; then
   echo "OK 9c: legacy .mcp.json cleaned"
 else
@@ -835,7 +835,7 @@ else
 fi
 
 # 9e-f: Codex TOML cleaned, existing preserved
-if grep -q '\[mcp_servers.codebase-memory-mcp\]' "$FAKE_HOME/.codex/config.toml" 2>/dev/null; then
+if grep -q '\[mcp_servers.code-cortex-mcp\]' "$FAKE_HOME/.codex/config.toml" 2>/dev/null; then
   echo "FAIL 9e: Codex TOML still has MCP section"
   exit 1
 fi
@@ -849,10 +849,10 @@ echo "OK 9e-f: Codex TOML cleaned, existing preserved"
 if cat "$FAKE_HOME/.gemini/settings.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-has_mcp = 'codebase-memory-mcp' in d.get('mcpServers', {})
+has_mcp = 'code-cortex-mcp' in d.get('mcpServers', {})
 has_existing = d.get('existingKey', False)
 hooks = d.get('hooks', {}).get('BeforeTool', [])
-has_hook = any('codebase-memory-mcp' in str(h) for h in hooks)
+has_hook = any('code-cortex-mcp' in str(h) for h in hooks)
 sys.exit(0 if (not has_mcp and has_existing and not has_hook) else 1)
 " 2>/dev/null; then
   echo "OK 9g-i: Gemini MCP removed, existing preserved, hooks removed"
@@ -865,7 +865,7 @@ fi
 if cat "$VSCODE_CFG" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-sys.exit(1 if 'codebase-memory-mcp' in d.get('servers', {}) else 0)
+sys.exit(1 if 'code-cortex-mcp' in d.get('servers', {}) else 0)
 " 2>/dev/null; then
   echo "OK 9j: VS Code MCP removed"
 else
@@ -877,7 +877,7 @@ fi
 if cat "$FAKE_HOME/.openclaw/openclaw.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-sys.exit(1 if 'codebase-memory-mcp' in d.get('mcp', {}).get('servers', {}) else 0)
+sys.exit(1 if 'code-cortex-mcp' in d.get('mcp', {}).get('servers', {}) else 0)
 " 2>/dev/null; then
   echo "OK 9k: OpenClaw MCP removed"
 else
@@ -886,7 +886,7 @@ else
 fi
 
 # 9l: Skills removed (consolidated skill dir)
-if [ -d "$FAKE_HOME/.claude/skills/codebase-memory" ]; then
+if [ -d "$FAKE_HOME/.claude/skills/code-cortex" ]; then
   echo "FAIL 9l: skills not removed"
   exit 1
 fi
@@ -912,14 +912,14 @@ rm -rf "$EMPTY_HOME"
 # 9b-2: Install twice (idempotent)
 IDEM_HOME=$(mktemp -d)
 mkdir -p "$IDEM_HOME/.claude" "$IDEM_HOME/.local/bin"
-cp "$BINARY" "$IDEM_HOME/.local/bin/codebase-memory-mcp"
+cp "$BINARY" "$IDEM_HOME/.local/bin/code-cortex-mcp"
 HOME="$IDEM_HOME" "$BINARY" install -y 2>&1 > /dev/null || true
 HOME="$IDEM_HOME" "$BINARY" install -y 2>&1 > /dev/null || true
 # Count MCP entries — should be exactly 1
 COUNT=$(cat "$IDEM_HOME/.claude.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-print(list(d.get('mcpServers',{}).keys()).count('codebase-memory-mcp'))
+print(list(d.get('mcpServers',{}).keys()).count('code-cortex-mcp'))
 " 2>/dev/null || echo "0")
 if [ "$COUNT" != "1" ]; then
   echo "FAIL 9b-2: double install created $COUNT entries (expected 1)"
@@ -938,7 +938,7 @@ rm -rf "$CLEAN_HOME"
 # 9b-4: Install over corrupt JSON
 CORRUPT_HOME=$(mktemp -d)
 mkdir -p "$CORRUPT_HOME/.claude" "$CORRUPT_HOME/.local/bin"
-cp "$BINARY" "$CORRUPT_HOME/.local/bin/codebase-memory-mcp"
+cp "$BINARY" "$CORRUPT_HOME/.local/bin/code-cortex-mcp"
 echo '{invalid json here' > "$CORRUPT_HOME/.claude.json"
 HOME="$CORRUPT_HOME" "$BINARY" install -y 2>&1 > /dev/null || true
 # Should either fix it or handle gracefully — not crash
@@ -948,7 +948,7 @@ rm -rf "$CORRUPT_HOME"
 # 9b-8: Double uninstall
 DBL_HOME=$(mktemp -d)
 mkdir -p "$DBL_HOME/.claude" "$DBL_HOME/.local/bin"
-cp "$BINARY" "$DBL_HOME/.local/bin/codebase-memory-mcp"
+cp "$BINARY" "$DBL_HOME/.local/bin/code-cortex-mcp"
 HOME="$DBL_HOME" "$BINARY" install -y 2>&1 > /dev/null || true
 HOME="$DBL_HOME" "$BINARY" uninstall -y -n 2>&1 > /dev/null || true
 HOME="$DBL_HOME" "$BINARY" uninstall -y -n 2>&1 > /dev/null || true
@@ -972,7 +972,7 @@ echo ""
 echo "=== Phase 10: binary security E2E ==="
 
 SECURITY_DIR=$(mktemp -d)
-SECURITY_BIN="$SECURITY_DIR/codebase-memory-mcp"
+SECURITY_BIN="$SECURITY_DIR/code-cortex-mcp"
 cp "$BINARY" "$SECURITY_BIN"
 chmod 755 "$SECURITY_BIN"
 
@@ -1085,29 +1085,29 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
   UPDATE_HOME=$(mktemp -d)
   mkdir -p "$UPDATE_HOME/.claude" "$UPDATE_HOME/.local/bin"
   if [[ "$BINARY" == *.exe ]]; then
-    cp "$BINARY" "$UPDATE_HOME/.local/bin/codebase-memory-mcp.exe"
-    chmod 755 "$UPDATE_HOME/.local/bin/codebase-memory-mcp.exe"
+    cp "$BINARY" "$UPDATE_HOME/.local/bin/code-cortex-mcp.exe"
+    chmod 755 "$UPDATE_HOME/.local/bin/code-cortex-mcp.exe"
   else
-    cp "$BINARY" "$UPDATE_HOME/.local/bin/codebase-memory-mcp"
-    chmod 755 "$UPDATE_HOME/.local/bin/codebase-memory-mcp"
+    cp "$BINARY" "$UPDATE_HOME/.local/bin/code-cortex-mcp"
+    chmod 755 "$UPDATE_HOME/.local/bin/code-cortex-mcp"
     if [ "$(uname -s)" = "Darwin" ]; then
-      codesign --sign - --force "$UPDATE_HOME/.local/bin/codebase-memory-mcp" 2>/dev/null || true
+      codesign --sign - --force "$UPDATE_HOME/.local/bin/code-cortex-mcp" 2>/dev/null || true
     fi
   fi
 
   # Pre-install agent config with a WRONG binary path (simulates stale config)
-  echo '{"mcpServers":{"codebase-memory-mcp":{"command":"/old/stale/path"}}}' > "$UPDATE_HOME/.claude.json"
+  echo '{"mcpServers":{"code-cortex-mcp":{"command":"/old/stale/path"}}}' > "$UPDATE_HOME/.claude.json"
 
   # 14a: Run actual update command
   HOME="$UPDATE_HOME" CBM_DOWNLOAD_URL="$SMOKE_DOWNLOAD_URL" \
     "$BINARY" update -y 2>&1 || true
 
   # 14b: Verify new binary exists and runs
-  if [ ! -f "$UPDATE_HOME/.local/bin/codebase-memory-mcp" ]; then
+  if [ ! -f "$UPDATE_HOME/.local/bin/code-cortex-mcp" ]; then
     echo "FAIL 14b: binary missing after update"
     exit 1
   fi
-  UPD_BIN="$UPDATE_HOME/.local/bin/codebase-memory-mcp"
+  UPD_BIN="$UPDATE_HOME/.local/bin/code-cortex-mcp"
   if [ "$(uname -s)" = "Darwin" ]; then
     codesign --sign - --force "$UPD_BIN" 2>/dev/null || true
   fi
@@ -1118,7 +1118,7 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
   echo "OK 14b: updated binary runs"
 
   # 14c: Verify agent config was refreshed (stale path replaced)
-  UPD_CMD=$(cat "$UPDATE_HOME/.claude.json" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('mcpServers',{}).get('codebase-memory-mcp',{}).get('command',''))" 2>/dev/null || echo "")
+  UPD_CMD=$(cat "$UPDATE_HOME/.claude.json" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('mcpServers',{}).get('code-cortex-mcp',{}).get('command',''))" 2>/dev/null || echo "")
   if [ "$UPD_CMD" = "/old/stale/path" ]; then
     echo "FAIL 14c: agent config still has stale path after update"
     exit 1
@@ -1131,7 +1131,7 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
 
   # ── 14d-f: Real uninstall with binary removal ──
   # First verify binary + configs exist
-  if [ ! -f "$UPDATE_HOME/.local/bin/codebase-memory-mcp" ]; then
+  if [ ! -f "$UPDATE_HOME/.local/bin/code-cortex-mcp" ]; then
     echo "FAIL 14d: binary should exist before uninstall"
     exit 1
   fi
@@ -1140,7 +1140,7 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
   HOME="$UPDATE_HOME" "$BINARY" uninstall -y 2>&1 || true
 
   # 14e: Verify binary removed
-  if [ -f "$UPDATE_HOME/.local/bin/codebase-memory-mcp" ] || [ -f "$UPDATE_HOME/.local/bin/codebase-memory-mcp.exe" ]; then
+  if [ -f "$UPDATE_HOME/.local/bin/code-cortex-mcp" ] || [ -f "$UPDATE_HOME/.local/bin/code-cortex-mcp.exe" ]; then
     echo "FAIL 14e: binary still exists after uninstall"
     exit 1
   fi
@@ -1150,7 +1150,7 @@ if [ -n "${SMOKE_DOWNLOAD_URL:-}" ]; then
   if cat "$UPDATE_HOME/.claude.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-if 'codebase-memory-mcp' in d.get('mcpServers', {}): sys.exit(1)
+if 'code-cortex-mcp' in d.get('mcpServers', {}): sys.exit(1)
 sys.exit(0)
 " 2>/dev/null; then
     echo "OK 14f: agent config removed by uninstall"
@@ -1165,16 +1165,16 @@ else
   # Local mode: basic binary replacement test (no download)
   UPDATE_DIR=$(mktemp -d)
   mkdir -p "$UPDATE_DIR/install"
-  cp "$BINARY" "$UPDATE_DIR/install/codebase-memory-mcp"
-  chmod 755 "$UPDATE_DIR/install/codebase-memory-mcp"
+  cp "$BINARY" "$UPDATE_DIR/install/code-cortex-mcp"
+  chmod 755 "$UPDATE_DIR/install/code-cortex-mcp"
   cp "$BINARY" "$UPDATE_DIR/smoke-downloaded"
-  rm -f "$UPDATE_DIR/install/codebase-memory-mcp"
-  cp "$UPDATE_DIR/smoke-downloaded" "$UPDATE_DIR/install/codebase-memory-mcp"
-  chmod 755 "$UPDATE_DIR/install/codebase-memory-mcp"
+  rm -f "$UPDATE_DIR/install/code-cortex-mcp"
+  cp "$UPDATE_DIR/smoke-downloaded" "$UPDATE_DIR/install/code-cortex-mcp"
+  chmod 755 "$UPDATE_DIR/install/code-cortex-mcp"
   if [ "$(uname -s)" = "Darwin" ]; then
-    codesign --sign - --force "$UPDATE_DIR/install/codebase-memory-mcp" 2>/dev/null || true
+    codesign --sign - --force "$UPDATE_DIR/install/code-cortex-mcp" 2>/dev/null || true
   fi
-  if ! "$UPDATE_DIR/install/codebase-memory-mcp" --version > /dev/null 2>&1; then
+  if ! "$UPDATE_DIR/install/code-cortex-mcp" --version > /dev/null 2>&1; then
     echo "FAIL 14: binary replacement failed"
     exit 1
   fi
@@ -1217,7 +1217,7 @@ if [ "$DL_OS" = "darwin" ] || [ "$DL_OS" = "linux" ]; then
 else
   DL_EXT="zip"
 fi
-DL_ARCHIVE="codebase-memory-mcp-${DL_OS}-${DL_ARCH}.${DL_EXT}"
+DL_ARCHIVE="code-cortex-mcp-${DL_OS}-${DL_ARCH}.${DL_EXT}"
 
 # 12a: curl download
 echo "--- Phase 12a: curl download ---"
@@ -1261,7 +1261,7 @@ echo "OK 12c: checksum verified"
 # 12d: extract binary
 echo "--- Phase 12d: extraction ---"
 (cd "$DL_DIR" && if [ "$DL_EXT" = "zip" ]; then unzip -q "$DL_ARCHIVE"; else tar -xzf "$DL_ARCHIVE"; fi)
-DL_BIN="$DL_DIR/codebase-memory-mcp"
+DL_BIN="$DL_DIR/code-cortex-mcp"
 if [ ! -f "$DL_BIN" ]; then
   echo "FAIL 12d: binary not found after extraction"
   exit 1
@@ -1314,7 +1314,7 @@ if [ "$DL_OS" != "windows" ] && [ -f "$REPO_ROOT/install.sh" ]; then
     "$REPO_ROOT/install.sh" --dir="$INSTALL_TEST_DIR" 2>&1 || true
 
   # 13b: binary placed
-  if [ ! -f "$INSTALL_TEST_DIR/codebase-memory-mcp" ]; then
+  if [ ! -f "$INSTALL_TEST_DIR/code-cortex-mcp" ]; then
     echo "FAIL 13b: binary not placed by install.sh"
     exit 1
   fi
@@ -1323,9 +1323,9 @@ if [ "$DL_OS" != "windows" ] && [ -f "$REPO_ROOT/install.sh" ]; then
   # 13c: binary runs
   # Sign if needed on macOS
   if [ "$DL_OS" = "darwin" ]; then
-    codesign --sign - --force "$INSTALL_TEST_DIR/codebase-memory-mcp" 2>/dev/null || true
+    codesign --sign - --force "$INSTALL_TEST_DIR/code-cortex-mcp" 2>/dev/null || true
   fi
-  if ! "$INSTALL_TEST_DIR/codebase-memory-mcp" --version > /dev/null 2>&1; then
+  if ! "$INSTALL_TEST_DIR/code-cortex-mcp" --version > /dev/null 2>&1; then
     echo "FAIL 13c: installed binary doesn't run"
     exit 1
   fi
@@ -1333,7 +1333,7 @@ if [ "$DL_OS" != "windows" ] && [ -f "$REPO_ROOT/install.sh" ]; then
 
   # 13d: macOS signature check
   if [ "$DL_OS" = "darwin" ]; then
-    if codesign -v "$INSTALL_TEST_DIR/codebase-memory-mcp" 2>/dev/null; then
+    if codesign -v "$INSTALL_TEST_DIR/code-cortex-mcp" 2>/dev/null; then
       echo "OK 13d: macOS binary signed"
     else
       echo "FAIL 13d: macOS binary not signed after install.sh"
@@ -1344,7 +1344,7 @@ if [ "$DL_OS" != "windows" ] && [ -f "$REPO_ROOT/install.sh" ]; then
   fi
 
   # 13e: agent configs created (at least Claude Code since we made ~/.claude)
-  if [ -f "$INSTALL_TEST_HOME/.claude.json" ] && grep -q 'codebase-memory-mcp' "$INSTALL_TEST_HOME/.claude.json" 2>/dev/null; then
+  if [ -f "$INSTALL_TEST_HOME/.claude.json" ] && grep -q 'code-cortex-mcp' "$INSTALL_TEST_HOME/.claude.json" 2>/dev/null; then
     echo "OK 13e: agent configs created by install.sh"
   else
     echo "FAIL 13e: install.sh did not create agent configs"
@@ -1390,9 +1390,9 @@ elif [ -f "$REPO_ROOT/install.ps1" ] && command -v powershell.exe &>/dev/null; t
     powershell.exe -ExecutionPolicy ByPass -File "$WIN_SCRIPT" "--dir=$WIN_DIR" 2>&1 || true
 
   # 13g: binary placed
-  PS1_BIN="$PS1_TEST_DIR/codebase-memory-mcp.exe"
-  if [ ! -f "$PS1_BIN" ] && [ -f "$PS1_TEST_DIR/codebase-memory-mcp" ]; then
-    PS1_BIN="$PS1_TEST_DIR/codebase-memory-mcp"
+  PS1_BIN="$PS1_TEST_DIR/code-cortex-mcp.exe"
+  if [ ! -f "$PS1_BIN" ] && [ -f "$PS1_TEST_DIR/code-cortex-mcp" ]; then
+    PS1_BIN="$PS1_TEST_DIR/code-cortex-mcp"
   fi
   if [ -f "$PS1_BIN" ]; then
     echo "OK 13g: binary placed by install.ps1"

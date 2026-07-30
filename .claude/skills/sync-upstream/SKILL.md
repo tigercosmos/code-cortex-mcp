@@ -95,7 +95,15 @@ For each approved commit:
    own C++23 idioms. A faithful re-implementation beats a mechanical port that
    fights context drift.
 4. Map paths: upstream `foo/bar.c` → our `foo/bar.cpp`; headers stay `.h`.
-5. Keep commits themed — one fork commit per coherent group, crediting the
+5. **Translate product-name strings.** The fork renamed everything user-facing
+   to `code-cortex-mcp` (v0.15.0, no backward compat): binary/asset names,
+   `~/.cache/code-cortex-mcp/`, agent-config server key, skill names
+   (`code-cortex*`), `[code-cortex]` hook prefix, `.code-cortex/` artifact dir,
+   `.code-cortex.json`. Upstream diffs containing `codebase-memory` /
+   `codebase-memory-mcp` strings must be mapped to those names (internal
+   `cbm_`/`CBM_*` identifiers and `.cbmignore` are unchanged). Full mapping in
+   `UPSTREAM_SYNC.md`.
+6. Keep commits themed — one fork commit per coherent group, crediting the
    upstream SHA(s):
    `merge(upstream): <what> from DeusData/codebase-memory-mcp@<sha>`
 

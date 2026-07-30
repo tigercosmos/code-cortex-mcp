@@ -1,12 +1,12 @@
 #!/bin/bash
 # benchmark-search-graph.sh — Time search_graph name_pattern= queries against a
-# codebase-memory-mcp binary to measure the regex / LIKE pre-filter performance.
+# code-cortex-mcp binary to measure the regex / LIKE pre-filter performance.
 #
 # Usage:
 #   scripts/benchmark-search-graph.sh <binary-path> <project-name>
 #
 # Example:
-#   scripts/benchmark-search-graph.sh ./build/c/codebase-memory-mcp my-project
+#   scripts/benchmark-search-graph.sh ./build/c/code-cortex-mcp my-project
 
 set -euo pipefail
 

@@ -1,4 +1,4 @@
-# Contributing to codebase-memory-mcp
+# Contributing to code-cortex-mcp
 
 Contributions are welcome. This guide covers setup, testing, and PR guidelines.
 
@@ -18,7 +18,7 @@ scripts/build.sh
 macOS: `xcode-select --install` provides clang.
 Linux: `sudo apt install build-essential zlib1g-dev` (Debian/Ubuntu) or `sudo dnf install gcc zlib-devel` (Fedora).
 
-The binary is output to `build/c/codebase-memory-mcp`.
+The binary is output to `build/c/code-cortex-mcp`.
 
 ## Run Tests
 

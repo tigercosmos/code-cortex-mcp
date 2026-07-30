@@ -63,7 +63,7 @@ scripts/build.sh
 #      ~/project_dir/datadice/api-hub    (188 .py files)
 mkdir -p /tmp/py-bench-results
 scripts/benchmark-index.sh \
-  ./build/c/codebase-memory-mcp \
+  ./build/c/code-cortex-mcp \
   python \
   ~/project_dir/datadice/falkemedia \
   /tmp/py-bench-results
@@ -71,11 +71,11 @@ scripts/benchmark-index.sh \
 # 3. Compute the resolution ratio. The benchmark dumps node/edge counts
 #    plus per-file timings; cross-reference with calls / resolved_calls
 #    via the MCP graph queries:
-codebase-memory-mcp query \
+code-cortex-mcp query \
   "MATCH ()-[r:CALLS]->() WHERE r.strategy STARTS WITH 'lsp_' \
    RETURN count(r) AS lsp_resolved"
 
-codebase-memory-mcp query \
+code-cortex-mcp query \
   "MATCH ()-[r:CALLS]->() RETURN count(r) AS total_resolved"
 ```
 

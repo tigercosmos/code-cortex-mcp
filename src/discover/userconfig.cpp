@@ -2,9 +2,9 @@
  * userconfig.c — User-defined extension→language mappings.
  *
  * Reads extra_extensions from:
- *   Global:  $XDG_CONFIG_HOME/codebase-memory-mcp/config.json
- *            (falls back to ~/.config/codebase-memory-mcp/config.json)
- *   Project: {repo_root}/.codebase-memory.json
+ *   Global:  $XDG_CONFIG_HOME/code-cortex-mcp/config.json
+ *            (falls back to ~/.config/code-cortex-mcp/config.json)
+ *   Project: {repo_root}/.code-cortex.json
  *
  * Project config wins over global. Unknown language values warn and are
  * skipped (fail-open). Missing files are silently ignored.
@@ -300,7 +300,7 @@ cbm_userconfig_t *cbm_userconfig_load(const char *repo_path) {
     const char *cfg_base = cbm_app_config_dir();
     const char *cfg_fallback = cfg_base ? cfg_base : "/tmp";
     char global_path[PATH_BUF_SZ];
-    snprintf(global_path, sizeof(global_path), "%s/codebase-memory-mcp/config.json", cfg_fallback);
+    snprintf(global_path, sizeof(global_path), "%s/code-cortex-mcp/config.json", cfg_fallback);
 
     if (load_config_file(global_path, &entries, &count) != 0) {
         for (int i = 0; i < count; i++) {
@@ -316,7 +316,7 @@ cbm_userconfig_t *cbm_userconfig_load(const char *repo_path) {
     /* ── Step 2: Load project config ── */
     if (repo_path && repo_path[0]) {
         char project_path[PATH_BUF_SZ];
-        snprintf(project_path, sizeof(project_path), "%s/.codebase-memory.json", repo_path);
+        snprintf(project_path, sizeof(project_path), "%s/.code-cortex.json", repo_path);
 
         if (load_config_file(project_path, &entries, &count) != 0) {
             /* Free already-allocated entries */

@@ -76,7 +76,7 @@ static cbm_store_t *lang_open_indexed(LangProj *lp) {
         home = "/tmp";
     }
     char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/code-cortex-mcp", home);
     cbm_mkdir(cache_dir);
     snprintf(lp->dbpath, sizeof(lp->dbpath), "%s/%s.db", cache_dir, lp->project);
     unlink(lp->dbpath);

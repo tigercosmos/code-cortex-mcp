@@ -193,33 +193,39 @@ typedef struct {
 
 static void cp_to_fwd_slashes(char *p) {
     for (; *p; p++) {
-        if (*p == '\\') *p = '/';
+        if (*p == '\\')
+            *p = '/';
     }
 }
 
 static cbm_store_t *cp_open_indexed(CP_Proj *lp) {
     lp->project = cbm_project_name_from_path(lp->tmpdir);
-    if (!lp->project) return NULL;
+    if (!lp->project)
+        return NULL;
     const char *home = getenv("HOME");
-    if (!home) home = "/tmp";
+    if (!home)
+        home = "/tmp";
     char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/code-cortex-mcp", home);
     cbm_mkdir(cache_dir);
     snprintf(lp->dbpath, sizeof(lp->dbpath), "%s/%s.db", cache_dir, lp->project);
     unlink(lp->dbpath);
     lp->srv = cbm_mcp_server_new(NULL);
-    if (!lp->srv) return NULL;
+    if (!lp->srv)
+        return NULL;
     char args[700];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
-    if (resp) free(resp);
+    if (resp)
+        free(resp);
     return cbm_store_open_path(lp->dbpath);
 }
 
 static cbm_store_t *cp_index_files(CP_Proj *lp, const CP_File *files, int nfiles) {
     memset(lp, 0, sizeof(*lp));
     snprintf(lp->tmpdir, sizeof(lp->tmpdir), "/tmp/cbm_cp_XXXXXX");
-    if (!cbm_mkdtemp(lp->tmpdir)) return NULL;
+    if (!cbm_mkdtemp(lp->tmpdir))
+        return NULL;
     cp_to_fwd_slashes(lp->tmpdir);
     for (int i = 0; i < nfiles; i++) {
         char path[700];
@@ -231,7 +237,8 @@ static cbm_store_t *cp_index_files(CP_Proj *lp, const CP_File *files, int nfiles
             *slash = '/';
         }
         FILE *f = fopen(path, "wb");
-        if (!f) return NULL;
+        if (!f)
+            return NULL;
         fputs(files[i].content, f);
         fclose(f);
     }
@@ -239,26 +246,34 @@ static cbm_store_t *cp_index_files(CP_Proj *lp, const CP_File *files, int nfiles
 }
 
 static void cp_cleanup(CP_Proj *lp, cbm_store_t *store) {
-    if (store) cbm_store_close(store);
-    if (lp->srv) { cbm_mcp_server_free(lp->srv); lp->srv = NULL; }
-    free(lp->project); lp->project = NULL;
+    if (store)
+        cbm_store_close(store);
+    if (lp->srv) {
+        cbm_mcp_server_free(lp->srv);
+        lp->srv = NULL;
+    }
+    free(lp->project);
+    lp->project = NULL;
     th_rmtree(lp->tmpdir);
     unlink(lp->dbpath);
     char wal[600], shm[600];
     snprintf(wal, sizeof(wal), "%s-wal", lp->dbpath);
     snprintf(shm, sizeof(shm), "%s-shm", lp->dbpath);
-    unlink(wal); unlink(shm);
+    unlink(wal);
+    unlink(shm);
 }
 
 /* Count edges of `edge_type`; -1 on DB error. */
 static int cp_edges(cbm_store_t *store, const char *project, const char *edge_type) {
-    if (!store) return -1;
+    if (!store)
+        return -1;
     return cbm_store_count_edges_by_type(store, project, edge_type);
 }
 
 /* Count nodes with a given label. */
 static int cp_count_label(cbm_store_t *store, const char *project, const char *label) {
-    if (!store) return -1;
+    if (!store)
+        return -1;
     cbm_node_t *nodes = NULL;
     int count = 0;
     if (cbm_store_find_nodes_by_label(store, project, label, &nodes, &count) != CBM_STORE_OK)
@@ -275,17 +290,41 @@ static int cp_callables(cbm_store_t *store, const char *project) {
 }
 
 /* Diagnostic edge histogram (stderr only, so test output stays clean). */
-static const char *CP_ALL_EDGE_TYPES[] = {
-    "CALLS", "CONFIGURES", "CONTAINS_FILE", "CONTAINS_FOLDER",
-    "DATA_FLOWS", "DECORATES", "DEFINES", "DEFINES_METHOD",
-    "DEPENDS_ON", "FILE_CHANGES_WITH", "GRAPHQL_CALLS", "GRPC_CALLS",
-    "HANDLES", "HTTP_CALLS", "IMPLEMENTS", "IMPORTS",
-    "INHERITS", "INFRA_MAPS", "OVERRIDE", "READS",
-    "SEMANTICALLY_RELATED", "SIMILAR_TO", "TESTS_FILE", "TESTS",
-    "TRPC_CALLS", "USAGE", "ASYNC_CALLS", "WRITES", NULL};
+static const char *CP_ALL_EDGE_TYPES[] = {"CALLS",
+                                          "CONFIGURES",
+                                          "CONTAINS_FILE",
+                                          "CONTAINS_FOLDER",
+                                          "DATA_FLOWS",
+                                          "DECORATES",
+                                          "DEFINES",
+                                          "DEFINES_METHOD",
+                                          "DEPENDS_ON",
+                                          "FILE_CHANGES_WITH",
+                                          "GRAPHQL_CALLS",
+                                          "GRPC_CALLS",
+                                          "HANDLES",
+                                          "HTTP_CALLS",
+                                          "IMPLEMENTS",
+                                          "IMPORTS",
+                                          "INHERITS",
+                                          "INFRA_MAPS",
+                                          "OVERRIDE",
+                                          "READS",
+                                          "SEMANTICALLY_RELATED",
+                                          "SIMILAR_TO",
+                                          "TESTS_FILE",
+                                          "TESTS",
+                                          "TRPC_CALLS",
+                                          "USAGE",
+                                          "ASYNC_CALLS",
+                                          "WRITES",
+                                          NULL};
 
 static void cp_diag(cbm_store_t *store, const char *project, const char *label) {
-    if (!store) { fprintf(stderr, "  [CP] %s: no graph DB\n", label); return; }
+    if (!store) {
+        fprintf(stderr, "  [CP] %s: no graph DB\n", label);
+        return;
+    }
     char line[640] = {0};
     for (int i = 0; CP_ALL_EDGE_TYPES[i]; i++) {
         int c = cbm_store_count_edges_by_type(store, project, CP_ALL_EDGE_TYPES[i]);
@@ -307,11 +346,12 @@ static cbm_store_t *cp_index_parallel(CP_Proj *lp, const CP_File *meaningful, in
     static char pad_body[CP_PARALLEL_PAD][64];
     CP_File files[CP_PAD_MAX] = {{0}};
     int n = 0;
-    for (int i = 0; i < n_mean; i++) files[n++] = meaningful[i];
+    for (int i = 0; i < n_mean; i++)
+        files[n++] = meaningful[i];
     for (int i = 0; i < CP_PARALLEL_PAD; i++) {
         snprintf(pad_name[i], sizeof(pad_name[i]), "pad/pad_%02d.py", i);
         snprintf(pad_body[i], sizeof(pad_body[i]), "def pad_%02d():\n    return %d\n", i, i);
-        files[n].name    = pad_name[i];
+        files[n].name = pad_name[i];
         files[n].content = pad_body[i];
         n++;
     }
@@ -339,7 +379,8 @@ TEST(cp_configures_go_getenv) {
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int cfg = cp_edges(store, lp.project, "CONFIGURES");
-    if (cfg < 1) cp_diag(store, lp.project, "configures/go_getenv");
+    if (cfg < 1)
+        cp_diag(store, lp.project, "configures/go_getenv");
     cp_cleanup(&lp, store);
     /* REAL BUG: internal/cbm/extract_env_accesses.c extracts os.Getenv into
      * result->env_accesses, but NO pipeline pass under src/pipeline ever consumes
@@ -365,7 +406,8 @@ TEST(cp_configures_python_os_getenv) {
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int cfg = cp_edges(store, lp.project, "CONFIGURES");
-    if (cfg < 1) cp_diag(store, lp.project, "configures/python_os_getenv");
+    if (cfg < 1)
+        cp_diag(store, lp.project, "configures/python_os_getenv");
     cp_cleanup(&lp, store);
     /* REAL BUG: os.getenv extracted into env_accesses but never consumed; stdlib
      * callee never resolves to an in-graph node → 0 CONFIGURES.
@@ -387,16 +429,16 @@ TEST(cp_configures_python_os_getenv) {
  *               (not a call; pipeline cannot see it). */
 TEST(cp_configures_ts_getenv_wrapper) {
     /* A3a: wrapper whose name triggers CBM_SVC_CONFIG */
-    static const CP_File f[] = {
-        {"env.ts",
-         "function getenv(key: string, fallback: string = ''): string {\n"
-         "    return (process as any).env[key] ?? fallback;\n}\n\n"
-         "function dbUrl(): string { return getenv('DATABASE_URL'); }\n"
-         "function port(): string { return getenv('PORT', '3000'); }\n"}};
+    static const CP_File f[] = {{"env.ts",
+                                 "function getenv(key: string, fallback: string = ''): string {\n"
+                                 "    return (process as any).env[key] ?? fallback;\n}\n\n"
+                                 "function dbUrl(): string { return getenv('DATABASE_URL'); }\n"
+                                 "function port(): string { return getenv('PORT', '3000'); }\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int cfg = cp_edges(store, lp.project, "CONFIGURES");
-    if (cfg < 1) cp_diag(store, lp.project, "configures/ts_getenv_wrapper");
+    if (cfg < 1)
+        cp_diag(store, lp.project, "configures/ts_getenv_wrapper");
     cp_cleanup(&lp, store);
     /* getenv() is a locally-defined function; the resolver finds it and
      * its name matches CBM_SVC_CONFIG → CONFIGURES should fire. */
@@ -421,7 +463,8 @@ TEST(cp_configures_csharp_getenv) {
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int cfg = cp_edges(store, lp.project, "CONFIGURES");
-    if (cfg < 1) cp_diag(store, lp.project, "configures/csharp_getenv");
+    if (cfg < 1)
+        cp_diag(store, lp.project, "configures/csharp_getenv");
     cp_cleanup(&lp, store);
     /* REAL BUG: Environment.GetEnvironmentVariable extracted into env_accesses but
      * never consumed; stdlib callee never resolves to an in-graph node →
@@ -446,7 +489,8 @@ TEST(cp_configures_rust_env_var) {
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int cfg = cp_edges(store, lp.project, "CONFIGURES");
-    if (cfg < 1) cp_diag(store, lp.project, "configures/rust_env_var");
+    if (cfg < 1)
+        cp_diag(store, lp.project, "configures/rust_env_var");
     cp_cleanup(&lp, store);
     /* REAL BUG: std::env::var extracted into env_accesses but never consumed;
      * stdlib callee never resolves to an in-graph node → 0 CONFIGURES.  (Rust
@@ -475,15 +519,14 @@ TEST(cp_configures_rust_env_var) {
  * not produce a Variable node.  If it does, reading it inside a function
  * should emit a READS edge. */
 TEST(cp_reads_writes_python_global) {
-    static const CP_File f[] = {
-        {"counter.py",
-         "count = 0\n\n\n"
-         "def increment():\n    global count\n    count += 1\n\n\n"
-         "def get():\n    return count\n\n\n"
-         "def reset():\n    global count\n    count = 0\n"}};
+    static const CP_File f[] = {{"counter.py",
+                                 "count = 0\n\n\n"
+                                 "def increment():\n    global count\n    count += 1\n\n\n"
+                                 "def get():\n    return count\n\n\n"
+                                 "def reset():\n    global count\n    count = 0\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int reads  = cp_edges(store, lp.project, "READS");
+    int reads = cp_edges(store, lp.project, "READS");
     int writes = cp_edges(store, lp.project, "WRITES");
     if (reads < 1 && writes < 1)
         cp_diag(store, lp.project, "reads_writes/python_global");
@@ -502,14 +545,13 @@ TEST(cp_reads_writes_python_global) {
  * EXPECTED UNCERTAIN: Go `var x int` at package scope may not emit a
  * Variable node; if it does, reads inside functions produce READS. */
 TEST(cp_reads_writes_go_global) {
-    static const CP_File f[] = {
-        {"store.go",
-         "package store\n\nvar cache = map[string]string{}\n\n"
-         "func Set(key, val string) { cache[key] = val }\n\n"
-         "func Get(key string) string { return cache[key] }\n"}};
+    static const CP_File f[] = {{"store.go",
+                                 "package store\n\nvar cache = map[string]string{}\n\n"
+                                 "func Set(key, val string) { cache[key] = val }\n\n"
+                                 "func Get(key string) string { return cache[key] }\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int reads  = cp_edges(store, lp.project, "READS");
+    int reads = cp_edges(store, lp.project, "READS");
     int writes = cp_edges(store, lp.project, "WRITES");
     if (reads < 1 && writes < 1)
         cp_diag(store, lp.project, "reads_writes/go_global");
@@ -527,14 +569,13 @@ TEST(cp_reads_writes_go_global) {
  * unless field_declaration is in the extract_fields list. */
 TEST(cp_reads_writes_java_static_field) {
     static const CP_File f[] = {
-        {"Counter.java",
-         "package app;\n\nclass Counter {\n    private static int count = 0;\n\n"
-         "    public static void increment() { count++; }\n\n"
-         "    public static int value() { return count; }\n\n"
-         "    public static void reset() { count = 0; }\n}\n"}};
+        {"Counter.java", "package app;\n\nclass Counter {\n    private static int count = 0;\n\n"
+                         "    public static void increment() { count++; }\n\n"
+                         "    public static int value() { return count; }\n\n"
+                         "    public static void reset() { count = 0; }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int reads  = cp_edges(store, lp.project, "READS");
+    int reads = cp_edges(store, lp.project, "READS");
     int writes = cp_edges(store, lp.project, "WRITES");
     if (reads < 1 && writes < 1)
         cp_diag(store, lp.project, "reads_writes/java_static_field");
@@ -552,14 +593,13 @@ TEST(cp_reads_writes_java_static_field) {
  * extracted as Variable nodes depending on extract_fields settings. */
 TEST(cp_reads_writes_cs_static_field) {
     static const CP_File f[] = {
-        {"Registry.cs",
-         "namespace App {\n    class Registry {\n"
-         "        private static int _count = 0;\n\n"
-         "        public static void Register() { _count++; }\n\n"
-         "        public static int Count() { return _count; }\n    }\n}\n"}};
+        {"Registry.cs", "namespace App {\n    class Registry {\n"
+                        "        private static int _count = 0;\n\n"
+                        "        public static void Register() { _count++; }\n\n"
+                        "        public static int Count() { return _count; }\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int reads  = cp_edges(store, lp.project, "READS");
+    int reads = cp_edges(store, lp.project, "READS");
     int writes = cp_edges(store, lp.project, "WRITES");
     if (reads < 1 && writes < 1)
         cp_diag(store, lp.project, "reads_writes/cs_static_field");
@@ -609,7 +649,8 @@ TEST(cp_grpc_calls_go_user_service) {
     cbm_store_t *store =
         cp_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
     int grpc = cp_edges(store, lp.project, "GRPC_CALLS");
-    if (grpc < 1) cp_diag(store, lp.project, "grpc_calls/go_user_service");
+    if (grpc < 1)
+        cp_diag(store, lp.project, "grpc_calls/go_user_service");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(grpc >= 1);
     PASS();
@@ -621,21 +662,20 @@ TEST(cp_grpc_calls_go_user_service) {
  * the "trpc" segment. */
 TEST(cp_trpc_calls_ts_procedure) {
     static const CP_File meaningful[] = {
-        {"trpc/client.ts",
-         "export function createTRPCProxyClient(opts: any): any {\n"
-         "  return { query: (proc: string) => proc };\n}\n\n"
-         "export function trpcCall(proc: string): string {\n"
-         "  const client = createTRPCProxyClient({});\n"
-         "  return client.query(proc);\n}\n"},
-        {"api/users.ts",
-         "import { trpcCall } from '../trpc/client';\n\n"
-         "export function getUser(id: string): string {\n"
-         "  return trpcCall('user.getById');\n}\n"}};
+        {"trpc/client.ts", "export function createTRPCProxyClient(opts: any): any {\n"
+                           "  return { query: (proc: string) => proc };\n}\n\n"
+                           "export function trpcCall(proc: string): string {\n"
+                           "  const client = createTRPCProxyClient({});\n"
+                           "  return client.query(proc);\n}\n"},
+        {"api/users.ts", "import { trpcCall } from '../trpc/client';\n\n"
+                         "export function getUser(id: string): string {\n"
+                         "  return trpcCall('user.getById');\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store =
         cp_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
     int trpc = cp_edges(store, lp.project, "TRPC_CALLS");
-    if (trpc < 1) cp_diag(store, lp.project, "trpc_calls/ts_procedure");
+    if (trpc < 1)
+        cp_diag(store, lp.project, "trpc_calls/ts_procedure");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(trpc >= 1);
     PASS();
@@ -646,22 +686,21 @@ TEST(cp_trpc_calls_ts_procedure) {
  * CBM_SVC_GRAPHQL.  We place the wrapper in a module "graphql/client.py". */
 TEST(cp_graphql_calls_python_execute) {
     static const CP_File meaningful[] = {
-        {"graphql/client.py",
-         "def gql(query):\n    return query\n\n"
-         "def execute(query, variables=None):\n    return {\"data\": None}\n"},
-        {"api/schema.py",
-         "from graphql.client import gql, execute\n\n\n"
-         "def fetch_user(user_id):\n"
-         "    q = gql('query GetUser($id: ID!) { user(id: $id) { name } }')\n"
-         "    return execute(q, {\"id\": user_id})\n\n\n"
-         "def list_users():\n"
-         "    q = gql('query ListUsers { users { id name } }')\n"
-         "    return execute(q)\n"}};
+        {"graphql/client.py", "def gql(query):\n    return query\n\n"
+                              "def execute(query, variables=None):\n    return {\"data\": None}\n"},
+        {"api/schema.py", "from graphql.client import gql, execute\n\n\n"
+                          "def fetch_user(user_id):\n"
+                          "    q = gql('query GetUser($id: ID!) { user(id: $id) { name } }')\n"
+                          "    return execute(q, {\"id\": user_id})\n\n\n"
+                          "def list_users():\n"
+                          "    q = gql('query ListUsers { users { id name } }')\n"
+                          "    return execute(q)\n"}};
     CP_Proj lp;
     cbm_store_t *store =
         cp_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
     int graphql = cp_edges(store, lp.project, "GRAPHQL_CALLS");
-    if (graphql < 1) cp_diag(store, lp.project, "graphql_calls/python_execute");
+    if (graphql < 1)
+        cp_diag(store, lp.project, "graphql_calls/python_execute");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(graphql >= 1);
     PASS();
@@ -677,15 +716,15 @@ TEST(cp_graphql_calls_python_execute) {
  * EXPECTED GREEN: the outer function Make() has CALLS edges even though
  * the call appears inside an anonymous func literal. */
 TEST(cp_closure_go_outer_call) {
-    static const CP_File f[] = {
-        {"ops.go",
-         "package ops\n\nfunc double(x int) int { return x * 2 }\n\n"
-         "func Make(base int) func(int) int {\n"
-         "    return func(x int) int { return double(base + x) }\n}\n"}};
+    static const CP_File f[] = {{"ops.go",
+                                 "package ops\n\nfunc double(x int) int { return x * 2 }\n\n"
+                                 "func Make(base int) func(int) int {\n"
+                                 "    return func(x int) int { return double(base + x) }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "closure/go_outer_call");
+    if (calls < 1)
+        cp_diag(store, lp.project, "closure/go_outer_call");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -694,15 +733,15 @@ TEST(cp_closure_go_outer_call) {
 /* D1b — Python lambda calling a named function.
  * EXPECTED GREEN: the enclosing function apply() has CALLS edge to helper(). */
 TEST(cp_closure_python_lambda) {
-    static const CP_File f[] = {
-        {"funcs.py",
-         "def helper(x):\n    return x * 2\n\n\n"
-         "def apply(items):\n    transform = lambda x: helper(x)\n"
-         "    return list(map(transform, items))\n"}};
+    static const CP_File f[] = {{"funcs.py",
+                                 "def helper(x):\n    return x * 2\n\n\n"
+                                 "def apply(items):\n    transform = lambda x: helper(x)\n"
+                                 "    return list(map(transform, items))\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "closure/python_lambda");
+    if (calls < 1)
+        cp_diag(store, lp.project, "closure/python_lambda");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -712,16 +751,15 @@ TEST(cp_closure_python_lambda) {
  * EXPECTED GREEN: ts_lsp_cross resolves the named import. */
 TEST(cp_closure_ts_arrow) {
     static const CP_File f[] = {
-        {"utils.ts",
-         "export function format(x: number): string { return x.toFixed(2); }\n"},
-        {"mapper.ts",
-         "import { format } from './utils';\n\n"
-         "export function mapAll(xs: number[]): string[] {\n"
-         "    return xs.map(x => format(x));\n}\n"}};
+        {"utils.ts", "export function format(x: number): string { return x.toFixed(2); }\n"},
+        {"mapper.ts", "import { format } from './utils';\n\n"
+                      "export function mapAll(xs: number[]): string[] {\n"
+                      "    return xs.map(x => format(x));\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 2);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "closure/ts_arrow");
+    if (calls < 1)
+        cp_diag(store, lp.project, "closure/ts_arrow");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -738,17 +776,17 @@ TEST(cp_closure_ts_arrow) {
  * non-self caller (Run->Fib) so a genuine CALLS edge appears while the recursive
  * shape (Fib->Fib, suppressed) is retained. */
 TEST(cp_recursive_go) {
-    static const CP_File f[] = {
-        {"fib.go",
-         "package fib\n\nfunc Fib(n int) int {\n"
-         "    if n <= 1 { return n }\n    return Fib(n-1) + Fib(n-2)\n}\n\n"
-         "func Run() int { return Fib(10) }\n"}};
+    static const CP_File f[] = {{"fib.go",
+                                 "package fib\n\nfunc Fib(n int) int {\n"
+                                 "    if n <= 1 { return n }\n    return Fib(n-1) + Fib(n-2)\n}\n\n"
+                                 "func Run() int { return Fib(10) }\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "recursive/go");
+    if (calls < 1)
+        cp_diag(store, lp.project, "recursive/go");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(calls >= 1);  /* Run->Fib (self-loop Fib->Fib is suppressed by design) */
+    ASSERT_TRUE(calls >= 1); /* Run->Fib (self-loop Fib->Fib is suppressed by design) */
     PASS();
 }
 
@@ -757,18 +795,17 @@ TEST(cp_recursive_go) {
  * self-loop (see D2a).  Add a non-self caller run->factorial so a real CALLS
  * edge appears; the recursive shape is retained. */
 TEST(cp_recursive_python) {
-    static const CP_File f[] = {
-        {"math.py",
-         "def factorial(n):\n"
-         "    if n <= 1:\n        return 1\n"
-         "    return n * factorial(n - 1)\n\n\n"
-         "def run():\n    return factorial(5)\n"}};
+    static const CP_File f[] = {{"math.py", "def factorial(n):\n"
+                                            "    if n <= 1:\n        return 1\n"
+                                            "    return n * factorial(n - 1)\n\n\n"
+                                            "def run():\n    return factorial(5)\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "recursive/python");
+    if (calls < 1)
+        cp_diag(store, lp.project, "recursive/python");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(calls >= 1);  /* run->factorial (self-loop suppressed by design) */
+    ASSERT_TRUE(calls >= 1); /* run->factorial (self-loop suppressed by design) */
     PASS();
 }
 
@@ -778,17 +815,16 @@ TEST(cp_recursive_python) {
  * recursive shape is retained.  (run->sum resolves via the name-based registry
  * resolver — a plain same-file function call, no `::` path involved.) */
 TEST(cp_recursive_rust) {
-    static const CP_File f[] = {
-        {"math.rs",
-         "pub fn sum(n: u64) -> u64 {\n"
-         "    if n == 0 { return 0; }\n    n + sum(n - 1)\n}\n\n"
-         "pub fn run() -> u64 { sum(5) }\n"}};
+    static const CP_File f[] = {{"math.rs", "pub fn sum(n: u64) -> u64 {\n"
+                                            "    if n == 0 { return 0; }\n    n + sum(n - 1)\n}\n\n"
+                                            "pub fn run() -> u64 { sum(5) }\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "recursive/rust");
+    if (calls < 1)
+        cp_diag(store, lp.project, "recursive/rust");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(calls >= 1);  /* run->sum (self-loop sum->sum suppressed by design) */
+    ASSERT_TRUE(calls >= 1); /* run->sum (self-loop sum->sum suppressed by design) */
     PASS();
 }
 
@@ -798,17 +834,17 @@ TEST(cp_recursive_rust) {
  * recursive shape is retained. */
 TEST(cp_recursive_java) {
     static const CP_File f[] = {
-        {"Fib.java",
-         "package app;\n\nclass Fib {\n"
-         "    static long fib(int n) {\n"
-         "        if (n <= 1) return n;\n        return fib(n-1) + fib(n-2);\n    }\n\n"
-         "    static long run() { return fib(10); }\n}\n"}};
+        {"Fib.java", "package app;\n\nclass Fib {\n"
+                     "    static long fib(int n) {\n"
+                     "        if (n <= 1) return n;\n        return fib(n-1) + fib(n-2);\n    }\n\n"
+                     "    static long run() { return fib(10); }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "recursive/java");
+    if (calls < 1)
+        cp_diag(store, lp.project, "recursive/java");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(calls >= 1);  /* run->fib (self-loop fib->fib suppressed by design) */
+    ASSERT_TRUE(calls >= 1); /* run->fib (self-loop fib->fib suppressed by design) */
     PASS();
 }
 
@@ -822,15 +858,17 @@ TEST(cp_async_python_await) {
         {"svc.py",
          "async def fetch_data(url):\n    return {\"url\": url}\n\n\n"
          "async def process(url):\n    data = await fetch_data(url)\n    return data\n\n\n"
-         "async def run():\n    result = await process(\"http://example.com\")\n    return result\n"}};
+         "async def run():\n    result = await process(\"http://example.com\")\n    return "
+         "result\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int calls   = cp_edges(store, lp.project, "CALLS");
+    int calls = cp_edges(store, lp.project, "CALLS");
     int fn_count = cp_count_label(store, lp.project, "Function");
-    if (calls < 1) cp_diag(store, lp.project, "async/python_await");
+    if (calls < 1)
+        cp_diag(store, lp.project, "async/python_await");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(fn_count >= 2);  /* async def functions must become Function nodes */
-    ASSERT_TRUE(calls >= 1);     /* await call must produce at least one CALLS edge */
+    ASSERT_TRUE(fn_count >= 2); /* async def functions must become Function nodes */
+    ASSERT_TRUE(calls >= 1);    /* await call must produce at least one CALLS edge */
     PASS();
 }
 
@@ -838,17 +876,16 @@ TEST(cp_async_python_await) {
  * EXPECTED GREEN: ts_lsp_cross resolves await-ed named function calls. */
 TEST(cp_async_ts_await) {
     static const CP_File f[] = {
-        {"api.ts",
-         "export async function fetchUser(id: string): Promise<any> {\n"
-         "    return { id };\n}\n"},
-        {"service.ts",
-         "import { fetchUser } from './api';\n\n"
-         "export async function getUser(id: string): Promise<any> {\n"
-         "    const user = await fetchUser(id);\n    return user;\n}\n"}};
+        {"api.ts", "export async function fetchUser(id: string): Promise<any> {\n"
+                   "    return { id };\n}\n"},
+        {"service.ts", "import { fetchUser } from './api';\n\n"
+                       "export async function getUser(id: string): Promise<any> {\n"
+                       "    const user = await fetchUser(id);\n    return user;\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 2);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "async/ts_await");
+    if (calls < 1)
+        cp_diag(store, lp.project, "async/ts_await");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -858,17 +895,17 @@ TEST(cp_async_ts_await) {
  * EXPECTED GREEN: C# name-based resolver finds the awaited method. */
 TEST(cp_async_csharp_task) {
     static const CP_File f[] = {
-        {"Svc.cs",
-         "using System.Threading.Tasks;\n\nnamespace App {\n"
-         "    class Svc {\n"
-         "        async Task<string> FetchAsync(string url) {\n"
-         "            await Task.Delay(0);\n            return url;\n        }\n\n"
-         "        async Task<string> RunAsync(string url) {\n"
-         "            return await FetchAsync(url);\n        }\n    }\n}\n"}};
+        {"Svc.cs", "using System.Threading.Tasks;\n\nnamespace App {\n"
+                   "    class Svc {\n"
+                   "        async Task<string> FetchAsync(string url) {\n"
+                   "            await Task.Delay(0);\n            return url;\n        }\n\n"
+                   "        async Task<string> RunAsync(string url) {\n"
+                   "            return await FetchAsync(url);\n        }\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "async/csharp_task");
+    if (calls < 1)
+        cp_diag(store, lp.project, "async/csharp_task");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -880,18 +917,18 @@ TEST(cp_async_csharp_task) {
  * await_expression is not included, so the awaited call is not extracted.
  * Assert CORRECT outcome (calls >= 1); RED if extractor misses it. */
 TEST(cp_async_rust_await) {
-    static const CP_File f[] = {
-        {"svc.rs",
-         "async fn fetch(url: &str) -> String { url.to_string() }\n\n"
-         "async fn run(url: &str) -> String {\n    fetch(url).await\n}\n"}};
+    static const CP_File f[] = {{"svc.rs",
+                                 "async fn fetch(url: &str) -> String { url.to_string() }\n\n"
+                                 "async fn run(url: &str) -> String {\n    fetch(url).await\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int calls   = cp_edges(store, lp.project, "CALLS");
+    int calls = cp_edges(store, lp.project, "CALLS");
     int fn_count = cp_count_label(store, lp.project, "Function");
-    if (calls < 1) cp_diag(store, lp.project, "async/rust_await");
+    if (calls < 1)
+        cp_diag(store, lp.project, "async/rust_await");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(fn_count >= 2);  /* async fns must still become Function nodes */
-    ASSERT_TRUE(calls >= 1);     /* RED if .await not in rust_call_types */
+    ASSERT_TRUE(fn_count >= 2); /* async fns must still become Function nodes */
+    ASSERT_TRUE(calls >= 1);    /* RED if .await not in rust_call_types */
     PASS();
 }
 
@@ -901,14 +938,14 @@ TEST(cp_async_rust_await) {
  * resolver should produce a CALLS edge via the name-based resolver. */
 TEST(cp_async_kotlin_suspend) {
     static const CP_File f[] = {
-        {"Fetch.kt",
-         "suspend fun fetchData(url: String): String = url\n\n"
-         "suspend fun process(url: String): String {\n"
-         "    val data = fetchData(url)\n    return data.uppercase()\n}\n"}};
+        {"Fetch.kt", "suspend fun fetchData(url: String): String = url\n\n"
+                     "suspend fun process(url: String): String {\n"
+                     "    val data = fetchData(url)\n    return data.uppercase()\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "async/kotlin_suspend");
+    if (calls < 1)
+        cp_diag(store, lp.project, "async/kotlin_suspend");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -929,11 +966,12 @@ TEST(cp_operator_python_add) {
          "def combine(a, b):\n    return a + b\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int calls   = cp_edges(store, lp.project, "CALLS");
+    int calls = cp_edges(store, lp.project, "CALLS");
     int methods = cp_count_label(store, lp.project, "Method");
-    if (calls < 1) cp_diag(store, lp.project, "operator/python_add");
+    if (calls < 1)
+        cp_diag(store, lp.project, "operator/python_add");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(methods >= 1);  /* __add__ must still be a Method node */
+    ASSERT_TRUE(methods >= 1); /* __add__ must still be a Method node */
     /* `a + b` desugars to a.__add__(b) but is NOT in call_expressions.
      * Assert CORRECT outcome (calls >= 1): RED until binary_expression
      * desugaring is added to the Python extractor. */
@@ -946,17 +984,17 @@ TEST(cp_operator_python_add) {
  * {"call_expression"} only; the add() desugaring is not extracted. */
 TEST(cp_operator_rust_add) {
     static const CP_File f[] = {
-        {"point.rs",
-         "use std::ops::Add;\n\n"
-         "#[derive(Clone, Copy)]\npub struct Point { pub x: i32, pub y: i32 }\n\n"
-         "impl Add for Point {\n    type Output = Point;\n\n"
-         "    fn add(self, other: Point) -> Point {\n"
-         "        Point { x: self.x + other.x, y: self.y + other.y }\n    }\n}\n\n"
-         "pub fn combine(a: Point, b: Point) -> Point { a + b }\n"}};
+        {"point.rs", "use std::ops::Add;\n\n"
+                     "#[derive(Clone, Copy)]\npub struct Point { pub x: i32, pub y: i32 }\n\n"
+                     "impl Add for Point {\n    type Output = Point;\n\n"
+                     "    fn add(self, other: Point) -> Point {\n"
+                     "        Point { x: self.x + other.x, y: self.y + other.y }\n    }\n}\n\n"
+                     "pub fn combine(a: Point, b: Point) -> Point { a + b }\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "operator/rust_add");
+    if (calls < 1)
+        cp_diag(store, lp.project, "operator/rust_add");
     cp_cleanup(&lp, store);
     /* REAL BUG: `a + b` is a binary_expression; lang_specs.c rust_call_types =
      * {call_expression, macro_invocation} has no binary_expression entry, so the
@@ -971,19 +1009,19 @@ TEST(cp_operator_rust_add) {
  * may or may not desugar it to a.plus(b) call. */
 TEST(cp_operator_kotlin_plus) {
     static const CP_File f[] = {
-        {"Vec.kt",
-         "data class Vec(val x: Int, val y: Int) {\n"
-         "    operator fun plus(other: Vec): Vec = Vec(x + other.x, y + other.y)\n"
-         "    operator fun minus(other: Vec): Vec = Vec(x - other.x, y - other.y)\n}\n\n"
-         "fun combine(a: Vec, b: Vec): Vec = a + b\n"}};
+        {"Vec.kt", "data class Vec(val x: Int, val y: Int) {\n"
+                   "    operator fun plus(other: Vec): Vec = Vec(x + other.x, y + other.y)\n"
+                   "    operator fun minus(other: Vec): Vec = Vec(x - other.x, y - other.y)\n}\n\n"
+                   "fun combine(a: Vec, b: Vec): Vec = a + b\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int calls   = cp_edges(store, lp.project, "CALLS");
+    int calls = cp_edges(store, lp.project, "CALLS");
     int methods = cp_count_label(store, lp.project, "Method");
-    if (calls < 1) cp_diag(store, lp.project, "operator/kotlin_plus");
+    if (calls < 1)
+        cp_diag(store, lp.project, "operator/kotlin_plus");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(methods >= 1);   /* operator funs must be Method nodes */
-    ASSERT_TRUE(calls >= 1);     /* UNCERTAIN/RED if binary_expression not desugared */
+    ASSERT_TRUE(methods >= 1); /* operator funs must be Method nodes */
+    ASSERT_TRUE(calls >= 1);   /* UNCERTAIN/RED if binary_expression not desugared */
     PASS();
 }
 
@@ -994,18 +1032,18 @@ TEST(cp_operator_kotlin_plus) {
  * from the assignment and resolves the method call. */
 TEST(cp_interface_dispatch_go) {
     static const CP_File f[] = {
-        {"shapes.go",
-         "package shapes\n\n"
-         "type Shape interface {\n    Area() float64\n    Perimeter() float64\n}\n\n"
-         "type Circle struct{ R float64 }\n\n"
-         "func (c Circle) Area() float64 { return 3.14159 * c.R * c.R }\n"
-         "func (c Circle) Perimeter() float64 { return 2 * 3.14159 * c.R }\n\n"
-         "func Describe(s Shape) float64 { return s.Area() + s.Perimeter() }\n\n"
-         "func Run() float64 {\n    c := Circle{R: 5}\n    return Describe(c)\n}\n"}};
+        {"shapes.go", "package shapes\n\n"
+                      "type Shape interface {\n    Area() float64\n    Perimeter() float64\n}\n\n"
+                      "type Circle struct{ R float64 }\n\n"
+                      "func (c Circle) Area() float64 { return 3.14159 * c.R * c.R }\n"
+                      "func (c Circle) Perimeter() float64 { return 2 * 3.14159 * c.R }\n\n"
+                      "func Describe(s Shape) float64 { return s.Area() + s.Perimeter() }\n\n"
+                      "func Run() float64 {\n    c := Circle{R: 5}\n    return Describe(c)\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "interface_dispatch/go");
+    if (calls < 1)
+        cp_diag(store, lp.project, "interface_dispatch/go");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -1028,7 +1066,8 @@ TEST(cp_interface_dispatch_rust_dyn) {
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "interface_dispatch/rust_dyn");
+    if (calls < 1)
+        cp_diag(store, lp.project, "interface_dispatch/rust_dyn");
     cp_cleanup(&lp, store);
     /* UNCERTAIN: RED if Rust lsp_cross gap prevents trait-dispatch resolution */
     ASSERT_TRUE(calls >= 1);
@@ -1039,20 +1078,20 @@ TEST(cp_interface_dispatch_rust_dyn) {
  * EXPECTED UNCERTAIN: the name-based resolver may find the method by name
  * if unique within the project. */
 TEST(cp_interface_dispatch_java) {
-    static const CP_File f[] = {
-        {"Shape.java",
-         "package app;\n\n"
-         "interface Shape { double area(); double perimeter(); }\n\n"
-         "class Circle implements Shape {\n    double r;\n"
-         "    Circle(double r) { this.r = r; }\n"
-         "    public double area() { return Math.PI * r * r; }\n"
-         "    public double perimeter() { return 2 * Math.PI * r; }\n}\n\n"
-         "class Util {\n    static double describe(Shape s) {\n"
-         "        return s.area() + s.perimeter();\n    }\n}\n"}};
+    static const CP_File f[] = {{"Shape.java",
+                                 "package app;\n\n"
+                                 "interface Shape { double area(); double perimeter(); }\n\n"
+                                 "class Circle implements Shape {\n    double r;\n"
+                                 "    Circle(double r) { this.r = r; }\n"
+                                 "    public double area() { return Math.PI * r * r; }\n"
+                                 "    public double perimeter() { return 2 * Math.PI * r; }\n}\n\n"
+                                 "class Util {\n    static double describe(Shape s) {\n"
+                                 "        return s.area() + s.perimeter();\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "interface_dispatch/java");
+    if (calls < 1)
+        cp_diag(store, lp.project, "interface_dispatch/java");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -1064,20 +1103,20 @@ TEST(cp_interface_dispatch_java) {
  * EXPECTED GREEN: variant data classes have their own methods; calls to them
  * are regular call_expressions resolved by name. */
 TEST(cp_enum_variant_kotlin_sealed) {
-    static const CP_File f[] = {
-        {"Result.kt",
-         "sealed class Result {\n"
-         "    data class Ok(val value: String) : Result() {\n"
-         "        fun display(): String = \"OK: $value\"\n    }\n"
-         "    data class Err(val msg: String) : Result() {\n"
-         "        fun display(): String = \"ERR: $msg\"\n    }\n}\n\n"
-         "fun describe(r: Result): String = when (r) {\n"
-         "    is Result.Ok -> r.display()\n"
-         "    is Result.Err -> r.display()\n}\n"}};
+    static const CP_File f[] = {{"Result.kt",
+                                 "sealed class Result {\n"
+                                 "    data class Ok(val value: String) : Result() {\n"
+                                 "        fun display(): String = \"OK: $value\"\n    }\n"
+                                 "    data class Err(val msg: String) : Result() {\n"
+                                 "        fun display(): String = \"ERR: $msg\"\n    }\n}\n\n"
+                                 "fun describe(r: Result): String = when (r) {\n"
+                                 "    is Result.Ok -> r.display()\n"
+                                 "    is Result.Err -> r.display()\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int calls = cp_edges(store, lp.project, "CALLS");
-    if (calls < 1) cp_diag(store, lp.project, "enum_variant/kotlin_sealed");
+    if (calls < 1)
+        cp_diag(store, lp.project, "enum_variant/kotlin_sealed");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(calls >= 1);
     PASS();
@@ -1088,28 +1127,28 @@ TEST(cp_enum_variant_kotlin_sealed) {
  * the name-based resolver should find label() if it's unique. */
 TEST(cp_enum_variant_rust_impl) {
     static const CP_File f[] = {
-        {"direction.rs",
-         "pub enum Direction { North, South, East, West }\n\n"
-         "impl Direction {\n"
-         "    pub fn label(&self) -> &str {\n        match self {\n"
-         "            Direction::North => \"N\", Direction::South => \"S\",\n"
-         "            Direction::East  => \"E\", Direction::West  => \"W\",\n"
-         "        }\n    }\n"
-         "    pub fn opposite(&self) -> Direction {\n        match self {\n"
-         "            Direction::North => Direction::South,\n"
-         "            Direction::South => Direction::North,\n"
-         "            Direction::East  => Direction::West,\n"
-         "            Direction::West  => Direction::East,\n"
-         "        }\n    }\n}\n\n"
-         "pub fn describe(d: Direction) -> String {\n"
-         "    format!(\"{} (opp: {})\", d.label(), d.opposite().label())\n}\n"}};
+        {"direction.rs", "pub enum Direction { North, South, East, West }\n\n"
+                         "impl Direction {\n"
+                         "    pub fn label(&self) -> &str {\n        match self {\n"
+                         "            Direction::North => \"N\", Direction::South => \"S\",\n"
+                         "            Direction::East  => \"E\", Direction::West  => \"W\",\n"
+                         "        }\n    }\n"
+                         "    pub fn opposite(&self) -> Direction {\n        match self {\n"
+                         "            Direction::North => Direction::South,\n"
+                         "            Direction::South => Direction::North,\n"
+                         "            Direction::East  => Direction::West,\n"
+                         "            Direction::West  => Direction::East,\n"
+                         "        }\n    }\n}\n\n"
+                         "pub fn describe(d: Direction) -> String {\n"
+                         "    format!(\"{} (opp: {})\", d.label(), d.opposite().label())\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int calls   = cp_edges(store, lp.project, "CALLS");
+    int calls = cp_edges(store, lp.project, "CALLS");
     int methods = cp_count_label(store, lp.project, "Method");
-    if (calls < 1) cp_diag(store, lp.project, "enum_variant/rust_impl");
+    if (calls < 1)
+        cp_diag(store, lp.project, "enum_variant/rust_impl");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(methods >= 1);  /* label + opposite must be Method nodes */
+    ASSERT_TRUE(methods >= 1); /* label + opposite must be Method nodes */
     /* REAL BUG: `d.label()` is a method call on a receiver typed as the enum
      * Direction.  Rust is NOT in cbm_pxc_has_cross_lsp (src/pipeline/
      * pass_lsp_cross.c — only Go/C/CPP/CUDA/Python/JS/TS/TSX/PHP), so there is
@@ -1135,11 +1174,12 @@ TEST(cp_enum_method_java) {
          "        return d.label() + (d.isWeekend() ? \"(rest)\" : \"(work)\");\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int calls   = cp_edges(store, lp.project, "CALLS");
-    int types   = cp_count_label(store, lp.project, "Enum");
-    if (calls < 1) cp_diag(store, lp.project, "enum_method/java");
+    int calls = cp_edges(store, lp.project, "CALLS");
+    int types = cp_count_label(store, lp.project, "Enum");
+    if (calls < 1)
+        cp_diag(store, lp.project, "enum_method/java");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(types >= 1);   /* enum Day must become an Enum node */
+    ASSERT_TRUE(types >= 1); /* enum Day must become an Enum node */
     ASSERT_TRUE(calls >= 1);
     PASS();
 }
@@ -1155,20 +1195,20 @@ TEST(cp_enum_method_java) {
  * gets its own type node. */
 TEST(cp_nested_class_python) {
     static const CP_File f[] = {
-        {"tree.py",
-         "class BinaryTree:\n"
-         "    class Node:\n        def __init__(self, val):\n"
-         "            self.val = val\n            self.left = None\n"
-         "            self.right = None\n\n"
-         "    def __init__(self):\n        self.root = None\n\n"
-         "    def insert(self, val):\n        self.root = self.Node(val)\n\n"
-         "    def height(self):\n        return 0\n"}};
+        {"tree.py", "class BinaryTree:\n"
+                    "    class Node:\n        def __init__(self, val):\n"
+                    "            self.val = val\n            self.left = None\n"
+                    "            self.right = None\n\n"
+                    "    def __init__(self):\n        self.root = None\n\n"
+                    "    def insert(self, val):\n        self.root = self.Node(val)\n\n"
+                    "    def height(self):\n        return 0\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int fn_types = cp_count_label(store, lp.project, "Function")
-                   + cp_count_label(store, lp.project, "Method")
-                   + cp_count_label(store, lp.project, "Class");
-    if (fn_types < 2) cp_diag(store, lp.project, "nested_class/python");
+    int fn_types = cp_count_label(store, lp.project, "Function") +
+                   cp_count_label(store, lp.project, "Method") +
+                   cp_count_label(store, lp.project, "Class");
+    if (fn_types < 2)
+        cp_diag(store, lp.project, "nested_class/python");
     cp_cleanup(&lp, store);
     /* Both BinaryTree and Node must produce type-like nodes */
     ASSERT_TRUE(fn_types >= 2);
@@ -1180,17 +1220,17 @@ TEST(cp_nested_class_python) {
  * when its declaration is nested inside Outer. */
 TEST(cp_nested_class_java) {
     static const CP_File f[] = {
-        {"Graph.java",
-         "package app;\n\nclass Graph {\n    private int vertices;\n\n"
-         "    class Edge {\n        int from, to, weight;\n"
-         "        Edge(int f, int t, int w) { from=f; to=t; weight=w; }\n"
-         "        int cost() { return weight; }\n    }\n\n"
-         "    Graph(int v) { this.vertices = v; }\n\n"
-         "    int run() {\n        return new Edge(0,1,5).cost();\n    }\n}\n"}};
+        {"Graph.java", "package app;\n\nclass Graph {\n    private int vertices;\n\n"
+                       "    class Edge {\n        int from, to, weight;\n"
+                       "        Edge(int f, int t, int w) { from=f; to=t; weight=w; }\n"
+                       "        int cost() { return weight; }\n    }\n\n"
+                       "    Graph(int v) { this.vertices = v; }\n\n"
+                       "    int run() {\n        return new Edge(0,1,5).cost();\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int classes = cp_count_label(store, lp.project, "Class");
-    if (classes < 1) cp_diag(store, lp.project, "nested_class/java");
+    if (classes < 1)
+        cp_diag(store, lp.project, "nested_class/java");
     cp_cleanup(&lp, store);
     /* At minimum Graph must be a Class; inner Edge is a bonus */
     ASSERT_TRUE(classes >= 1);
@@ -1200,17 +1240,17 @@ TEST(cp_nested_class_java) {
 /* E1c — C# nested class.
  * EXPECTED GREEN: C# extractor walks class_declaration inside class_declaration. */
 TEST(cp_nested_class_csharp) {
-    static const CP_File f[] = {
-        {"Outer.cs",
-         "namespace App {\n    class Outer {\n        private int x;\n\n"
-         "        class Inner {\n            private int y;\n"
-         "            public int Value() { return y; }\n        }\n\n"
-         "        public int Run() {\n            var i = new Inner();\n"
-         "            return i.Value();\n        }\n    }\n}\n"}};
+    static const CP_File f[] = {{"Outer.cs",
+                                 "namespace App {\n    class Outer {\n        private int x;\n\n"
+                                 "        class Inner {\n            private int y;\n"
+                                 "            public int Value() { return y; }\n        }\n\n"
+                                 "        public int Run() {\n            var i = new Inner();\n"
+                                 "            return i.Value();\n        }\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int classes = cp_count_label(store, lp.project, "Class");
-    if (classes < 1) cp_diag(store, lp.project, "nested_class/csharp");
+    if (classes < 1)
+        cp_diag(store, lp.project, "nested_class/csharp");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(classes >= 1);
     PASS();
@@ -1226,22 +1266,22 @@ TEST(cp_nested_class_csharp) {
  * Assert enclosing class exists; check for any CALLS edge. */
 TEST(cp_anon_class_java) {
     static const CP_File f[] = {
-        {"AnonDemo.java",
-         "package app;\n\ninterface Greeter { String greet(String name); }\n\n"
-         "class Factory {\n"
-         "    static Greeter makeGreeter(String prefix) {\n"
-         "        return new Greeter() {\n"
-         "            public String greet(String name) {\n"
-         "                return prefix + name;\n"
-         "            }\n        };\n    }\n\n"
-         "    static String run() {\n"
-         "        Greeter g = makeGreeter(\"Hello, \");\n"
-         "        return g.greet(\"World\");\n    }\n}\n"}};
+        {"AnonDemo.java", "package app;\n\ninterface Greeter { String greet(String name); }\n\n"
+                          "class Factory {\n"
+                          "    static Greeter makeGreeter(String prefix) {\n"
+                          "        return new Greeter() {\n"
+                          "            public String greet(String name) {\n"
+                          "                return prefix + name;\n"
+                          "            }\n        };\n    }\n\n"
+                          "    static String run() {\n"
+                          "        Greeter g = makeGreeter(\"Hello, \");\n"
+                          "        return g.greet(\"World\");\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int classes = cp_count_label(store, lp.project, "Class");
-    int ifaces  = cp_count_label(store, lp.project, "Interface");
-    if (classes < 1 && ifaces < 1) cp_diag(store, lp.project, "anon_class/java");
+    int ifaces = cp_count_label(store, lp.project, "Interface");
+    if (classes < 1 && ifaces < 1)
+        cp_diag(store, lp.project, "anon_class/java");
     cp_cleanup(&lp, store);
     /* Factory class must exist; Greeter interface should also be modelled */
     ASSERT_TRUE(classes >= 1 || ifaces >= 1);
@@ -1252,21 +1292,21 @@ TEST(cp_anon_class_java) {
  * EXPECTED UNCERTAIN: `object : Iface {}` syntax; the Kotlin extractor may
  * produce a Class node (anonymous_object) or skip it. */
 TEST(cp_anon_object_kotlin) {
-    static const CP_File f[] = {
-        {"Anon.kt",
-         "interface Transformer { fun transform(x: Int): Int }\n\n"
-         "fun makeDoubler(): Transformer = object : Transformer {\n"
-         "    override fun transform(x: Int): Int = x * 2\n}\n\n"
-         "fun run(x: Int): Int = makeDoubler().transform(x)\n"}};
+    static const CP_File f[] = {{"Anon.kt",
+                                 "interface Transformer { fun transform(x: Int): Int }\n\n"
+                                 "fun makeDoubler(): Transformer = object : Transformer {\n"
+                                 "    override fun transform(x: Int): Int = x * 2\n}\n\n"
+                                 "fun run(x: Int): Int = makeDoubler().transform(x)\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int callables = cp_callables(store, lp.project);
-    int calls     = cp_edges(store, lp.project, "CALLS");
-    if (callables < 1) cp_diag(store, lp.project, "anon_object/kotlin");
+    int calls = cp_edges(store, lp.project, "CALLS");
+    if (callables < 1)
+        cp_diag(store, lp.project, "anon_object/kotlin");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(callables >= 1);  /* makeDoubler / run must be Function nodes */
+    ASSERT_TRUE(callables >= 1); /* makeDoubler / run must be Function nodes */
     /* UNCERTAIN: anonymous object's transform may or may not be a Method node */
-    (void)calls;                  /* informational only */
+    (void)calls; /* informational only */
     PASS();
 }
 
@@ -1277,17 +1317,18 @@ TEST(cp_anon_object_kotlin) {
  * const nodes may not be created.  We assert pipeline doesn't crash and
  * the file produces at least one node (the Module). */
 TEST(cp_constant_go_const) {
-    static const CP_File f[] = {
-        {"limits.go",
-         "package limits\n\nconst (\n"
-         "    MaxRetries = 3\n    DefaultTimeout = 30\n    BaseURL = \"https://api.example.com\"\n)\n\n"
-         "func Retry(n int) bool { return n < MaxRetries }\n"}};
+    static const CP_File f[] = {{"limits.go",
+                                 "package limits\n\nconst (\n"
+                                 "    MaxRetries = 3\n    DefaultTimeout = 30\n    BaseURL = "
+                                 "\"https://api.example.com\"\n)\n\n"
+                                 "func Retry(n int) bool { return n < MaxRetries }\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int total = store ? cbm_store_count_nodes(store, lp.project) : -1;
-    if (total < 1) cp_diag(store, lp.project, "constant/go_const");
+    if (total < 1)
+        cp_diag(store, lp.project, "constant/go_const");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(total >= 1);  /* at least Module + Function nodes */
+    ASSERT_TRUE(total >= 1); /* at least Module + Function nodes */
     PASS();
 }
 
@@ -1295,19 +1336,20 @@ TEST(cp_constant_go_const) {
  * EXPECTED UNCERTAIN: Rust const_item / static_item not in function_types;
  * these declarations may not produce graph nodes. */
 TEST(cp_constant_rust_const_static) {
-    static const CP_File f[] = {
-        {"limits.rs",
-         "pub const MAX_RETRIES: u32 = 3;\npub const BASE_URL: &str = \"https://api.example.com\";\n"
-         "pub static COUNTER: std::sync::atomic::AtomicU32 = "
-         "std::sync::atomic::AtomicU32::new(0);\n\n"
-         "pub fn should_retry(n: u32) -> bool { n < MAX_RETRIES }\n"}};
+    static const CP_File f[] = {{"limits.rs",
+                                 "pub const MAX_RETRIES: u32 = 3;\npub const BASE_URL: &str = "
+                                 "\"https://api.example.com\";\n"
+                                 "pub static COUNTER: std::sync::atomic::AtomicU32 = "
+                                 "std::sync::atomic::AtomicU32::new(0);\n\n"
+                                 "pub fn should_retry(n: u32) -> bool { n < MAX_RETRIES }\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int fn_count = cp_count_label(store, lp.project, "Function");
-    int total    = store ? cbm_store_count_nodes(store, lp.project) : -1;
-    if (fn_count < 1) cp_diag(store, lp.project, "constant/rust_const_static");
+    int total = store ? cbm_store_count_nodes(store, lp.project) : -1;
+    if (fn_count < 1)
+        cp_diag(store, lp.project, "constant/rust_const_static");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(fn_count >= 1);  /* should_retry must be a Function node */
+    ASSERT_TRUE(fn_count >= 1); /* should_retry must be a Function node */
     ASSERT_TRUE(total >= 1);
     PASS();
 }
@@ -1326,12 +1368,13 @@ TEST(cp_constant_java_static_final) {
          "        return url != null && url.startsWith(BASE_URL);\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int classes  = cp_count_label(store, lp.project, "Class");
-    int methods  = cp_count_label(store, lp.project, "Method");
-    if (classes < 1) cp_diag(store, lp.project, "constant/java_static_final");
+    int classes = cp_count_label(store, lp.project, "Class");
+    int methods = cp_count_label(store, lp.project, "Method");
+    if (classes < 1)
+        cp_diag(store, lp.project, "constant/java_static_final");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(classes >= 1);  /* Constants class must exist */
-    ASSERT_TRUE(methods >= 1);  /* isValidUrl must be a Method node */
+    ASSERT_TRUE(classes >= 1); /* Constants class must exist */
+    ASSERT_TRUE(methods >= 1); /* isValidUrl must be a Method node */
     PASS();
 }
 
@@ -1350,10 +1393,11 @@ TEST(cp_macro_rust_macro_rules) {
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int fn_count = cp_count_label(store, lp.project, "Function");
-    int total    = store ? cbm_store_count_nodes(store, lp.project) : -1;
-    if (fn_count < 1) cp_diag(store, lp.project, "macro/rust_macro_rules");
+    int total = store ? cbm_store_count_nodes(store, lp.project) : -1;
+    if (fn_count < 1)
+        cp_diag(store, lp.project, "macro/rust_macro_rules");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(fn_count >= 1);  /* run() must be a Function node */
+    ASSERT_TRUE(fn_count >= 1); /* run() must be a Function node */
     ASSERT_TRUE(total >= 1);
     /* Intentionally do NOT assert that macro_rules! nodes are created — the
      * expected behavior is that they are NOT extracted (RED gap). */
@@ -1365,19 +1409,19 @@ TEST(cp_macro_rust_macro_rules) {
  * AST (they are resolved before parsing in the preprocessed form).
  * The C extractor cannot see function-like #define symbols. */
 TEST(cp_macro_c_define) {
-    static const CP_File f[] = {
-        {"math.c",
-         "#define SQUARE(x) ((x) * (x))\n"
-         "#define MAX(a, b) ((a) > (b) ? (a) : (b))\n"
-         "#define CLAMP(v, lo, hi) MAX(lo, MIN(v, hi))\n\n"
-         "int run(int x) {\n    return SQUARE(x) + MAX(x, 0);\n}\n"}};
+    static const CP_File f[] = {{"math.c",
+                                 "#define SQUARE(x) ((x) * (x))\n"
+                                 "#define MAX(a, b) ((a) > (b) ? (a) : (b))\n"
+                                 "#define CLAMP(v, lo, hi) MAX(lo, MIN(v, hi))\n\n"
+                                 "int run(int x) {\n    return SQUARE(x) + MAX(x, 0);\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int fn_count = cp_count_label(store, lp.project, "Function");
-    int total    = store ? cbm_store_count_nodes(store, lp.project) : -1;
-    if (fn_count < 1) cp_diag(store, lp.project, "macro/c_define");
+    int total = store ? cbm_store_count_nodes(store, lp.project) : -1;
+    if (fn_count < 1)
+        cp_diag(store, lp.project, "macro/c_define");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(fn_count >= 1);  /* run() must be a Function node */
+    ASSERT_TRUE(fn_count >= 1); /* run() must be a Function node */
     ASSERT_TRUE(total >= 1);
     /* #define SQUARE / MAX / CLAMP are NOT in the AST — expected to produce 0
      * Function/Macro nodes.  This is RED (known gap). */
@@ -1401,12 +1445,13 @@ TEST(cp_property_python) {
          "def make(r):\n    c = Circle(r)\n    return c.area\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int methods  = cp_count_label(store, lp.project, "Method");
-    int classes  = cp_count_label(store, lp.project, "Class");
-    if (methods < 1 && classes < 1) cp_diag(store, lp.project, "property/python");
+    int methods = cp_count_label(store, lp.project, "Method");
+    int classes = cp_count_label(store, lp.project, "Class");
+    if (methods < 1 && classes < 1)
+        cp_diag(store, lp.project, "property/python");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(classes >= 1);  /* Circle class must exist */
-    ASSERT_TRUE(methods >= 1);  /* at least __init__ must be a Method */
+    ASSERT_TRUE(classes >= 1); /* Circle class must exist */
+    ASSERT_TRUE(methods >= 1); /* at least __init__ must be a Method */
     PASS();
 }
 
@@ -1422,17 +1467,19 @@ TEST(cp_property_csharp) {
          "            set { _name = value ?? throw new ArgumentNullException(); }\n        }\n\n"
          "        public int Age {\n"
          "            get { return _age; }\n"
-         "            set { _age = value >= 0 ? value : throw new ArgumentOutOfRangeException(); }\n"
+         "            set { _age = value >= 0 ? value : throw new ArgumentOutOfRangeException(); "
+         "}\n"
          "        }\n\n"
          "        public string Describe() { return $\"{_name}, age {_age}\"; }\n    }\n}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int classes = cp_count_label(store, lp.project, "Class");
     int methods = cp_count_label(store, lp.project, "Method");
-    if (classes < 1) cp_diag(store, lp.project, "property/csharp");
+    if (classes < 1)
+        cp_diag(store, lp.project, "property/csharp");
     cp_cleanup(&lp, store);
     ASSERT_TRUE(classes >= 1);
-    ASSERT_TRUE(methods >= 1);  /* Describe() at minimum */
+    ASSERT_TRUE(methods >= 1); /* Describe() at minimum */
     PASS();
 }
 
@@ -1441,21 +1488,21 @@ TEST(cp_property_csharp) {
  * the Kotlin extractor may or may not model the custom getter as a Method. */
 TEST(cp_property_kotlin_custom_getter) {
     static const CP_File f[] = {
-        {"Rect.kt",
-         "class Rect(val width: Double, val height: Double) {\n"
-         "    val area: Double\n        get() = width * height\n\n"
-         "    val perimeter: Double\n        get() = 2 * (width + height)\n\n"
-         "    val isSquare: Boolean\n        get() = width == height\n\n"
-         "    fun describe(): String = \"${width}x${height} area=${area}\"\n}\n\n"
-         "fun makeRect(w: Double, h: Double): Rect = Rect(w, h)\n"}};
+        {"Rect.kt", "class Rect(val width: Double, val height: Double) {\n"
+                    "    val area: Double\n        get() = width * height\n\n"
+                    "    val perimeter: Double\n        get() = 2 * (width + height)\n\n"
+                    "    val isSquare: Boolean\n        get() = width == height\n\n"
+                    "    fun describe(): String = \"${width}x${height} area=${area}\"\n}\n\n"
+                    "fun makeRect(w: Double, h: Double): Rect = Rect(w, h)\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
-    int classes   = cp_count_label(store, lp.project, "Class");
+    int classes = cp_count_label(store, lp.project, "Class");
     int callables = cp_callables(store, lp.project);
-    if (callables < 1) cp_diag(store, lp.project, "property/kotlin_custom_getter");
+    if (callables < 1)
+        cp_diag(store, lp.project, "property/kotlin_custom_getter");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(classes >= 1);    /* Rect class must exist */
-    ASSERT_TRUE(callables >= 1);  /* describe + makeRect at minimum */
+    ASSERT_TRUE(classes >= 1);   /* Rect class must exist */
+    ASSERT_TRUE(callables >= 1); /* describe + makeRect at minimum */
     PASS();
 }
 
@@ -1464,25 +1511,26 @@ TEST(cp_property_kotlin_custom_getter) {
  * the TS extractor may treat it as a Method node or skip it. */
 TEST(cp_property_ts_accessor) {
     static const CP_File f[] = {
-        {"Vector.ts",
-         "export class Vector {\n    private _x: number;\n    private _y: number;\n\n"
-         "    constructor(x: number, y: number) { this._x = x; this._y = y; }\n\n"
-         "    get x(): number { return this._x; }\n"
-         "    set x(value: number) { this._x = value; }\n\n"
-         "    get y(): number { return this._y; }\n"
-         "    set y(value: number) { this._y = value; }\n\n"
-         "    get magnitude(): number {\n"
-         "        return Math.sqrt(this._x * this._x + this._y * this._y);\n    }\n\n"
-         "    add(other: Vector): Vector { return new Vector(this._x + other._x, this._y + other._y); }\n"
-         "}\n"}};
+        {"Vector.ts", "export class Vector {\n    private _x: number;\n    private _y: number;\n\n"
+                      "    constructor(x: number, y: number) { this._x = x; this._y = y; }\n\n"
+                      "    get x(): number { return this._x; }\n"
+                      "    set x(value: number) { this._x = value; }\n\n"
+                      "    get y(): number { return this._y; }\n"
+                      "    set y(value: number) { this._y = value; }\n\n"
+                      "    get magnitude(): number {\n"
+                      "        return Math.sqrt(this._x * this._x + this._y * this._y);\n    }\n\n"
+                      "    add(other: Vector): Vector { return new Vector(this._x + other._x, "
+                      "this._y + other._y); }\n"
+                      "}\n"}};
     CP_Proj lp;
     cbm_store_t *store = cp_index_files(&lp, f, 1);
     int classes = cp_count_label(store, lp.project, "Class");
     int methods = cp_count_label(store, lp.project, "Method");
-    if (classes < 1) cp_diag(store, lp.project, "property/ts_accessor");
+    if (classes < 1)
+        cp_diag(store, lp.project, "property/ts_accessor");
     cp_cleanup(&lp, store);
-    ASSERT_TRUE(classes >= 1);  /* Vector class must exist */
-    ASSERT_TRUE(methods >= 1);  /* add() method at minimum; accessors are uncertain */
+    ASSERT_TRUE(classes >= 1); /* Vector class must exist */
+    ASSERT_TRUE(methods >= 1); /* add() method at minimum; accessors are uncertain */
     PASS();
 }
 

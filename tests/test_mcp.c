@@ -108,7 +108,7 @@ TEST(jsonrpc_format_response_string_id_issue253) {
 TEST(jsonrpc_format_response) {
     cbm_jsonrpc_response_t resp = {
         .id = 1,
-        .result_json = "{\"name\":\"codebase-memory-mcp\"}",
+        .result_json = "{\"name\":\"code-cortex-mcp\"}",
     };
     char *json = cbm_jsonrpc_format_response(&resp);
     ASSERT_NOT_NULL(json);
@@ -139,7 +139,7 @@ TEST(mcp_initialize_response) {
     /* Default (no params): returns latest supported version */
     char *json = cbm_mcp_initialize_response(NULL);
     ASSERT_NOT_NULL(json);
-    ASSERT_NOT_NULL(strstr(json, "codebase-memory-mcp"));
+    ASSERT_NOT_NULL(strstr(json, "code-cortex-mcp"));
     ASSERT_NOT_NULL(strstr(json, "capabilities"));
     ASSERT_NOT_NULL(strstr(json, "tools"));
     ASSERT_NOT_NULL(strstr(json, "2025-11-25"));
@@ -311,7 +311,7 @@ TEST(server_handle_initialize) {
                                    "\"params\":{\"capabilities\":{}}}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":1"));
-    ASSERT_NOT_NULL(strstr(resp, "codebase-memory-mcp"));
+    ASSERT_NOT_NULL(strstr(resp, "code-cortex-mcp"));
     ASSERT_NOT_NULL(strstr(resp, "capabilities"));
     free(resp);
 
@@ -846,7 +846,7 @@ TEST(tool_manage_adr_no_project) {
  * MUST FAIL before fix: free(buf) is called before yy_doc_to_str serializes doc,
  * so result field is missing or contains garbage. MUST PASS after fix. */
 TEST(tool_manage_adr_get_with_existing_adr) {
-    /* Create a temp directory with .codebase-memory/adr.md */
+    /* Create a temp directory with .code-cortex/adr.md */
     char tmp_dir[256];
     snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-adr-test-XXXXXX");
     if (!cbm_mkdtemp(tmp_dir)) {
@@ -854,7 +854,7 @@ TEST(tool_manage_adr_get_with_existing_adr) {
     }
 
     char adr_dir[512];
-    snprintf(adr_dir, sizeof(adr_dir), "%s/.codebase-memory", tmp_dir);
+    snprintf(adr_dir, sizeof(adr_dir), "%s/.code-cortex", tmp_dir);
     cbm_mkdir(adr_dir);
 
     char adr_path[512];
