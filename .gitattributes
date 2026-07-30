@@ -1,3 +1,23 @@
+# Third-party code — exclude from GitHub language stats (the repo's own
+# code is C++23; everything vendored is C and would otherwise dominate).
+vendored/** linguist-vendored
+internal/cbm/vendored/** linguist-vendored
+
 # Vendored tree-sitter grammars — machine-generated, hide from stats and diffs
 internal/cbm/vendored/grammars/**/parser.c  linguist-generated=true diff=false
 internal/cbm/vendored/grammars/**/scanner.c linguist-generated=true diff=false
+
+# Zero-logic shims that #include vendored C in isolated TUs — count with the
+# code they include, not as first-party C.
+internal/cbm/grammar_*.c linguist-vendored
+internal/cbm/ts_runtime.c linguist-vendored
+
+# tree-sitter CLI output for the in-repo grammars (grammar.js is the source)
+tools/tree-sitter-*/src/** linguist-generated=true
+
+# First-party headers are part of the C++23 codebase; without this Linguist's
+# content heuristic classifies the extern-"C" dual-mode headers as C.
+src/**/*.h linguist-language=C++
+internal/cbm/*.h linguist-language=C++
+internal/cbm/lsp/**/*.h linguist-language=C++
+tests/*.h linguist-language=C++
