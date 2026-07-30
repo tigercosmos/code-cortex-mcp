@@ -9,6 +9,9 @@ libraries, the tree-sitter `grammar_*.c` parsers, and `ts_runtime.c`
 returns nothing. **Phase 2** is the remaining idiomatic-C++23 rewriting
 that turns ported-as-C++ TUs into modern code (RAII, `std::expected`,
 ranges, etc.) — that is modernization, not migration, and has not started.
+As of 2026-07-31 the **test suite is C++23 too** (see "Test-suite
+migration" below): `find . -name '*.c'` now matches only vendored
+third-party code and the zero-logic grammar/ts_runtime include-shims.
 
 The 5 remaining first-party C files were converted module-by-module, each
 behind its own commit, verified against the test baseline after each:
@@ -185,8 +188,41 @@ struct memory layout.
    the C++23 side via `CBM_WERROR=OFF` to allow `-Wextra` warnings like
    enum-narrowing and format-truncation through). C side keeps
    `-Werror`.
-5. Migrate `tests/*.c` to `tests/*.cpp` — only valuable if the tests
-   themselves want to use C++ idioms; otherwise they work as-is.
+5. ✅ **Done (2026-07-31):** `tests/*.c` migrated to `tests/*.cpp` — see
+   "Test-suite migration" below. The last first-party C TUs are gone;
+   `CBM_FIRSTPARTY_C_FLAGS` and the test-runner's `LANGUAGE C` /
+   `C_STANDARD 11` overrides were removed with them.
+
+## Test-suite migration — `tests/*.c` → `tests/*.cpp` (2026-07-31)
+
+The last first-party C: 83 test TUs (~115k LOC), previously force-compiled
+as C11 via `set_source_files_properties(... LANGUAGE C)`. Mechanical port,
+same doctrine as Phase 1 (compile as C++23, no idiomatic rewrite); the
+macro test framework (`test_framework.h`) ported unchanged. Compiler-driven
+fixes only — the LSP suites embed foreign-language source in string
+literals, so regex sweeps were limited to sites the compiler flagged.
+
+| Category | Sites | Fix |
+|---|---|---|
+| Implicit `void*` → `T*` conversions | 67 in 24 files | explicit `(T *)` cast, type taken from the clang diagnostic |
+| `cbm_da_reserve` / `cbm_da_push_ptr` assigned `realloc`'s `void*` to typed `items` | 2 macros in `src/foundation/dyn_array.h` | `(__typeof__((da)->items))` cast, matching what `cbm_da_push` already did — these macros had only ever been expanded from C TUs |
+| `_Atomic int`/`_Atomic int64_t` + `<stdatomic.h>` | 30 sites / 7 includes | `cbm_atomic_*` typedefs from `foundation/cbm_atomic.h` (the shim's C branch is now test-unused but kept for the dual-mode headers) |
+| `{0}` init of enum-first struct (`cbm_discover_opts_t`) | 14 in test_discover | `= {}` value-init (int→enum narrowing is ill-formed in C++) |
+| Local prototypes of C-ABI functions declared without a header (`cbm_ac_*`, `cbm_lz4_*`, `cbm_zstd_*`, `mi_*`, `ts_current_*`, `cbm_kind_in_set_free_cache`) | 6 blocks in 5 files | wrapped in `extern "C" { }` — these mangled as C++ and failed at link |
+| Tests using their own source path as a fixture (`"tests/test_platform.c"`) | 4 in test_platform | path literal updated to `.cpp` — surfaced as 3 test failures, not compile errors |
+
+Compound literals (`(CBMDumpNode){...}`, `(TSNode){0}`, `cbm_da_push`
+args) compile as a GNU extension under the project's C++ flag set on both
+clang and GCC — left as-is, same as Phase 1 left them in `src/`.
+
+`grammar_cases.h`'s `extern const GrammarCase CBM_GRAMMAR_CASES[]` decl
+is included by the defining TU, so the definition keeps external linkage
+with no edit (the feared C++ internal-linkage break did not materialize).
+
+**Validation:** non-sanitizer clean build, **5573 pass / 0 fail** — exact
+parity with the same-machine C11 baseline captured immediately before the
+rename (the suite has grown since the 3630 figure above). ASan/UBSan and
+GCC `-Werror` validation ride CI as usual.
 
 ## Phase 2 — module-by-module C → idiomatic C++23
 
@@ -268,10 +304,12 @@ Re-enable `-Werror` on first-party C++ TUs at the end of Phase 2.
 
 ## Open items / gotchas surfaced during Phase 1
 
-1. **`src/foundation/vmem.c`** (now `.cpp`) — not referenced by
-   `Makefile.cbm` at all, but `tests/test_vmem.c` exists. Either the
-   test is dead or the Makefile is missing a build rule. Investigate
-   before Phase 2.
+1. ✅ **Resolved (2026-07-31): `src/foundation/vmem.cpp` and
+   `tests/test_vmem.c` were dead code — deleted.** Investigation during the
+   test-suite migration: `mem.h` states it *replaces* the vmem budget
+   allocator, `vmem.cpp` was compiled by no target, and nothing outside
+   `vmem.{h,cpp}`/its test referenced it. All three files removed rather
+   than wiring a superseded allocator into the build.
 2. **`make test-foundation` is broken upstream.** `Makefile.cbm:386-387`
    links only `FOUNDATION_SRCS`, but `tests/test_main.c` references
    every suite (`suite_security`, `suite_yaml`, etc.) and calls
