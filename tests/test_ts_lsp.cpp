@@ -1893,8 +1893,8 @@ TEST(tslsp_crossfile_method_dispatch) {
         {.qualified_name = "test.conn.Conn.ping",
          .short_name = "ping",
          .label = "Method",
-         .def_module_qn = "test.conn",
-         .receiver_type = "test.conn.Conn"},
+         .receiver_type = "test.conn.Conn",
+         .def_module_qn = "test.conn"},
     };
     const char *imp_names[] = {"Conn"};
     const char *imp_qns[] = {"test.conn"};   /* module QN; type QN derived as mqn + "." + bare */
@@ -1990,8 +1990,8 @@ TEST(tslsp_crossfile_chain_through_return) {
         {.qualified_name = "test.fs.File.read",
          .short_name = "read",
          .label = "Method",
-         .def_module_qn = "test.fs",
-         .receiver_type = "test.fs.File"},
+         .receiver_type = "test.fs.File",
+         .def_module_qn = "test.fs"},
         {.qualified_name = "test.fs.open",
          .short_name = "open",
          .label = "Function",

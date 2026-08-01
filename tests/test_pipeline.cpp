@@ -769,13 +769,22 @@ TEST(githistory_is_trackable) {
     PASS();
 }
 
+/* cbm_commit_files_t::files is `char **` — a C-era API that only ever reads the
+ * paths — but C++ forbids converting a string literal to char*. The coupling
+ * tests below share these mutable buffers instead of literals. */
+static char cf_a[] = "a.go";
+static char cf_b[] = "b.go";
+static char cf_c[] = "c.go";
+static char cf_d[] = "d.go";
+static char cf_e[] = "e.go";
+
 TEST(githistory_compute_coupling) {
     /* 5 commits with overlapping files */
-    char *files_0[] = {"a.go", "b.go", "c.go"};
-    char *files_1[] = {"a.go", "b.go"};
-    char *files_2[] = {"a.go", "b.go"};
-    char *files_3[] = {"a.go", "c.go"};
-    char *files_4[] = {"d.go", "e.go"};
+    char *files_0[] = {cf_a, cf_b, cf_c};
+    char *files_1[] = {cf_a, cf_b};
+    char *files_2[] = {cf_a, cf_b};
+    char *files_3[] = {cf_a, cf_c};
+    char *files_4[] = {cf_d, cf_e};
 
     cbm_commit_files_t commits[] = {
         {files_0, 3, 0}, {files_1, 2, 0}, {files_2, 2, 0}, {files_3, 2, 0}, {files_4, 2, 0},
@@ -810,12 +819,12 @@ TEST(githistory_coupling_carries_last_co_change) {
      * a pair co-changed, so callers can score recency in addition to
      * frequency. The pair (a.go, b.go) co-changes at three timestamps; the
      * resulting last_co_change must be the maximum (newest) of those. */
-    char *files_old[] = {"a.go", "b.go"};
-    char *files_mid[] = {"a.go", "b.go"};
-    char *files_new[] = {"a.go", "b.go"};
+    char *files_old[] = {cf_a, cf_b};
+    char *files_mid[] = {cf_a, cf_b};
+    char *files_new[] = {cf_a, cf_b};
     /* Unrelated co-change in the middle to make sure we don't accidentally
      * pick up that pair's timestamp by index. */
-    char *files_other[] = {"c.go", "d.go"};
+    char *files_other[] = {cf_c, cf_d};
 
     cbm_commit_files_t commits[] = {
         {files_old, 2, 1700000000LL},   /* oldest a.go/b.go co-change */
@@ -4605,11 +4614,11 @@ TEST(githistory_compute_change_coupling) {
      * ddd: a.go, c.go
      * eee: d.go, e.go
      */
-    char *files_aaa[] = {"a.go", "b.go", "c.go"};
-    char *files_bbb[] = {"a.go", "b.go"};
-    char *files_ccc[] = {"a.go", "b.go"};
-    char *files_ddd[] = {"a.go", "c.go"};
-    char *files_eee[] = {"d.go", "e.go"};
+    char *files_aaa[] = {cf_a, cf_b, cf_c};
+    char *files_bbb[] = {cf_a, cf_b};
+    char *files_ccc[] = {cf_a, cf_b};
+    char *files_ddd[] = {cf_a, cf_c};
+    char *files_eee[] = {cf_d, cf_e};
 
     cbm_commit_files_t commits[5] = {
         {files_aaa, 3, 0}, {files_bbb, 2, 0}, {files_ccc, 2, 0},
@@ -5704,8 +5713,8 @@ TEST(coupling_empty_commits) {
 
 TEST(coupling_single_file_commit) {
     /* Commits with single files → no pairs → zero couplings */
-    char *f1[] = {"a.go"};
-    char *f2[] = {"b.go"};
+    char *f1[] = {cf_a};
+    char *f2[] = {cf_b};
     cbm_commit_files_t commits[] = {{f1, 1, 0}, {f2, 1, 0}};
     cbm_change_coupling_t results[16];
     int n = cbm_compute_change_coupling(commits, 2, results, 16);

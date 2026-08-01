@@ -206,7 +206,7 @@ TEST(parallel_for_actually_parallel) {
 
 static void tls_worker(int idx, void *ctx_ptr) {
     (void)idx;
-    static _Thread_local int tls_val = 0;
+    static thread_local int tls_val = 0;
     cbm_atomic_int *reuse_count = (cbm_atomic_int *)ctx_ptr;
     if (tls_val == 42)
         atomic_fetch_add(reuse_count, 1);

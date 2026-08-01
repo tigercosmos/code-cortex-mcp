@@ -138,7 +138,7 @@ TEST(store_search_pagination) {
 
     /* limit=1 */
     cbm_search_params_t params = {
-        .project = "test", .limit = 1, .min_degree = -1, .max_degree = -1};
+        .project = "test", .min_degree = -1, .max_degree = -1, .limit = 1};
     cbm_search_output_t out = {0};
     int rc = cbm_store_search(s, &params, &out);
     ASSERT_EQ(rc, CBM_STORE_OK);
@@ -414,7 +414,7 @@ TEST(store_search_exclude_labels) {
 
     /* Search without exclusion */
     cbm_search_params_t params = {
-        .project = "test", .limit = 100, .min_degree = -1, .max_degree = -1};
+        .project = "test", .min_degree = -1, .max_degree = -1, .limit = 100};
     cbm_search_output_t out = {0};
     int rc = cbm_store_search(s, &params, &out);
     ASSERT_EQ(rc, CBM_STORE_OK);
@@ -425,9 +425,9 @@ TEST(store_search_exclude_labels) {
     /* Search with Route excluded */
     const char *excl[] = {"Route", NULL};
     cbm_search_params_t params2 = {.project = "test",
-                                   .limit = 100,
                                    .min_degree = -1,
                                    .max_degree = -1,
+                                   .limit = 100,
                                    .exclude_labels = excl};
     cbm_search_output_t out2 = {0};
     rc = cbm_store_search(s, &params2, &out2);
