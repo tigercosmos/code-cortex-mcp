@@ -170,8 +170,10 @@ while IFS= read -r match; do
     file=$(echo "$match" | cut -d: -f1)
     relfile="${file#"$ROOT/"}"
     case "$relfile" in
-        src/cli/cli.cpp|src/store/store.cpp|src/pipeline/*.cpp|src/foundation/log.cpp|src/foundation/diagnostics.cpp|src/mcp/mcp.cpp)
-            ;; # Known safe (diagnostics.cpp: atomic .tmp+rename metrics dump to configured path)
+        src/cli/cli.cpp|src/store/store.cpp|src/pipeline/*.cpp|src/foundation/log.cpp|src/foundation/diagnostics.cpp|src/mcp/mcp.cpp|src/main.cpp)
+            ;; # Known safe (diagnostics.cpp: atomic .tmp+rename metrics dump to configured path;
+               # main.cpp: supervised index worker writes its tool result to the parent-supplied
+               # response file from cbm_index_worker_response_out())
         *)
             echo "REVIEW: ${match}"
             echo "  -> Unexpected fopen(\"w\") in ${relfile}"

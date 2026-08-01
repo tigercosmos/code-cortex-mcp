@@ -836,8 +836,8 @@ TEST(golsp_crossfile_method_dispatch) {
         {.qualified_name = "myapp/db.Conn.Query",
          .short_name = "Query",
          .label = "Method",
-         .def_module_qn = "myapp/db",
-         .receiver_type = "myapp/db.Conn"},
+         .receiver_type = "myapp/db.Conn",
+         .def_module_qn = "myapp/db"},
     };
     const char *imp_names[] = {"db"};
     const char *imp_qns[] = {"myapp/db"};
@@ -882,8 +882,8 @@ TEST(golsp_crossfile_return_type_chain) {
         {.qualified_name = "myapp/repo.User.Name",
          .short_name = "Name",
          .label = "Method",
-         .def_module_qn = "myapp/repo",
-         .receiver_type = "myapp/repo.User"},
+         .receiver_type = "myapp/repo.User",
+         .def_module_qn = "myapp/repo"},
     };
     const char *imp_names[] = {"repo"};
     const char *imp_qns[] = {"myapp/repo"};
@@ -922,8 +922,8 @@ TEST(golsp_crossfile_interface_dispatch) {
         {.qualified_name = "myapp/svc.DefaultBinder.Bind",
          .short_name = "Bind",
          .label = "Method",
-         .def_module_qn = "myapp/svc",
-         .receiver_type = "myapp/svc.DefaultBinder"},
+         .receiver_type = "myapp/svc.DefaultBinder",
+         .def_module_qn = "myapp/svc"},
     };
     const char *imp_names[] = {"svc"};
     const char *imp_qns[] = {"myapp/svc"};
@@ -959,8 +959,8 @@ TEST(golsp_crossfile_interface_field_chain) {
         {.qualified_name = "test.main.Context.process",
          .short_name = "process",
          .label = "Method",
-         .def_module_qn = "test.main",
-         .receiver_type = "test.main.Context"},
+         .receiver_type = "test.main.Context",
+         .def_module_qn = "test.main"},
         {.qualified_name = "myapp/echo.Echo",
          .short_name = "Echo",
          .label = "Type",
@@ -978,8 +978,8 @@ TEST(golsp_crossfile_interface_field_chain) {
         {.qualified_name = "myapp/echo.DefaultBinder.Bind",
          .short_name = "Bind",
          .label = "Method",
-         .def_module_qn = "myapp/echo",
-         .receiver_type = "myapp/echo.DefaultBinder"},
+         .receiver_type = "myapp/echo.DefaultBinder",
+         .def_module_qn = "myapp/echo"},
     };
     const char *imp_names[] = {"echo"};
     const char *imp_qns[] = {"myapp/echo"};
@@ -1018,8 +1018,8 @@ TEST(golsp_crossfile_map_index) {
         {.qualified_name = "myapp/echo.Echo.ServeHTTP",
          .short_name = "ServeHTTP",
          .label = "Method",
-         .def_module_qn = "myapp/echo",
-         .receiver_type = "myapp/echo.Echo"},
+         .receiver_type = "myapp/echo.Echo",
+         .def_module_qn = "myapp/echo"},
     };
     const char *imp_names[] = {"echo"};
     const char *imp_qns[] = {"myapp/echo"};
@@ -1083,8 +1083,8 @@ TEST(golsp_crossfile_local_interface_single_impl) {
          .short_name = "Store",
          .label = "Interface",
          .def_module_qn = "myapp/svc",
-         .is_interface = true,
-         .method_names_str = "Get|Put"},
+         .method_names_str = "Get|Put",
+         .is_interface = true},
         {.qualified_name = "myapp/svc.RedisStore",
          .short_name = "RedisStore",
          .label = "Class",
@@ -1092,13 +1092,13 @@ TEST(golsp_crossfile_local_interface_single_impl) {
         {.qualified_name = "myapp/svc.RedisStore.Get",
          .short_name = "Get",
          .label = "Method",
-         .def_module_qn = "myapp/svc",
-         .receiver_type = "myapp/svc.RedisStore"},
+         .receiver_type = "myapp/svc.RedisStore",
+         .def_module_qn = "myapp/svc"},
         {.qualified_name = "myapp/svc.RedisStore.Put",
          .short_name = "Put",
          .label = "Method",
-         .def_module_qn = "myapp/svc",
-         .receiver_type = "myapp/svc.RedisStore"},
+         .receiver_type = "myapp/svc.RedisStore",
+         .def_module_qn = "myapp/svc"},
     };
     const char *imp_names[] = {"svc"};
     const char *imp_qns[] = {"myapp/svc"};

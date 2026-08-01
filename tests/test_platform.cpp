@@ -21,8 +21,14 @@
 TEST(platform_now_ns) {
     uint64_t t1 = cbm_now_ns();
     ASSERT_GT(t1, 0);
-    /* Busy-wait a tiny bit */
-    for (volatile int i = 0; i < 100000; i++) {}
+    /* Busy-wait a tiny bit. The counter is plain and the volatile store lives in
+     * the body: C++20 (P1152R4) deprecated both `++` on a volatile operand and
+     * assignment to one, so neither belongs in the loop header. Initialising a
+     * volatile is untouched by that, and still forces a store per iteration. */
+    for (int i = 0; i < 100000; i++) {
+        volatile int sink = i;
+        (void)sink;
+    }
     uint64_t t2 = cbm_now_ns();
     ASSERT_GT(t2, t1);
     PASS();
