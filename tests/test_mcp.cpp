@@ -6,7 +6,10 @@
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h" /* cbm_unlink / cbm_rmdir */
 #include "test_framework.h"
+#include "test_helpers.h" /* th_write_file / th_rmtree / th_mktempdir */
 #include <mcp/mcp.h>
+#include <mcp/mcp_internal.h> /* cbm_detect_node_in_hunks (#1363) */
+#include <pipeline/pipeline.h>
 #include <store/store.h>
 #include <yyjson/yyjson.h>
 #include <string.h>
@@ -824,6 +827,200 @@ TEST(tool_detect_changes_no_project) {
     free(resp);
 
     cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Regression test for issue #1363: detect_changes seeded every definition in
+ * a changed file instead of just the ones whose line range overlaps the diff
+ * hunk. cbm_detect_node_in_hunks is the overlap primitive; this exercises it
+ * directly, independent of the git/subprocess/index plumbing around it. */
+TEST(detect_changes_node_in_hunks_overlap_issue1363) {
+    cbm_changed_hunk_t hunks[2] = {
+        {"pkg/mod.py", 10, 12},
+        {"pkg/other.py", 1, 1},
+    };
+
+    cbm_node_t inside = {};
+    inside.start_line = 8;
+    inside.end_line = 15;
+    ASSERT(cbm_detect_node_in_hunks(&inside, hunks, 2, "pkg/mod.py"));
+
+    cbm_node_t exact = {};
+    exact.start_line = 10;
+    exact.end_line = 12;
+    ASSERT(cbm_detect_node_in_hunks(&exact, hunks, 2, "pkg/mod.py"));
+
+    cbm_node_t touches_edge = {};
+    touches_edge.start_line = 12;
+    touches_edge.end_line = 20;
+    ASSERT(cbm_detect_node_in_hunks(&touches_edge, hunks, 2, "pkg/mod.py"));
+
+    cbm_node_t before = {};
+    before.start_line = 1;
+    before.end_line = 9;
+    ASSERT(!cbm_detect_node_in_hunks(&before, hunks, 2, "pkg/mod.py"));
+
+    cbm_node_t after = {};
+    after.start_line = 13;
+    after.end_line = 20;
+    ASSERT(!cbm_detect_node_in_hunks(&after, hunks, 2, "pkg/mod.py"));
+
+    /* Same line range, different file — must not match. */
+    cbm_node_t wrong_file = {};
+    wrong_file.start_line = 10;
+    wrong_file.end_line = 12;
+    ASSERT(!cbm_detect_node_in_hunks(&wrong_file, hunks, 2, "pkg/unrelated.py"));
+
+    PASS();
+}
+
+/* `git -C` with double quotes, not `cd '<dir>' &&`: single quotes are not
+ * quoting characters for cmd.exe, and identity/branch/signing come from -c so
+ * the fixture does not depend on the machine's global git config. */
+#define DC1363_GITCFG \
+    "-c user.name=t -c user.email=t@t.io -c init.defaultBranch=main -c commit.gpgsign=false"
+
+static int dc1363_git_init(const char *repo) {
+    char cmd[1200];
+    const char *steps[] = {"init -q", "add -A", "commit -q -m init"};
+    for (size_t s = 0; s < sizeof(steps) / sizeof(steps[0]); s++) {
+        snprintf(cmd, sizeof(cmd), "git -C \"%s\" " DC1363_GITCFG " %s", repo, steps[s]);
+        if (system(cmd) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* End-to-end regression test for issue #1363: a same-line-count edit inside
+ * one function must seed only that function, not every definition in the
+ * file. A flat file with two independent top-level functions (no enclosing
+ * class) makes this unambiguous — before the fix, editing foo() also seeded
+ * bar() because seeding was scoped to the whole changed file.
+ *
+ * Asserted against this fork's JSON detect_changes response ("seed_count"),
+ * not upstream's tree-format "seed_symbols: N" text, which this fork does not
+ * carry. */
+TEST(detect_changes_seeds_only_touched_symbol_issue1363) {
+    char *tmp = th_mktempdir("cbm-detect-seed-scope");
+    ASSERT_NOT_NULL(tmp);
+    char repo[512];
+    snprintf(repo, sizeof(repo), "%s", tmp);
+
+    char src[600];
+    snprintf(src, sizeof(src), "%s/mod.py", repo);
+    ASSERT_EQ(th_write_file(src, "def foo():\n"
+                                 "    x = 1\n"
+                                 "    return x\n"
+                                 "\n"
+                                 "\n"
+                                 "def bar():\n"
+                                 "    y = 2\n"
+                                 "    return y\n"),
+              0);
+
+    if (dc1363_git_init(repo) != 0) {
+        th_rmtree(repo);
+        FAIL("git fixture setup failed");
+    }
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char idx_args[700];
+    snprintf(idx_args, sizeof(idx_args), "{\"repo_path\":\"%s\",\"mode\":\"full\"}", repo);
+    char *idx_resp = cbm_mcp_handle_tool(srv, "index_repository", idx_args);
+    ASSERT_NOT_NULL(idx_resp);
+    free(idx_resp);
+
+    /* Same-line-count in-place edit inside foo() only; bar() is untouched. */
+    ASSERT_EQ(th_write_file(src, "def foo():\n"
+                                 "    x = 11\n"
+                                 "    return x\n"
+                                 "\n"
+                                 "\n"
+                                 "def bar():\n"
+                                 "    y = 2\n"
+                                 "    return y\n"),
+              0);
+
+    char *project = cbm_project_name_from_path(repo);
+    ASSERT_NOT_NULL(project);
+    char dc_args[700];
+    snprintf(dc_args, sizeof(dc_args), "{\"project\":\"%s\",\"depth\":1}", project);
+    char *dc_resp = cbm_mcp_handle_tool(srv, "detect_changes", dc_args);
+    ASSERT_NOT_NULL(dc_resp);
+    /* Before the fix this was 2 — editing foo() also seeded bar(). */
+    ASSERT_NOT_NULL(strstr(dc_resp, "\"seed_count\":1"));
+
+    free(dc_resp);
+    free(project);
+    cbm_mcp_server_free(srv);
+    th_rmtree(repo);
+    PASS();
+}
+
+/* Recall guard for the zero-overlap case (#1363 review): an import-only edit
+ * changes lines that lie outside every definition's range. Scoping alone would
+ * drop the file from the seed set — worse recall than the whole-file behavior
+ * being replaced — so detect_collect_seeds falls back to whole-file seeding
+ * when a changed file has hunks but no definition overlapping any of them. */
+TEST(detect_changes_zero_overlap_falls_back_issue1363) {
+    char *tmp = th_mktempdir("cbm-detect-zero-overlap");
+    ASSERT_NOT_NULL(tmp);
+    char repo[512];
+    snprintf(repo, sizeof(repo), "%s", tmp);
+
+    char src[600];
+    snprintf(src, sizeof(src), "%s/mod.py", repo);
+    /* Import on line 1 sits above both definitions. */
+    ASSERT_EQ(th_write_file(src, "import os\n"
+                                 "\n"
+                                 "\n"
+                                 "def foo():\n"
+                                 "    return 1\n"
+                                 "\n"
+                                 "\n"
+                                 "def bar():\n"
+                                 "    return 2\n"),
+              0);
+
+    if (dc1363_git_init(repo) != 0) {
+        th_rmtree(repo);
+        FAIL("git fixture setup failed");
+    }
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char idx_args[700];
+    snprintf(idx_args, sizeof(idx_args), "{\"repo_path\":\"%s\",\"mode\":\"full\"}", repo);
+    char *idx_resp = cbm_mcp_handle_tool(srv, "index_repository", idx_args);
+    ASSERT_NOT_NULL(idx_resp);
+    free(idx_resp);
+
+    /* Edit ONLY the import line — outside every definition's line range. */
+    ASSERT_EQ(th_write_file(src, "import os, sys\n"
+                                 "\n"
+                                 "\n"
+                                 "def foo():\n"
+                                 "    return 1\n"
+                                 "\n"
+                                 "\n"
+                                 "def bar():\n"
+                                 "    return 2\n"),
+              0);
+
+    char *project = cbm_project_name_from_path(repo);
+    ASSERT_NOT_NULL(project);
+    char dc_args[700];
+    snprintf(dc_args, sizeof(dc_args), "{\"project\":\"%s\",\"depth\":1}", project);
+    char *dc_resp = cbm_mcp_handle_tool(srv, "detect_changes", dc_args);
+    ASSERT_NOT_NULL(dc_resp);
+    /* Both definitions must survive: zero overlaps means no scoping for this
+     * file, not an empty seed set. */
+    ASSERT_NOT_NULL(strstr(dc_resp, "\"seed_count\":2"));
+
+    free(dc_resp);
+    free(project);
+    cbm_mcp_server_free(srv);
+    th_rmtree(repo);
     PASS();
 }
 
@@ -2094,6 +2291,104 @@ TEST(tool_bad_project_name_no_overflow_issue235) {
 }
 #undef ISSUE235_DBNAME
 
+/* #1211: list_projects only ever advertises the project NAME, never the
+ * repo_path, but re-indexing by that same name (the natural next call) used
+ * to fall straight to "repo_path is required" because nothing resolved the
+ * name back to its stored root_path. Index once by repo_path, then re-index
+ * by project name alone and confirm it actually indexes instead of erroring. */
+TEST(tool_index_repository_resolves_root_path_from_project_name_issue1211) {
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-index-byname-test-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        PASS();
+    }
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-index-byname-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        cbm_rmdir(tmp_dir);
+        PASS();
+    }
+
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char src_path[512];
+    snprintf(src_path, sizeof(src_path), "%s/main.py", tmp_dir);
+    FILE *fp = fopen(src_path, "w");
+    ASSERT_NOT_NULL(fp);
+    fputs("def main():\n    return 'ok'\n", fp);
+    fclose(fp);
+
+    char *project = cbm_project_name_from_path(tmp_dir);
+    ASSERT_NOT_NULL(project);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char index_args[1024];
+    snprintf(index_args, sizeof(index_args), "{\"repo_path\":\"%s\",\"mode\":\"fast\"}", tmp_dir);
+    char *resp = cbm_mcp_handle_tool(srv, "index_repository", index_args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\\\"status\\\":\\\"indexed\\\""));
+    free(resp);
+
+    char by_name_args[512];
+    snprintf(by_name_args, sizeof(by_name_args), "{\"project\":\"%s\",\"mode\":\"fast\"}", project);
+    resp = cbm_mcp_handle_tool(srv, "index_repository", by_name_args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "repo_path is required"));
+    ASSERT_NOT_NULL(strstr(resp, "\\\"status\\\":\\\"indexed\\\""));
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(project);
+    remove(src_path);
+    th_rmtree(cache);
+    cbm_rmdir(tmp_dir);
+    PASS();
+}
+
+/* Same gap, opposite outcome: a project name that was never indexed has no
+ * stored root_path to resolve, so it must still fail with the same clear
+ * "repo_path is required" error rather than a resolver crash or silent
+ * no-op. Guards the fallback path the fix above added. */
+TEST(tool_index_repository_unknown_project_name_still_requires_repo_path) {
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-index-byname-unknown-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        PASS();
+    }
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char *resp =
+        cbm_mcp_handle_tool(srv, "index_repository", "{\"project\":\"never-indexed-project\"}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "repo_path is required"));
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    cbm_rmdir(cache);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
@@ -2190,6 +2485,9 @@ SUITE(mcp) {
     RUN_TEST(search_code_literal_pipe_warns_issue282);
     RUN_TEST(search_code_ampersand_accepted_issue272);
     RUN_TEST(tool_detect_changes_no_project);
+    RUN_TEST(detect_changes_node_in_hunks_overlap_issue1363);
+    RUN_TEST(detect_changes_seeds_only_touched_symbol_issue1363);
+    RUN_TEST(detect_changes_zero_overlap_falls_back_issue1363);
     RUN_TEST(tool_manage_adr_no_project);
     RUN_TEST(tool_manage_adr_get_with_existing_adr);
     RUN_TEST(tool_manage_adr_unified_backend_issue256);
@@ -2235,4 +2533,6 @@ SUITE(mcp) {
     RUN_TEST(snippet_include_neighbors_default);
     RUN_TEST(snippet_include_neighbors_enabled);
     RUN_TEST(tool_bad_project_name_no_overflow_issue235);
+    RUN_TEST(tool_index_repository_resolves_root_path_from_project_name_issue1211);
+    RUN_TEST(tool_index_repository_unknown_project_name_still_requires_repo_path);
 }

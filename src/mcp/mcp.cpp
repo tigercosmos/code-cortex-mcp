@@ -47,6 +47,7 @@ enum {
 #include <algorithm>
 #include "cypher/cypher.h"
 #include "pipeline/pipeline.h"
+#include "mcp/mcp_internal.h"
 #include "pipeline/pass_cross_repo.h"
 #include "git/git_context.h"
 #include "cli/cli.h"
@@ -552,9 +553,10 @@ static const tool_def_t TOOLS[] = {
 
     {"manage_adr", "Manage ADR", "Create or update Architecture Decision Records",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"mode\":{\"type\":"
-     "\"string\",\"enum\":[\"get\",\"update\",\"sections\"]},\"content\":{\"type\":\"string\"},"
-     "\"sections\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"project\"]"
-     "}"},
+     "\"string\",\"enum\":[\"get\",\"update\",\"sections\"],\"description\":\"update replaces "
+     "the entire ADR document; sections only lists existing headings\"},\"content\":{\"type\":"
+     "\"string\",\"description\":\"Complete replacement document required by update\"}},"
+     "\"additionalProperties\":false,\"required\":[\"project\"]}"},
 
     {"ingest_traces", "Ingest traces", "Ingest runtime traces to enhance the knowledge graph",
      "{\"type\":\"object\",\"properties\":{\"traces\":{\"type\":\"array\",\"items\":{\"type\":"
@@ -1096,10 +1098,19 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
     }
 
     /* Open project's .db file — query-only open (no SQLITE_OPEN_CREATE) to
-     * prevent ghost .db file creation for unknown/unindexed projects. */
+     * prevent ghost .db file creation for unknown/unindexed projects.
+     * #1425: a project name failing cbm_validate_project_name yields an EMPTY
+     * path, and SQLite opens "" as an anonymous temp database. That healthy
+     * temp db then fails the integrity check (it has no projects table) and
+     * drives the corrupt-db backup below for a database that never existed —
+     * rendering a bare relative ".corrupt" target in the process cwd and
+     * logging a spurious store.auto_clean error on every such query, while the
+     * caller only ever saw a clean 'project not found'. Skip the direct open
+     * entirely; the fallback scan below still resolves legacy dbs whose
+     * internal name predates validation. */
     char path[CBM_SZ_1K];
     project_db_path(project, path, sizeof(path));
-    srv->store = cbm_store_open_path_query(path);
+    srv->store = path[0] ? cbm_store_open_path_query(path) : NULL;
     if (srv->store) {
         /* Check DB integrity — back up (never silently delete) a corrupt DB */
         if (!cbm_store_check_integrity(srv->store)) {
@@ -1773,7 +1784,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         "       (fts.base_rank "
         "        - CASE WHEN n.label IN ('Function','Method') THEN 10.0 "
         "               WHEN n.label = 'Route' THEN 8.0 "
-        "               WHEN n.label IN ('Class','Interface','Type','Enum') THEN 5.0 "
+        "               WHEN n.label IN (" CBM_SQL_TYPE_LIKE_LABELS ") THEN 5.0 "
         "               ELSE 0.0 END) AS rank "
         "FROM ("
         "    SELECT rowid, bm25(nodes_fts) AS base_rank"
@@ -4579,6 +4590,36 @@ char *cbm_mcp_index_run_supervised_path(const char *root_path) {
 
 bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
 
+/* #1211: index_repository requires repo_path, but list_projects only ever
+ * advertises the project NAME, and every read tool accepts that name back via
+ * get_project_arg's "project"/"project_name"/"project_id"/"projectName"
+ * aliases. Re-indexing an already-indexed project by that same name had no
+ * resolution path and fell straight to "repo_path is required". Look up the
+ * project's own stored root_path (list_projects proves it's on file) before
+ * giving up. Query-only open, always closed here: this never creates a store
+ * or touches srv->store/srv->current_project, so it cannot disturb whatever
+ * project the server has cached. */
+static char *resolved_repo_path_from_project_arg(const char *args) {
+    char *project = get_project_arg(args);
+    if (!project) {
+        return NULL;
+    }
+    char db_path[CBM_SZ_1K];
+    project_db_path(project, db_path, sizeof(db_path));
+    cbm_store_t *store = db_path[0] ? cbm_store_open_path_query(db_path) : NULL;
+    char *root_path = NULL;
+    if (store) {
+        cbm_project_t proj = {0};
+        if (cbm_store_get_project(store, project, &proj) == CBM_STORE_OK) {
+            root_path = proj.root_path ? heap_strdup(proj.root_path) : NULL;
+            cbm_project_free_fields(&proj);
+        }
+        cbm_store_close(store);
+    }
+    free(project);
+    return root_path;
+}
+
 static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     /* Supervisor gate: run the index in a crash/hang-isolating worker subprocess
      * unless this process IS the worker or the kill switch (CBM_INDEX_SUPERVISOR=0)
@@ -4594,6 +4635,11 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     char *mode_str = cbm_mcp_get_string_arg(args, "mode");
     char *name_override = cbm_mcp_get_string_arg(args, "name");
     cbm_normalize_path_sep(repo_path);
+
+    if (!repo_path) {
+        repo_path = resolved_repo_path_from_project_arg(args);
+        cbm_normalize_path_sep(repo_path);
+    }
 
     if (!repo_path) {
         free(mode_str);
@@ -6144,19 +6190,77 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── detect_changes ───────────────────────────────────────────── */
 
-/* Collect BFS seed ids: every symbol DEFINED in a changed file (everything but
- * the structural container labels — those have no CALLS edges). These anchor
- * the multi-source impact traversal. */
+/* Does `node`'s line range overlap any recorded hunk for `file`? Used to scope
+ * seed detection to the actually-changed lines rather than the whole file.
+ * Non-static (declared in mcp_internal.h) so tests can exercise the overlap
+ * logic directly, matching this file's existing white-box test hooks. */
+bool cbm_detect_node_in_hunks(const cbm_node_t *node, const cbm_changed_hunk_t *hunks,
+                              int hunk_count, const char *file) {
+    for (int h = 0; h < hunk_count; h++) {
+        if (strcmp(hunks[h].path, file) == 0 && node->start_line <= hunks[h].end_line &&
+            node->end_line >= hunks[h].start_line) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Structural container labels carry no CALLS edges and span the whole file, so
+ * they are never seeds. Shared by the seeding loop and the overlap probe. */
+static bool detect_is_seedable_label(const char *lb) {
+    return lb && strcmp(lb, "File") != 0 && strcmp(lb, "Folder") != 0 &&
+           strcmp(lb, "Project") != 0 && strcmp(lb, "Module") != 0 && strcmp(lb, "Package") != 0 &&
+           strcmp(lb, "Section") != 0;
+}
+
+/* Collect BFS seed ids for one changed file (everything but the structural
+ * container labels — those have no CALLS edges). These anchor the
+ * multi-source impact traversal.
+ *
+ * When `hunks` has at least one entry for `file`, only definitions whose line
+ * range overlaps a hunk become seeds — a one-line edit inside a single
+ * function no longer seeds every other definition in the file. When no hunk
+ * is recorded for `file` (a brand-new/untracked file has no comparable
+ * "before" state, or the hunk fetch failed/was skipped), every non-container
+ * definition in the file is a seed — the previous, whole-file behavior — so
+ * this is a precision improvement, not a new failure mode. */
 static void detect_collect_seeds(cbm_store_t *store, const char *project, const char *file,
-                                 int64_t **seeds, int *n, int *cap) {
+                                 const cbm_changed_hunk_t *hunks, int hunk_count, int64_t **seeds,
+                                 int *n, int *cap) {
     cbm_node_t *nodes = NULL;
     int ncount = 0;
     cbm_store_find_nodes_by_file(store, project, file, &nodes, &ncount);
+    bool scope_to_hunks = false;
+    for (int h = 0; h < hunk_count; h++) {
+        if (strcmp(hunks[h].path, file) == 0) {
+            scope_to_hunks = true;
+            break;
+        }
+    }
+    /* A file can have hunks yet no SEEDABLE definition overlapping any of them:
+     * an import-only edit, a module-level constant, or a change above the first
+     * definition all land outside every definition's line range. Scoping would
+     * then drop the file from the seed set entirely — strictly worse recall
+     * than the whole-file behavior this replaces. Probe for an overlap first
+     * and keep whole-file seeding for that file when there is none.
+     *
+     * The probe must apply the same label filter as the seeding loop below:
+     * container nodes span the whole file (a Module node is lines 1..EOF), so
+     * counting them would report an overlap for every hunk and defeat the
+     * fallback entirely. */
+    if (scope_to_hunks) {
+        bool any_overlap = false;
+        for (int i = 0; i < ncount && !any_overlap; i++) {
+            any_overlap = detect_is_seedable_label(nodes[i].label) &&
+                          cbm_detect_node_in_hunks(&nodes[i], hunks, hunk_count, file);
+        }
+        scope_to_hunks = any_overlap;
+    }
     for (int i = 0; i < ncount; i++) {
-        const char *lb = nodes[i].label;
-        if (lb && strcmp(lb, "File") != 0 && strcmp(lb, "Folder") != 0 &&
-            strcmp(lb, "Project") != 0 && strcmp(lb, "Module") != 0 && strcmp(lb, "Package") != 0 &&
-            strcmp(lb, "Section") != 0) {
+        if (detect_is_seedable_label(nodes[i].label)) {
+            if (scope_to_hunks && !cbm_detect_node_in_hunks(&nodes[i], hunks, hunk_count, file)) {
+                continue;
+            }
             if (*n >= *cap) {
                 *cap = *cap ? *cap * 2 : 16;
                 *seeds = (int64_t *)safe_realloc(*seeds, (size_t)*cap * sizeof(int64_t));
@@ -6321,6 +6425,89 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     int seed_count = 0;
     int seed_cap = 0;
 
+    /* Hunk line ranges (unified=0 diff), used to scope seed detection to the
+     * actually-changed lines instead of every definition in a changed file
+     * (see detect_collect_seeds). Best-effort: any failure here just leaves
+     * `hunks` empty and every file falls back to its previous whole-file
+     * seeding — this is a precision improvement, not a correctness
+     * dependency, so it is never treated as a request-level failure.
+     *
+     * Coordinate systems: `base...HEAD` hunks carry HEAD-side line numbers,
+     * the worktree diff carries worktree-side ones, and node line ranges come
+     * from the indexed snapshot. These agree while the index is fresh — the
+     * watcher reindexes on HEAD movement and on a dirty tree — but a stale
+     * index combined with insertions earlier in the file shifts the node lines
+     * relative to the hunks and can mis-scope. The failure is bounded by
+     * detect_collect_seeds' zero-overlap fallback: a file whose definitions all
+     * miss reverts to whole-file seeding rather than dropping out. */
+    cbm_changed_hunk_t *hunks = NULL;
+    int hunk_count = 0;
+    if (want_symbols) {
+        char hunk_cmd[CBM_SZ_2K];
+#ifdef _WIN32
+        snprintf(hunk_cmd, sizeof(hunk_cmd),
+                 "git -C \"%s\" diff --unified=0 \"%s\"...HEAD 2>NUL & "
+                 "git -C \"%s\" diff --unified=0 2>NUL",
+                 root_path, base_branch, root_path);
+#else
+        snprintf(hunk_cmd, sizeof(hunk_cmd),
+                 "{ git -C '%s' diff --unified=0 '%s'...HEAD 2>/dev/null; "
+                 "git -C '%s' diff --unified=0 2>/dev/null; }",
+                 root_path, base_branch, root_path);
+#endif
+        FILE *hfp = cbm_popen(hunk_cmd, "r");
+        if (hfp) {
+            /* Slurp the diff into one growable buffer — cbm_parse_hunks takes
+             * the whole text. Capped so a pathological diff cannot balloon the
+             * request; a truncated read just means fewer hunks, which the
+             * cap check below then turns into whole-file seeding. */
+            enum { HUNK_READ_MAX = 8u << 20, HUNK_READ_CHUNK = 64u << 10 };
+            size_t hlen = 0;
+            size_t hcap = HUNK_READ_CHUNK;
+            char *hbuf = (char *)malloc(hcap);
+            while (hbuf && hlen + SKIP_ONE < HUNK_READ_MAX) {
+                if (hlen + HUNK_READ_CHUNK + SKIP_ONE > hcap) {
+                    size_t ncap = hcap * 2;
+                    char *grown = (char *)realloc(hbuf, ncap);
+                    if (!grown) {
+                        free(hbuf);
+                        hbuf = NULL;
+                        break;
+                    }
+                    hbuf = grown;
+                    hcap = ncap;
+                }
+                size_t got = fread(hbuf + hlen, SKIP_ONE, HUNK_READ_CHUNK, hfp);
+                hlen += got;
+                if (got < HUNK_READ_CHUNK) {
+                    break;
+                }
+            }
+            (void)cbm_pclose(hfp);
+            if (hbuf) {
+                hbuf[hlen] = '\0';
+                enum { HUNK_CAP = 4096 };
+                hunks = (cbm_changed_hunk_t *)calloc((size_t)HUNK_CAP, sizeof(cbm_changed_hunk_t));
+                if (hunks) {
+                    hunk_count = cbm_parse_hunks(hbuf, hunks, HUNK_CAP);
+                    /* A filled buffer means the diff was truncated: the hunks
+                     * past the cap are gone, so files captured only partially
+                     * would still look scoped and silently under-seed. Drop
+                     * scoping for the whole request rather than under-report a
+                     * large refactor — whole-file seeding is the safe side. */
+                    if (hunk_count >= HUNK_CAP) {
+                        cbm_log_info("detect_changes.hunks", "action", "scoping_disabled", "reason",
+                                     "hunk_cap_reached");
+                        free(hunks);
+                        hunks = NULL;
+                        hunk_count = 0;
+                    }
+                }
+                free(hbuf);
+            }
+        }
+    }
+
     char line[CBM_SZ_1K];
     int file_count = 0;
 
@@ -6371,7 +6558,8 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         files[file_count++] = heap_strdup(path_line);
 
         if (want_symbols) {
-            detect_collect_seeds(store, project, path_line, &seeds, &seed_count, &seed_cap);
+            detect_collect_seeds(store, project, path_line, hunks, hunk_count, &seeds, &seed_count,
+                                 &seed_cap);
         }
     }
     int git_status = cbm_pclose(fp);
@@ -6515,6 +6703,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     }
     free(files);
     free(seeds);
+    free(hunks);
     free(direction);
     free(root_path);
     free(project);
@@ -6609,6 +6798,28 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
         mode_str = heap_strdup("get");
     }
 
+    /* `sections` used to be advertised as an input argument, but it was never
+     * consumed: mode=update still replaced the whole document. Reject the old
+     * shape explicitly before opening a store so a stale client cannot mistake
+     * a whole-document replacement for a section-scoped update. */
+    bool has_sections_arg = false;
+    yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
+    if (args_doc) {
+        yyjson_val *args_root = yyjson_doc_get_root(args_doc);
+        has_sections_arg =
+            args_root && yyjson_is_obj(args_root) && yyjson_obj_get(args_root, "sections") != NULL;
+        yyjson_doc_free(args_doc);
+    }
+    if (has_sections_arg) {
+        free(project);
+        free(mode_str);
+        free(content);
+        return cbm_mcp_text_result(
+            "{\"status\":\"invalid_arguments\",\"error\":\"The sections argument is not an "
+            "update primitive and has been removed. No ADR write was performed.\"}",
+            true);
+    }
+
     /* ADRs are stored in the SQLite store (project_summaries), the SAME
      * backend the UI /api/adr endpoints use — so writes via the MCP tool and
      * the UI are visible to each other (#256). */
@@ -6673,6 +6884,7 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
     if ((strcmp(mode_str, "update") == 0 || strcmp(mode_str, "store") == 0) && content) {
         if (cbm_store_adr_store(store, project, content) == CBM_STORE_OK) {
             yyjson_mut_obj_add_str(doc, root_obj, "status", "updated");
+            yyjson_mut_obj_add_str(doc, root_obj, "semantics", "whole_document_replaced");
         } else {
             yyjson_mut_obj_add_str(doc, root_obj, "status", "write_error");
             is_error = true;
@@ -7282,6 +7494,16 @@ int cbm_mcp_server_run(cbm_mcp_server_t *srv, FILE *in, FILE *out) {
     char *line = NULL;
     size_t cap = 0;
     int fd = cbm_fileno(in);
+
+#ifdef _WIN32
+    /* Ensure stdio is in binary mode to prevent CRLF translation from corrupting
+     * Content-Length byte counts and causing fread() to hang. (<io.h> and
+     * <fcntl.h> are already included unconditionally on the _WIN32 branch of
+     * this file, so _setmode/_O_BINARY do not depend on transitive inclusion
+     * through <windows.h> the way upstream's version does.) */
+    _setmode(cbm_fileno(in), _O_BINARY);
+    _setmode(cbm_fileno(out), _O_BINARY);
+#endif
 
     for (;;) {
         /* Poll with idle timeout so we can evict unused stores between requests.
