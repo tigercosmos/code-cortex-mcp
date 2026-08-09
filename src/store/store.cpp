@@ -3517,6 +3517,13 @@ int cbm_store_bfs_multi(cbm_store_t *s, const int64_t *seed_ids, int seed_count,
 
     int cap = ST_INIT_CAP_16;
     int n = 0;
+    /* A negative ceiling would break out of the scan before any row is
+     * written and then free fields of an unwritten (negative-index) slot --
+     * clang-analyzer traced that path into a garbage free. Clamp: zero rows
+     * is the total behavior for a non-positive ceiling. */
+    if (max_results < 0) {
+        max_results = 0;
+    }
     cbm_node_hop_t *visited = (cbm_node_hop_t *)malloc(cap * sizeof(cbm_node_hop_t));
     int scan_rc_multi;
     while ((scan_rc_multi = sqlite3_step(stmt)) == SQLITE_ROW) {
@@ -4748,6 +4755,16 @@ static int arch_boundaries(cbm_store_t *s, const char *project, const char *path
         }
         free(nids);
         free(npkgs);
+        /* The boundary accumulators (and the package strings accum_boundary
+         * duplicated into them) were leaked on this abort path -- caught by
+         * the clang-analyzer unix.Malloc lane. Mirror the normal cleanup. */
+        for (int bi = 0; bi < bn; bi++) {
+            free(bfroms[bi]);
+            free(btos[bi]);
+        }
+        free(bfroms);
+        free(btos);
+        free(bcounts);
         return CBM_STORE_ERR;
     }
     sqlite3_finalize(estmt);
@@ -5506,8 +5523,12 @@ static int lg_build(int n, const int *wsi, const int *wdi, const double *ww, int
         off[i + 1] += off[i];
     }
     int total = off[n];
-    int *nbr = (int *)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
-    double *w = (double *)malloc((size_t)(total > 0 ? total : 1) * sizeof(double));
+    /* calloc, not malloc: every slot IS written (off[n] equals the summed
+     * degrees, two writes per edge), but that invariant is invisible to
+     * path-sensitive analysis, and zero-filled backing turns any future
+     * degree-miscount bug into a benign self-loop instead of UB. */
+    int *nbr = (int *)calloc((size_t)(total > 0 ? total : 1), sizeof(int));
+    double *w = (double *)calloc((size_t)(total > 0 ? total : 1), sizeof(double));
     if (!nbr || !w) {
         free(off);
         free(k);
@@ -5729,9 +5750,11 @@ static int leiden_aggregate(const cbm_lg_t *g, const int *refined, int r_count, 
     int n = g->n;
     double *k2 = (double *)calloc((size_t)r_count, sizeof(double));
     int *gcount = (int *)calloc((size_t)r_count, sizeof(int));
-    int *gstart = (int *)malloc(((size_t)r_count + 1) * sizeof(int));
-    int *members = (int *)malloc((size_t)n * sizeof(int));
-    int *fill = (int *)malloc((size_t)r_count * sizeof(int));
+    /* calloc: the fill-cursor pattern writes every slot (same degree-sum
+     * invariant as the CSR builds), invisible to path-sensitive analysis. */
+    int *gstart = (int *)calloc((size_t)r_count + 1, sizeof(int));
+    int *members = (int *)calloc((size_t)n, sizeof(int));
+    int *fill = (int *)calloc((size_t)r_count, sizeof(int));
     double *acc = (double *)calloc((size_t)r_count, sizeof(double));
     int *dirty = (int *)malloc((size_t)r_count * sizeof(int));
     int *off2 = (int *)malloc(((size_t)r_count + 1) * sizeof(int));
@@ -5786,8 +5809,11 @@ static int leiden_aggregate(const cbm_lg_t *g, const int *refined, int r_count, 
         }
     }
     int total = off2[r_count];
-    int *nbr2 = (int *)malloc((size_t)(total > 0 ? total : 1) * sizeof(int));
-    double *w2 = (double *)malloc((size_t)(total > 0 ? total : 1) * sizeof(double));
+    /* calloc for the same reason as the base CSR build: full-fill holds by
+     * the degree-sum invariant, invisible to path-sensitive analysis; zeroed
+     * backing degrades a future miscount into a self-loop, not UB. */
+    int *nbr2 = (int *)calloc((size_t)(total > 0 ? total : 1), sizeof(int));
+    double *w2 = (double *)calloc((size_t)(total > 0 ? total : 1), sizeof(double));
     if (!nbr2 || !w2) {
         free(k2);
         free(gcount);

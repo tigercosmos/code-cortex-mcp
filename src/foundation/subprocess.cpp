@@ -20,6 +20,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#ifdef __APPLE__
+#include <crt_externs.h> /* _NSGetEnviron — macOS does not declare `environ` */
+#include <spawn.h>
+#endif
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -311,8 +315,146 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 
 #else /* POSIX */
 
+/* fork+exec child setup. On Apple this runs ONLY for the exec-failure fallback
+ * (see cbm_posix_spawn_apple), which preserves the documented "unusable binary
+ * => child exits 127" contract across platforms. */
+static void cbm_posix_child_exec(const cbm_proc_opts_t *opts) {
+    /* Child: redirect stdout+stderr to the log (or discard), then exec.
+     * Use open()+dup2() (async-signal-safe, no malloc) rather than freopen():
+     * the parent may be multithreaded (the MCP server holds worker/watcher/http
+     * threads plus mimalloc/sqlite global state), and a fork() copies
+     * only the calling thread — a malloc between fork and exec could deadlock on
+     * a lock another thread held at fork time. open/dup2/execv touch no heap. */
+    const char *bin = opts->bin;
+    const char *const default_argv[] = {bin, NULL};
+    const char *const *argv = opts->argv ? opts->argv : default_argv;
+    const char *target = opts->log_file ? opts->log_file : "/dev/null";
+    int fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        (void)dup2(fd, STDOUT_FILENO);
+        (void)dup2(fd, STDERR_FILENO);
+        if (fd > STDERR_FILENO) {
+            (void)close(fd);
+        }
+    }
+    execv(bin, (char *const *)argv);
+    _exit(127); /* exec failed */
+}
+
+#ifdef __APPLE__
+/* macOS: spawn instead of fork+exec.
+ *
+ * fork() duplicates the parent's whole address-space bookkeeping, and an
+ * ASan-instrumented parent carries an enormous shadow mapping. Past a footprint
+ * threshold the child is jetsam-killed BEFORE exec replaces the image, so the
+ * call fails with the child already gone — a spawn defect that reads as the
+ * launched tool dying (a fixture's `git init` "failing" only once enough suites
+ * have run ahead of it). posix_spawn never copies the parent address space, so
+ * the parent's footprint stops being a variable.
+ *
+ * Every guarantee of THIS fork path is carried over exactly:
+ *   - stdout+stderr wired to the log (or /dev/null) via adddup2
+ *   - stdin left inherited (this fork's child never rebinds it)
+ *   - default signal dispositions and an empty mask (SETSIGDEF/SETSIGMASK)
+ *   - exact-path exec: posix_spawn, not posix_spawnp, matches execv's semantics
+ * The log descriptor is opened here rather than in the child (posix_spawn has
+ * no child context to run code in); O_CLOEXEC keeps the spare copy out of the
+ * exec'd image, while the two dup2'd descriptors survive because dup2 clears
+ * close-on-exec.
+ *
+ * Returns 0 on success (*pid_out set), 1 for an exec-class failure the caller
+ * should reproduce with fork+exec, -1 for a hard spawn failure. */
+static int cbm_posix_spawn_apple(const cbm_proc_opts_t *opts, pid_t *pid_out) {
+    const char *bin = opts->bin;
+    const char *const default_argv[] = {bin, NULL};
+    const char *const *argv = opts->argv ? opts->argv : default_argv;
+    const char *target = opts->log_file ? opts->log_file : "/dev/null";
+    int log_flags = O_WRONLY | O_CREAT | O_TRUNC;
+#ifdef O_CLOEXEC
+    log_flags |= O_CLOEXEC;
+#endif
+    /* A failed open is not fatal here either: the fork path execs with the
+     * inherited stdout/stderr in that case, so this one does too. */
+    int fd = open(target, log_flags, 0644);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attr;
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        if (fd >= 0) {
+            (void)close(fd);
+        }
+        return -1;
+    }
+    if (posix_spawnattr_init(&attr) != 0) {
+        (void)posix_spawn_file_actions_destroy(&actions);
+        if (fd >= 0) {
+            (void)close(fd);
+        }
+        return -1;
+    }
+    sigset_t empty_mask;
+    sigset_t all_signals;
+    (void)sigemptyset(&empty_mask);
+    (void)sigfillset(&all_signals);
+    short flags = (short)(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+    bool configured = posix_spawnattr_setflags(&attr, flags) == 0 &&
+                      posix_spawnattr_setsigmask(&attr, &empty_mask) == 0 &&
+                      posix_spawnattr_setsigdefault(&attr, &all_signals) == 0;
+    if (configured && fd >= 0) {
+        configured = posix_spawn_file_actions_adddup2(&actions, fd, STDOUT_FILENO) == 0 &&
+                     posix_spawn_file_actions_adddup2(&actions, fd, STDERR_FILENO) == 0;
+    }
+    pid_t pid = -1;
+    int rc = configured
+                 ? posix_spawn(&pid, bin, &actions, &attr, (char *const *)argv, *_NSGetEnviron())
+                 : -1;
+    (void)posix_spawn_file_actions_destroy(&actions);
+    (void)posix_spawnattr_destroy(&attr);
+    if (fd >= 0) {
+        (void)close(fd);
+    }
+    if (configured && rc == 0 && pid > 0) {
+        *pid_out = pid;
+        return 0;
+    }
+    /* posix_spawn reports an unusable binary to the PARENT, where fork+exec
+     * instead produces a child that exits 127. cbm_subprocess_run's contract
+     * treats a -1 return as "the spawn MECHANISM failed", not "the tool was
+     * missing", so exec-class errors fall back to fork+exec and macOS keeps
+     * classifying a bogus binary exactly as Linux does. That child execs (or
+     * _exits) immediately, so it does not reintroduce the jetsam hazard. */
+    if (configured && (rc == ENOENT || rc == EACCES || rc == ENOEXEC || rc == EISDIR ||
+                       rc == ELOOP || rc == ENAMETOOLONG || rc == ENOTDIR)) {
+        return 1;
+    }
+    return -1;
+}
+#endif
+
 static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
-    pid_t pid = fork();
+    pid_t pid = -1;
+#ifdef __APPLE__
+    int spawn_rc = cbm_posix_spawn_apple(opts, &pid);
+    if (spawn_rc < 0) {
+        out->outcome = CBM_PROC_SPAWN_FAILED;
+        out->exit_code = -1;
+        out->term_signal = 0;
+        return -1;
+    }
+    if (spawn_rc > 0) { /* exec-class failure: reproduce the fork+exec 127 */
+        pid = fork();
+        if (pid < 0) {
+            out->outcome = CBM_PROC_SPAWN_FAILED;
+            out->exit_code = -1;
+            out->term_signal = 0;
+            return -1;
+        }
+        if (pid == 0) {
+            cbm_posix_child_exec(opts);
+        }
+    }
+#else
+    pid = fork();
     if (pid < 0) {
         out->outcome = CBM_PROC_SPAWN_FAILED;
         out->exit_code = -1;
@@ -320,27 +462,9 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         return -1;
     }
     if (pid == 0) {
-        /* Child: redirect stdout+stderr to the log (or discard), then exec.
-         * Use open()+dup2() (async-signal-safe, no malloc) rather than freopen():
-         * the parent may be multithreaded (the MCP server holds worker/watcher/http
-         * threads plus mimalloc/sqlite global state), and a fork() copies
-         * only the calling thread — a malloc between fork and exec could deadlock on
-         * a lock another thread held at fork time. open/dup2/execv touch no heap. */
-        const char *bin = opts->bin;
-        const char *const default_argv[] = {bin, NULL};
-        const char *const *argv = opts->argv ? opts->argv : default_argv;
-        const char *target = opts->log_file ? opts->log_file : "/dev/null";
-        int fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) {
-            (void)dup2(fd, STDOUT_FILENO);
-            (void)dup2(fd, STDERR_FILENO);
-            if (fd > STDERR_FILENO) {
-                (void)close(fd);
-            }
-        }
-        execv(bin, (char *const *)argv);
-        _exit(127); /* exec failed */
+        cbm_posix_child_exec(opts);
     }
+#endif
 
     long tail_pos = 0;
     uint64_t last_activity = cbm_now_ms();

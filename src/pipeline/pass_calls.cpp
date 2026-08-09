@@ -341,7 +341,13 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
          * substring coincidence in the resolved QN (e.g. "SalesforceRestClient"
          * matches the "RestClient" HTTP lib). Emit a plain CALLS edge — unless a
          * weak TS/JS member-call match should be suppressed (#592/#606). */
-        if (suppress_plain_calls) {
+        /* !target: the service-pattern call sites pass NULL (the route node is
+         * synthesized below) behind a hand-duplicated copy of the is_url/
+         * is_topic predicate above. While the copies agree this branch is
+         * unreachable for them — but a drift between the two would turn
+         * target->id into a null dereference (clang-analyzer traced exactly
+         * that), and with no callee node there is nothing to emit anyway. */
+        if (suppress_plain_calls || !target) {
             return;
         }
         char esc_callee[CBM_SZ_256];

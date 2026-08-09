@@ -8,6 +8,8 @@
 #include "../src/foundation/log.h"
 #include "../src/foundation/compat.h"
 #include <stdbool.h>
+#include <atomic>
+#include <thread>
 #ifndef _WIN32
 #include <unistd.h>
 #include <fcntl.h>
@@ -184,6 +186,70 @@ TEST(log_level_from_env_invalid_ignored) {
     PASS();
 }
 
+/* ── Concurrent reconfiguration ───────────────────────────────── */
+
+static std::atomic<int> g_sink_a_hits{0};
+static std::atomic<int> g_sink_b_hits{0};
+
+static void sink_a(const char *line) {
+    (void)line;
+    g_sink_a_hits.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void sink_b(const char *line) {
+    (void)line;
+    g_sink_b_hits.fetch_add(1, std::memory_order_relaxed);
+}
+
+/* The level/format/sink globals are written by whichever thread configures
+ * logging and read by every thread that logs. For the sink this is not a
+ * benign stale-value race: emit_line tested the global pointer and then
+ * called it, so a concurrent cbm_log_set_sink could turn a checked pointer
+ * into a call through a NULL or partially-written one. This exercises that
+ * exact interleaving — it is the ThreadSanitizer lane's tripwire (a plain
+ * aligned pointer rarely tears in practice, so the assertions below only
+ * bind the functional contract) — while the load-once fix closes the
+ * test-then-call window outright.
+ *
+ * Both sinks are non-NULL so nothing escapes to stderr while this runs. */
+TEST(log_concurrent_sink_swap_is_defined) {
+    CBMLogLevel saved_level = cbm_log_get_level();
+    cbm_log_set_level(CBM_LOG_DEBUG);
+    g_sink_a_hits.store(0, std::memory_order_relaxed);
+    g_sink_b_hits.store(0, std::memory_order_relaxed);
+    cbm_log_set_sink(sink_a);
+
+    std::atomic<bool> stop{false};
+    std::thread flipper([&stop]() {
+        for (int i = 0; i < 2000 && !stop.load(std::memory_order_relaxed); i++) {
+            cbm_log_set_sink((i & 1) ? sink_b : sink_a);
+            cbm_log_set_format((i & 1) ? CBM_LOG_FORMAT_JSON : CBM_LOG_FORMAT_TEXT);
+        }
+    });
+    std::thread loggers[3];
+    for (auto &t : loggers) {
+        t = std::thread([]() {
+            for (int i = 0; i < 500; i++) {
+                cbm_log_info("test.concurrent", "k", "v");
+            }
+        });
+    }
+    for (auto &t : loggers) {
+        t.join();
+    }
+    stop.store(true, std::memory_order_relaxed);
+    flipper.join();
+
+    int total = g_sink_a_hits.load(std::memory_order_relaxed) +
+                g_sink_b_hits.load(std::memory_order_relaxed);
+    ASSERT_EQ(total, 1500);
+
+    cbm_log_set_sink(NULL);
+    cbm_log_set_format(CBM_LOG_FORMAT_TEXT);
+    cbm_log_set_level(saved_level);
+    PASS();
+}
+
 SUITE(log) {
     RUN_TEST(log_level_default);
     RUN_TEST(log_level_set);
@@ -194,4 +260,5 @@ SUITE(log) {
     RUN_TEST(log_level_from_env_textual);
     RUN_TEST(log_level_from_env_numeric);
     RUN_TEST(log_level_from_env_invalid_ignored);
+    RUN_TEST(log_concurrent_sink_swap_is_defined);
 }
