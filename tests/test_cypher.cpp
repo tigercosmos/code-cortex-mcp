@@ -370,11 +370,45 @@ TEST(cypher_parse_return_order_limit) {
     int rc =
         cbm_cypher_parse("MATCH (f:Function) RETURN f.name ORDER BY f.name DESC LIMIT 5", &q, &err);
     ASSERT_EQ(rc, 0);
-    ASSERT_NOT_NULL(q->ret->order_by);
-    ASSERT_STR_EQ(q->ret->order_dir, "DESC");
+    ASSERT_EQ(q->ret->order_key_count, 1);
+    ASSERT_STR_EQ(q->ret->order_keys[0], "f.name");
+    ASSERT(q->ret->order_descs[0]);
     ASSERT_EQ(q->ret->limit, 5);
 
     cbm_query_free(q);
+    PASS();
+}
+
+/* #1334: every ORDER BY key is parsed (per-key direction) and the LIMIT that
+ * follows the key list is consumed instead of silently dropped. */
+TEST(cypher_parse_multikey_order_by_issue1334) {
+    cbm_query_t *q = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse(
+        "MATCH (f:Function) RETURN f.name ORDER BY f.complexity DESC, f.name ASC LIMIT 5", &q,
+        &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(q->ret->order_key_count, 2);
+    ASSERT_STR_EQ(q->ret->order_keys[0], "f.complexity");
+    ASSERT(q->ret->order_descs[0]);
+    ASSERT(!q->ret->order_descs[1]);
+    ASSERT_STR_EQ(q->ret->order_keys[1], "f.name");
+    ASSERT_EQ(q->ret->limit, 5);
+
+    cbm_query_free(q);
+    PASS();
+}
+
+/* #1334: more keys than the modeled maximum is a loud parse error - the old
+ * failure mode (ignore the remainder, drop the LIMIT) must never come back. */
+TEST(cypher_parse_order_by_over_cap_rejected_issue1334) {
+    cbm_query_t *q = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse("MATCH (f:Function) RETURN f.name ORDER BY "
+                              "f.a, f.b, f.c, f.d, f.e, f.f, f.g, f.h, f.i LIMIT 5",
+                              &q, &err);
+    ASSERT(rc != 0);
+    free(err);
     PASS();
 }
 
@@ -2020,6 +2054,63 @@ TEST(cypher_exec_skip_limit) {
     PASS();
 }
 
+/* Regression for #1334: a LIMIT must survive a multi-key ORDER BY. The parser
+ * used to stop at the first sort key, leaving ", key2 ... LIMIT n" unconsumed —
+ * the whole result set came back (6326 rows instead of 5 on the reporter's
+ * graph: a token-flood into agent context). */
+TEST(cypher_exec_multikey_order_by_keeps_limit_issue1334) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    /* start_lines: HandleOrder=10, ValidateOrder=5, SubmitOrder=0, LogError=0 */
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) RETURN f.name, f.start_line "
+                                "ORDER BY f.start_line DESC, f.name ASC LIMIT 2",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
+    ASSERT_STR_EQ(r.rows[1][0], "ValidateOrder");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* #1334: the secondary key must actually break ties, per-key direction. */
+TEST(cypher_exec_multikey_order_by_tiebreak_issue1334) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    /* start_line ASC puts the two 0-line functions first; name DESC breaks the
+     * tie: SubmitOrder before LogError. */
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) RETURN f.name, f.start_line "
+                                "ORDER BY f.start_line ASC, f.name DESC LIMIT 2",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "SubmitOrder");
+    ASSERT_STR_EQ(r.rows[1][0], "LogError");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* #1334: the WITH-clause pipeline has the same multi-key ORDER BY contract. */
+TEST(cypher_exec_with_multikey_order_by_keeps_limit_issue1334) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WITH f.name AS n, f.start_line AS sl "
+                                "ORDER BY sl DESC, n ASC LIMIT 2 RETURN n",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
+    ASSERT_STR_EQ(r.rows[1][0], "ValidateOrder");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_exec_sum) {
     cbm_store_t *s = setup_cypher_store();
     cbm_cypher_result_t r = {0};
@@ -2101,6 +2192,28 @@ TEST(cypher_exec_count_star) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(r.row_count, 1);
     ASSERT_STR_EQ(r.rows[0][0], "4");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* #1111: type(r) grouped with count(*) must return the actual relationship type,
+ * not the row count. ret_agg_build_key/ret_agg_emit_row classified aggregate vs.
+ * scalar columns with a bare `item->func` truthy check, so type(r) (a non-aggregate
+ * function, func != NULL) was misrouted into the aggregate-value branch and
+ * formatted via format_agg_value's default case, silently substituting the row
+ * count for the relationship type. */
+TEST(cypher_issue1111_return_type_count_group) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS n ORDER BY n DESC", "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "CALLS");
+    ASSERT_STR_EQ(r.rows[0][1], "3");
+    ASSERT_STR_EQ(r.rows[1][0], "DEFINES");
+    ASSERT_STR_EQ(r.rows[1][1], "1");
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
     PASS();
@@ -2264,6 +2377,49 @@ TEST(cypher_exec_with_count) {
     /* HandleOrder calls 2 (ValidateOrder, LogError), ValidateOrder calls 1 (SubmitOrder) */
     ASSERT_STR_EQ(r.rows[0][0], "HandleOrder");
     ASSERT_STR_EQ(r.rows[0][1], "2");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* #1111, WITH variant: the same misrouting in with_agg_build_key/with_agg_accumulate/
+ * execute_with_aggregate's per-column func check. */
+TEST(cypher_issue1111_with_type_count_group) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(
+        s, "MATCH (a)-[r]->(b) WITH type(r) AS t, count(*) AS n RETURN t, n ORDER BY n DESC",
+        "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 2);
+    ASSERT_STR_EQ(r.rows[0][0], "CALLS");
+    ASSERT_STR_EQ(r.rows[0][1], "3");
+    ASSERT_STR_EQ(r.rows[1][0], "DEFINES");
+    ASSERT_STR_EQ(r.rows[1][1], "1");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* #1111 follow-up (review from DeusData on #1221): with_agg_find_or_create's
+ * bare-node-carry check only tested `!property && variable`, so an entity-
+ * introspection alias like `labels(f) AS l` (variable set, property NULL, func
+ * set) was ALSO tagged with the source node. A later `l.file_path` then read
+ * the carried node and silently returned HandleOrder's real file_path instead
+ * of "" for the non-node alias `l`. */
+TEST(cypher_issue1111_with_scalar_func_alias_no_node_leak) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WHERE f.name = \"HandleOrder\" "
+                                "WITH labels(f) AS l, COUNT(*) AS c "
+                                "RETURN l, l.file_path, c",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "[\"Function\"]");
+    ASSERT_STR_EQ(r.rows[0][1], ""); /* was "handler.go" before the fix */
+    ASSERT_STR_EQ(r.rows[0][2], "1");
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
     PASS();
@@ -2572,6 +2728,51 @@ TEST(cypher_parse_unwind_var) {
     PASS();
 }
 
+/* Regression: an UNWIND literal list whose element is longer than the 2KB
+ * assembly buffer used to overflow the stack. snprintf reports the length it
+ * WOULD have written, so blen ran past sizeof(buf) and the trailing
+ * buf[blen++]=']' / buf[blen]='\0' wrote out of bounds (ASan: stack-buffer-
+ * overflow). The query text is agent-controlled via the MCP query tool. */
+TEST(cypher_parse_unwind_oversized_literal_no_overflow) {
+    char query[4096];
+    char big[3000];
+    memset(big, 'a', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    snprintf(query, sizeof(query), "UNWIND [\"%s\"] AS x MATCH (f) RETURN f.name", big);
+
+    cbm_query_t *q = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse(query, &q, &err);
+    /* Must not crash and must produce a NUL-terminated, in-bounds expression. */
+    ASSERT_EQ(rc, 0);
+    ASSERT_NOT_NULL(q->unwind_expr);
+    ASSERT_STR_EQ(q->unwind_alias, "x");
+    cbm_query_free(q);
+    PASS();
+}
+
+/* Regression: many oversized elements accumulate blen well past the buffer,
+ * which also underflowed the (size_t)(cap - blen) length passed to snprintf. */
+TEST(cypher_parse_unwind_many_elements_no_overflow) {
+    /* 200 elements (~20 chars each) accumulate well past the 2KB assembly
+     * buffer, which also underflowed the (size_t)(cap - blen) length. */
+    char query[8192];
+    int off = snprintf(query, sizeof(query), "UNWIND [");
+    for (int i = 0; i < 200; i++) {
+        off += snprintf(query + off, sizeof(query) - (size_t)off, "%s\"element_value_%d\"",
+                        i ? "," : "", i);
+    }
+    snprintf(query + off, sizeof(query) - (size_t)off, "] AS x MATCH (f) RETURN f.name");
+
+    cbm_query_t *q = NULL;
+    char *err = NULL;
+    int rc = cbm_cypher_parse(query, &q, &err);
+    ASSERT_EQ(rc, 0);
+    ASSERT_NOT_NULL(q->unwind_expr);
+    cbm_query_free(q);
+    PASS();
+}
+
 /* ── Issue #389 group: Cypher feature reproductions ─────────────────
  * Each asserts the CORRECT behavior; a failure reproduces the bug. */
 
@@ -2743,6 +2944,8 @@ SUITE(cypher) {
     RUN_TEST(cypher_parse_return_simple);
     RUN_TEST(cypher_parse_return_count);
     RUN_TEST(cypher_parse_return_order_limit);
+    RUN_TEST(cypher_parse_multikey_order_by_issue1334);
+    RUN_TEST(cypher_parse_order_by_over_cap_rejected_issue1334);
     RUN_TEST(cypher_parse_return_distinct);
     RUN_TEST(cypher_parse_inline_props);
     RUN_TEST(cypher_parse_error);
@@ -2841,12 +3044,16 @@ SUITE(cypher) {
     /* Phase 4: SKIP + aggregation */
     RUN_TEST(cypher_exec_skip);
     RUN_TEST(cypher_exec_skip_limit);
+    RUN_TEST(cypher_exec_multikey_order_by_keeps_limit_issue1334);
+    RUN_TEST(cypher_exec_multikey_order_by_tiebreak_issue1334);
+    RUN_TEST(cypher_exec_with_multikey_order_by_keeps_limit_issue1334);
     RUN_TEST(cypher_exec_sum);
     RUN_TEST(cypher_exec_avg);
     RUN_TEST(cypher_exec_min);
     RUN_TEST(cypher_exec_max);
     RUN_TEST(cypher_exec_collect);
     RUN_TEST(cypher_exec_count_star);
+    RUN_TEST(cypher_issue1111_return_type_count_group);
     RUN_TEST(cypher_parse_skip);
     RUN_TEST(cypher_parse_sum_avg);
     RUN_TEST(cypher_parse_collect);
@@ -2860,6 +3067,8 @@ SUITE(cypher) {
     /* Phase 6: WITH clause */
     RUN_TEST(cypher_exec_with_rename);
     RUN_TEST(cypher_exec_with_count);
+    RUN_TEST(cypher_issue1111_with_type_count_group);
+    RUN_TEST(cypher_issue1111_with_scalar_func_alias_no_node_leak);
     RUN_TEST(cypher_exec_with_where);
     RUN_TEST(cypher_exec_with_orderby_limit);
     RUN_TEST(cypher_parse_with);
@@ -2881,4 +3090,6 @@ SUITE(cypher) {
     /* Phase 9: UNWIND */
     RUN_TEST(cypher_parse_unwind);
     RUN_TEST(cypher_parse_unwind_var);
+    RUN_TEST(cypher_parse_unwind_oversized_literal_no_overflow);
+    RUN_TEST(cypher_parse_unwind_many_elements_no_overflow);
 }
