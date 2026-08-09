@@ -549,6 +549,18 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
      * complete in-memory graph in Phase 2. */
     for (int i = 0; i < file_count; i++) {
         if (cbm_pipeline_check_cancel(ctx)) {
+            /* Cancellation mid-extraction: release the cache this pass owns,
+             * including results already extracted into it (the normal cleanup
+             * at the end of the pass does the same) — clang-analyzer caught
+             * this return leaking the whole cache. */
+            if (owns_local_cache) {
+                for (int j = 0; j < file_count; j++) {
+                    if (local_cache[j]) {
+                        cbm_free_result(local_cache[j]);
+                    }
+                }
+                free(local_cache);
+            }
             return CBM_NOT_FOUND;
         }
 

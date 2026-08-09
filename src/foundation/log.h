@@ -8,7 +8,9 @@
  *   - Levels: DEBUG, INFO, WARN, ERROR
  *   - Level filtering at runtime via cbm_log_set_level() or the
  *     CBM_LOG_LEVEL env var (see cbm_log_init_from_env)
- *   - Thread-safe (each fprintf is atomic on POSIX for lines < PIPE_BUF)
+ *   - Thread-safe (each fprintf is atomic on POSIX for lines < PIPE_BUF).
+ *     The configuration itself — level, format, sink — is held in relaxed
+ *     atomics, so reconfiguring from one thread while others log is defined.
  */
 #ifndef CBM_LOG_H
 #define CBM_LOG_H

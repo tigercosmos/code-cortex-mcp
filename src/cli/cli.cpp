@@ -2979,7 +2979,9 @@ int cbm_config_delete(cbm_config_t *cfg, const char *key) {
 /* ── Config CLI subcommand ────────────────────────────────────── */
 
 int cbm_cmd_config(int argc, char **argv) {
-    if (argc == 0) {
+    /* NULL argv with a nonzero argc previously slipped past this guard and
+     * dereferenced argv[0] below -- caught by the clang-analyzer lane. */
+    if (argc == 0 || !argv) {
         printf("Usage: code-cortex-mcp config <command> [args]\n\n");
         printf("Commands:\n");
         printf("  list             Show all config values\n");

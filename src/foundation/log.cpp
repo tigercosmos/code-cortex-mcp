@@ -3,6 +3,7 @@
  */
 #include "log.h"
 #include "foundation/constants.h"
+#include <atomic>
 #include <ctype.h>
 #include <inttypes.h>
 #include <stdarg.h>
@@ -11,9 +12,24 @@
 #include <stdlib.h>
 #include <string.h>
 
-static CBMLogLevel g_log_level = CBM_LOG_INFO;
-static CBMLogFormat g_log_format = CBM_LOG_FORMAT_TEXT;
-static cbm_log_sink_fn g_log_sink = NULL;
+/* These are written by whatever thread configures logging and read by every
+ * thread that logs — pipeline workers, the watcher, the MCP server. They were
+ * plain globals, which is a data race on the SINK in the strict sense that
+ * matters: emit_line read the pointer and CALLED it, so a torn or stale read
+ * is a jump through a partially-written pointer, not just a stale value.
+ *
+ * Relaxed ordering is the right level: each is an independent scalar with no
+ * happens-before relationship to publish alongside it, and the log path must
+ * stay cheap enough that nobody is tempted to route around it.
+ *
+ * std::atomic rather than C11 _Atomic/<stdatomic.h>: this TU is C++23, and
+ * std::atomic's constexpr constructor makes every initializer below a
+ * constant initializer — including the null function pointer, which as a bare
+ * C `NULL` (i.e. `((void *)0)`) is not a compile-time constant for a
+ * function-pointer _Atomic and is rejected outright by older Apple clang. */
+static std::atomic<CBMLogLevel> g_log_level{CBM_LOG_INFO};
+static std::atomic<CBMLogFormat> g_log_format{CBM_LOG_FORMAT_TEXT};
+static std::atomic<cbm_log_sink_fn> g_log_sink{nullptr};
 
 /* CBM_LOG_LEVEL support — distilled from #414 (closes #413, thanks @santanusinha). */
 void cbm_log_init_from_env(void) {
@@ -71,23 +87,23 @@ parse_format:;
 }
 
 void cbm_log_set_sink(cbm_log_sink_fn fn) {
-    g_log_sink = fn;
+    g_log_sink.store(fn, std::memory_order_relaxed);
 }
 
 void cbm_log_set_level(CBMLogLevel level) {
-    g_log_level = level;
+    g_log_level.store(level, std::memory_order_relaxed);
 }
 
 CBMLogLevel cbm_log_get_level(void) {
-    return g_log_level;
+    return g_log_level.load(std::memory_order_relaxed);
 }
 
 void cbm_log_set_format(CBMLogFormat format) {
-    g_log_format = format;
+    g_log_format.store(format, std::memory_order_relaxed);
 }
 
 CBMLogFormat cbm_log_get_format(void) {
-    return g_log_format;
+    return g_log_format.load(std::memory_order_relaxed);
 }
 
 static const char *level_str(CBMLogLevel level) {
@@ -190,15 +206,18 @@ static void finish_line(char *buf, size_t bufsz, size_t pos) {
 }
 
 static void emit_line(const char *line) {
-    if (g_log_sink) {
-        g_log_sink(line);
+    /* Load ONCE: re-reading the global between the test and the call would let
+     * a concurrent cbm_log_set_sink turn a checked pointer into a NULL call. */
+    cbm_log_sink_fn sink = g_log_sink.load(std::memory_order_relaxed);
+    if (sink) {
+        sink(line);
         return;
     }
     (void)fprintf(stderr, "%s\n", line);
 }
 
 void cbm_log(CBMLogLevel level, const char *msg, ...) {
-    if (level < g_log_level) {
+    if (level < g_log_level.load(std::memory_order_relaxed)) {
         return;
     }
 
@@ -207,7 +226,7 @@ void cbm_log(CBMLogLevel level, const char *msg, ...) {
     va_list args;
     va_start(args, msg);
 
-    if (g_log_format == CBM_LOG_FORMAT_JSON) {
+    if (g_log_format.load(std::memory_order_relaxed) == CBM_LOG_FORMAT_JSON) {
         append_raw(line_buf, sizeof(line_buf), &pos, "{\"level\":");
         append_json_string(line_buf, sizeof(line_buf), &pos, level_str(level));
         append_raw(line_buf, sizeof(line_buf), &pos, ",\"event\":");
