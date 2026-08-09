@@ -1052,6 +1052,126 @@ TEST(nix_function) {
     PASS();
 }
 
+/* Defined further down with the decorator helpers; used by the Nix tests too. */
+static const CBMDefinition *find_def_by_name(CBMFileResult *r, const char *name);
+
+/* Count definitions with a given name (any label). */
+static int count_defs_named(CBMFileResult *r, const char *name) {
+    int n = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, name) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* A Nix library/module file's ROOT expression is normally itself a lambda
+ * (`{ pkgs, lib, ... }: <body>`). walk_defs handed that node to the function
+ * path, resolved no name for it, and then abandoned the whole subtree — so no
+ * binding below the near-universal header was ever visited. */
+TEST(nix_bindings_behind_header_lambda) {
+    CBMFileResult *r = extract("{ pkgs, lib, ... }:\n"
+                               "{\n"
+                               "  addOne = x: x + 1;\n"
+                               "  addTwo = x: x + 2;\n"
+                               "}\n",
+                               CBM_LANG_NIX, "t", "lib.nix");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "addOne"));
+    ASSERT(has_def(r, "Function", "addTwo"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A Nix binding's name is a PATH. The leaf is the name and the leading segments
+ * are scope, so `a.b.fn` is named `fn` (not `a`), and two attrsets can each hold
+ * a `dup` without the second silently overwriting the first at write. */
+TEST(nix_attrpath_leaf_is_name_path_is_scope) {
+    CBMFileResult *r = extract("{ lib }:\n"
+                               "{\n"
+                               "  setA = { dup = x: x; };\n"
+                               "  setB = { dup = x: x; };\n"
+                               "  a.b.fn = x: x;\n"
+                               "}\n",
+                               CBM_LANG_NIX, "t", "paths.nix");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* Both `dup` bindings survive, under distinct qualified names. */
+    ASSERT_EQ(count_defs_named(r, "dup"), 2);
+    const char *qn_a = NULL;
+    const char *qn_b = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, "dup") == 0) {
+            if (!qn_a) {
+                qn_a = r->defs.items[i].qualified_name;
+            } else {
+                qn_b = r->defs.items[i].qualified_name;
+            }
+        }
+    }
+    ASSERT_NOT_NULL(qn_a);
+    ASSERT_NOT_NULL(qn_b);
+    ASSERT(strcmp(qn_a, qn_b) != 0);
+    ASSERT_NOT_NULL(strstr(qn_a, ".setA.dup"));
+    ASSERT_NOT_NULL(strstr(qn_b, ".setB.dup"));
+    /* Dotted attrpath: leaf is the name, leading segments are QN scope. */
+    const CBMDefinition *fn = find_def_by_name(r, "fn");
+    ASSERT_NOT_NULL(fn);
+    ASSERT_NOT_NULL(fn->qualified_name);
+    ASSERT_NOT_NULL(strstr(fn->qualified_name, ".a.b.fn"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Nix Variable nodes: the returned attrset's direct bindings are the file's
+ * exported surface. Lambda-valued bindings are Functions and attrset-valued
+ * ones are scopes, so neither may be double-counted as a Variable; bindings in
+ * a deeper attrset are not file scope and must stay out (the per-leaf flood). */
+TEST(nix_module_bindings_mint_variables) {
+    CBMFileResult *r = extract("{ pkgs }:\n"
+                               "{\n"
+                               "  name = \"demo\";\n"
+                               "  services.nginx.enable = true;\n"
+                               "  mk = x: x;\n"
+                               "  nested = { deep = 1; };\n"
+                               "}\n",
+                               CBM_LANG_NIX, "t", "module.nix");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Variable", "name"));
+    const CBMDefinition *en = find_def_by_name(r, "enable");
+    ASSERT_NOT_NULL(en);
+    ASSERT_STR_EQ(en->label, "Variable");
+    ASSERT_NOT_NULL(en->qualified_name);
+    ASSERT_NOT_NULL(strstr(en->qualified_name, ".services.nginx.enable"));
+    ASSERT_FALSE(has_def(r, "Variable", "mk"));     /* already a Function */
+    ASSERT_FALSE(has_def(r, "Variable", "nested")); /* a scope, not a value */
+    ASSERT_FALSE(has_def_any(r, "deep"));           /* nested, not file scope */
+    cbm_free_result(r);
+    PASS();
+}
+
+/* `let … in { … }`: the let's own bindings are file scope in the same sense a
+ * C++ file-static is, and the returned attrset's are the exported surface. */
+TEST(nix_let_and_attrset_bindings_mint_variables) {
+    CBMFileResult *r = extract("{ pkgs }:\n"
+                               "let\n"
+                               "  version = \"1.2.3\";\n"
+                               "in\n"
+                               "{\n"
+                               "  pname = \"demo\";\n"
+                               "}\n",
+                               CBM_LANG_NIX, "t", "pkg.nix");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Variable", "version"));
+    ASSERT(has_def(r, "Variable", "pname"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Fortran --- */
 TEST(fortran_function) {
     /* Fortran subroutine name extraction is incomplete — just verify no crash */
@@ -1188,6 +1308,39 @@ TEST(cpp_function) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     ASSERT_GTE(r->defs.count, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* #1266: GoogleTest TEST() macros with the same name collapse into a single
+ * node when multiple tests share a file. Each must mint a distinct Function
+ * node whose name encodes the suite and case arguments. */
+TEST(cpp_gtest_same_name_collision_issue1266) {
+    CBMFileResult *r = extract("namespace demo { int assembleWidget(int s) { return s * 2; } }\n"
+                               "TEST(WidgetSuite, DoublesSmallSize) { demo::assembleWidget(1); }\n"
+                               "TEST(WidgetSuite, DoublesZero) { demo::assembleWidget(0); }\n"
+                               "TEST(WidgetSuite, DoublesLargeSize) {\n"
+                               "  demo::assembleWidget(1000);\n"
+                               "}\n",
+                               CBM_LANG_CPP, "t", "direct_test.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_def(r, "Function", "TEST_WidgetSuite_DoublesSmallSize"));
+    ASSERT(has_def(r, "Function", "TEST_WidgetSuite_DoublesZero"));
+    ASSERT(has_def(r, "Function", "TEST_WidgetSuite_DoublesLargeSize"));
+    ASSERT(!has_def(r, "Function", "TEST"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* #1266: TEST_F fixture macro also produces unique names. */
+TEST(cpp_gtest_f_unique_name_issue1266) {
+    CBMFileResult *r = extract("TEST_F(MyFixture, FirstTest) { doStuff(); }\n"
+                               "TEST_F(MyFixture, SecondTest) { doOtherStuff(); }\n",
+                               CBM_LANG_CPP, "t", "fixture_test.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_def(r, "Function", "TEST_F_MyFixture_FirstTest"));
+    ASSERT(has_def(r, "Function", "TEST_F_MyFixture_SecondTest"));
+    ASSERT(!has_def(r, "Function", "TEST_F"));
     cbm_free_result(r);
     PASS();
 }
@@ -2619,6 +2772,70 @@ TEST(extract_java_method_annotations_issue382) {
     PASS();
 }
 
+/* A comment between decorators must not drop the decorators above it.
+ * Comments are NAMED tree-sitter nodes, so the prev-sibling walk used to stop
+ * at one — a documented route (@Post + @HttpCode above an explanatory comment)
+ * silently lost those decorators and disappeared from route/authz queries. */
+TEST(extract_ts_decorators_survive_interleaved_comment) {
+    CBMFileResult *r = extract("class AuthController {\n"
+                               "  @Post('login')\n"
+                               "  @HttpCode(HttpStatus.OK)\n"
+                               "  // throttled per IP and per account\n"
+                               "  @Throttle({ default: { ttl: 900_000, limit: 5 } })\n"
+                               "  async login(dto: LoginDto) { return 1; }\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "auth.controller.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *m = find_def_by_name(r, "login");
+    ASSERT_NOT_NULL(m);
+    ASSERT(decorators_contain(m, "Throttle")); /* below the comment — always worked */
+    ASSERT(decorators_contain(m, "HttpCode")); /* above the comment — was dropped */
+    ASSERT(decorators_contain(m, "Post"));     /* above the comment — was dropped */
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Find an in-body call by its raw callee text; returns the call or NULL. */
+static const CBMCall *find_call_by_callee(CBMFileResult *r, const char *callee) {
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && strcmp(r->calls.items[i].callee_name, callee) == 0) {
+            return &r->calls.items[i];
+        }
+    }
+    return NULL;
+}
+
+/* Issue #1006: JS/TS template-literal URLs must flatten ${...} substitutions
+ * to the canonical "{}" placeholder, both as call arguments (HTTP_CALLS) and
+ * as URL-shaped string_refs collected from const/return positions. */
+TEST(extract_ts_template_string_url_issue1006) {
+    CBMFileResult *r = extract("export function detailPath(id: string): string {\n"
+                               "  return `/api/v1/things/${id}/detail`;\n"
+                               "}\n"
+                               "export function load(id: string) {\n"
+                               "  return fetch(`/api/v1/things/${id}`);\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "paths.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c = find_call_by_callee(r, "fetch");
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(c->first_string_arg);
+    ASSERT_STR_EQ(c->first_string_arg, "/api/v1/things/{}");
+    int found = 0;
+    for (int i = 0; i < r->string_refs.count; i++) {
+        if (r->string_refs.items[i].value &&
+            strcmp(r->string_refs.items[i].value, "/api/v1/things/{}/detail") == 0) {
+            found = 1;
+            break;
+        }
+    }
+    ASSERT(found);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Issue #213: large TS files were indexed as a File node with zero children. */
 TEST(extract_large_ts_has_functions_issue213) {
     enum { NFUNCS = 4000 };
@@ -3087,6 +3304,10 @@ SUITE(extraction) {
     RUN_TEST(julia_function);
     RUN_TEST(elm_function);
     RUN_TEST(nix_function);
+    RUN_TEST(nix_bindings_behind_header_lambda);
+    RUN_TEST(nix_attrpath_leaf_is_name_path_is_scope);
+    RUN_TEST(nix_module_bindings_mint_variables);
+    RUN_TEST(nix_let_and_attrset_bindings_mint_variables);
     RUN_TEST(fortran_function);
 
     /* OOP/Systems variants */
@@ -3101,6 +3322,8 @@ SUITE(extraction) {
     RUN_TEST(rust_enum);
     RUN_TEST(zig_struct);
     RUN_TEST(cpp_function);
+    RUN_TEST(cpp_gtest_same_name_collision_issue1266);
+    RUN_TEST(cpp_gtest_f_unique_name_issue1266);
     RUN_TEST(cpp_out_of_line_method_issue428);
     RUN_TEST(cobol_paragraph);
     RUN_TEST(verilog_module);
@@ -3217,6 +3440,8 @@ SUITE(extraction) {
     RUN_TEST(js_index_module_qn_not_collide_with_folder);
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);
+    RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
+    RUN_TEST(extract_ts_template_string_url_issue1006);
     RUN_TEST(extract_large_ts_has_functions_issue213);
 
     /* Per-function complexity metrics (Tier A) */

@@ -121,6 +121,14 @@ typedef struct {
      * resolve. */
     CBMArena seq_cross_arena;
     bool seq_cross_arena_live;
+    /* Sequential lsp_cross only: the per-file module-QN strings the collected
+     * defs (and through them the shared cross registries in seq_cross_arena)
+     * borrow. The registries outlive the pass so pass_calls can read borrowed
+     * strings — these must too. Ownership transfers here at the end of the
+     * pass; released beside the arena. Freeing them at pass end was a
+     * use-after-free first observable on the real-repo corpus tier. */
+    char **seq_cross_def_modules;
+    int seq_cross_def_module_count;
 } cbm_pipeline_ctx_t;
 
 static inline int cbm_pipeline_relpath_is_excluded(const char *rel_path, char *const *excluded_dirs,
