@@ -897,9 +897,14 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
 
     cbm_pxc_free_module_def_index(module_def_index);
     free(all_defs);
-    for (int i = 0; i < file_count; i++)
-        free(def_modules[i]);
-    free(def_modules);
+    /* The module-QN strings are borrowed by the shared cross registries in
+     * ctx->seq_cross_arena, which deliberately outlive this pass so that
+     * pass_calls can read borrowed registry strings. Freeing the strings here
+     * while keeping the registries alive was a use-after-free (pass_calls
+     * strcmp on a freed module QN, caught by ASan on the kernel corpus tier).
+     * Ownership transfers to the ctx; released beside the arena. */
+    ctx->seq_cross_def_modules = def_modules;
+    ctx->seq_cross_def_module_count = file_count;
 
     /* Drop the borrowed manifest pointer before its arena dies, so a later
      * pass (or a stale thread-local) can never read freed manifest memory. */

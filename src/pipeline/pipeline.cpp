@@ -831,10 +831,20 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         ctx->result_cache = NULL;
     }
     /* Release the lsp_cross pass's shared registries only now: resolved_calls
-     * borrowed registry-owned strings that the calls pass read above. */
+     * borrowed registry-owned strings that the calls pass read above. The
+     * module-QN strings the registries borrow (parked on the ctx by the pass
+     * for exactly this lifetime) go with them. */
     if (ctx->seq_cross_arena_live) {
         cbm_arena_destroy(&ctx->seq_cross_arena);
         ctx->seq_cross_arena_live = false;
+    }
+    if (ctx->seq_cross_def_modules) {
+        for (int i = 0; i < ctx->seq_cross_def_module_count; i++) {
+            free(ctx->seq_cross_def_modules[i]);
+        }
+        free(ctx->seq_cross_def_modules);
+        ctx->seq_cross_def_modules = NULL;
+        ctx->seq_cross_def_module_count = 0;
     }
     /* Destroy this thread's TLS parser: the sequential path parses on the
      * CALLING thread (usually main), and a parser left alive here was
