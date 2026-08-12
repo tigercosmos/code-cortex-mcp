@@ -12,9 +12,14 @@
 #include <cypher/cypher.h>
 #include "../src/foundation/str_util.h"
 #include "../src/foundation/compat_fs.h"
+#include "../src/foundation/platform.h"
+#include "../src/foundation/subprocess.h"
 
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 /* ══════════════════════════════════════════════════════════════════
  *  SHELL INJECTION PREVENTION
@@ -364,6 +369,27 @@ TEST(exec_no_shell_captures_exit_code) {
     PASS();
 }
 
+TEST(subprocess_total_timeout_ignores_continuous_progress) {
+    char log_path[256];
+    snprintf(log_path, sizeof(log_path), "/tmp/cbm-subprocess-timeout-%d.log", (int)getpid());
+    const char *argv[] = {"/bin/sh", "-c", "while :; do echo tick; sleep 0.05; done", NULL};
+    cbm_proc_opts_t opts = {0};
+    opts.bin = argv[0];
+    opts.argv = argv;
+    opts.log_file = log_path;
+    opts.quiet_timeout_ms = 2000;
+    opts.total_timeout_ms = 250;
+    opts.delete_log_on_exit = true;
+
+    uint64_t started = cbm_now_ms();
+    cbm_proc_result_t result;
+    ASSERT_EQ(cbm_subprocess_run(&opts, &result), 0);
+    uint64_t elapsed = cbm_now_ms() - started;
+    ASSERT_EQ(result.outcome, CBM_PROC_HANG);
+    ASSERT_TRUE(elapsed < 5000);
+    PASS();
+}
+
 #endif /* _WIN32 */
 
 /* ══════════════════════════════════════════════════════════════════
@@ -417,5 +443,6 @@ SUITE(security) {
     RUN_TEST(exec_no_shell_nonexistent_command);
     RUN_TEST(exec_no_shell_null_argv_returns_error);
     RUN_TEST(exec_no_shell_captures_exit_code);
+    RUN_TEST(subprocess_total_timeout_ignores_continuous_progress);
 #endif
 }

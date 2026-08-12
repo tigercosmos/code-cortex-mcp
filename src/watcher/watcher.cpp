@@ -45,6 +45,7 @@ typedef struct {
     uint64_t first_missing_ms; /* cbm_now_ms() of the streak's first miss (0 = no streak) */
     int file_count;            /* approximate, for interval calc */
     int interval_ms;           /* adaptive poll interval */
+    int index_failure_count;   /* consecutive failed re-index attempts */
     int64_t next_poll_ns;      /* next poll time (monotonic ns) */
 } project_state_t;
 
@@ -73,6 +74,7 @@ struct cbm_watcher {
 #define POLL_BASE_MS 5000
 #define POLL_FILE_STEP 500 /* add 1s per this many files */
 #define POLL_MAX_MS 60000
+#define INDEX_FAILURE_BACKOFF_MAX_MS 900000
 
 /* Stale-root pruning (#286): a watched project whose root directory stays
  * missing is pruned — its cached DB is deleted and the watch entry removed.
@@ -464,7 +466,8 @@ void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name) {
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *s = (project_state_t *)cbm_ht_get(w->projects, project_name);
     if (s) {
-        /* Reset backoff — poll immediately on next cycle */
+        /* A new explicit change may have fixed the prior indexing failure. */
+        s->index_failure_count = 0;
         s->next_poll_ns = 0;
     }
     cbm_mutex_unlock(&w->projects_lock);
@@ -518,8 +521,8 @@ static bool check_changes(project_state_t *s) {
     char head[CBM_SZ_64] = {0};
     if (git_head(s->root_path, head, sizeof(head)) == 0) {
         if (s->last_head[0] != '\0' && strcmp(head, s->last_head) != 0) {
-            /* HEAD moved — commit, checkout, pull */
-            strncpy(s->last_head, head, sizeof(s->last_head) - 1);
+            /* Keep the old baseline until indexing succeeds so a failed
+             * attempt remains observable and is retried after backoff. */
             return true;
         }
         strncpy(s->last_head, head, sizeof(s->last_head) - 1);
@@ -636,6 +639,7 @@ static void poll_project(const char *key, void *val, void *ud) {
     if (ctx->w->index_fn) {
         int rc = ctx->w->index_fn(s->project_name, s->root_path, ctx->w->user_data);
         if (rc == 0) {
+            s->index_failure_count = 0;
             ctx->reindexed++;
             /* Update HEAD after successful reindex */
             git_head(s->root_path, s->last_head, sizeof(s->last_head));
@@ -643,7 +647,18 @@ static void poll_project(const char *key, void *val, void *ud) {
             s->file_count = git_file_count(s->root_path);
             s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
         } else {
+            s->index_failure_count++;
+            int64_t backoff_ms = s->interval_ms;
+            int doublings = s->index_failure_count > 8 ? 8 : s->index_failure_count;
+            for (int i = 0; i < doublings && backoff_ms < INDEX_FAILURE_BACKOFF_MAX_MS; i++) {
+                backoff_ms *= 2;
+            }
+            if (backoff_ms > INDEX_FAILURE_BACKOFF_MAX_MS) {
+                backoff_ms = INDEX_FAILURE_BACKOFF_MAX_MS;
+            }
             cbm_log_warn("watcher.index.err", "project", s->project_name);
+            s->next_poll_ns = now_ns() + (backoff_ms * US_PER_MS);
+            return;
         }
     }
 

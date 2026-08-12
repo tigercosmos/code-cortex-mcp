@@ -145,7 +145,7 @@ static int watcher_index_fn(const char *project_name, const char *root_path, voi
      * Watcher will retry on next poll cycle (5-60s). */
     if (!cbm_pipeline_try_lock()) {
         cbm_log_info("watcher.skip", "project", project_name, "reason", "pipeline_busy");
-        return 0;
+        return -1;
     }
 
     cbm_log_info("watcher.reindex", "project", project_name, "path", root_path);
@@ -155,16 +155,18 @@ static int watcher_index_fn(const char *project_name, const char *root_path, voi
      * instead of ratcheting (mimalloc v3 does not reclaim pages that worker
      * threads abandon at exit). The child writes the DB; the parent only needs the
      * return code. The pipeline lock (already held) still serialises re-indexes.
-     * Degrade to the in-process pipeline when the supervisor is off (kill switch)
-     * or the spawn fails. */
+     * The in-process pipeline below is used only when the supervisor is off. */
     if (cbm_index_supervisor_should_wrap()) {
         char *resp = cbm_mcp_index_run_supervised_path(root_path);
-        if (resp) {
-            free(resp);
-            cbm_pipeline_unlock();
-            return 0;
+        bool is_error = true;
+        bool valid = cbm_mcp_tool_result_valid(resp, &is_error);
+        free(resp);
+        cbm_pipeline_unlock();
+        if (!valid || is_error) {
+            cbm_log_warn("watcher.reindex_failed", "project", project_name, "mode", "supervised");
+            return -1;
         }
-        /* resp == NULL → spawn-failure degrade → fall through to in-process. */
+        return 0;
     }
 
     cbm_pipeline_t *p = cbm_pipeline_new(root_path, NULL, CBM_MODE_FULL);
@@ -290,13 +292,38 @@ static char *cli_slurp_stream(FILE *f) {
 
 /* Slurp a file path into a heap, NUL-terminated string. Caller frees. */
 static char *cli_slurp_file(const char *path) {
-    FILE *f = fopen(path, "rb");
+    FILE *f = cbm_fopen(path, "rb");
     if (!f) {
         return NULL;
     }
     char *s = cli_slurp_stream(f);
     (void)fclose(f);
     return s;
+}
+
+/* Publish a worker response atomically. A killed worker may leave the temporary
+ * file incomplete, but the parent never observes it as the completed response. */
+static bool cli_write_response(const char *path, const char *result) {
+    char tmp_path[CBM_SZ_2K];
+    int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    if (n <= 0 || (size_t)n >= sizeof(tmp_path)) {
+        return false;
+    }
+    (void)cbm_unlink(tmp_path);
+
+    FILE *f = cbm_fopen(tmp_path, "wb");
+    if (!f) {
+        return false;
+    }
+    bool ok = fputs(result, f) >= 0 && fflush(f) == 0 && !ferror(f);
+    if (fclose(f) != 0) {
+        ok = false;
+    }
+    if (!ok || cbm_rename_replace(tmp_path, path) != 0) {
+        (void)cbm_unlink(tmp_path);
+        return false;
+    }
+    return true;
 }
 
 /* True if the first non-whitespace byte of s is '{' (raw-JSON detection). */
@@ -321,8 +348,9 @@ static int run_cli(int argc, char **argv) {
      * the given file for the parent to read back. Stripped here so the tool
      * dispatch below sees only the tool name + its args. */
     bool index_worker = cli_strip_flag(&argc, argv, "--index-worker");
+    bool supervised_worker = cli_strip_flag(&argc, argv, "--supervised-worker");
     const char *response_out = cli_strip_flag_value(&argc, argv, "--response-out");
-    cbm_index_set_worker_role(index_worker, response_out);
+    cbm_index_set_worker_role(index_worker || supervised_worker, response_out);
 
 #ifndef _WIN32
     /* #845: a supervised worker must not outlive its supervisor. If the parent
@@ -333,7 +361,7 @@ static int run_cli(int argc, char **argv) {
      * stderr and _exit(0)s — no cleanup dependencies). Detached: the worker
      * exits by returning from run_cli; exit() tears the thread down. Failure
      * to start is non-fatal, same policy as the MCP-server watchdog. */
-    if (index_worker) {
+    if (index_worker || supervised_worker) {
         static pid_t worker_initial_ppid; /* static: outlives run_cli for the thread */
         worker_initial_ppid = getppid();
         cbm_thread_t worker_watchdog_tid;
@@ -444,17 +472,15 @@ static int run_cli(int argc, char **argv) {
         /* Supervised worker: hand the full result string to the parent via the
          * response file before printing (parent reads it back on a clean exit). */
         const char *ro = cbm_index_worker_response_out();
-        if (ro) {
-            FILE *rf = cbm_fopen(ro, "wb");
-            if (rf) {
-                (void)fputs(result, rf);
-                (void)fclose(rf);
-            }
-        }
+        bool response_write_failed = ro && !cli_write_response(ro, result);
         if (raw_json) {
             printf("%s\n", result);
         } else {
             exit_code = cli_print_mcp_result(result);
+        }
+        if (response_write_failed) {
+            cbm_log_error("worker.response.write_failed", "path", ro);
+            exit_code = SKIP_ONE;
         }
         if (cbm_index_worker_active()) {
             /* Supervised worker: the response is delivered (file + stdout).

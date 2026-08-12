@@ -9,9 +9,9 @@
  *   1. Exit CLASSIFICATION — {clean, exit-nonzero, crash, hang, killed} — from
  *      POSIX WIFSIGNALED/WTERMSIG and the Windows NTSTATUS exception exit codes
  *      (0xC0000005 access-violation, 0xC00000FD stack-overflow, …).
- *   2. A quiet-timeout — kill + report HANG when the child makes no progress
- *      (emits no new log line) for a configurable window. This catches external
- *      tree-sitter scanners that infinite-loop (a hang, not a crash).
+ *   2. Quiet and total timeouts — kill + report HANG when the child makes no
+ *      progress or exceeds a hard wall-clock deadline. The latter remains
+ *      effective even when a stuck child keeps emitting log lines.
  *
  * The reap loop is EINTR-safe. Line tailing keeps a partial final line buffered
  * (an incomplete, un-newline-terminated line is not yet "progress" and is not
@@ -57,12 +57,15 @@ typedef struct {
     void *log_ud;                /* user data for on_log_line */
     int quiet_timeout_ms;        /* <= 0 => no timeout; else kill+HANG after this many
                                   * ms with no new completed log line */
+    int total_timeout_ms;        /* <= 0 => no total cap; else kill+HANG after this many
+                                  * ms regardless of log activity */
     bool delete_log_on_exit;     /* unlink log_file after reaping */
 } cbm_proc_opts_t;
 
-/* Spawn opts->bin, supervise (tail + optional quiet-timeout), block until it ends,
- * and classify the result into *out. Returns 0 if a child was spawned and reaped
- * (out filled), or -1 if the spawn itself failed (out->outcome == CBM_PROC_SPAWN_FAILED). */
+/* Spawn opts->bin, supervise (tail + optional quiet/total timeouts), block until
+ * it ends, and classify the result into *out. Returns 0 if a child was spawned
+ * and reaped (out filled), or -1 if the spawn itself failed
+ * (out->outcome == CBM_PROC_SPAWN_FAILED). */
 int cbm_subprocess_run(const cbm_proc_opts_t *opts, cbm_proc_result_t *out);
 
 /* Pure outcome classifier — exposed so the platform-specific exit-code mapping

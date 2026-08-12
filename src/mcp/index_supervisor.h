@@ -53,6 +53,15 @@ void cbm_index_supervisor_mark_host(void);
  * (CBM_INDEX_SUPERVISOR=0) is not set. */
 bool cbm_index_supervisor_should_wrap(void);
 
+/* True when a normal MCP tools/call request should run in a disposable child.
+ * The child is killed at a hard deadline (30 seconds for ordinary tools and 90
+ * seconds for graph-wide tools by default), so native code cannot wedge the
+ * stdio event loop indefinitely. CBM_TOOL_TIMEOUT_S overrides both classes. */
+bool cbm_tool_supervisor_should_wrap(void);
+
+/* Hard wall-clock deadline for one complete index_repository call. */
+int cbm_index_timeout_ms(void);
+
 /* TEST HOOK (#845): process-wide count of worker-spawn attempts, incremented on
  * entry to cbm_index_spawn_worker. Embedder tests assert the count is unchanged
  * across an index_repository call to prove indexing ran IN-PROCESS. */
@@ -73,7 +82,8 @@ typedef struct {
  * supervise it (quiet-timeout for hangs), reap, and classify. On a clean exit,
  * result->response holds the worker's response string (read from the temp file).
  * Returns 0 if a worker was spawned and reaped (result filled), or -1 if the
- * child could not be spawned (caller degrades to in-process).
+ * child could not be spawned. total_timeout_ms is the caller's remaining
+ * wall-clock budget for this attempt.
  *
  * Probe knobs for the skip-and-continue recovery re-run (Stage 3c) are passed to
  * the child as inherited env vars around the spawn (set before, unset after —
@@ -87,7 +97,21 @@ typedef struct {
  * Any of the three may be false/NULL to leave that knob unset (the normal first
  * attempt passes single_thread=false, marker_file=NULL, quarantine_file=NULL). */
 int cbm_index_spawn_worker(const char *args_json, bool single_thread, const char *marker_file,
-                           const char *quarantine_file, cbm_index_worker_result_t *result);
+                           const char *quarantine_file, int total_timeout_ms,
+                           cbm_index_worker_result_t *result);
+
+/* Spawn `<self> cli --supervised-worker <tool_name> --args-file <tmp>
+ * --response-out <tmp>`, enforce the hard tool-call deadline, and return the
+ * child's MCP result. The caller must accept a response only after a clean or
+ * explicit nonzero exit and after validating the complete MCP result document. */
+int cbm_tool_spawn_worker(const char *tool_name, const char *args_json,
+                          cbm_index_worker_result_t *result);
+
+/* Configured hard deadline for ordinary tool workers. */
+int cbm_tool_timeout_ms(const char *tool_name);
+
+/* Reject option-looking or otherwise unsafe tool names before building argv. */
+bool cbm_tool_worker_name_safe(const char *tool_name);
 
 void cbm_index_worker_result_free(cbm_index_worker_result_t *result);
 

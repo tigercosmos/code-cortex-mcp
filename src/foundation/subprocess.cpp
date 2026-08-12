@@ -5,8 +5,9 @@
  */
 #include "subprocess.h"
 
-#include "compat.h"   /* cbm_nanosleep */
-#include "platform.h" /* cbm_now_ms */
+#include "compat.h"    /* cbm_nanosleep */
+#include "compat_fs.h" /* cbm_fopen, cbm_unlink */
+#include "platform.h"  /* cbm_now_ms */
 
 #include <stdio.h>
 #include <string.h>
@@ -99,7 +100,7 @@ static bool cbm_tail_log(const char *log_file, long *tail_pos, cbm_proc_log_cb c
     if (!log_file) {
         return false;
     }
-    FILE *lf = fopen(log_file, "r");
+    FILE *lf = cbm_fopen(log_file, "r");
     if (!lf) {
         return false;
     }
@@ -256,14 +257,24 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 
     HANDLE hlog = INVALID_HANDLE_VALUE;
     STARTUPINFOW si = {.cb = sizeof(si)};
+    SECURITY_ATTRIBUTES inherit = {sizeof(inherit), NULL, TRUE};
     if (opts->log_file) {
-        hlog = CreateFileA(opts->log_file, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hlog != INVALID_HANDLE_VALUE) {
-            si.dwFlags = STARTF_USESTDHANDLES;
-            si.hStdError = hlog;
-            si.hStdOutput = hlog;
+        wchar_t *wlog = cbm_utf8_to_wide(opts->log_file);
+        if (wlog) {
+            hlog = CreateFileW(wlog, GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL);
+            free(wlog);
         }
+    }
+    if (hlog == INVALID_HANDLE_VALUE) {
+        hlog = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    if (hlog != INVALID_HANDLE_VALUE) {
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdError = hlog;
+        si.hStdOutput = hlog;
     }
 
     PROCESS_INFORMATION pi = {0};
@@ -280,7 +291,8 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     }
 
     long tail_pos = 0;
-    uint64_t last_activity = cbm_now_ms();
+    uint64_t started_at = cbm_now_ms();
+    uint64_t last_activity = started_at;
     bool timed_out = false;
     for (;;) {
         DWORD w = WaitForSingleObject(pi.hProcess, 200);
@@ -290,8 +302,12 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         if (w == WAIT_OBJECT_0) {
             break;
         }
-        if (opts->quiet_timeout_ms > 0 &&
-            (cbm_now_ms() - last_activity) >= (uint64_t)opts->quiet_timeout_ms) {
+        uint64_t now = cbm_now_ms();
+        bool quiet_expired =
+            opts->quiet_timeout_ms > 0 && (now - last_activity) >= (uint64_t)opts->quiet_timeout_ms;
+        bool total_expired =
+            opts->total_timeout_ms > 0 && (now - started_at) >= (uint64_t)opts->total_timeout_ms;
+        if (quiet_expired || total_expired) {
             TerminateProcess(pi.hProcess, 1);
             WaitForSingleObject(pi.hProcess, INFINITE);
             timed_out = true;
@@ -304,7 +320,7 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     if (opts->log_file && opts->delete_log_on_exit) {
-        DeleteFileA(opts->log_file);
+        (void)cbm_unlink(opts->log_file);
     }
 
     out->exit_code = (int)code;
@@ -330,6 +346,9 @@ static void cbm_posix_child_exec(const cbm_proc_opts_t *opts) {
     const char *const *argv = opts->argv ? opts->argv : default_argv;
     const char *target = opts->log_file ? opts->log_file : "/dev/null";
     int fd = open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 && opts->log_file) {
+        fd = open("/dev/null", O_WRONLY);
+    }
     if (fd >= 0) {
         (void)dup2(fd, STDOUT_FILENO);
         (void)dup2(fd, STDERR_FILENO);
@@ -373,9 +392,10 @@ static int cbm_posix_spawn_apple(const cbm_proc_opts_t *opts, pid_t *pid_out) {
 #ifdef O_CLOEXEC
     log_flags |= O_CLOEXEC;
 #endif
-    /* A failed open is not fatal here either: the fork path execs with the
-     * inherited stdout/stderr in that case, so this one does too. */
     int fd = open(target, log_flags, 0644);
+    if (fd < 0 && opts->log_file) {
+        fd = open("/dev/null", log_flags, 0644);
+    }
 
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attr;
@@ -467,8 +487,10 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 #endif
 
     long tail_pos = 0;
-    uint64_t last_activity = cbm_now_ms();
+    uint64_t started_at = cbm_now_ms();
+    uint64_t last_activity = started_at;
     bool timed_out = false;
+    long poll_delay_ns = 1000000L;
     int wstatus = 0;
     for (;;) {
         pid_t wr;
@@ -483,8 +505,12 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         if (done) {
             break;
         }
-        if (opts->quiet_timeout_ms > 0 &&
-            (cbm_now_ms() - last_activity) >= (uint64_t)opts->quiet_timeout_ms) {
+        uint64_t now = cbm_now_ms();
+        bool quiet_expired =
+            opts->quiet_timeout_ms > 0 && (now - last_activity) >= (uint64_t)opts->quiet_timeout_ms;
+        bool total_expired =
+            opts->total_timeout_ms > 0 && (now - started_at) >= (uint64_t)opts->total_timeout_ms;
+        if (quiet_expired || total_expired) {
             kill(pid, SIGKILL);
             do {
                 wr = waitpid(pid, &wstatus, 0);
@@ -492,8 +518,14 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
             timed_out = true;
             break;
         }
-        struct timespec ts = {0, 100000000L}; /* 100 ms poll */
+        struct timespec ts = {0, poll_delay_ns};
         cbm_nanosleep(&ts, NULL);
+        if (poll_delay_ns < 100000000L) {
+            poll_delay_ns *= 2;
+            if (poll_delay_ns > 100000000L) {
+                poll_delay_ns = 100000000L;
+            }
+        }
     }
 
     if (opts->log_file && opts->delete_log_on_exit) {

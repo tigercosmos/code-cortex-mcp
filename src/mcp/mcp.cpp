@@ -35,6 +35,10 @@ enum {
     MCP_CONTENT_PREFIX = 15, /* strlen("Content-Length:") */
     MCP_RETURN_2 = 2,
     MCP_TOOLS_PAGE_SIZE = 8,
+    MCP_FALLBACK_SCAN_TIMEOUT_MS = 5000,
+    MCP_FALLBACK_DB_BUSY_MS = 500,
+    MCP_INDEX_LOCK_WAIT_MS = 5000,
+    MCP_INDEX_LOCK_POLL_MS = 50,
 };
 #define MCP_MS_TO_US 1000LL
 #define MCP_S_TO_US 1000000LL
@@ -77,6 +81,7 @@ enum {
 #include <fcntl.h>
 #endif
 #include <yyjson/yyjson.h>
+#include <limits.h>
 #include <stdint.h> // int64_t
 #include <stdio.h>
 #include <stdlib.h>
@@ -650,6 +655,33 @@ const char *cbm_mcp_tool_input_schema(const char *tool_name) {
     return NULL;
 }
 
+static bool mcp_tool_known(const char *tool_name) {
+    return cbm_mcp_tool_input_schema(tool_name) != NULL ||
+           (tool_name && strcmp(tool_name, "trace_call_path") == 0);
+}
+
+bool cbm_mcp_tool_result_valid(const char *json, bool *is_error) {
+    if (is_error) {
+        *is_error = true;
+    }
+    if (!json) {
+        return false;
+    }
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    if (!doc) {
+        return false;
+    }
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *content = yyjson_is_obj(root) ? yyjson_obj_get(root, "content") : NULL;
+    yyjson_val *error = yyjson_is_obj(root) ? yyjson_obj_get(root, "isError") : NULL;
+    bool valid = content && yyjson_is_arr(content) && error && yyjson_is_bool(error);
+    if (valid && is_error) {
+        *is_error = yyjson_get_bool(error);
+    }
+    yyjson_doc_free(doc);
+    return valid;
+}
+
 static int mcp_tools_cursor_offset(const char *params_json) {
     if (!params_json) {
         return 0;
@@ -915,14 +947,15 @@ bool cbm_mcp_get_bool_arg(const char *args_json, const char *key) {
  * ══════════════════════════════════════════════════════════════════ */
 
 struct cbm_mcp_server {
-    cbm_store_t *store;             /* currently open project store (or NULL) */
-    bool owns_store;                /* true if we opened the store */
-    char *current_project;          /* which project store is open for (heap) */
-    time_t store_last_used;         /* last time resolve_store was called for a named project */
-    char update_notice[CBM_SZ_256]; /* one-shot update notice, cleared after first injection */
-    bool update_checked;            /* true after background check has been launched */
-    cbm_thread_t update_tid;        /* background update check thread */
-    bool update_thread_active;      /* true if update thread was started and needs joining */
+    cbm_store_t *store;               /* currently open project store (or NULL) */
+    bool owns_store;                  /* true if we opened the store */
+    char *current_project;            /* which project store is open for (heap) */
+    time_t store_last_used;           /* last time resolve_store was called for a named project */
+    bool store_resolution_incomplete; /* cache scan stopped on a busy DB or its deadline */
+    char update_notice[CBM_SZ_256];   /* one-shot update notice, cleared after first injection */
+    bool update_checked;              /* true after background check has been launched */
+    cbm_thread_t update_tid;          /* background update check thread */
+    bool update_thread_active;        /* true if update thread was started and needs joining */
 
     /* Session + auto-index state */
     char session_root[CBM_SZ_1K];     /* detected project root path */
@@ -1067,19 +1100,28 @@ static const char *project_db_path(const char *project, char *buf, size_t bufsz)
  * the internal name is copied into name_out; if out_store is non-NULL the open
  * handle is transferred to the caller (who must cbm_store_close it). On failure
  * the store is always closed. Defined after is_project_db_file below. */
-static bool db_internal_project_name(const char *full_path, char *name_out, size_t name_sz,
-                                     cbm_store_t **out_store);
+typedef enum {
+    DB_PROJECT_INVALID = 0,
+    DB_PROJECT_FOUND,
+    DB_PROJECT_BUSY,
+    DB_PROJECT_DEADLINE,
+} db_project_result_t;
+
+static db_project_result_t db_internal_project_name(const char *full_path, char *name_out,
+                                                    size_t name_sz, cbm_store_t **out_store,
+                                                    uint64_t deadline_ms);
 
 /* #704 fallback: scan the cache dir for the db whose sole internal project name
  * equals `project`, returning an open store handle (caller owns it) or NULL.
  * Used only when <project>.db is absent or its internal name differs from the
  * passed name (drifted filename). Defined after is_project_db_file below. */
-static cbm_store_t *resolve_store_fallback_scan(const char *project);
+static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incomplete);
 
 /* Open the right project's .db file for query tools.
  * Caches the connection — reopens only when project changes.
  * Tracks last-access time so the event loop can evict idle stores. */
 static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
+    srv->store_resolution_incomplete = false;
     if (!project) {
         return NULL; /* project is required — no implicit fallback */
     }
@@ -1161,7 +1203,7 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
      * cache dir for the db whose sole internal project name equals `project` and
      * adopt it. Runs ONLY on the fallback — the common fast path is unchanged.
      * No match → NULL (a genuine typo stays not-found). */
-    cbm_store_t *scanned = resolve_store_fallback_scan(project);
+    cbm_store_t *scanned = resolve_store_fallback_scan(project, &srv->store_resolution_incomplete);
     if (scanned) {
         srv->store = scanned;
         srv->owns_store = true;
@@ -1180,15 +1222,23 @@ static void free_node_contents(cbm_node_t *n);
 
 /* Scan cache dir for .db files, writing comma-separated quoted names into out.
  * Returns the number of projects found. */
-static int collect_db_project_names(const char *dir_path, char *out, size_t out_sz) {
+static int collect_db_project_names(const char *dir_path, char *out, size_t out_sz,
+                                    bool *incomplete) {
+    *incomplete = false;
     int count = 0;
     int offset = 0;
+    uint64_t deadline_ms = cbm_now_ms() + MCP_FALLBACK_SCAN_TIMEOUT_MS;
     cbm_dir_t *d = cbm_opendir(dir_path);
     if (!d) {
         return 0;
     }
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(d)) != NULL) {
+        if (cbm_now_ms() >= deadline_ms) {
+            *incomplete = true;
+            cbm_log_warn("store.project_list.incomplete", "reason", "deadline");
+            break;
+        }
         const char *n = entry->name;
         size_t len = strlen(n);
         if (!is_project_db_file(n, len)) {
@@ -1199,8 +1249,18 @@ static int collect_db_project_names(const char *dir_path, char *out, size_t out_
          * actually pass to resolve a store. */
         char full_path[CBM_SZ_2K];
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, n);
+        if (!cbm_is_regular_file(full_path)) {
+            continue;
+        }
         char iname[CBM_SZ_1K];
-        if (!db_internal_project_name(full_path, iname, sizeof(iname), NULL)) {
+        db_project_result_t db_result =
+            db_internal_project_name(full_path, iname, sizeof(iname), NULL, deadline_ms);
+        if (db_result == DB_PROJECT_BUSY || db_result == DB_PROJECT_DEADLINE) {
+            *incomplete = true;
+            cbm_log_warn("store.project_list.incomplete", "path", full_path, "reason",
+                         db_result == DB_PROJECT_BUSY ? "database_busy" : "deadline");
+        }
+        if (db_result != DB_PROJECT_FOUND) {
             continue;
         }
         /* Element-boundary write: only emit this name if the WHOLE element —
@@ -1211,6 +1271,8 @@ static int collect_db_project_names(const char *dir_path, char *out, size_t out_
         size_t off = (size_t)offset;
         size_t need = strlen(iname) + 2 /* quotes */ + (count > 0 ? 1u : 0u) /* comma */;
         if (off + need + 1 > out_sz) {
+            *incomplete = true;
+            cbm_log_warn("store.project_list.incomplete", "reason", "response_buffer_full");
             break; /* would not fit entirely — stop at this element boundary */
         }
         if (count > 0) {
@@ -1263,7 +1325,9 @@ static char *build_project_list_error(const char *reason) {
     cache_dir(dir_path, sizeof(dir_path));
 
     char projects[CBM_SZ_4K] = "";
-    int count = collect_db_project_names(dir_path, projects, sizeof(projects));
+    bool projects_incomplete = false;
+    int count =
+        collect_db_project_names(dir_path, projects, sizeof(projects), &projects_incomplete);
 
     enum { ERR_BUF_SZ = 5120 };
     char buf[ERR_BUF_SZ];
@@ -1271,8 +1335,16 @@ static char *build_project_list_error(const char *reason) {
         snprintf(buf, sizeof(buf),
                  "{\"error\":\"%s\",\"hint\":\"Use list_projects to see all indexed projects, "
                  "then pass it as the \\\"project\\\" "
-                 "argument.\",\"available_projects\":[%s],\"count\":%d}",
-                 reason, projects, count);
+                 "argument.\",\"available_projects\":[%s],\"count\":%d,"
+                 "\"available_projects_incomplete\":%s}",
+                 reason, projects, count, projects_incomplete ? "true" : "false");
+    } else if (projects_incomplete) {
+        snprintf(buf, sizeof(buf),
+                 "{\"error\":\"%s\",\"hint\":\"Project discovery was incomplete because "
+                 "a cache database was busy or the scan deadline expired. Retry the call.\","
+                 "\"available_projects\":[],\"count\":0,"
+                 "\"available_projects_incomplete\":true}",
+                 reason);
     } else {
         snprintf(buf, sizeof(buf),
                  "{\"error\":\"%s\",\"hint\":\"No projects indexed yet. "
@@ -1295,21 +1367,25 @@ static char *build_missing_project_error(void) {
 /* Pick the right no-store error: a NULL project means the argument was missing
  * (clearer message); a non-NULL project that didn't resolve means it's
  * unknown/unindexed (list the available ones). */
-static char *build_no_store_error(const char *project) {
+static char *build_no_store_error(cbm_mcp_server_t *srv, const char *project) {
+    if (project && srv->store_resolution_incomplete) {
+        return build_project_list_error(
+            "project lookup incomplete: a cache database was busy or the scan deadline expired");
+    }
     return project ? build_project_list_error("project not found or not indexed")
                    : build_missing_project_error();
 }
 
 /* Bail with the right error when no store is available. */
-#define REQUIRE_STORE(store, project)                     \
-    do {                                                  \
-        if (!(store)) {                                   \
-            char *_err = build_no_store_error(project);   \
-            char *_res = cbm_mcp_text_result(_err, true); \
-            free(_err);                                   \
-            free(project);                                \
-            return _res;                                  \
-        }                                                 \
+#define REQUIRE_STORE(store, project)                        \
+    do {                                                     \
+        if (!(store)) {                                      \
+            char *_err = build_no_store_error(srv, project); \
+            char *_res = cbm_mcp_text_result(_err, true);    \
+            free(_err);                                      \
+            free(project);                                   \
+            return _res;                                     \
+        }                                                    \
     } while (0)
 
 static bool project_has_adr(cbm_store_t *store, const char *project, const char *root_path) {
@@ -1328,8 +1404,7 @@ static bool project_has_adr(cbm_store_t *store, const char *project, const char 
 
     char adr_path[CBM_SZ_4K];
     snprintf(adr_path, sizeof(adr_path), "%s/.code-cortex/adr.md", root_path);
-    struct stat adr_st;
-    return stat(adr_path, &adr_st) == 0;
+    return cbm_file_exists(adr_path);
 }
 
 /* ── Tool handler implementations ─────────────────────────────── */
@@ -1352,43 +1427,75 @@ static bool is_project_db_file(const char *name, size_t len) {
 }
 
 /* db_internal_project_name — see forward declaration above resolve_store. */
-static bool db_internal_project_name(const char *full_path, char *name_out, size_t name_sz,
-                                     cbm_store_t **out_store) {
+static int db_scan_deadline_expired(void *ctx) {
+    uint64_t deadline_ms = *(const uint64_t *)ctx;
+    return deadline_ms > 0 && cbm_now_ms() >= deadline_ms;
+}
+
+static db_project_result_t db_internal_project_name(const char *full_path, char *name_out,
+                                                    size_t name_sz, cbm_store_t **out_store,
+                                                    uint64_t deadline_ms) {
     if (out_store) {
         *out_store = NULL;
     }
+    if (deadline_ms > 0 && cbm_now_ms() >= deadline_ms) {
+        return DB_PROJECT_DEADLINE;
+    }
     cbm_store_t *st = cbm_store_open_path_query(full_path);
     if (!st) {
-        return false; /* nonexistent / unreadable */
+        return DB_PROJECT_INVALID; /* nonexistent / unreadable */
+    }
+    sqlite3 *db = cbm_store_get_db(st);
+    if (deadline_ms > 0 && db) {
+        sqlite3_busy_timeout(db, MCP_FALLBACK_DB_BUSY_MS);
+        sqlite3_progress_handler(db, 1000, db_scan_deadline_expired, &deadline_ms);
     }
     cbm_project_t *projs = NULL;
     int n = 0;
+    int list_err = cbm_store_list_projects(st, &projs, &n);
     bool ok = false;
-    if (cbm_store_list_projects(st, &projs, &n) == CBM_STORE_OK && n == 1 && projs[0].name &&
-        projs[0].name[0]) {
+    if (list_err == CBM_STORE_OK && n == 1 && projs[0].name && projs[0].name[0]) {
         snprintf(name_out, name_sz, "%s", projs[0].name);
         ok = true;
     }
+    if (deadline_ms > 0 && db) {
+        sqlite3_progress_handler(db, 0, NULL, NULL);
+        sqlite3_busy_timeout(db, 10000);
+    }
     cbm_store_free_projects(projs, n);
+    db_project_result_t result = DB_PROJECT_INVALID;
+    if (ok) {
+        result = DB_PROJECT_FOUND;
+    } else if (deadline_ms > 0 && cbm_now_ms() >= deadline_ms) {
+        result = DB_PROJECT_DEADLINE;
+    } else if (db && (sqlite3_errcode(db) == SQLITE_BUSY || sqlite3_errcode(db) == SQLITE_LOCKED)) {
+        result = DB_PROJECT_BUSY;
+    }
     if (ok && out_store) {
         *out_store = st; /* transfer ownership to caller */
     } else {
         cbm_store_close(st);
     }
-    return ok;
+    return result;
 }
 
 /* resolve_store_fallback_scan — see forward declaration above resolve_store. */
-static cbm_store_t *resolve_store_fallback_scan(const char *project) {
+static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incomplete) {
     char dir_path[CBM_SZ_1K];
     cache_dir(dir_path, sizeof(dir_path));
     cbm_dir_t *d = cbm_opendir(dir_path);
     if (!d) {
         return NULL;
     }
+    uint64_t deadline_ms = cbm_now_ms() + MCP_FALLBACK_SCAN_TIMEOUT_MS;
     cbm_store_t *found = NULL;
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(d)) != NULL) {
+        if (cbm_now_ms() >= deadline_ms) {
+            cbm_log_warn("store.fallback.timeout", "project", project);
+            *incomplete = true;
+            break;
+        }
         const char *n = entry->name;
         size_t len = strlen(n);
         if (!is_project_db_file(n, len)) {
@@ -1396,9 +1503,19 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
         }
         char full_path[CBM_SZ_2K];
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, n);
+        if (!cbm_is_regular_file(full_path)) {
+            continue;
+        }
         char iname[CBM_SZ_1K];
         cbm_store_t *st = NULL;
-        if (db_internal_project_name(full_path, iname, sizeof(iname), &st)) {
+        db_project_result_t db_result =
+            db_internal_project_name(full_path, iname, sizeof(iname), &st, deadline_ms);
+        if (db_result == DB_PROJECT_BUSY || db_result == DB_PROJECT_DEADLINE) {
+            *incomplete = true;
+            cbm_log_warn("store.fallback.incomplete", "project", project, "path", full_path,
+                         "reason", db_result == DB_PROJECT_BUSY ? "database_busy" : "deadline");
+        }
+        if (db_result == DB_PROJECT_FOUND) {
             if (strcmp(iname, project) == 0) {
                 found = st; /* adopt — caller takes ownership */
                 break;
@@ -1412,8 +1529,10 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
 
 /* Open a .db file briefly, collect node/edge counts and root_path,
  * then append a JSON entry to arr. */
-static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, const char *dir_path,
-                                     const char *name, size_t name_len, int64_t size_bytes) {
+static db_project_result_t build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                                                    const char *dir_path, const char *name,
+                                                    size_t name_len, int64_t size_bytes,
+                                                    uint64_t deadline_ms) {
     (void)name_len;
 
     char full_path[CBM_SZ_2K];
@@ -1426,21 +1545,49 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
      * they don't appear as resolvable projects. */
     char project_name[CBM_SZ_1K];
     cbm_store_t *pstore = NULL;
-    if (!db_internal_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
-        return; /* ghost / unreadable — not a resolvable project */
+    db_project_result_t project_result = db_internal_project_name(
+        full_path, project_name, sizeof(project_name), &pstore, deadline_ms);
+    if (project_result != DB_PROJECT_FOUND) {
+        return project_result; /* ghost / unreadable — not a resolvable project */
     }
 
+    sqlite3 *db = cbm_store_get_db(pstore);
+    if (db) {
+        sqlite3_busy_timeout(db, MCP_FALLBACK_DB_BUSY_MS);
+        sqlite3_progress_handler(db, 1000, db_scan_deadline_expired, &deadline_ms);
+    }
     int nodes = cbm_store_count_nodes(pstore, project_name);
+    int nodes_db_error = db ? sqlite3_errcode(db) : SQLITE_OK;
     int edges = cbm_store_count_edges(pstore, project_name);
+    int edges_db_error = db ? sqlite3_errcode(db) : SQLITE_OK;
     char root_path_buf[CBM_SZ_1K] = "";
     cbm_project_t proj = {0};
-    if (cbm_store_get_project(pstore, project_name, &proj) == CBM_STORE_OK) {
+    int project_store_result = cbm_store_get_project(pstore, project_name, &proj);
+    int project_db_error = db ? sqlite3_errcode(db) : SQLITE_OK;
+    if (project_store_result == CBM_STORE_OK) {
         if (proj.root_path) {
             snprintf(root_path_buf, sizeof(root_path_buf), "%s", proj.root_path);
         }
         cbm_project_free_fields(&proj);
     }
+    bool deadline_expired = cbm_now_ms() >= deadline_ms;
+    if (db) {
+        sqlite3_progress_handler(db, 0, NULL, NULL);
+        sqlite3_busy_timeout(db, 10000);
+    }
     cbm_store_close(pstore);
+    if (deadline_expired || nodes_db_error == SQLITE_INTERRUPT ||
+        edges_db_error == SQLITE_INTERRUPT || project_db_error == SQLITE_INTERRUPT) {
+        return DB_PROJECT_DEADLINE;
+    }
+    if (nodes_db_error == SQLITE_BUSY || nodes_db_error == SQLITE_LOCKED ||
+        edges_db_error == SQLITE_BUSY || edges_db_error == SQLITE_LOCKED ||
+        project_db_error == SQLITE_BUSY || project_db_error == SQLITE_LOCKED) {
+        return DB_PROJECT_BUSY;
+    }
+    if (nodes < 0 || edges < 0 || project_store_result != CBM_STORE_OK) {
+        return DB_PROJECT_INVALID;
+    }
 
     yyjson_mut_val *p = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, p, "name", project_name);
@@ -1450,6 +1597,7 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
     yyjson_mut_obj_add_int(doc, p, "edges", edges);
     yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
     yyjson_mut_arr_add_val(arr, p);
+    return DB_PROJECT_FOUND;
 }
 
 /* list_projects: scan cache directory for .db files.
@@ -1467,6 +1615,8 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    uint64_t deadline_ms = cbm_now_ms() + MCP_FALLBACK_SCAN_TIMEOUT_MS;
+    bool incomplete = false;
 
     if (!d) {
         char msg[CBM_SZ_1K];
@@ -1480,6 +1630,10 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
 
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(d)) != NULL) {
+        if (cbm_now_ms() >= deadline_ms) {
+            incomplete = true;
+            break;
+        }
         const char *name = entry->name;
         size_t len = strlen(name);
         if (!is_project_db_file(name, len)) {
@@ -1487,15 +1641,28 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         }
         char full_path[CBM_SZ_2K];
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
+        if (!cbm_is_regular_file(full_path)) {
+            continue;
+        }
         int64_t size_bytes = cbm_file_size(full_path);
         if (size_bytes < 0) {
             continue;
         }
-        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes);
+        db_project_result_t entry_result =
+            build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, deadline_ms);
+        if (entry_result == DB_PROJECT_BUSY || entry_result == DB_PROJECT_DEADLINE) {
+            incomplete = true;
+        }
     }
     cbm_closedir(d);
 
     yyjson_mut_obj_add_val(doc, root, "projects", arr);
+    yyjson_mut_obj_add_bool(doc, root, "incomplete", incomplete);
+    if (incomplete) {
+        yyjson_mut_obj_add_str(doc, root, "incomplete_hint",
+                               "Some cache databases were busy or the 5 second scan deadline "
+                               "expired; retry list_projects.");
+    }
 
     /* Guide user when no projects are indexed */
     if (yyjson_mut_arr_size(arr) == 0) {
@@ -4253,14 +4420,25 @@ static char *build_worker_failure_response(const char *args, cbm_proc_outcome_t 
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
     yyjson_mut_obj_add_str(doc, root, "status", "error");
-    yyjson_mut_obj_add_str(doc, root, "outcome", cbm_proc_outcome_str(outcome));
-    yyjson_mut_obj_add_str(
-        doc, root, "hint",
-        outcome == CBM_PROC_HANG
-            ? "Indexing worker timed out (a file made no progress). The worker was "
-              "terminated and the server survived. Re-run to retry."
-            : "Indexing worker crashed on a file. The crash was contained (the server "
-              "survived). Re-run to retry; a future release isolates the culprit file.");
+    yyjson_mut_obj_add_str(doc, root, "outcome",
+                           outcome == CBM_PROC_CLEAN ? "missing_response"
+                                                     : cbm_proc_outcome_str(outcome));
+    const char *hint = "Indexing worker crashed on a file. The crash was contained (the server "
+                       "survived). Re-run to retry; a future release isolates the culprit file.";
+    if (outcome == CBM_PROC_CLEAN) {
+        hint = "The indexing worker exited cleanly but did not publish a response. The server "
+               "survived; inspect the retained worker log and response path.";
+    } else if (outcome == CBM_PROC_HANG) {
+        hint = "Indexing worker exceeded its deadline. The worker was terminated and the server "
+               "survived. Re-run to retry.";
+    } else if (outcome == CBM_PROC_SPAWN_FAILED) {
+        hint = "The indexing worker could not be started. No in-process fallback was attempted, "
+               "so the server remains responsive.";
+    } else if (outcome == CBM_PROC_EXIT_NONZERO) {
+        hint = "The indexing worker exited without a usable response. The server survived; inspect "
+               "the retained worker log for the reported error.";
+    }
+    yyjson_mut_obj_add_str(doc, root, "hint", hint);
     if (repo_path) {
         yyjson_mut_obj_add_strcpy(doc, root, "repo_path", repo_path);
     }
@@ -4406,6 +4584,15 @@ static bool supervisor_append_quarantine(const char *path, const char *rel, cons
     return true;
 }
 
+static int supervisor_remaining_ms(uint64_t deadline_ms) {
+    uint64_t now_ms = cbm_now_ms();
+    if (now_ms >= deadline_ms) {
+        return 0;
+    }
+    uint64_t remaining = deadline_ms - now_ms;
+    return remaining > INT_MAX ? INT_MAX : (int)remaining;
+}
+
 /* Run index_repository in a supervised worker subprocess with skip-and-continue
  * (Stage 3c). Returns the response string (caller frees):
  *   - the worker's own response on a clean first run (the common path);
@@ -4414,32 +4601,32 @@ static bool supervisor_append_quarantine(const char *path, const char *rel, cons
  *     skipped[] as phase="crash"/"hang", and the good files indexed;
  *   - a best-effort PARTIAL index (one final quarantine-only run) if the recovery
  *     loop cannot converge but at least one file was quarantined;
- *   - a contained-failure response only if even that cannot produce a clean run.
- * Returns NULL only when the worker could not be spawned at all, so the caller
- * degrades to the in-process path. */
+ *   - a contained-failure response if even that cannot produce a clean run.
+ * Every attempt shares one hard deadline; failure never falls back to an
+ * unbounded in-process index in the production host. */
 static char *index_run_supervised(cbm_mcp_server_t *srv, const char *args) {
     supervisor_invalidate_store(srv);
+    uint64_t deadline_ms = cbm_now_ms() + (uint64_t)cbm_index_timeout_ms();
 
     /* First attempt: normal parallel run. */
     cbm_index_worker_result_t wr;
-    int rc = cbm_index_spawn_worker(args, false, NULL, NULL, &wr);
+    int rc =
+        cbm_index_spawn_worker(args, false, NULL, NULL, supervisor_remaining_ms(deadline_ms), &wr);
 
     if (rc != 0 || wr.outcome == CBM_PROC_SPAWN_FAILED) {
         cbm_index_worker_result_free(&wr);
         supervisor_invalidate_store(srv);
-        return NULL; /* degrade to in-process */
+        return build_worker_failure_response(args, CBM_PROC_SPAWN_FAILED);
     }
     if (wr.outcome == CBM_PROC_CLEAN) {
-        /* Clean exit → transfer the worker's response (the common path). If the
-         * worker exited clean but wrote no response (a degenerate case, e.g. a
-         * self binary that does not act as an index worker), resp is NULL and the
-         * caller degrades to the in-process path — a clean run never needs the
-         * crash-recovery loop. */
+        /* Clean exit → transfer the worker's response (the common path). A clean
+         * worker that wrote no response is still a contained worker failure; do
+         * not fall back to an unbounded in-process run. */
         char *resp = wr.response; /* transfer ownership to caller (may be NULL) */
         wr.response = NULL;
         cbm_index_worker_result_free(&wr);
         supervisor_invalidate_store(srv);
-        return resp;
+        return resp ? resp : build_worker_failure_response(args, CBM_PROC_CLEAN);
     }
 
     /* Crash / hang / nonzero exit → skip-and-continue recovery. Re-run the
@@ -4486,9 +4673,14 @@ static char *index_run_supervised(cbm_mcp_server_t *srv, const char *args) {
     char **prev_suspects = NULL; /* previous failed round's in-flight set */
     int prev_n = 0;
     for (int i = 0; i < cap; i++) {
+        int remaining_ms = supervisor_remaining_ms(deadline_ms);
+        if (remaining_ms <= 0) {
+            last_outcome = CBM_PROC_HANG;
+            break;
+        }
         cbm_index_worker_result_t wr2;
         int rc2 = cbm_index_spawn_worker(args, /*single_thread=*/false, marker_path,
-                                         quarantine_path, &wr2);
+                                         quarantine_path, remaining_ms, &wr2);
         if (rc2 != 0) {
             last_outcome = wr2.outcome;
             cbm_index_worker_result_free(&wr2);
@@ -4566,18 +4758,21 @@ static char *index_run_supervised(cbm_mcp_server_t *srv, const char *args) {
      * as skips) rather than a hard failure. Bounded by the same quiet-timeout,
      * so it cannot itself hang. Rare given monotonic progress. */
     if (!resp && quarantined > 0) {
-        cbm_index_worker_result_t wrp;
-        int rcp =
-            cbm_index_spawn_worker(args, /*single_thread=*/false, NULL, quarantine_path, &wrp);
-        if (rcp == 0 && wrp.outcome == CBM_PROC_CLEAN && wrp.response) {
-            resp = wrp.response; /* transfer ownership to caller */
-            wrp.response = NULL;
-            char qn[MCP_FIELD_SIZE];
-            snprintf(qn, sizeof(qn), "%d", quarantined);
-            cbm_log_error("index.supervisor.partial", "quarantined", qn, "outcome",
-                          cbm_proc_outcome_str(last_outcome));
+        int remaining_ms = supervisor_remaining_ms(deadline_ms);
+        if (remaining_ms > 0) {
+            cbm_index_worker_result_t wrp;
+            int rcp = cbm_index_spawn_worker(args, /*single_thread=*/false, NULL, quarantine_path,
+                                             remaining_ms, &wrp);
+            if (rcp == 0 && wrp.outcome == CBM_PROC_CLEAN && wrp.response) {
+                resp = wrp.response; /* transfer ownership to caller */
+                wrp.response = NULL;
+                char qn[MCP_FIELD_SIZE];
+                snprintf(qn, sizeof(qn), "%d", quarantined);
+                cbm_log_error("index.supervisor.partial", "quarantined", qn, "outcome",
+                              cbm_proc_outcome_str(last_outcome));
+            }
+            cbm_index_worker_result_free(&wrp);
         }
-        cbm_index_worker_result_free(&wrp);
     }
 
     (void)remove(quarantine_path);
@@ -4592,7 +4787,8 @@ static char *index_run_supervised(cbm_mcp_server_t *srv, const char *args) {
 /* Build a minimal {"repo_path": "<root>"} args object (path safely escaped) and
  * run it through index_run_supervised. Shared by the session auto-index (srv
  * present → its cached store is invalidated) and the watcher re-index (srv NULL).
- * Returns the worker's response string (caller frees) or NULL to degrade. */
+ * Returns the worker's response string (caller frees), or NULL only when the
+ * input path could not be encoded. */
 static char *index_run_supervised_path(cbm_mcp_server_t *srv, const char *root_path) {
     if (!root_path || !root_path[0]) {
         return NULL;
@@ -4649,15 +4845,34 @@ static char *resolved_repo_path_from_project_arg(const char *args) {
     return root_path;
 }
 
+static bool wait_for_pipeline_lock(int timeout_ms) {
+    uint64_t deadline_ms = cbm_now_ms() + (uint64_t)timeout_ms;
+    do {
+        if (cbm_pipeline_try_lock()) {
+            return true;
+        }
+        struct timespec delay = {0, MCP_INDEX_LOCK_POLL_MS * 1000000L};
+        cbm_nanosleep(&delay, NULL);
+    } while (cbm_now_ms() < deadline_ms);
+    return false;
+}
+
 static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     /* Supervisor gate: run the index in a crash/hang-isolating worker subprocess
      * unless this process IS the worker or the kill switch (CBM_INDEX_SUPERVISOR=0)
-     * is set. On spawn failure, fall through to the in-process path (degrade). */
+     * is set. A production supervisor failure returns an error; it never falls
+     * through to an unbounded in-process run. */
     if (cbm_index_supervisor_should_wrap()) {
-        char *supervised = index_run_supervised(srv, args);
-        if (supervised) {
-            return supervised;
+        if (!wait_for_pipeline_lock(MCP_INDEX_LOCK_WAIT_MS)) {
+            return cbm_mcp_text_result(
+                "{\"status\":\"error\",\"error\":\"indexing is already active after waiting "
+                "5 seconds\",\"hint\":\"Call index_status for the target project, then retry "
+                "index_repository.\"}",
+                true);
         }
+        char *supervised = index_run_supervised(srv, args);
+        cbm_pipeline_unlock();
+        return supervised;
     }
 
     char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
@@ -6364,7 +6579,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
 
     char *root_path = get_project_root(srv, project);
     if (!root_path) {
-        char *err = build_no_store_error(project);
+        char *err = build_no_store_error(srv, project);
         char *res = cbm_mcp_text_result(err, true);
         free(err);
         free(project);
@@ -6854,7 +7069,7 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
      * the UI are visible to each other (#256). */
     cbm_store_t *resolved = resolve_store(srv, project);
     if (!resolved) {
-        char *err = build_no_store_error(project);
+        char *err = build_no_store_error(srv, project);
         char *res = cbm_mcp_text_result(err, true);
         free(err);
         free(project);
@@ -6876,7 +7091,7 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
     if (resolved_db_path) {
         owned_rw = cbm_store_open_path(resolved_db_path);
         if (!owned_rw) {
-            char *err = build_no_store_error(project);
+            char *err = build_no_store_error(srv, project);
             char *res = cbm_mcp_text_result(err, true);
             free(err);
             free(project);
@@ -7102,12 +7317,16 @@ static void *autoindex_thread(void *arg) {
     /* #832: prefer the supervised worker subprocess. Indexing the whole session in
      * this long-lived server thread ratchets RSS (mimalloc v3 does not reclaim the
      * pages worker threads abandon at exit); running it in a child that exits hands
-     * 100% of that memory back to the OS every cycle. Degrade to the in-process
-     * pipeline below when the supervisor is off (kill switch) or the spawn fails. */
+     * 100% of that memory back to the OS every cycle. Use the in-process pipeline
+     * below only when the supervisor is explicitly disabled. */
     if (cbm_index_supervisor_should_wrap()) {
+        cbm_pipeline_lock();
         char *resp = index_run_supervised_path(srv, srv->session_root);
-        if (resp) {
-            free(resp);
+        cbm_pipeline_unlock();
+        bool is_error = true;
+        bool valid = cbm_mcp_tool_result_valid(resp, &is_error);
+        free(resp);
+        if (valid && !is_error) {
             cbm_log_info("autoindex.done", "project", srv->session_project, "mode", "supervised");
             /* Register with watcher for ongoing change detection — gated on
              * auto_watch (#849), same as the in-process branch below. A bare
@@ -7116,7 +7335,10 @@ static void *autoindex_thread(void *arg) {
             register_watcher_if_enabled(srv);
             return NULL;
         }
-        /* resp == NULL → spawn-failure degrade → fall through to in-process. */
+        cbm_log_warn("autoindex.err", "msg",
+                     valid ? "supervised_index_failed" : "supervisor_returned_invalid_response");
+        register_watcher_if_enabled(srv);
+        return NULL;
     }
 
     cbm_pipeline_t *p = cbm_pipeline_new(srv->session_root, NULL, CBM_MODE_FULL);
@@ -7364,7 +7586,73 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
 
         struct timespec t0;
         cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
-        result_json = cbm_mcp_handle_tool(srv, tool_name, tool_args);
+        bool wrap_tool = mcp_tool_known(tool_name) && strcmp(tool_name, "index_repository") != 0 &&
+                         cbm_tool_supervisor_should_wrap();
+        char *delete_project = wrap_tool && strcmp(tool_name, "delete_project") == 0
+                                   ? get_project_arg(tool_args)
+                                   : NULL;
+        bool delete_locked = false;
+        if (delete_project) {
+            delete_locked = cbm_pipeline_try_lock();
+            if (!delete_locked) {
+                result_json = cbm_mcp_text_result(
+                    "delete_project cannot run while indexing is active; retry after indexing "
+                    "finishes",
+                    true);
+            } else if (srv->current_project && strcmp(srv->current_project, delete_project) == 0) {
+                if (srv->owns_store && srv->store) {
+                    cbm_store_close(srv->store);
+                }
+                srv->store = NULL;
+                free(srv->current_project);
+                srv->current_project = NULL;
+                srv->store_last_used = 0;
+            }
+        }
+        if (wrap_tool) {
+            cbm_index_worker_result_t worker = {};
+            int spawn_rc = result_json ? -1 : cbm_tool_spawn_worker(tool_name, tool_args, &worker);
+            bool response_error = true;
+            bool usable_outcome =
+                worker.outcome == CBM_PROC_CLEAN || worker.outcome == CBM_PROC_EXIT_NONZERO;
+            bool usable_response = spawn_rc == 0 && usable_outcome &&
+                                   cbm_mcp_tool_result_valid(worker.response, &response_error);
+            if (usable_response) {
+                result_json = worker.response;
+                worker.response = NULL;
+            } else if (spawn_rc == 0 && worker.outcome == CBM_PROC_HANG) {
+                char msg[CBM_SZ_256];
+                snprintf(msg, sizeof(msg),
+                         "{\"error\":\"tool call exceeded the server deadline\","
+                         "\"timeout_ms\":%d}",
+                         cbm_tool_timeout_ms(tool_name));
+                result_json = cbm_mcp_text_result(msg, true);
+            } else if (!result_json) {
+                char msg[CBM_SZ_256];
+                snprintf(msg, sizeof(msg),
+                         "{\"error\":\"supervised tool worker failed\","
+                         "\"outcome\":\"%s\","
+                         "\"hint\":\"Check the cache directory and process limits. "
+                         "CBM_TOOL_SUPERVISOR=0 disables isolation for emergency diagnosis, "
+                         "but removes the hard tool deadline.\"}",
+                         spawn_rc == 0 ? cbm_proc_outcome_str(worker.outcome) : "spawn_failed");
+                result_json = cbm_mcp_text_result(msg, true);
+            }
+            if (delete_locked) {
+                char delete_path[CBM_SZ_1K];
+                project_db_path(delete_project, delete_path, sizeof(delete_path));
+                bool delete_gone = delete_path[0] && !cbm_file_exists(delete_path);
+                if (((usable_response && !response_error) || delete_gone) && srv->watcher) {
+                    cbm_watcher_unwatch(srv->watcher, delete_project);
+                }
+                cbm_pipeline_unlock();
+                cbm_mem_collect();
+            }
+            cbm_index_worker_result_free(&worker);
+        } else {
+            result_json = cbm_mcp_handle_tool(srv, tool_name, tool_args);
+        }
+        free(delete_project);
         srv->active_request_id = CBM_NOT_FOUND;
         free(srv->active_request_id_str);
         srv->active_request_id_str = NULL;

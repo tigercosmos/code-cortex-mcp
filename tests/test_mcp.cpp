@@ -9,11 +9,56 @@
 #include "test_helpers.h" /* th_write_file / th_rmtree / th_mktempdir */
 #include <mcp/mcp.h>
 #include <mcp/mcp_internal.h> /* cbm_detect_node_in_hunks (#1363) */
+#include <mcp/index_supervisor.h>
 #include <pipeline/pipeline.h>
 #include <store/store.h>
 #include <yyjson/yyjson.h>
 #include <string.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <time.h>
+#endif
+
+TEST(mcp_tool_result_validation_rejects_partial_response) {
+    bool is_error = true;
+    ASSERT_TRUE(cbm_mcp_tool_result_valid("{\"content\":[],\"isError\":false}", &is_error));
+    ASSERT_FALSE(is_error);
+    ASSERT_FALSE(cbm_mcp_tool_result_valid("{\"content\":[", &is_error));
+    ASSERT_FALSE(cbm_mcp_tool_result_valid("{\"content\":[],\"isError\":\"false\"}", &is_error));
+    PASS();
+}
+
+TEST(mcp_tool_deadlines_are_bounded_and_tool_specific) {
+    const char *saved = getenv("CBM_TOOL_TIMEOUT_S");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_unsetenv("CBM_TOOL_TIMEOUT_S");
+    ASSERT_EQ(cbm_tool_timeout_ms("get_graph_schema"), 30000);
+    ASSERT_EQ(cbm_tool_timeout_ms("list_projects"), 90000);
+    ASSERT_EQ(cbm_tool_timeout_ms("index_status"), 90000);
+    ASSERT_EQ(cbm_tool_timeout_ms("search_graph"), 90000);
+    ASSERT_EQ(cbm_tool_timeout_ms("query_graph"), 90000);
+    ASSERT_EQ(cbm_tool_timeout_ms("get_architecture"), 90000);
+    cbm_setenv("CBM_TOOL_TIMEOUT_S", "7", 1);
+    ASSERT_EQ(cbm_tool_timeout_ms("search_graph"), 7000);
+    ASSERT_EQ(cbm_tool_timeout_ms("query_graph"), 7000);
+    if (saved_copy) {
+        cbm_setenv("CBM_TOOL_TIMEOUT_S", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_TOOL_TIMEOUT_S");
+    }
+    PASS();
+}
+
+TEST(mcp_tool_worker_name_rejects_option_injection) {
+    ASSERT_TRUE(cbm_tool_worker_name_safe("search_graph"));
+    ASSERT_FALSE(cbm_tool_worker_name_safe("--response-out"));
+    ASSERT_FALSE(cbm_tool_worker_name_safe("search-graph"));
+    ASSERT_FALSE(cbm_tool_worker_name_safe(""));
+    ASSERT_FALSE(cbm_tool_worker_name_safe(NULL));
+    PASS();
+}
 
 /* ══════════════════════════════════════════════════════════════════
  *  JSON-RPC PARSING
@@ -383,6 +428,7 @@ TEST(tool_list_projects_empty) {
     ASSERT_NOT_NULL(strstr(resp, "\"id\":10"));
     /* Should return a result (possibly empty list) */
     ASSERT_NOT_NULL(strstr(resp, "\"result\""));
+    ASSERT_NOT_NULL(strstr(resp, "incomplete"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -2291,6 +2337,51 @@ TEST(tool_bad_project_name_no_overflow_issue235) {
 }
 #undef ISSUE235_DBNAME
 
+#ifndef _WIN32
+TEST(tool_unknown_project_skips_nonregular_cache_db) {
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-badproj-fifo-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        PASS();
+    }
+
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char fifo_path[512];
+    snprintf(fifo_path, sizeof(fifo_path), "%s/blocked.db", cache);
+    ASSERT_EQ(mkfifo(fifo_path, 0600), 0);
+
+    struct timespec start;
+    struct timespec finish;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *resp = cbm_mcp_handle_tool(
+        srv, "search_graph", "{\"project\":\"definitely-not-indexed\",\"name_pattern\":\"x\"}");
+    clock_gettime(CLOCK_MONOTONIC, &finish);
+
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "not found"));
+    long elapsed_ms =
+        (finish.tv_sec - start.tv_sec) * 1000L + (finish.tv_nsec - start.tv_nsec) / 1000000L;
+    ASSERT_TRUE(elapsed_ms < 10000);
+    free(resp);
+    cbm_mcp_server_free(srv);
+
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    cbm_unlink(fifo_path);
+    cbm_rmdir(cache);
+    PASS();
+}
+#endif
+
 /* #1211: list_projects only ever advertises the project NAME, never the
  * repo_path, but re-indexing by that same name (the natural next call) used
  * to fall straight to "repo_path is required" because nothing resolved the
@@ -2421,6 +2512,9 @@ SUITE(mcp) {
     RUN_TEST(mcp_tools_array_schemas_have_items);
     RUN_TEST(mcp_text_result);
     RUN_TEST(mcp_text_result_error);
+    RUN_TEST(mcp_tool_result_validation_rejects_partial_response);
+    RUN_TEST(mcp_tool_deadlines_are_bounded_and_tool_specific);
+    RUN_TEST(mcp_tool_worker_name_rejects_option_injection);
 
     /* Argument extraction */
     RUN_TEST(mcp_get_tool_name);
@@ -2533,6 +2627,9 @@ SUITE(mcp) {
     RUN_TEST(snippet_include_neighbors_default);
     RUN_TEST(snippet_include_neighbors_enabled);
     RUN_TEST(tool_bad_project_name_no_overflow_issue235);
+#ifndef _WIN32
+    RUN_TEST(tool_unknown_project_skips_nonregular_cache_db);
+#endif
     RUN_TEST(tool_index_repository_resolves_root_path_from_project_name_issue1211);
     RUN_TEST(tool_index_repository_unknown_project_name_still_requires_repo_path);
 }

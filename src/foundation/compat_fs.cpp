@@ -392,6 +392,17 @@ FILE *cbm_fopen(const char *path, const char *mode) {
     return f;
 }
 
+bool cbm_is_regular_file(const char *path) {
+    wchar_t *wpath = cbm_utf8_to_wide(path);
+    if (!wpath) {
+        return false;
+    }
+    struct _stat64 wst;
+    int ret = _wstat64(wpath, &wst);
+    free(wpath);
+    return ret == 0 && (wst.st_mode & _S_IFMT) == _S_IFREG;
+}
+
 bool cbm_mkdir_p(const char *path, int mode) {
     (void)mode;
     wchar_t *wpath = cbm_utf8_to_wide(path);
@@ -654,6 +665,11 @@ int cbm_pclose(FILE *f) {
 
 FILE *cbm_fopen(const char *path, const char *mode) {
     return fopen(path, mode);
+}
+
+bool cbm_is_regular_file(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
 bool cbm_mkdir_p(const char *path, int mode) {

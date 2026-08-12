@@ -161,6 +161,14 @@ static int index_callback(const char *name, const char *path, void *ud) {
     return 0;
 }
 
+static int failing_index_callback(const char *name, const char *path, void *ud) {
+    (void)name;
+    (void)path;
+    (void)ud;
+    index_call_count++;
+    return -1;
+}
+
 TEST(watcher_poll_no_projects) {
     cbm_store_t *store = cbm_store_open_memory();
     cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
@@ -1187,6 +1195,41 @@ TEST(watcher_modify_tracked_file) {
     PASS();
 }
 
+TEST(watcher_failed_commit_index_retries_without_losing_head) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_watcher_retry_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    if (wt_git(tmpdir, "init -q") != 0) { th_rmtree(tmpdir); FAIL("git init failed"); }
+    { char p[300]; th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "one\n"); }
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m initial");
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, failing_index_callback, NULL);
+    cbm_watcher_watch(w, "retry-repo", tmpdir);
+    index_call_count = 0;
+    cbm_watcher_poll_once(w);
+
+    { char p[300]; th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "two\n"); }
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m changed");
+
+    cbm_watcher_touch(w, "retry-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 1);
+
+    cbm_watcher_touch(w, "retry-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 2);
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  RESOURCE MANAGEMENT & AUTO-INDEXING BEHAVIOR
  * ══════════════════════════════════════════════════════════════════ */
@@ -1541,6 +1584,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_poll_only_watched_projects);
     RUN_TEST(watcher_touch_resets_immediate);
     RUN_TEST(watcher_modify_tracked_file);
+    RUN_TEST(watcher_failed_commit_index_retries_without_losing_head);
 
     /* Resource management & auto-indexing behavior */
     RUN_TEST(watcher_null_store_handling);

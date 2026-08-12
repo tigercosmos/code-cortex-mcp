@@ -67,6 +67,9 @@ int cbm_rmdir(const char *path);
  * On POSIX, delegates to fopen. mode must be an ASCII string. */
 FILE *cbm_fopen(const char *path, const char *mode);
 
+/* Return true when a UTF-8 path names a regular file. */
+bool cbm_is_regular_file(const char *path);
+
 /* Execute a command without shell interpretation.
  * argv is a NULL-terminated array: {"cmd", "arg1", "arg2", NULL}.
  * Returns the process exit code, or -1 on fork/exec failure.
