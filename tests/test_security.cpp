@@ -437,6 +437,35 @@ TEST(subprocess_gives_up_after_the_retry_budget) {
     ASSERT_TRUE(refused);
     PASS();
 }
+TEST(subprocess_spawn_retry_respects_the_caller_deadline) {
+    /* The retry ladder runs BEFORE the child exists. If it ignores the caller's
+     * total budget it sits outside every deadline they set — cbm_index_spawn_worker
+     * passes the REMAINING wall-clock budget, so a full ladder could start a
+     * worker after the deadline had already passed, or return ~0.6s late (~5s
+     * under a sanitizer). With a budget far smaller than the ladder, the call
+     * must give up on the budget, not run the ladder to its end. */
+    const char *argv[] = {"/bin/sh", "-c", "exit 0", NULL};
+    cbm_proc_opts_t opts = {0};
+    opts.bin = argv[0];
+    opts.argv = argv;
+    opts.total_timeout_ms = 25;
+
+    cbm_proc_result_t result;
+    cbm_subprocess_force_spawn_eagain_for_testing(50); /* far more than the budget allows */
+    uint64_t t0 = cbm_now_ms();
+    int rc = cbm_subprocess_run(&opts, &result);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    bool refused = result.outcome == CBM_PROC_SPAWN_FAILED;
+    cbm_subprocess_force_spawn_eagain_for_testing(0); /* never leak into later tests */
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(refused);
+    /* The unbounded ladder is ~630ms (~5.1s sanitized). Anything at or above the
+     * un-sanitized ladder means the budget was ignored; the bound is generous so
+     * a loaded machine cannot make this flaky. */
+    ASSERT_TRUE(elapsed < 600);
+    PASS();
+}
 #endif /* CBM_ENABLE_TEST_SEAMS */
 
 #endif /* _WIN32 */
@@ -497,6 +526,7 @@ SUITE(security) {
     /* Transient spawn-refusal retry (test-seam builds only) */
     RUN_TEST(subprocess_retries_transient_spawn_refusal);
     RUN_TEST(subprocess_gives_up_after_the_retry_budget);
+    RUN_TEST(subprocess_spawn_retry_respects_the_caller_deadline);
 #endif
 #endif
 }

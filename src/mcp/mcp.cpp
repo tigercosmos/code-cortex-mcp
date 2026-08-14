@@ -1251,6 +1251,27 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
      * No match → NULL (a genuine typo stays not-found). */
     cbm_store_t *scanned = resolve_store_fallback_scan(project, &srv->store_resolution_incomplete);
     if (scanned) {
+        /* The scan only proves the `projects` row matches. Without this the
+         * #1037 hole simply moves: a drifted-filename database with a torn
+         * node/edge btree passes that row check and gets served, silently, as
+         * an empty-but-successful result — exactly what the direct-open branch
+         * above stopped doing.
+         *
+         * This branch REFUSES rather than quarantines. The scan resolves a file
+         * whose name does not match the project, and it does not hand back the
+         * path it used, so there is nothing here that can safely be renamed —
+         * and renaming the wrong file is worse than refusing to answer. The
+         * user's route out is delete_project or a re-index, which the
+         * "not found or not indexed" hint already names. */
+        cbm_integrity_verdict_t scanned_verdict = cbm_store_check_integrity_verdict(scanned);
+        if (scanned_verdict != CBM_INTEGRITY_OK) {
+            cbm_log_error("store.scan_rejected", "project", project, "verdict",
+                          scanned_verdict == CBM_INTEGRITY_CORRUPT ? "corrupt" : "inconclusive",
+                          "action", "refusing to serve — re-index to rebuild");
+            cbm_store_close(scanned);
+            srv->store_resolution_incomplete = true;
+            return NULL;
+        }
         srv->store = scanned;
         srv->owns_store = true;
         free(srv->current_project);

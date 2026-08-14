@@ -431,9 +431,22 @@ static void cbm_spawn_backoff(int attempt) {
     (void)cbm_nanosleep(&delay, nullptr);
 }
 
+/* True once the caller's total wall-clock budget leaves no room for another
+ * backoff. The retry ladder runs BEFORE the child exists, so without this it
+ * sits outside every deadline the caller set: cbm_index_spawn_worker passes the
+ * REMAINING budget, and a ladder that ignores it can start a worker after the
+ * deadline has already passed, or return ~0.6s (~5s sanitized) late. Retrying
+ * is only worth doing while there is still time to use the result. */
+static bool cbm_spawn_budget_exhausted(const cbm_proc_opts_t *opts, uint64_t started_at) {
+    if (!opts || opts->total_timeout_ms <= 0) {
+        return false; /* no budget set: the ladder's own ceiling is the bound */
+    }
+    return (cbm_now_ms() - started_at) >= (uint64_t)opts->total_timeout_ms;
+}
+
 /* fork() fails with EAGAIN under the same pressure posix_spawn does, and the
  * fallback path must not be less robust than the primary one. */
-static pid_t cbm_fork_with_retry(void) {
+static pid_t cbm_fork_with_retry(const cbm_proc_opts_t *opts, uint64_t started_at) {
     /* CBM_SPAWN_RETRY_ATTEMPTS backoffs means ATTEMPTS+1 tries. Every try goes
      * through the same branch — including the last — so the injection seam
      * models production exactly rather than leaving a final unguarded fork() the
@@ -445,6 +458,10 @@ static pid_t cbm_fork_with_retry(void) {
                 errno = EAGAIN;
                 return -1;
             }
+            if (cbm_spawn_budget_exhausted(opts, started_at)) {
+                errno = EAGAIN;
+                return -1;
+            }
             cbm_spawn_backoff(attempt);
             continue;
         }
@@ -453,7 +470,7 @@ static pid_t cbm_fork_with_retry(void) {
         if (pid >= 0 || (errno != EAGAIN && errno != ENOMEM)) {
             return pid;
         }
-        if (attempt >= CBM_SPAWN_RETRY_ATTEMPTS) {
+        if (attempt >= CBM_SPAWN_RETRY_ATTEMPTS || cbm_spawn_budget_exhausted(opts, started_at)) {
             errno = EAGAIN;
             return -1;
         }
@@ -600,9 +617,14 @@ static int cbm_posix_spawn_apple(const cbm_proc_opts_t *opts, pid_t *pid_out) {
 
 static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     pid_t pid = -1;
+    /* The caller's total budget covers the WHOLE call, spawn retries included —
+     * see cbm_spawn_budget_exhausted. Start the clock here, not after the child
+     * exists. */
+    uint64_t started_at = cbm_now_ms();
 #ifdef __APPLE__
     int spawn_rc = cbm_posix_spawn_apple(opts, &pid);
-    for (int attempt = 0; spawn_rc == CBM_SPAWN_RETRY && attempt < CBM_SPAWN_RETRY_ATTEMPTS;
+    for (int attempt = 0; spawn_rc == CBM_SPAWN_RETRY && attempt < CBM_SPAWN_RETRY_ATTEMPTS &&
+                          !cbm_spawn_budget_exhausted(opts, started_at);
          attempt++) {
         cbm_spawn_backoff(attempt);
         spawn_rc = cbm_posix_spawn_apple(opts, &pid);
@@ -617,7 +639,7 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         return -1;
     }
     if (spawn_rc > 0) { /* exec-class failure: reproduce the fork+exec 127 */
-        pid = cbm_fork_with_retry();
+        pid = cbm_fork_with_retry(opts, started_at);
         if (pid < 0) {
             out->outcome = CBM_PROC_SPAWN_FAILED;
             out->exit_code = -1;
@@ -629,7 +651,7 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         }
     }
 #else
-    pid = cbm_fork_with_retry();
+    pid = cbm_fork_with_retry(opts, started_at);
     if (pid < 0) {
         out->outcome = CBM_PROC_SPAWN_FAILED;
         out->exit_code = -1;
@@ -642,8 +664,11 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 #endif
 
     long tail_pos = 0;
-    uint64_t started_at = cbm_now_ms();
-    uint64_t last_activity = started_at;
+    /* started_at was taken BEFORE the spawn, so the caller's total budget covers
+     * the retry ladder too. last_activity is sampled fresh: time spent waiting
+     * for the kernel to hand us a process is not idleness on the child's part
+     * and must not count against the idle timeout. */
+    uint64_t last_activity = cbm_now_ms();
     bool timed_out = false;
     long poll_delay_ns = 1000000L;
     int wstatus = 0;

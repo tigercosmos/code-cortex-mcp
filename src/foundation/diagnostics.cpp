@@ -149,6 +149,15 @@ static void write_diagnostics(void) {
      * current. */
     current_rss = cbm_mem_rss();
     peak_rss = cbm_mem_peak_rss();
+    /* cbm_mem_peak_rss() reconciles peak >= current against its OWN fresh RSS
+     * sample, not against the one taken on the line above. On Linux those are
+     * two different reads of a moving value (page-granular statm vs KB-granular
+     * ru_maxrss, which lags), so if RSS drops in between, the file can report
+     * peak_rss_bytes < rss_bytes and contradict the invariant it documents.
+     * Reconcile against the value actually being written. */
+    if (current_rss > peak_rss) {
+        peak_rss = current_rss;
+    }
 
     int fds = count_open_fds();
     time_t now = time(NULL);

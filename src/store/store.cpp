@@ -854,22 +854,39 @@ bool cbm_store_check_integrity_deep(cbm_store_t *s) {
     return ok;
 }
 
-/* Classify a SQLite result code as a transient (retryable) condition vs. a
- * hard error. SQLITE_BUSY / SQLITE_LOCKED happen when another connection holds
- * the writer lock — they are NOT evidence of corruption, yet the bare
- * cbm_store_check_integrity() treats any prepare failure as "corrupt". This
- * helper backs the verdict API so the quarantine path stops destroying healthy
- * DBs that merely lost a lock race (#1206, #1037). */
-static bool st_rc_is_transient(int rc) {
-    switch (rc) {
-    case SQLITE_BUSY:
-    case SQLITE_LOCKED:
-    case SQLITE_IOERR_LOCK:
-    case SQLITE_IOERR_BLOCKED:
+/* Does this SQLite result code prove the FILE is damaged?
+ *
+ * The polarity matters more than the list. An allow-list of "transient" codes
+ * with a corrupt-by-default fallback is the same bug this API exists to fix,
+ * one level down: SQLITE_NOMEM, SQLITE_INTERRUPT, SQLITE_SCHEMA, SQLITE_CANTOPEN
+ * and every non-lock SQLITE_IOERR (a transient disk read error) would all fall
+ * through to "corrupt" and get a healthy database renamed and rebuilt.
+ *
+ * The two mistakes do not cost the same. Calling real damage "transient" merely
+ * defers the repair to the next resolve — the DB is still there, and quick_check
+ * will say so again. Calling an operational failure "corrupt" DESTROYS a healthy
+ * graph. So CORRUPT requires explicit structural evidence: either SQLite itself
+ * says the file is malformed, or one of the semantic probes below finds damage
+ * it can name. Everything else, INCLUDING codes we do not recognise, is
+ * transient.
+ *
+ * Masking to the primary code folds extended results (SQLITE_CORRUPT_VTAB,
+ * SQLITE_BUSY_SNAPSHOT, SQLITE_IOERR_LOCK, …) onto their base, so the
+ * classification is correct whether or not extended result codes are enabled. */
+static bool st_rc_is_structural_damage(int rc) {
+    switch (rc & 0xff) {
+    case SQLITE_CORRUPT:
+    case SQLITE_NOTADB:
         return true;
     default:
         return false;
     }
+}
+
+/* Verdict for a failed SQL operation: damage evidence, or something that says
+ * nothing about the file. */
+static cbm_integrity_verdict_t st_verdict_for_rc(int rc) {
+    return st_rc_is_structural_damage(rc) ? CBM_INTEGRITY_CORRUPT : CBM_INTEGRITY_TRANSIENT;
 }
 
 cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
@@ -886,9 +903,9 @@ cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
         sqlite3_prepare_v2(s->db, "SELECT count(*) FROM projects;", CBM_NOT_FOUND, &stmt, NULL);
     if (rc != SQLITE_OK) {
         /* A prepare failure here is the #1206 trigger: under concurrent access
-         * the schema lookup can return BUSY/LOCKED. Treat transient codes as
-         * "do not quarantine"; only a hard error is corruption evidence. */
-        return st_rc_is_transient(rc) ? CBM_INTEGRITY_TRANSIENT : CBM_INTEGRITY_CORRUPT;
+         * the schema lookup can return BUSY/LOCKED. Only malformed-file
+         * evidence may condemn the DB — see st_rc_is_structural_damage. */
+        return st_verdict_for_rc(rc);
     }
     cbm_integrity_verdict_t verdict = CBM_INTEGRITY_OK;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -899,10 +916,9 @@ cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
             verdict = CBM_INTEGRITY_CORRUPT;
         }
     } else {
-        /* step returned DONE/ERROR — for a SELECT count(*) this means the table
-         * is unreadable. BUSY-family => transient; otherwise corruption. */
-        int step_rc = sqlite3_errcode(s->db);
-        verdict = st_rc_is_transient(step_rc) ? CBM_INTEGRITY_TRANSIENT : CBM_INTEGRITY_CORRUPT;
+        /* step returned DONE/ERROR — a SELECT count(*) always yields one row, so
+         * either way the table could not be read. Classify by the code. */
+        verdict = st_verdict_for_rc(sqlite3_errcode(s->db));
     }
     sqlite3_finalize(stmt);
     if (verdict != CBM_INTEGRITY_OK) {
@@ -918,13 +934,20 @@ cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
                             "OR (substr(root_path, 1, 1) BETWEEN 'a' AND 'z')) LIMIT 1;",
                             CBM_NOT_FOUND, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        return st_rc_is_transient(rc) ? CBM_INTEGRITY_TRANSIENT : CBM_INTEGRITY_CORRUPT;
+        return st_verdict_for_rc(rc);
     }
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
+    int step_rc = sqlite3_step(stmt);
+    if (step_rc == SQLITE_ROW) {
         const char *bad_path = (const char *)sqlite3_column_text(stmt, 0);
         (void)fprintf(stderr, "ERROR store.corrupt table=projects bad_root_path=%s\n",
                       bad_path ? bad_path : "(null)");
         verdict = CBM_INTEGRITY_CORRUPT;
+    } else if (step_rc != SQLITE_DONE) {
+        /* Neither a hit nor a clean end-of-scan: the probe did not run. Treating
+         * that as "no bad row" would let a BUSY here mask the very corruption
+         * this query exists to find — the row would go unseen, and if the lock
+         * clears before quick_check the DB could be declared healthy. */
+        verdict = st_verdict_for_rc(sqlite3_errcode(s->db));
     }
     sqlite3_finalize(stmt);
     if (verdict != CBM_INTEGRITY_OK) {
@@ -939,7 +962,7 @@ cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
      * quarantine decision path, never on hot opens. */
     rc = sqlite3_prepare_v2(s->db, "PRAGMA quick_check(1);", CBM_NOT_FOUND, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        return st_rc_is_transient(rc) ? CBM_INTEGRITY_TRANSIENT : CBM_INTEGRITY_CORRUPT;
+        return st_verdict_for_rc(rc);
     }
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *res = (const char *)sqlite3_column_text(stmt, 0);
@@ -948,8 +971,10 @@ cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
             verdict = CBM_INTEGRITY_CORRUPT;
         }
     } else {
-        int step_rc = sqlite3_errcode(s->db);
-        verdict = st_rc_is_transient(step_rc) ? CBM_INTEGRITY_TRANSIENT : CBM_INTEGRITY_CORRUPT;
+        /* quick_check always produces at least one row ("ok" or the first
+         * problem), so no row means the walk itself failed. A malformed-file
+         * code here IS the finding; anything else says the check could not run. */
+        verdict = st_verdict_for_rc(sqlite3_errcode(s->db));
     }
     sqlite3_finalize(stmt);
     return verdict;

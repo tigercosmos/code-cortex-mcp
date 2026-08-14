@@ -1078,6 +1078,25 @@ TEST(store_integrity_verdict_real_corruption_is_corrupt) {
     PASS();
 }
 
+TEST(store_integrity_verdict_operational_failure_is_transient_not_corrupt) {
+    /* A query that FAILS TO RUN is not evidence about the file's contents.
+     * The dangerous shape is an allow-list of "transient" codes with a
+     * corrupt-by-default fallback: SQLITE_NOMEM, SQLITE_INTERRUPT,
+     * SQLITE_CANTOPEN and every non-lock SQLITE_IOERR (a transient disk read
+     * error) would all fall through to CORRUPT and get a healthy database
+     * renamed and rebuilt — the exact failure this API exists to prevent.
+     *
+     * Dropping the table makes the probe fail with SQLITE_ERROR, standing in
+     * for that whole class: no malformed-file evidence, so no quarantine. */
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    sqlite3 *db = cbm_store_get_db(s);
+    ASSERT_EQ(sqlite3_exec(db, "DROP TABLE projects;", NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_EQ(cbm_store_check_integrity_verdict(s), CBM_INTEGRITY_TRANSIENT);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(store_integrity_verdict_unopenable_is_transient_not_corrupt) {
     /* A handle we could not open tells us NOTHING about the file's contents.
      * Reporting CORRUPT here is how a database nobody could read got renamed
@@ -1632,6 +1651,7 @@ SUITE(store_nodes) {
     RUN_TEST(store_integrity_corrupt_too_many_rows);
     RUN_TEST(store_integrity_verdict_healthy_is_ok);
     RUN_TEST(store_integrity_verdict_real_corruption_is_corrupt);
+    RUN_TEST(store_integrity_verdict_operational_failure_is_transient_not_corrupt);
     RUN_TEST(store_integrity_verdict_unopenable_is_transient_not_corrupt);
     RUN_TEST(store_integrity_null_check);
     RUN_TEST(store_project_crud);
