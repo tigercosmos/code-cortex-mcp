@@ -419,29 +419,50 @@ static bool cbm_spawn_eagain_injected(void) {
 }
 #endif
 
-static void cbm_spawn_backoff(int attempt) {
+static long cbm_spawn_backoff_ms(int attempt) {
     /* Cap the shift at the budget, not at a constant: with the sanitized budget
      * of 9 a hard-coded 6 would flatten the last three waits to 320ms each
      * instead of continuing to double. The budget is the only bound needed —
      * callers never exceed it, and a second clamp would be dead code. */
     int shift = attempt < CBM_SPAWN_RETRY_ATTEMPTS ? attempt : CBM_SPAWN_RETRY_ATTEMPTS;
-    long ms = static_cast<long>(CBM_SPAWN_BACKOFF_BASE_MS) << shift;
+    return static_cast<long>(CBM_SPAWN_BACKOFF_BASE_MS) << shift;
+}
+
+static void cbm_spawn_backoff(int attempt) {
+    long ms = cbm_spawn_backoff_ms(attempt);
     struct timespec delay = {static_cast<time_t>(ms / CBM_SPAWN_MS_PER_SEC),
                              static_cast<long>(ms % CBM_SPAWN_MS_PER_SEC) * CBM_SPAWN_NS_PER_MS};
     (void)cbm_nanosleep(&delay, nullptr);
 }
 
-/* True once the caller's total wall-clock budget leaves no room for another
- * backoff. The retry ladder runs BEFORE the child exists, so without this it
- * sits outside every deadline the caller set: cbm_index_spawn_worker passes the
- * REMAINING budget, and a ladder that ignores it can start a worker after the
- * deadline has already passed, or return ~0.6s (~5s sanitized) late. Retrying
- * is only worth doing while there is still time to use the result. */
-static bool cbm_spawn_budget_exhausted(const cbm_proc_opts_t *opts, uint64_t started_at) {
-    if (!opts || opts->total_timeout_ms <= 0) {
-        return false; /* no budget set: the ladder's own ceiling is the bound */
+/* Wait out this attempt's backoff, but only if the caller's budget can still
+ * pay for BOTH the wait and the spawn that follows it. Returns false when it
+ * cannot — the caller must then stop retrying.
+ *
+ * The ladder runs BEFORE the child exists, so it sits outside every deadline
+ * the caller set unless it is checked here: cbm_index_spawn_worker passes the
+ * REMAINING budget, and a ladder that ignores it starts a worker after the
+ * deadline has already passed.
+ *
+ * Checking only on entry to the loop is not enough, which is the whole reason
+ * this returns a bool instead of being a plain sleep: with a 25ms budget the
+ * entry check passes at 0ms, the code sleeps 10ms, passes again at 10ms, sleeps
+ * 20ms, and spawns at 30ms — after the deadline. The wait itself has to be
+ * priced in, so a backoff that would outlast the budget is not taken at all. */
+static bool cbm_spawn_backoff_within_budget(int attempt, const cbm_proc_opts_t *opts,
+                                            uint64_t started_at) {
+    if (opts && opts->total_timeout_ms > 0) {
+        uint64_t elapsed = cbm_now_ms() - started_at;
+        if (elapsed >= (uint64_t)opts->total_timeout_ms) {
+            return false;
+        }
+        uint64_t remaining = (uint64_t)opts->total_timeout_ms - elapsed;
+        if ((uint64_t)cbm_spawn_backoff_ms(attempt) >= remaining) {
+            return false; /* the wait alone would spend what is left */
+        }
     }
-    return (cbm_now_ms() - started_at) >= (uint64_t)opts->total_timeout_ms;
+    cbm_spawn_backoff(attempt);
+    return true;
 }
 
 /* fork() fails with EAGAIN under the same pressure posix_spawn does, and the
@@ -458,11 +479,10 @@ static pid_t cbm_fork_with_retry(const cbm_proc_opts_t *opts, uint64_t started_a
                 errno = EAGAIN;
                 return -1;
             }
-            if (cbm_spawn_budget_exhausted(opts, started_at)) {
+            if (!cbm_spawn_backoff_within_budget(attempt, opts, started_at)) {
                 errno = EAGAIN;
                 return -1;
             }
-            cbm_spawn_backoff(attempt);
             continue;
         }
 #endif
@@ -470,11 +490,11 @@ static pid_t cbm_fork_with_retry(const cbm_proc_opts_t *opts, uint64_t started_a
         if (pid >= 0 || (errno != EAGAIN && errno != ENOMEM)) {
             return pid;
         }
-        if (attempt >= CBM_SPAWN_RETRY_ATTEMPTS || cbm_spawn_budget_exhausted(opts, started_at)) {
+        if (attempt >= CBM_SPAWN_RETRY_ATTEMPTS ||
+            !cbm_spawn_backoff_within_budget(attempt, opts, started_at)) {
             errno = EAGAIN;
             return -1;
         }
-        cbm_spawn_backoff(attempt);
     }
 }
 
@@ -618,15 +638,16 @@ static int cbm_posix_spawn_apple(const cbm_proc_opts_t *opts, pid_t *pid_out) {
 static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     pid_t pid = -1;
     /* The caller's total budget covers the WHOLE call, spawn retries included —
-     * see cbm_spawn_budget_exhausted. Start the clock here, not after the child
+     * see cbm_spawn_backoff_within_budget. Start the clock here, not after the child
      * exists. */
     uint64_t started_at = cbm_now_ms();
 #ifdef __APPLE__
     int spawn_rc = cbm_posix_spawn_apple(opts, &pid);
-    for (int attempt = 0; spawn_rc == CBM_SPAWN_RETRY && attempt < CBM_SPAWN_RETRY_ATTEMPTS &&
-                          !cbm_spawn_budget_exhausted(opts, started_at);
+    for (int attempt = 0; spawn_rc == CBM_SPAWN_RETRY && attempt < CBM_SPAWN_RETRY_ATTEMPTS;
          attempt++) {
-        cbm_spawn_backoff(attempt);
+        if (!cbm_spawn_backoff_within_budget(attempt, opts, started_at)) {
+            break;
+        }
         spawn_rc = cbm_posix_spawn_apple(opts, &pid);
     }
     if (spawn_rc == CBM_SPAWN_RETRY) {

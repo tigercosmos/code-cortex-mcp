@@ -481,9 +481,9 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
 
     /* A qualified name embeds the file path and the symbol slice, so it can be
      * long enough to cut the blob and can carry a quote. */
-    char esc_h[CBM_SZ_512];
+    char esc_h[CBM_SZ_1K];
     cbm_json_escape(esc_h, sizeof(esc_h), func->qualified_name ? func->qualified_name : "");
-    char hprops[CBM_SZ_1K];
+    char hprops[CBM_SZ_2K];
     int hn = snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
     cbm_gbuf_insert_edge(gb, func->id, route_id, "HANDLES",
                          cbm_json_props_checked(hprops, hn, sizeof(hprops)));
@@ -1179,10 +1179,10 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
 
         /* SvelteKit route QNs embed the whole nested directory path, so they
          * routinely exceed what CBM_SZ_256 can hold around the wrapper. */
-        char esc_h[CBM_SZ_512];
+        char esc_h[CBM_SZ_1K];
         cbm_json_escape(esc_h, sizeof(esc_h),
                         child->qualified_name ? child->qualified_name : child->name);
-        char hprops[CBM_SZ_1K];
+        char hprops[CBM_SZ_2K];
         int hn =
             snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\",\"framework\":\"sveltekit\"%s}",
                      esc_h, is_actions ? ",\"via\":\"actions_object\"" : "");

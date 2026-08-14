@@ -740,8 +740,8 @@ static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_file_info
         /* hprops must exceed the escaped QN + wrapper: at CBM_SZ_512 a deep
          * qualified name cut the blob before its closing quote+brace (the
          * sequential twin in pass_calls.cpp already uses CBM_SZ_1K). */
-        char hprops[CBM_SZ_1K];
-        char esc_h[CBM_SZ_512];
+        char hprops[CBM_SZ_2K];
+        char esc_h[CBM_SZ_1K];
         cbm_json_escape(esc_h, sizeof(esc_h), def->qualified_name);
         int hn = snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
         cbm_gbuf_insert_edge(ws->local_gbuf, func_id, route_id, "HANDLES",

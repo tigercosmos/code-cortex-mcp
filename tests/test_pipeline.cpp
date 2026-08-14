@@ -835,22 +835,26 @@ static bool pg_create_fixture(const char *dir) {
         return false;
     }
 
-    /* A decorated route handler whose qualified name (project + nested dirs +
-     * file + symbol) overflows a 512-byte HANDLES props buffer. */
-    char deep[1024];
-    snprintf(deep, sizeof(deep), "%s/d%s", dir, ident);
-    if (!cbm_mkdir_p(deep, 0755)) {
-        return false;
-    }
-    char route[1024];
+    /* A decorated route handler whose qualified name overflows a 512-byte
+     * HANDLES props buffer. The length comes from the SYMBOL, not from nested
+     * directories: a 241-character path component pushes the fixture past
+     * MAX_PATH once %TEMP% is prepended, and cbm_mkdir_p/fopen have no \\?\\
+     * prefix, so a long-path fixture fails the whole suite on a Windows job
+     * without long-path support. A long identifier costs nothing and exercises
+     * the same buffer. */
+    /* Short route PATH on purpose: a 300-character path produces no HANDLES
+     * edge at all, which would make the handler assertion vacuous rather than
+     * strict. The length under test belongs on the SYMBOL. The trailing
+     * _endmarker is what makes truncation visible — a clipped value keeps its
+     * prefix and its run of 'c's, so only a marker at the very end can tell a
+     * whole value from a shortened one. */
+    char route[2048];
     snprintf(route, sizeof(route),
-             "@app.route(\"/deep/%s\")\n"
-             "def handler_%s():\n"
+             "@app.route(\"/deep/handler\")\n"
+             "def handler_%s%s_endmarker():\n"
              "    return 1\n",
-             path_tail, ident);
-    char deep_rel[1024];
-    snprintf(deep_rel, sizeof(deep_rel), "d%s/route_props.py", ident);
-    if (!pg_write(dir, deep_rel, route)) {
+             ident, ident);
+    if (!pg_write(dir, "route_props.py", route)) {
         return false;
     }
 
@@ -946,12 +950,29 @@ static int pg_index_and_verify(const char *repo, const char *db_path, const char
         has_url = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0;
         sqlite3_finalize(st);
     }
+    /* The same trap, one level deeper, and the reason this check exists at all:
+     * once cbm_json_props_checked() fails closed, an UNDERSIZED BUFFER no longer
+     * produces malformed JSON — it produces a valid "{}". The json_valid sweep
+     * above therefore cannot see a buffer-size regression; only a fidelity check
+     * can. The route handler's qualified name is the longest value the pipeline
+     * emits, so it is the one that goes first: at hprops[512] this edge comes
+     * back as {} while every other assertion here still passes. */
+    bool has_handler = false;
+    st = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT COUNT(*) FROM edges WHERE type = 'HANDLES' AND "
+                           "json_extract(properties,'$.handler') LIKE '%\\_endmarker' ESCAPE '\\'",
+                           -1, &st, NULL) == SQLITE_OK) {
+        has_handler = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0;
+        sqlite3_finalize(st);
+    }
     sqlite3_close(db);
 
-    if (bad_nodes != 0 || bad_edges != 0 || !qc || !has_url) {
+    if (bad_nodes != 0 || bad_edges != 0 || !qc || !has_url || !has_handler) {
         printf("    %s: %d malformed node blobs, %d malformed edge blobs, quick_check %s, "
-               "url_path preserved: %s\n",
-               mode, bad_nodes, bad_edges, qc ? "ok" : "FAILED", has_url ? "yes" : "NO");
+               "url_path preserved: %s, long handler preserved: %s\n",
+               mode, bad_nodes, bad_edges, qc ? "ok" : "FAILED", has_url ? "yes" : "NO",
+               has_handler ? "yes" : "NO");
         return 1;
     }
     return 0;

@@ -976,6 +976,7 @@ struct cbm_mcp_server {
     char *current_project;            /* which project store is open for (heap) */
     time_t store_last_used;           /* last time resolve_store was called for a named project */
     bool store_resolution_incomplete; /* cache scan stopped on a busy DB or its deadline */
+    bool store_resolution_corrupt;    /* a resolved db failed the integrity verdict */
     char update_notice[CBM_SZ_256];   /* one-shot update notice, cleared after first injection */
     bool update_checked;              /* true after background check has been launched */
     cbm_thread_t update_tid;          /* background update check thread */
@@ -1146,6 +1147,7 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incom
  * Tracks last-access time so the event loop can evict idle stores. */
 static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
     srv->store_resolution_incomplete = false;
+    srv->store_resolution_corrupt = false;
     if (!project) {
         return NULL; /* project is required — no implicit fallback */
     }
@@ -1269,7 +1271,15 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
                           scanned_verdict == CBM_INTEGRITY_CORRUPT ? "corrupt" : "inconclusive",
                           "action", "refusing to serve — re-index to rebuild");
             cbm_store_close(scanned);
-            srv->store_resolution_incomplete = true;
+            /* Report what actually happened. Marking confirmed damage as an
+             * "incomplete lookup" would tell the user a database was BUSY when
+             * it is broken, and would hide the re-index guidance that is the
+             * only way out of it. */
+            if (scanned_verdict == CBM_INTEGRITY_CORRUPT) {
+                srv->store_resolution_corrupt = true;
+            } else {
+                srv->store_resolution_incomplete = true;
+            }
             return NULL;
         }
         srv->store = scanned;
@@ -1435,6 +1445,11 @@ static char *build_missing_project_error(void) {
  * (clearer message); a non-NULL project that didn't resolve means it's
  * unknown/unindexed (list the available ones). */
 static char *build_no_store_error(cbm_mcp_server_t *srv, const char *project) {
+    if (project && srv->store_resolution_corrupt) {
+        return build_project_list_error(
+            "project database failed its integrity check and was not served — "
+            "re-run index_repository to rebuild it");
+    }
     if (project && srv->store_resolution_incomplete) {
         return build_project_list_error(
             "project lookup incomplete: a cache database was busy or the scan deadline expired");

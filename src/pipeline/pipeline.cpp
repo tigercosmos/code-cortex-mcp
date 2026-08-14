@@ -567,9 +567,17 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
      * are stripped), so they can carry quotes, backslashes and — for a
      * multi-line scalar — raw newlines. The broker comes from a fixed table but
      * is escaped alongside them so the whole blob has one rule. */
+    /* Sized against the 2 KB object below, not against a guessed value length.
+     * At CBM_SZ_256 a signed callback URL — routinely longer than 255 bytes —
+     * was silently shortened INSIDE a buffer with room to spare: the blob still
+     * fit, so the validity guard accepted it, and the Route node kept the full
+     * URL while the edge carried a clipped one. Escaping can expand a byte up
+     * to 6x (\u00XX), so a pathological value can still clip; that degrades one
+     * property rather than corrupting the object, and the guard covers the
+     * case where the whole blob would not fit. */
     char esc_broker[CBM_SZ_64];
-    char esc_topic[CBM_SZ_256];
-    char esc_url[CBM_SZ_256];
+    char esc_topic[CBM_SZ_512];
+    char esc_url[CBM_SZ_1K];
     cbm_json_escape(esc_broker, sizeof(esc_broker), ib->broker ? ib->broker : "async");
     cbm_json_escape(esc_topic, sizeof(esc_topic), ib->source_name);
     cbm_json_escape(esc_url, sizeof(esc_url), ib->target_url);
@@ -600,7 +608,7 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
             return 0;
         }
     }
-    char props[CBM_SZ_1K];
+    char props[CBM_SZ_2K];
     int pn =
         snprintf(props, sizeof(props), "{\"broker\":\"%s\",\"topic\":\"%s\",\"endpoint\":\"%s\"}",
                  esc_broker, esc_topic, esc_url);
