@@ -873,20 +873,14 @@ bool cbm_store_check_integrity_deep(cbm_store_t *s) {
  * Masking to the primary code folds extended results (SQLITE_CORRUPT_VTAB,
  * SQLITE_BUSY_SNAPSHOT, SQLITE_IOERR_LOCK, …) onto their base, so the
  * classification is correct whether or not extended result codes are enabled. */
-static bool st_rc_is_structural_damage(int rc) {
+static cbm_integrity_verdict_t st_verdict_for_rc(int rc) {
     switch (rc & 0xff) {
     case SQLITE_CORRUPT:
     case SQLITE_NOTADB:
-        return true;
+        return CBM_INTEGRITY_CORRUPT;
     default:
-        return false;
+        return CBM_INTEGRITY_TRANSIENT;
     }
-}
-
-/* Verdict for a failed SQL operation: damage evidence, or something that says
- * nothing about the file. */
-static cbm_integrity_verdict_t st_verdict_for_rc(int rc) {
-    return st_rc_is_structural_damage(rc) ? CBM_INTEGRITY_CORRUPT : CBM_INTEGRITY_TRANSIENT;
 }
 
 cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
@@ -904,7 +898,7 @@ cbm_integrity_verdict_t cbm_store_check_integrity_verdict(cbm_store_t *s) {
     if (rc != SQLITE_OK) {
         /* A prepare failure here is the #1206 trigger: under concurrent access
          * the schema lookup can return BUSY/LOCKED. Only malformed-file
-         * evidence may condemn the DB — see st_rc_is_structural_damage. */
+         * evidence may condemn the DB — see st_verdict_for_rc. */
         return st_verdict_for_rc(rc);
     }
     cbm_integrity_verdict_t verdict = CBM_INTEGRITY_OK;

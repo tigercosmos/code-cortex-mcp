@@ -129,31 +129,24 @@ static void write_diagnostics(void) {
     size_t elapsed_ms = 0;
     size_t user_ms = 0;
     size_t sys_ms = 0;
-    size_t current_rss = 0;
-    size_t peak_rss = 0;
     size_t current_commit = 0;
     size_t peak_commit = 0;
     size_t page_faults = 0;
-    mi_process_info(&elapsed_ms, &user_ms, &sys_ms, &current_rss, &peak_rss, &current_commit,
-                    &peak_commit, &page_faults);
+    /* NULL for the two rss out-params, deliberately: on Linux mimalloc never
+     * sets current_rss and leaves its own committed-page counter there, which
+     * this project tunes low (purge_decommits=1, purge_delay=0) and which can
+     * go transiently NEGATIVE under purge — wrapping through size_t to an
+     * rss_bytes near 2^64. cbm_mem_rss()/cbm_mem_peak_rss() below are the
+     * authoritative source on every platform. */
+    mi_process_info(&elapsed_ms, &user_ms, &sys_ms, NULL, NULL, &current_commit, &peak_commit,
+                    &page_faults);
+    size_t current_rss = cbm_mem_rss();
+    size_t peak_rss = cbm_mem_peak_rss();
 
-    /* Do NOT report mi_process_info's rss fields. On Linux mimalloc never sets
-     * current_rss, so the field keeps mimalloc's internal committed-page
-     * counter — deliberately tuned low here (purge_decommits=1, purge_delay=0)
-     * and able to go transiently NEGATIVE under purge, which wraps through
-     * size_t and prints an rss_bytes near 2^64 (read as a 17-exabyte "leak").
-     * A `== 0` fallback does not catch that, because the field is nonzero
-     * garbage rather than unset. cbm_mem_rss()/cbm_mem_peak_rss() already
-     * encode the whole lesson: /proc statm is authoritative on Linux, mimalloc
-     * is correct on macOS/Windows, and peak is reconciled never to undercut
-     * current. */
-    current_rss = cbm_mem_rss();
-    peak_rss = cbm_mem_peak_rss();
     /* cbm_mem_peak_rss() reconciles peak >= current against its OWN fresh RSS
-     * sample, not against the one taken on the line above. On Linux those are
-     * two different reads of a moving value (page-granular statm vs KB-granular
-     * ru_maxrss, which lags), so if RSS drops in between, the file can report
-     * peak_rss_bytes < rss_bytes and contradict the invariant it documents.
+     * sample, not the one taken above. On Linux those are two reads of a moving
+     * value (page-granular statm vs KB-granular ru_maxrss, which lags), so if
+     * RSS drops in between, the file could report peak_rss_bytes < rss_bytes.
      * Reconcile against the value actually being written. */
     if (current_rss > peak_rss) {
         peak_rss = current_rss;

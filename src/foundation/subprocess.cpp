@@ -334,7 +334,7 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 /* Transient spawn-failure retry (see the EAGAIN note in cbm_posix_spawn_apple):
  * long enough to ride out a burst of process creation, short enough that a
  * genuinely exhausted system still fails fast. The budget below is the single
- * source of truth for both — see cbm_spawn_backoff for the resulting waits.
+ * source of truth for both — see cbm_spawn_backoff_ms for the resulting waits.
  *
  * A sanitized build needs a wider window than an ordinary one, and only a
  * sanitized one does.
@@ -377,9 +377,8 @@ enum { CBM_SPAWN_RETRY = 2, CBM_SPAWN_RETRY_ATTEMPTS = 6 };
 
 /* Exponential backoff, doubling from CBM_SPAWN_BACKOFF_BASE_MS: 10, 20, 40, 80,
  * 160, 320 — ~630ms of total patience on an ordinary build, and three further
- * doublings (640, 1280, 2560) to roughly 5s on a sanitized one. The waits follow
- * from CBM_SPAWN_RETRY_ATTEMPTS above rather than being listed separately here,
- * so changing the budget cannot leave this description behind.
+ * doublings (640, 1280, 2560) to roughly 5s on a sanitized one. Both totals
+ * follow from CBM_SPAWN_RETRY_ATTEMPTS above; if you change it, re-derive them.
  *
  * The first version waited a flat 3 x 10ms, which was enough for a momentary
  * dip and NOT enough for the real thing: a CI runner building and testing in
@@ -428,13 +427,6 @@ static long cbm_spawn_backoff_ms(int attempt) {
     return static_cast<long>(CBM_SPAWN_BACKOFF_BASE_MS) << shift;
 }
 
-static void cbm_spawn_backoff(int attempt) {
-    long ms = cbm_spawn_backoff_ms(attempt);
-    struct timespec delay = {static_cast<time_t>(ms / CBM_SPAWN_MS_PER_SEC),
-                             static_cast<long>(ms % CBM_SPAWN_MS_PER_SEC) * CBM_SPAWN_NS_PER_MS};
-    (void)cbm_nanosleep(&delay, nullptr);
-}
-
 /* Wait out this attempt's backoff, but only if the caller's budget can still
  * pay for BOTH the wait and the spawn that follows it. Returns false when it
  * cannot — the caller must then stop retrying.
@@ -461,7 +453,10 @@ static bool cbm_spawn_backoff_within_budget(int attempt, const cbm_proc_opts_t *
             return false; /* the wait alone would spend what is left */
         }
     }
-    cbm_spawn_backoff(attempt);
+    long ms = cbm_spawn_backoff_ms(attempt);
+    struct timespec delay = {static_cast<time_t>(ms / CBM_SPAWN_MS_PER_SEC),
+                             static_cast<long>(ms % CBM_SPAWN_MS_PER_SEC) * CBM_SPAWN_NS_PER_MS};
+    (void)cbm_nanosleep(&delay, nullptr);
     return true;
 }
 
@@ -475,11 +470,8 @@ static pid_t cbm_fork_with_retry(const cbm_proc_opts_t *opts, uint64_t started_a
     for (int attempt = 0;; attempt++) {
 #ifdef CBM_ENABLE_TEST_SEAMS
         if (cbm_spawn_eagain_injected()) {
-            if (attempt >= CBM_SPAWN_RETRY_ATTEMPTS) {
-                errno = EAGAIN;
-                return -1;
-            }
-            if (!cbm_spawn_backoff_within_budget(attempt, opts, started_at)) {
+            if (attempt >= CBM_SPAWN_RETRY_ATTEMPTS ||
+                !cbm_spawn_backoff_within_budget(attempt, opts, started_at)) {
                 errno = EAGAIN;
                 return -1;
             }

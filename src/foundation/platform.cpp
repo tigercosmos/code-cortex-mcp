@@ -142,6 +142,25 @@ int64_t cbm_file_size(const char *path) {
     return (int64_t)sz.QuadPart;
 }
 
+int64_t cbm_file_mtime(const char *path) {
+    wchar_t *wpath = cbm_utf8_to_wide(path);
+    if (!wpath) {
+        return CBM_NOT_FOUND;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    BOOL ok = GetFileAttributesExW(wpath, GetFileExInfoStandard, &fad);
+    free(wpath);
+    if (!ok) {
+        return CBM_NOT_FOUND;
+    }
+    /* FILETIME is 100ns ticks since 1601; scale to seconds. The epoch offset
+     * does not matter — this value is only ever compared against itself. */
+    ULARGE_INTEGER t;
+    t.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+    t.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+    return (int64_t)(t.QuadPart / 10000000ULL);
+}
+
 char *cbm_normalize_path_sep(char *path) {
     if (path) {
         for (char *p = path; *p; p++) {
@@ -268,6 +287,14 @@ int64_t cbm_file_size(const char *path) {
         return CBM_NOT_FOUND;
     }
     return (int64_t)st.st_size;
+}
+
+int64_t cbm_file_mtime(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return CBM_NOT_FOUND;
+    }
+    return (int64_t)st.st_mtime;
 }
 
 char *cbm_normalize_path_sep(char *path) {

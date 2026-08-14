@@ -161,6 +161,11 @@ bool cbm_is_dir(const char *path);
 /* Get file size. Returns -1 on error. */
 int64_t cbm_file_size(const char *path);
 
+/* Last-modification time in seconds. Returns -1 on error. Paired with
+ * cbm_file_size it forms a cheap change signature for "is this the same
+ * generation of this file I already inspected?". */
+int64_t cbm_file_mtime(const char *path);
+
 /* Normalize path separators to forward slashes (in-place).
  * On Windows, converts backslashes to forward slashes.
  * On POSIX, this is a no-op. Returns the input pointer. */

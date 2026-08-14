@@ -5,8 +5,7 @@
  * on a temporary directory with known file layout.
  */
 #include "../src/foundation/compat.h"
-#include "foundation/platform.h"  // cbm_normalize_path_sep (drive-canonicalization regression)
-#include "foundation/compat_fs.h" // cbm_mkdir_p (nested fixture dirs)
+#include "foundation/platform.h" // cbm_normalize_path_sep (drive-canonicalization regression)
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "pipeline/pipeline.h"
@@ -897,6 +896,17 @@ static int pg_invalid_rows(sqlite3 *db, const char *table, const char *kind_col)
     return bad;
 }
 
+/* COUNT(*) > 0 for a fixed query. */
+static bool pg_count_gt0(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        return false;
+    }
+    bool hit = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0;
+    sqlite3_finalize(st);
+    return hit;
+}
+
 /* PRAGMA quick_check — the exact probe whose failure quarantines the DB. */
 static bool pg_quick_check_ok(sqlite3 *db) {
     sqlite3_stmt *st = NULL;
@@ -941,15 +951,8 @@ static int pg_index_and_verify(const char *repo, const char *db_path, const char
     /* Valid is not enough: degrading every blob to "{}" would also satisfy the
      * json_valid() sweep. The long-URL HTTP client call must still carry its
      * url_path, so a future "fix" cannot buy validity by dropping the data. */
-    bool has_url = false;
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-                           "SELECT COUNT(*) FROM edges WHERE type = 'HTTP_CALLS' AND "
-                           "json_extract(properties,'$.url_path') LIKE '/api/p%'",
-                           -1, &st, NULL) == SQLITE_OK) {
-        has_url = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0;
-        sqlite3_finalize(st);
-    }
+    bool has_url = pg_count_gt0(db, "SELECT COUNT(*) FROM edges WHERE type = 'HTTP_CALLS' AND "
+                                    "json_extract(properties,'$.url_path') LIKE '/api/p%'");
     /* The same trap, one level deeper, and the reason this check exists at all:
      * once cbm_json_props_checked() fails closed, an UNDERSIZED BUFFER no longer
      * produces malformed JSON — it produces a valid "{}". The json_valid sweep
@@ -957,15 +960,9 @@ static int pg_index_and_verify(const char *repo, const char *db_path, const char
      * can. The route handler's qualified name is the longest value the pipeline
      * emits, so it is the one that goes first: at hprops[512] this edge comes
      * back as {} while every other assertion here still passes. */
-    bool has_handler = false;
-    st = NULL;
-    if (sqlite3_prepare_v2(db,
-                           "SELECT COUNT(*) FROM edges WHERE type = 'HANDLES' AND "
-                           "json_extract(properties,'$.handler') LIKE '%\\_endmarker' ESCAPE '\\'",
-                           -1, &st, NULL) == SQLITE_OK) {
-        has_handler = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0;
-        sqlite3_finalize(st);
-    }
+    bool has_handler =
+        pg_count_gt0(db, "SELECT COUNT(*) FROM edges WHERE type = 'HANDLES' AND "
+                         "json_extract(properties,'$.handler') LIKE '%\\_endmarker' ESCAPE '\\'");
     sqlite3_close(db);
 
     if (bad_nodes != 0 || bad_edges != 0 || !qc || !has_url || !has_handler) {

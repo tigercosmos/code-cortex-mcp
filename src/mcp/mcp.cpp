@@ -976,11 +976,23 @@ struct cbm_mcp_server {
     char *current_project;            /* which project store is open for (heap) */
     time_t store_last_used;           /* last time resolve_store was called for a named project */
     bool store_resolution_incomplete; /* cache scan stopped on a busy DB or its deadline */
-    bool store_resolution_corrupt;    /* a resolved db failed the integrity verdict */
-    char update_notice[CBM_SZ_256];   /* one-shot update notice, cleared after first injection */
-    bool update_checked;              /* true after background check has been launched */
-    cbm_thread_t update_tid;          /* background update check thread */
-    bool update_thread_active;        /* true if update thread was started and needs joining */
+    /* Why the last resolve produced no store. The VERDICT reason is one field,
+     * not a bool per outcome: two bools admitted a meaningless both-true state,
+     * and the error builder was only correct because it happened to test them
+     * in the right order. store_resolution_incomplete above stays separate — it
+     * reports that the cache SCAN was truncated, which is a different fact from
+     * what a scanned database turned out to be. */
+    cbm_integrity_verdict_t store_resolution_state;
+    /* Memo for the O(db size) integrity verdict, keyed on a file generation. */
+    char verdict_path[CBM_SZ_1K];
+    int64_t verdict_size;
+    int64_t verdict_mtime;
+    cbm_integrity_verdict_t verdict_result;
+    bool verdict_valid;
+    char update_notice[CBM_SZ_256]; /* one-shot update notice, cleared after first injection */
+    bool update_checked;            /* true after background check has been launched */
+    cbm_thread_t update_tid;        /* background update check thread */
+    bool update_thread_active;      /* true if update thread was started and needs joining */
 
     /* Session + auto-index state */
     char session_root[CBM_SZ_1K];     /* detected project root path */
@@ -1142,12 +1154,51 @@ static db_project_result_t db_internal_project_name(const char *full_path, char 
  * passed name (drifted filename). Defined after is_project_db_file below. */
 static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incomplete);
 
+/* Integrity verdict for a store, memoized on the file's (path, size, mtime)
+ * generation.
+ *
+ * The verdict walks the whole btree (PRAGMA quick_check), which measured ~160ms
+ * on a 41MB cache database — and resolve_store runs on EVERY tool call, while
+ * the store cache is evicted after STORE_IDLE_TIMEOUT_S. An agent client with
+ * any pause between calls would therefore re-walk the entire database at the
+ * start of every turn. Both the header and the implementation promise this
+ * check stays off the hot path; the memo is what makes that true.
+ *
+ * Detection is unchanged: any rewrite of the file changes its size or mtime, so
+ * a re-indexed or newly damaged generation is always re-examined.
+ *
+ * TRANSIENT is deliberately NOT memoized. It means "ask again" — caching it
+ * would turn one unlucky lock collision into a sticky failure for the life of
+ * the process. */
+static cbm_integrity_verdict_t resolve_store_verdict(cbm_mcp_server_t *srv, cbm_store_t *store,
+                                                     const char *path) {
+    int64_t size = cbm_file_size(path);
+    int64_t mtime = cbm_file_mtime(path);
+    bool signable = size >= 0 && mtime >= 0 && strlen(path) < sizeof(srv->verdict_path);
+    if (signable && srv->verdict_valid && srv->verdict_size == size &&
+        srv->verdict_mtime == mtime && strcmp(srv->verdict_path, path) == 0) {
+        return srv->verdict_result;
+    }
+
+    cbm_integrity_verdict_t verdict = cbm_store_check_integrity_verdict(store);
+    if (signable && verdict != CBM_INTEGRITY_TRANSIENT) {
+        snprintf(srv->verdict_path, sizeof(srv->verdict_path), "%s", path);
+        srv->verdict_size = size;
+        srv->verdict_mtime = mtime;
+        srv->verdict_result = verdict;
+        srv->verdict_valid = true;
+    } else {
+        srv->verdict_valid = false;
+    }
+    return verdict;
+}
+
 /* Open the right project's .db file for query tools.
  * Caches the connection — reopens only when project changes.
  * Tracks last-access time so the event loop can evict idle stores. */
 static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
     srv->store_resolution_incomplete = false;
-    srv->store_resolution_corrupt = false;
+    srv->store_resolution_state = CBM_INTEGRITY_OK;
     if (!project) {
         return NULL; /* project is required — no implicit fallback */
     }
@@ -1191,7 +1242,7 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
          * intact projects table — passed and kept being served. Only a
          * CONFIRMED corrupt verdict may rename a file; a transient one leaves
          * the DB untouched and lets the next resolve retry. */
-        cbm_integrity_verdict_t verdict = cbm_store_check_integrity_verdict(srv->store);
+        cbm_integrity_verdict_t verdict = resolve_store_verdict(srv, srv->store, path);
         if (verdict == CBM_INTEGRITY_TRANSIENT) {
             /* Report it as an incomplete lookup, NOT as "not found": the latter
              * reads to a user as "re-index me", which is the one action that
@@ -1200,7 +1251,7 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
                           "integrity check inconclusive (db busy or locked) — not quarantining");
             cbm_store_close(srv->store);
             srv->store = NULL;
-            srv->store_resolution_incomplete = true;
+            srv->store_resolution_state = CBM_INTEGRITY_TRANSIENT;
             return NULL;
         }
         if (verdict == CBM_INTEGRITY_CORRUPT) {
@@ -1223,6 +1274,7 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
             snprintf(shm_path, sizeof(shm_path), "%s-shm", path);
             cbm_unlink(wal_path);
             cbm_unlink(shm_path);
+            srv->store_resolution_state = CBM_INTEGRITY_CORRUPT;
             return NULL;
         }
 
@@ -1275,11 +1327,7 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
              * "incomplete lookup" would tell the user a database was BUSY when
              * it is broken, and would hide the re-index guidance that is the
              * only way out of it. */
-            if (scanned_verdict == CBM_INTEGRITY_CORRUPT) {
-                srv->store_resolution_corrupt = true;
-            } else {
-                srv->store_resolution_incomplete = true;
-            }
+            srv->store_resolution_state = scanned_verdict;
             return NULL;
         }
         srv->store = scanned;
@@ -1445,17 +1493,20 @@ static char *build_missing_project_error(void) {
  * (clearer message); a non-NULL project that didn't resolve means it's
  * unknown/unindexed (list the available ones). */
 static char *build_no_store_error(cbm_mcp_server_t *srv, const char *project) {
-    if (project && srv->store_resolution_corrupt) {
+    if (!project) {
+        return build_missing_project_error();
+    }
+    if (srv->store_resolution_state == CBM_INTEGRITY_CORRUPT) {
         return build_project_list_error(
             "project database failed its integrity check and was not served — "
             "re-run index_repository to rebuild it");
     }
-    if (project && srv->store_resolution_incomplete) {
+    if (srv->store_resolution_state == CBM_INTEGRITY_TRANSIENT ||
+        srv->store_resolution_incomplete) {
         return build_project_list_error(
             "project lookup incomplete: a cache database was busy or the scan deadline expired");
     }
-    return project ? build_project_list_error("project not found or not indexed")
-                   : build_missing_project_error();
+    return build_project_list_error("project not found or not indexed");
 }
 
 /* Bail with the right error when no store is available. */
