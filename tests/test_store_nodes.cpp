@@ -1045,6 +1045,48 @@ TEST(store_integrity_corrupt_too_many_rows) {
     PASS();
 }
 
+/* ── Quarantine verdict (#1206, #1037) ──────────────────────────────
+ *
+ * The bool check above cannot answer the only question the quarantine path
+ * actually asks: "is this database damaged, or did I just lose a lock race?"
+ * Answering "damaged" to the second question is what made concurrent instances
+ * rename each other's HEALTHY databases to .corrupt (#1206). These bind the
+ * three-way verdict so that behaviour cannot come back. */
+
+TEST(store_integrity_verdict_healthy_is_ok) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_store_upsert_project(s, "healthy-proj", "/tmp/healthy");
+    ASSERT_EQ(cbm_store_check_integrity_verdict(s), CBM_INTEGRITY_OK);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_integrity_verdict_real_corruption_is_corrupt) {
+    /* Structural damage the shallow check can see: node IDs landing in
+     * root_path. This one MUST be quarantinable — a verdict that never says
+     * CORRUPT would protect broken databases instead of users. */
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    sqlite3 *db = cbm_store_get_db(s);
+    sqlite3_exec(db,
+                 "INSERT INTO projects (name, indexed_at, root_path) "
+                 "VALUES ('broken', '2024-01-01', '826');",
+                 NULL, NULL, NULL);
+    ASSERT_EQ(cbm_store_check_integrity_verdict(s), CBM_INTEGRITY_CORRUPT);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_integrity_verdict_unopenable_is_transient_not_corrupt) {
+    /* A handle we could not open tells us NOTHING about the file's contents.
+     * Reporting CORRUPT here is how a database nobody could read got renamed
+     * and rebuilt from scratch (#1206) — the destructive answer to a question
+     * that was never asked. */
+    ASSERT_EQ(cbm_store_check_integrity_verdict(NULL), CBM_INTEGRITY_TRANSIENT);
+    PASS();
+}
+
 TEST(store_integrity_null_check) {
     /* NULL store should return false (not crash) */
     ASSERT_FALSE(cbm_store_check_integrity(NULL));
@@ -1588,6 +1630,9 @@ SUITE(store_nodes) {
     RUN_TEST(store_integrity_corrupt_bad_path);
     RUN_TEST(store_integrity_windows_lowercase_drive_issue367);
     RUN_TEST(store_integrity_corrupt_too_many_rows);
+    RUN_TEST(store_integrity_verdict_healthy_is_ok);
+    RUN_TEST(store_integrity_verdict_real_corruption_is_corrupt);
+    RUN_TEST(store_integrity_verdict_unopenable_is_transient_not_corrupt);
     RUN_TEST(store_integrity_null_check);
     RUN_TEST(store_project_crud);
     RUN_TEST(store_project_update);

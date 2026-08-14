@@ -1154,8 +1154,30 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
     project_db_path(project, path, sizeof(path));
     srv->store = path[0] ? cbm_store_open_path_query(path) : NULL;
     if (srv->store) {
-        /* Check DB integrity — back up (never silently delete) a corrupt DB */
-        if (!cbm_store_check_integrity(srv->store)) {
+        /* Check DB integrity — back up (never silently delete) a corrupt DB.
+         *
+         * #1206/#1037: the decision is tri-state, not a bool. The shallow
+         * cbm_store_check_integrity() reports failure for ANY prepare error,
+         * so a writer lock held by a second MCP instance (SQLITE_BUSY — a
+         * transient condition, not damage) used to quarantine a perfectly
+         * healthy database and rebuild a sparse replacement. It also never ran
+         * quick_check, so the inverse case — a torn node/edge btree behind an
+         * intact projects table — passed and kept being served. Only a
+         * CONFIRMED corrupt verdict may rename a file; a transient one leaves
+         * the DB untouched and lets the next resolve retry. */
+        cbm_integrity_verdict_t verdict = cbm_store_check_integrity_verdict(srv->store);
+        if (verdict == CBM_INTEGRITY_TRANSIENT) {
+            /* Report it as an incomplete lookup, NOT as "not found": the latter
+             * reads to a user as "re-index me", which is the one action that
+             * would destroy the graph this branch exists to protect. */
+            cbm_log_error("store.busy", "project", project, "path", path, "action",
+                          "integrity check inconclusive (db busy or locked) — not quarantining");
+            cbm_store_close(srv->store);
+            srv->store = NULL;
+            srv->store_resolution_incomplete = true;
+            return NULL;
+        }
+        if (verdict == CBM_INTEGRITY_CORRUPT) {
             cbm_log_error("store.auto_clean", "project", project, "path", path, "action",
                           "backing up corrupt db to .corrupt — re-index required");
             cbm_store_close(srv->store);
