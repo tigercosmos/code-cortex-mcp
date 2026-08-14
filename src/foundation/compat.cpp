@@ -55,9 +55,14 @@ char *cbm_strcasestr(const char *haystack, const char *needle) {
 #ifdef _WIN32
 #include <direct.h>
 char *cbm_mkdtemp(char *tmpl) {
-    /* Build path in static buffer, then copy back to caller.
-     * Callers must provide buffers >= CBM_SZ_256 bytes (all test code does). */
-    static char buf[CBM_SZ_512];
+    /* Per-call storage, NOT static: concurrent callers (the MCP server answers
+     * requests from more than one thread) would otherwise overwrite each
+     * other's path between template expansion, directory creation, and the
+     * copy back — handing one caller a directory created for another.
+     * The result is copied into `tmpl` before returning, so nothing outlives
+     * this frame. Callers must provide buffers >= CBM_SZ_256 bytes (all test
+     * code does). */
+    char buf[CBM_SZ_512];
     if (strncmp(tmpl, "/tmp/", 5) == 0) {
         const char *tmp = getenv("TEMP");
         if (!tmp)
@@ -90,8 +95,11 @@ char *cbm_mkdtemp(char *tmpl) {
 
 #ifdef _WIN32
 int cbm_mkstemp(char *tmpl) {
-    /* Rewrite /tmp/ to %TEMP%\ like cbm_mkdtemp */
-    static char buf[CBM_SZ_512];
+    /* Rewrite /tmp/ to %TEMP%\ like cbm_mkdtemp — and, like it, per-call
+     * storage: a static buffer lets one thread's expansion overwrite
+     * another's between _mktemp and _open, so two callers race for the same
+     * name and one of them silently gets the other's file. */
+    char buf[CBM_SZ_512];
     if (strncmp(tmpl, "/tmp/", 5) == 0) {
         const char *tmp = getenv("TEMP");
         if (!tmp)

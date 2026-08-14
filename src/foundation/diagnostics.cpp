@@ -137,10 +137,18 @@ static void write_diagnostics(void) {
     mi_process_info(&elapsed_ms, &user_ms, &sys_ms, &current_rss, &peak_rss, &current_commit,
                     &peak_commit, &page_faults);
 
-    /* Fallback RSS for ASan builds */
-    if (current_rss == 0) {
-        current_rss = cbm_mem_rss();
-    }
+    /* Do NOT report mi_process_info's rss fields. On Linux mimalloc never sets
+     * current_rss, so the field keeps mimalloc's internal committed-page
+     * counter — deliberately tuned low here (purge_decommits=1, purge_delay=0)
+     * and able to go transiently NEGATIVE under purge, which wraps through
+     * size_t and prints an rss_bytes near 2^64 (read as a 17-exabyte "leak").
+     * A `== 0` fallback does not catch that, because the field is nonzero
+     * garbage rather than unset. cbm_mem_rss()/cbm_mem_peak_rss() already
+     * encode the whole lesson: /proc statm is authoritative on Linux, mimalloc
+     * is correct on macOS/Windows, and peak is reconciled never to undercut
+     * current. */
+    current_rss = cbm_mem_rss();
+    peak_rss = cbm_mem_peak_rss();
 
     int fds = count_open_fds();
     time_t now = time(NULL);

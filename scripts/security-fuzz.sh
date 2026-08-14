@@ -116,6 +116,22 @@ test_payload "zero max_depth" '{"jsonrpc":"2.0","id":2,"method":"tools/call","pa
 test_payload "huge max_rows" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_graph","arguments":{"query":"MATCH (n) RETURN n","max_rows":999999999}}}'
 
 echo ""
+echo "--- Wrong JSON types ---"
+
+# The cases above vary argument VALUES but always send the expected type. These
+# nine send the wrong JSON type for the envelope fields parsed before tool
+# dispatch: tool name, arguments, params and method.
+test_payload "null tool name" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":null,"arguments":{}}}'
+test_payload "numeric tool name" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":42,"arguments":{}}}'
+test_payload "object tool name" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":{"a":1},"arguments":{}}}'
+test_payload "array arguments" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_graph","arguments":[1,2]}}'
+test_payload "string arguments" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_graph","arguments":"nope"}}'
+test_payload "null arguments" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_graph","arguments":null}}'
+test_payload "array params" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":[1,2]}'
+test_payload "numeric params" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":7}'
+test_payload "numeric method" '{"jsonrpc":"2.0","id":2,"method":7,"params":{}}'
+
+echo ""
 echo "--- Results ---"
 echo "  $PASS/$TOTAL passed"
 
