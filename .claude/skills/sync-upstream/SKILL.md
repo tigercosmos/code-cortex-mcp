@@ -148,8 +148,24 @@ For each approved commit:
   directly rather than importing `CBM_TLS`. Before adding any foundation
   header to a TU, diff its `#include` block against the last released commit —
   if the set is unchanged, the exposure is unchanged.
+- **`properties` JSON is load-bearing, not decoration.** The `edges` table
+  declares generated columns over `json_extract(properties, …)`
+  (`url_path_gen`, `local_name_gen`), so ANY malformed blob from ANY producer
+  makes `json_extract` raise, which makes `PRAGMA quick_check` error out,
+  which — since `a39fddf9` put quick_check on the quarantine path — deletes the
+  user's whole project database. Nothing downstream will catch it for you:
+  SQLite itself REFUSES a write that breaks a generated column ("malformed
+  JSON"), but `internal/cbm/sqlite_writer.cpp` is a hand-rolled writer that
+  builds raw B-tree records and never evaluates the expression — so the dump
+  path stores blobs the engine would have rejected, and the defect only
+  surfaces later, on read. Treat every producer as a correctness surface: check
+  both the sequential and parallel twins, check every conditional branch of a
+  format string closes its quotes, and check `cbm_json_escape` buffers cannot
+  truncate mid-escape. This is how the 2026-08-15 pass found `51921d90`.
 - Don't hand-edit `lsp_all.cpp` / `CMakeLists.txt` from a fan-out — central
-  build wiring is a single deliberate step.
+  build wiring is a single deliberate step. Same for `scripts/test.sh`: the
+  `CBM_TEST_SEAMS` option it passes is what compiles in fault-injection seams,
+  so a guard that needs one is wired centrally, not by the agent that wrote it.
 
 #### Permanent fork deferrals
 
@@ -164,15 +180,36 @@ scripts/build.sh          # or a non-sanitizer CMake build
 scripts/test.sh
 ```
 
-- **ASan is broken on this Mac** (Apple clang 17 / macOS 26 — `scripts/test.sh`
-  hangs at init). Build and validate with `CBM_SANITIZE=OFF` instead.
+- **Measure the baseline FIRST, in a separate worktree**
+  (`git worktree add <scratch> HEAD --detach`), before you edit anything —
+  especially when subagents are editing the tree in parallel. A baseline taken
+  in the working tree is worthless the moment the first port lands, and you
+  need it to be trustworthy: the 2026-08-15 pass had 6 failures that a subagent
+  reported as "pre-existing" and the isolated baseline proved were a real fault
+  the port had surfaced. `git worktree remove --force` when done.
+- **`scripts/test.sh` hardcodes `-DCBM_SANITIZE=ON`.** A `CBM_SANITIZE=OFF`
+  environment variable does NOT reach CMake through it (only `build.sh` sets
+  OFF). ASan+UBSan runs fine on this Mac as of 2026-08-15 — the old "ASan hangs
+  at init" note no longer holds. For a non-sanitizer tree, configure explicitly:
+  `cmake -S . -B build/nosan -DCBM_SANITIZE=OFF -DCBM_TEST_SEAMS=ON`.
+- Run `test-runner` **from the repo root** — fixtures are cwd-relative, and
+  running it out of the build dir produces ~6 spurious failures that look like
+  real regressions.
 - **`scripts/lint.sh` needs bash 4+** (`mapfile`; macOS ships 3.2). Reproduce
-  its three gates by hand over the changed files:
-  `clang-format-20.1.8 --dry-run --Werror`, `cppcheck` in C++ mode, and
-  `scripts/check-nolint-whitelist.sh`.
+  its three gates by hand: `clang-format --dry-run --Werror` (the binary is
+  plain `clang-format`, version 20.1.8; there is no `clang-format-20.1.8`),
+  `cppcheck` in C++ mode, and `scripts/check-nolint-whitelist.sh`. Copy
+  cppcheck's flags verbatim from `run_cppcheck` and **diff its output against
+  HEAD** rather than reading it — the only way to tell a finding you introduced
+  from one that was already there. Note the lint set is `src/` + `internal/cbm`
+  only; `tests/` is not covered by any gate. In zsh, an unquoted `$FILES`
+  variable does NOT word-split — pass globs directly or use `${=FILES}`.
 - Record the pass/fail counts and compare against the pre-sync baseline. Port
   the upstream regression tests for the fixes you took — a fix without its guard
   is half-ported.
+- **A green suite is not a green sync, and a red one is not automatically
+  someone else's fault.** Chase every failure to a root cause before accepting
+  it; the 2026-08-15 pass found an unported upstream fix (`51921d90`) that way.
 - For anything claiming a behavior change, **functionally verify against the
   built binary** on a purpose-built fixture (index it, query the graph, show the
   edge/node counts before and after).
