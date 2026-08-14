@@ -390,6 +390,55 @@ TEST(subprocess_total_timeout_ignores_continuous_progress) {
     PASS();
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* The kernel refusing a spawn with EAGAIN means "not right now", not "never" —
+ * a momentarily full process table on a busy machine. We used to treat it as a
+ * permanent failure, so a git probe or LSP server refused to start for a reason
+ * the user could neither see nor act on, and spawns failed on loaded CI runners
+ * with the contract intact.
+ *
+ * These pin the retry itself rather than the constant. Injecting refusals is
+ * deterministic, so this proves the loop retries on EVERY machine instead of
+ * only on one that happens to be starved. The whole seam (and both tests) is
+ * compiled out unless CBM_ENABLE_TEST_SEAMS is defined, so production carries
+ * no always-false branch. */
+static int subprocess_spawn_exit_zero(cbm_proc_result_t *out) {
+    const char *argv[] = {"/bin/sh", "-c", "exit 0", NULL};
+    cbm_proc_opts_t opts = {0};
+    opts.bin = argv[0];
+    opts.argv = argv;
+    return cbm_subprocess_run(&opts, out);
+}
+
+TEST(subprocess_retries_transient_spawn_refusal) {
+    /* Fewer refusals than the budget: the spawn must still succeed. */
+    cbm_proc_result_t result;
+    cbm_subprocess_force_spawn_eagain_for_testing(3);
+    int rc = subprocess_spawn_exit_zero(&result);
+    int pending = cbm_subprocess_pending_spawn_eagain_for_testing();
+    cbm_subprocess_force_spawn_eagain_for_testing(0); /* never leak into later tests */
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(pending, 0);
+    ASSERT_EQ(result.outcome, CBM_PROC_CLEAN);
+    ASSERT_EQ(result.exit_code, 0);
+    PASS();
+}
+
+TEST(subprocess_gives_up_after_the_retry_budget) {
+    /* More refusals than the budget: it must fail rather than retry forever.
+     * A machine still refusing after ~0.6s is genuinely out of capacity, and
+     * failing fast beats hanging. */
+    cbm_proc_result_t result;
+    cbm_subprocess_force_spawn_eagain_for_testing(50);
+    int rc = subprocess_spawn_exit_zero(&result);
+    bool refused = result.outcome == CBM_PROC_SPAWN_FAILED;
+    cbm_subprocess_force_spawn_eagain_for_testing(0); /* never leak into later tests */
+    ASSERT_EQ(rc, -1);
+    ASSERT_TRUE(refused);
+    PASS();
+}
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
 #endif /* _WIN32 */
 
 /* ══════════════════════════════════════════════════════════════════
@@ -444,5 +493,10 @@ SUITE(security) {
     RUN_TEST(exec_no_shell_null_argv_returns_error);
     RUN_TEST(exec_no_shell_captures_exit_code);
     RUN_TEST(subprocess_total_timeout_ignores_continuous_progress);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    /* Transient spawn-refusal retry (test-seam builds only) */
+    RUN_TEST(subprocess_retries_transient_spawn_refusal);
+    RUN_TEST(subprocess_gives_up_after_the_retry_budget);
+#endif
 #endif
 }

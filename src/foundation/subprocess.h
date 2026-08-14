@@ -95,6 +95,16 @@ const char *cbm_proc_outcome_str(cbm_proc_outcome_t o);
  * shared, tested implementation. */
 bool cbm_build_win_cmdline(char *buf, size_t cap, const char *const *argv);
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Force the next N spawn attempts to behave as if the kernel returned EAGAIN
+ * ("try again"), so the retry path can be exercised deterministically instead
+ * of hoping a loaded machine reproduces it. The counter is per-thread and
+ * counts DOWN: after N simulated refusals the next attempt spawns for real.
+ * POSIX test builds only — compiled out entirely otherwise. */
+void cbm_subprocess_force_spawn_eagain_for_testing(int attempts);
+int cbm_subprocess_pending_spawn_eagain_for_testing(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -60,7 +60,10 @@ scripts/clean.sh
 # Step 2: Configure with ASan+UBSan (mirrors the old `make test`). $MAKE_ARGS
 # carries any VAR=VAL passthrough; CC/CXX are already exported above and fed to
 # CMake explicitly so a re-run with a different compiler reconfigures cleanly.
-CMAKE_ARGS=(-DCBM_SANITIZE=ON)
+# CBM_TEST_SEAMS=ON compiles in the deterministic fault-injection seams some
+# guards need (a spawn the kernel refuses for load cannot be produced on demand
+# otherwise). It is OFF for every production build — see CMakeLists.txt.
+CMAKE_ARGS=(-DCBM_SANITIZE=ON -DCBM_TEST_SEAMS=ON)
 [[ -n "${CC:-}" ]]  && CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$CC")
 [[ -n "${CXX:-}" ]] && CMAKE_ARGS+=(-DCMAKE_CXX_COMPILER="$CXX")
 # Windows (msys2): use Unix Makefiles + the msys2 clang toolchain, not the

@@ -30,6 +30,16 @@ endif()
 option(CBM_SANITIZE "Enable ASan+UBSan on all targets" ON)
 option(CBM_WERROR  "Promote warnings to errors on first-party code" ON)
 
+# Deterministic fault-injection seams for tests (e.g. simulating a kernel that
+# refuses a spawn under load). OFF by default and compiled out entirely, so
+# production carries neither the hooks nor an always-false branch; scripts/test.sh
+# turns it ON. Configure-time rather than per-target because the object libraries
+# are shared between test-runner and the production binary in one build dir.
+option(CBM_TEST_SEAMS "Compile in deterministic test fault-injection seams" OFF)
+if(CBM_TEST_SEAMS)
+    add_compile_definitions(CBM_ENABLE_TEST_SEAMS)
+endif()
+
 # Production-binary knobs (mirror Makefile.cbm's CFLAGS_EXTRA / STATIC / with-ui).
 set(CBM_VERSION "dev" CACHE STRING "Version string baked into the binary")
 option(CBM_STATIC  "Link the production binary fully static (musl/Alpine portable builds)" OFF)
@@ -104,6 +114,11 @@ if(CBM_SANITIZE)
     set(CBM_SAN_FLAGS -fsanitize=address,undefined -fno-omit-frame-pointer)
     add_compile_options(${CBM_SAN_FLAGS})
     add_link_options(${CBM_SAN_FLAGS})
+    # Code that must widen a timing budget under instrumentation reads this.
+    # Compiler-provided detection (__SANITIZE_ADDRESS__ / __has_feature) stays
+    # the primary signal; this define is the build system saying so explicitly,
+    # so a sanitizer we do not special-case still gets the wider window.
+    add_compile_definitions(CBM_SANITIZED_BUILD=1)
 endif()
 
 # ── libgit2 auto-detect (mirrors Makefile.cbm) ─────────────────
