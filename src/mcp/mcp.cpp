@@ -268,6 +268,23 @@ char *cbm_mcp_text_result(const char *text, bool is_error) {
     yyjson_mut_arr_add_val(content, item);
     yyjson_mut_obj_add_val(doc, root, "content", content);
 
+    /* structuredContent has been wrong in both directions upstream, so the rule
+     * is spelled out here in full:
+     *
+     *   - JSON-object payload -> structuredContent = the PARSED object (the
+     *     spec's structured+serialized pattern).
+     *   - error               -> structuredContent = {"error": <text>} —
+     *     bounded, small, and the only machine-readable form of a failure a
+     *     client has.
+     *   - anything else       -> NO structuredContent key at all.
+     *
+     * Duplicating a non-object payload into {"text": <payload>} beside an
+     * identical content[0].text measured 2.05x the bytes on a 20k-node
+     * query_graph, and an EMPTY object is worse still: clients that honor a
+     * declared outputSchema treat structuredContent as THE authoritative
+     * result, so an empty object beside a non-empty payload renders the reply
+     * as literally "{}". Which is why no tool declares an outputSchema anymore
+     * — see mcp_add_tool_def. */
     if (!is_error && text) {
         yyjson_doc *structured_doc = yyjson_read(text, strlen(text), 0);
         if (structured_doc) {
@@ -278,6 +295,10 @@ char *cbm_mcp_text_result(const char *text, bool is_error) {
             }
             yyjson_doc_free(structured_doc);
         }
+    } else if (is_error) {
+        yyjson_mut_val *structured = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, structured, "error", text ? text : "");
+        yyjson_mut_obj_add_val(doc, root, "structuredContent", structured);
     }
     yyjson_mut_obj_add_bool(doc, root, "isError", is_error);
 
@@ -572,8 +593,6 @@ static const tool_def_t TOOLS[] = {
 
 static const int TOOL_COUNT = sizeof(TOOLS) / sizeof(TOOLS[0]);
 
-static const char MCP_TOOL_OUTPUT_SCHEMA[] = "{\"type\":\"object\",\"additionalProperties\":true}";
-
 static void mcp_add_json_schema(yyjson_mut_doc *doc, yyjson_mut_val *obj, const char *key,
                                 const char *schema_json) {
     yyjson_doc *schema_doc = yyjson_read(schema_json, strlen(schema_json), 0);
@@ -593,7 +612,12 @@ static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) 
     yyjson_mut_obj_add_str(doc, tool, "description", TOOLS[i].description);
 
     mcp_add_json_schema(doc, tool, "inputSchema", TOOLS[i].input_schema);
-    mcp_add_json_schema(doc, tool, "outputSchema", MCP_TOOL_OUTPUT_SCHEMA);
+    /* Deliberately NO outputSchema. A declared schema makes spec-honoring
+     * clients read structuredContent as the authoritative result, and a tool
+     * whose payload is not always a JSON object (an error envelope, a plain
+     * text answer) then renders as whatever structuredContent happens to hold.
+     * The blanket {"type":"object","additionalProperties":true} this replaced
+     * validated anything and informed nobody. See cbm_mcp_text_result. */
 
     yyjson_mut_arr_add_val(tools, tool);
 }

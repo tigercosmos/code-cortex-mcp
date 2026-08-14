@@ -283,6 +283,54 @@ TEST(mcp_text_result_error) {
     PASS();
 }
 
+/* #1522: the three structuredContent branches, bound one test each.
+ *
+ * A declared outputSchema makes spec-honoring clients (Claude Code among them)
+ * read structuredContent as THE result, so the key must be present exactly
+ * when it carries structure — and no tool may advertise a schema its
+ * payload does not always satisfy. */
+
+TEST(mcp_text_result_object_payload_carries_structured_content) {
+    char *json = cbm_mcp_text_result("{\"total\":5}", false);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NOT_NULL(strstr(json, "\"structuredContent\""));
+    /* The parsed object itself, not a re-wrapped string. */
+    ASSERT_NULL(strstr(json, "\"structuredContent\":{\"text\""));
+    free(json);
+    PASS();
+}
+
+TEST(mcp_text_result_text_payload_omits_structured_content) {
+    /* A non-object payload has no structure to carry. Emitting {} here is what
+     * rendered whole replies as literally "{}" in schema-honoring clients. */
+    char *json = cbm_mcp_text_result("plain text answer", false);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NULL(strstr(json, "structuredContent"));
+    ASSERT_NOT_NULL(strstr(json, "plain text answer"));
+    free(json);
+    PASS();
+}
+
+TEST(mcp_text_result_error_carries_structured_error) {
+    char *json = cbm_mcp_text_result("something failed", true);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NOT_NULL(strstr(json, "\"structuredContent\":{\"error\":\"something failed\"}"));
+    ASSERT_NOT_NULL(strstr(json, "\"isError\":true"));
+    free(json);
+    PASS();
+}
+
+TEST(mcp_tools_list_declares_no_output_schema) {
+    /* Output is payload-shaped, not schema-shaped: an error envelope and a
+     * text answer do not satisfy one static schema, so no tool declares one. */
+    char *json = cbm_mcp_tools_list();
+    ASSERT_NOT_NULL(json);
+    ASSERT_NULL(strstr(json, "outputSchema"));
+    ASSERT_NOT_NULL(strstr(json, "inputSchema"));
+    free(json);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  ARGUMENT EXTRACTION
  * ══════════════════════════════════════════════════════════════════ */
@@ -2512,6 +2560,10 @@ SUITE(mcp) {
     RUN_TEST(mcp_tools_array_schemas_have_items);
     RUN_TEST(mcp_text_result);
     RUN_TEST(mcp_text_result_error);
+    RUN_TEST(mcp_text_result_object_payload_carries_structured_content);
+    RUN_TEST(mcp_text_result_text_payload_omits_structured_content);
+    RUN_TEST(mcp_text_result_error_carries_structured_error);
+    RUN_TEST(mcp_tools_list_declares_no_output_schema);
     RUN_TEST(mcp_tool_result_validation_rejects_partial_response);
     RUN_TEST(mcp_tool_deadlines_are_bounded_and_tool_specific);
     RUN_TEST(mcp_tool_worker_name_rejects_option_injection);
