@@ -449,9 +449,9 @@ TEST(gbuf_upsert_empty_qn) {
 TEST(gbuf_upsert_same_qn_updates_all_fields) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
     int64_t id1 = cbm_gbuf_upsert_node(gb, "Function", "old_name", "pkg.fn", "old.go", 1, 10,
-                                        "{\"k\":\"v1\"}");
+                                       "{\"k\":\"v1\"}");
     int64_t id2 = cbm_gbuf_upsert_node(gb, "Method", "new_name", "pkg.fn", "new.go", 20, 30,
-                                        "{\"k\":\"v2\"}");
+                                       "{\"k\":\"v2\"}");
     ASSERT_EQ(id1, id2);
     ASSERT_EQ(cbm_gbuf_node_count(gb), 1);
 
@@ -720,7 +720,8 @@ TEST(gbuf_merge_overlapping_qns) {
     cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
 
     /* dst has node with QN "pkg.fn" */
-    cbm_gbuf_upsert_node(dst, "Function", "fn_old", "pkg.fn", "old.go", 1, 10, "{\"from\":\"dst\"}");
+    cbm_gbuf_upsert_node(dst, "Function", "fn_old", "pkg.fn", "old.go", 1, 10,
+                         "{\"from\":\"dst\"}");
     cbm_gbuf_upsert_node(dst, "Function", "unique_dst", "pkg.unique_dst", "u.go", 1, 5, "{}");
 
     /* src has same QN with different fields — src should win */

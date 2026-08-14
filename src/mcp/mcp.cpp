@@ -1473,6 +1473,12 @@ static bool is_project_db_file(const char *name, size_t len) {
 }
 
 /* db_internal_project_name — see forward declaration above resolve_store. */
+/* `ctx` cannot be const-qualified: sqlite3_progress_handler fixes the callback
+ * type as int(*)(void*), so constifying the parameter changes the function
+ * pointer's type and requires a cast at the registration site — trading a real
+ * type mismatch for a cosmetic one. The body already reads through a const
+ * pointer, which is where the guarantee belongs. */
+// cppcheck-suppress constParameterCallback
 static int db_scan_deadline_expired(void *ctx) {
     uint64_t deadline_ms = *(const uint64_t *)ctx;
     return deadline_ms > 0 && cbm_now_ms() >= deadline_ms;
