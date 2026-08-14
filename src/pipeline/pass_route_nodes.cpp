@@ -456,10 +456,17 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
              cbm_route_canon_path(path, cpath, sizeof(cpath)));
     const cbm_gbuf_node_t *existing = cbm_gbuf_find_by_qn(gb, route_qn);
 
+    /* method is re-read out of the node's own properties by a scanner that stops
+     * at the first '"' — an escaped value comes back with its trailing
+     * backslash, which would open an escape sequence here. */
+    char esc_m[CBM_SZ_64];
+    cbm_json_escape(esc_m, sizeof(esc_m), method);
     char rprops[CBM_SZ_256];
-    snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", method);
-    int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", path, route_qn,
-                                            func->file_path ? func->file_path : "", 0, 0, rprops);
+    int rn =
+        snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", esc_m);
+    int64_t route_id =
+        cbm_gbuf_upsert_node(gb, "Route", path, route_qn, func->file_path ? func->file_path : "", 0,
+                             0, cbm_json_props_checked(rprops, rn, sizeof(rprops)));
 
     if (existing) {
         const cbm_gbuf_edge_t **existing_handles = NULL;
@@ -472,10 +479,14 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
         }
     }
 
-    char hprops[CBM_SZ_512];
-    snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}",
-             func->qualified_name ? func->qualified_name : "");
-    cbm_gbuf_insert_edge(gb, func->id, route_id, "HANDLES", hprops);
+    /* A qualified name embeds the file path and the symbol slice, so it can be
+     * long enough to cut the blob and can carry a quote. */
+    char esc_h[CBM_SZ_512];
+    cbm_json_escape(esc_h, sizeof(esc_h), func->qualified_name ? func->qualified_name : "");
+    char hprops[CBM_SZ_1K];
+    int hn = snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
+    cbm_gbuf_insert_edge(gb, func->id, route_id, "HANDLES",
+                         cbm_json_props_checked(hprops, hn, sizeof(hprops)));
     return SKIP_ONE;
 }
 
@@ -872,11 +883,15 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
         char route_qn[CBM_ROUTE_QN_SIZE];
         snprintf(route_qn, sizeof(route_qn), "__grpc__%s/%s", svc->name, fn->name);
 
-        char props[CBM_SZ_128];
-        snprintf(props, sizeof(props), "{\"source\":\"proto\",\"service\":\"%s\"}", svc->name);
+        char esc_svc[CBM_SZ_256]; /* node name: a source slice, escape it */
+        cbm_json_escape(esc_svc, sizeof(esc_svc), svc->name);
+        char props[CBM_SZ_512];
+        int pn =
+            snprintf(props, sizeof(props), "{\"source\":\"proto\",\"service\":\"%s\"}", esc_svc);
 
-        int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", fn->name, route_qn, fn->file_path,
-                                                fn->start_line, fn->end_line, props);
+        int64_t route_id =
+            cbm_gbuf_upsert_node(gb, "Route", fn->name, route_qn, fn->file_path, fn->start_line,
+                                 fn->end_line, cbm_json_props_checked(props, pn, sizeof(props)));
         cbm_gbuf_insert_edge(gb, fn->id, route_id, "HANDLES", "{\"via\":\"proto_rpc\"}");
         grpc_routes++;
     }
@@ -1162,11 +1177,17 @@ static void sveltekit_file_visitor(const cbm_gbuf_node_t *node, void *userdata) 
         }
         ctx->routes_created++;
 
-        char hprops[CBM_SZ_256];
-        snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\",\"framework\":\"sveltekit\"%s}",
-                 child->qualified_name ? child->qualified_name : child->name,
-                 is_actions ? ",\"via\":\"actions_object\"" : "");
-        cbm_gbuf_insert_edge(ctx->gb, child->id, route_id, "HANDLES", hprops);
+        /* SvelteKit route QNs embed the whole nested directory path, so they
+         * routinely exceed what CBM_SZ_256 can hold around the wrapper. */
+        char esc_h[CBM_SZ_512];
+        cbm_json_escape(esc_h, sizeof(esc_h),
+                        child->qualified_name ? child->qualified_name : child->name);
+        char hprops[CBM_SZ_1K];
+        int hn =
+            snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\",\"framework\":\"sveltekit\"%s}",
+                     esc_h, is_actions ? ",\"via\":\"actions_object\"" : "");
+        cbm_gbuf_insert_edge(ctx->gb, child->id, route_id, "HANDLES",
+                             cbm_json_props_checked(hprops, hn, sizeof(hprops)));
         ctx->handles_created++;
     }
 }

@@ -25,6 +25,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"
+#include "foundation/str_util.h" // cbm_json_escape, cbm_json_props_checked
 
 #include <errno.h>
 #include <stdlib.h>
@@ -864,8 +865,11 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
             const char *basename = slash ? slash + SKIP_ONE : rel;
             char props[CBM_SZ_256];
             const char *ext = strrchr(basename, '.');
-            snprintf(props, sizeof(props), "{\"extension\":\"%s\"}", ext ? ext : "");
-            cbm_gbuf_upsert_node(existing, "File", basename, file_qn, rel, 0, 0, props);
+            char ext_escaped[CBM_SZ_64]; /* filename slice: may hold a quote */
+            cbm_json_escape(ext_escaped, (int)sizeof(ext_escaped), ext ? ext : "");
+            int pn = snprintf(props, sizeof(props), "{\"extension\":\"%s\"}", ext_escaped);
+            cbm_gbuf_upsert_node(existing, "File", basename, file_qn, rel, 0, 0,
+                                 cbm_json_props_checked(props, pn, sizeof(props)));
             free(file_qn);
         }
     }

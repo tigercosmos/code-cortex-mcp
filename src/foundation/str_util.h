@@ -90,6 +90,24 @@ bool cbm_validate_project_name(const char *name);
  * If buf is too small, output is truncated but always NUL-terminated. */
 int cbm_json_escape(char *buf, int bufsize, const char *src);
 
+/* The properties value every node/edge falls back to: the smallest valid JSON
+ * object. Never "" — json_valid('') is 0, so an empty blob is as malformed as a
+ * truncated one. */
+#define CBM_JSON_EMPTY_OBJECT "{}"
+
+/* Guard for a node/edge properties blob assembled with snprintf: returns props
+ * when the WHOLE blob fit (n, the snprintf return value or the running total of
+ * one, lies in [1, cap)), otherwise the empty object.
+ *
+ * A truncated blob has lost its closing brace and may be cut mid-string or
+ * mid-escape-sequence, so it is not valid JSON. Persisting one aborts every
+ * json_extract() consumer — including the edges table's url_path_gen /
+ * local_name_gen generated columns, whose evaluation makes PRAGMA quick_check
+ * error out and the whole project database get quarantined (#898). Degrading to
+ * "{}" loses the properties of one edge; storing the truncated blob loses the
+ * user's entire index. */
+const char *cbm_json_props_checked(const char *props, int n, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

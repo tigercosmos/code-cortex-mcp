@@ -5,7 +5,8 @@
  * on a temporary directory with known file layout.
  */
 #include "../src/foundation/compat.h"
-#include "foundation/platform.h" // cbm_normalize_path_sep (drive-canonicalization regression)
+#include "foundation/platform.h"  // cbm_normalize_path_sep (drive-canonicalization regression)
+#include "foundation/compat_fs.h" // cbm_mkdir_p (nested fixture dirs)
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "pipeline/pipeline.h"
@@ -13,6 +14,7 @@
 #include "store/store.h"
 #include "git/git_context.h"
 #include <yyjson/yyjson.h> // properties-JSON validity (oversized-props regression)
+#include <sqlite3.h>       // json_valid()/quick_check over every dumped row
 
 #include <stdlib.h>
 #include <string.h>
@@ -715,6 +717,276 @@ TEST(pipeline_edge_props_valid_json) {
     PASS();
 }
 
+/* ── Regression guard: EVERY stored properties blob is valid JSON ── */
+
+/* A node/edge properties blob that is not valid JSON makes json_extract() fail.
+ * The edges table declares
+ *   url_path_gen   TEXT GENERATED ALWAYS AS (json_extract(properties,'$.url_path'))
+ *   local_name_gen TEXT GENERATED ALWAYS AS (... json_extract(properties,'$.local_name') ...)
+ * and indexes both, so evaluating them on a malformed blob raises "malformed
+ * JSON" — which makes PRAGMA quick_check ERROR OUT, and a quick_check error
+ * quarantines the whole project database (renamed .corrupt, rebuilt from
+ * scratch). ONE bad producer anywhere therefore deletes a user's entire index.
+ * The bulk dump writes SQLite pages directly, so nothing rejects the blob on the
+ * way in: it lands on disk and detonates on the next integrity check (#898 —
+ * every brokered ASYNC_CALLS edge stored {"broker":"celery} unterminated).
+ *
+ * This is a WHOLE-TABLE guard rather than one test per producer: the fixture
+ * drives the real pipeline over the service-edge paths (HTTP client call,
+ * brokered async call, GraphQL client call), over values that carry a bare
+ * double quote (channel name, YAML config key), and over identifiers long
+ * enough to overflow the fixed props buffers — then asserts json_valid() for
+ * EVERY row of nodes and edges plus a clean quick_check. A future producer that
+ * emits a malformed blob for this fixture fails here without a new test.
+ *
+ * The repo is indexed TWICE: once with CBM_INDEX_SINGLE_THREAD=1 (the
+ * sequential passes) and once without it and with more than
+ * MIN_FILES_FOR_PARALLEL files (the parallel twins, which is what any
+ * real-world repo takes). The pass twins have drifted apart before — the
+ * escaping of channel/import properties lives on one side only — so a defect in
+ * either path has to fail this test. */
+enum {
+    PG_PAD_FILES = 55,       /* > MIN_FILES_FOR_PARALLEL (50) in pipeline.cpp */
+    PG_LONG_IDENT_LEN = 240, /* callee/ref names that overflow a 512-byte blob */
+    PG_LONG_PATH_LEN = 300,
+};
+
+/* Fill buf with `len` copies of c plus a NUL. */
+static void pg_repeat(char *buf, size_t buf_sz, size_t len, char c) {
+    if (len >= buf_sz) {
+        len = buf_sz - 1;
+    }
+    memset(buf, c, len);
+    buf[len] = '\0';
+}
+
+static bool pg_write(const char *dir, const char *name, const char *content) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        return false;
+    }
+    fputs(content, f);
+    fclose(f);
+    return true;
+}
+
+/* Write the properties-stressing fixture into an existing repo directory. */
+static bool pg_create_fixture(const char *dir) {
+    char ident[PG_LONG_IDENT_LEN + 1];
+    char path_tail[PG_LONG_PATH_LEN + 1];
+    pg_repeat(ident, sizeof(ident), PG_LONG_IDENT_LEN, 'c');
+    pg_repeat(path_tail, sizeof(path_tail), PG_LONG_PATH_LEN, 'p');
+
+    /* HTTP client call + brokered async call. Both carry a callee chain and a
+     * URL/topic long enough that the two escaped values plus the wrapper no
+     * longer fit a 512-byte props buffer — the truncated blob then loses its
+     * closing brace mid-"url_path", the exact shape url_path_gen chokes on. */
+    char svc[2048];
+    snprintf(svc, sizeof(svc),
+             "import requests\n"
+             "def call_http():\n"
+             "    return %s.requests.get(\"/api/%s\")\n"
+             "def call_async():\n"
+             "    return %s.celery_app.send_task(\"topic.%s\")\n",
+             ident, path_tail, ident, path_tail);
+    if (!pg_write(dir, "svc_props.py", svc)) {
+        return false;
+    }
+
+    /* GraphQL client call: the operation is the query document, which carries
+     * bare double quotes. Only the parallel path emits GRAPHQL_CALLS. */
+    if (!pg_write(dir, "gqlmod.py", "def gql(q):\n    return q\n")) {
+        return false;
+    }
+    if (!pg_write(dir, "gqluse.py",
+                  "from gqlmod import gql\n"
+                  "def fetch_user():\n"
+                  "    return gql('{ user(name:\"ann\") { id } }')\n")) {
+        return false;
+    }
+
+    /* Channel name sliced from a single-quoted literal that contains a bare
+     * double quote — it reaches the Channel node's properties verbatim. */
+    if (!pg_write(dir, "chan_props.js",
+                  "const socket = io();\n"
+                  "export function send(payload) {\n"
+                  "  socket.emit('say \"hi\"', payload);\n"
+                  "}\n")) {
+        return false;
+    }
+
+    /* YAML key path: the key node text is joined RAW, quotes included. */
+    if (!pg_write(dir, "infra_props.yaml",
+                  "\"svc.endpoint\":\n"
+                  "  push_endpoint: https://example.com/api/v1/orders\n")) {
+        return false;
+    }
+
+    /* A reference name long enough to overflow a 256-byte USAGE props buffer. */
+    char usage[1024];
+    snprintf(usage, sizeof(usage),
+             "u%s = 1\n"
+             "def read_it():\n"
+             "    return u%s\n",
+             ident, ident);
+    if (!pg_write(dir, "longref.py", usage)) {
+        return false;
+    }
+
+    /* A decorated route handler whose qualified name (project + nested dirs +
+     * file + symbol) overflows a 512-byte HANDLES props buffer. */
+    char deep[1024];
+    snprintf(deep, sizeof(deep), "%s/d%s", dir, ident);
+    if (!cbm_mkdir_p(deep, 0755)) {
+        return false;
+    }
+    char route[1024];
+    snprintf(route, sizeof(route),
+             "@app.route(\"/deep/%s\")\n"
+             "def handler_%s():\n"
+             "    return 1\n",
+             path_tail, ident);
+    char deep_rel[1024];
+    snprintf(deep_rel, sizeof(deep_rel), "d%s/route_props.py", ident);
+    if (!pg_write(dir, deep_rel, route)) {
+        return false;
+    }
+
+    /* Padding so the file count crosses MIN_FILES_FOR_PARALLEL. */
+    for (int i = 0; i < PG_PAD_FILES; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "pad_%02d.py", i);
+        snprintf(body, sizeof(body), "def pad_%02d():\n    return %d\n", i, i);
+        if (!pg_write(dir, name, body)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Count rows in `table` whose properties are not valid JSON, printing the first
+ * offender. Returns -1 if the query itself fails. */
+static int pg_invalid_rows(sqlite3 *db, const char *table, const char *kind_col) {
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+             "SELECT %s, properties FROM %s "
+             "WHERE properties IS NOT NULL AND json_valid(properties) = 0",
+             kind_col, table);
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        return -1;
+    }
+    int bad = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (bad < 3) {
+            const char *kind = (const char *)sqlite3_column_text(st, 0);
+            const char *props = (const char *)sqlite3_column_text(st, 1);
+            printf("    INVALID %s properties [%s]: %.200s\n", table, kind ? kind : "?",
+                   props ? props : "(null)");
+        }
+        bad++;
+    }
+    sqlite3_finalize(st);
+    return bad;
+}
+
+/* PRAGMA quick_check — the exact probe whose failure quarantines the DB. */
+static bool pg_quick_check_ok(sqlite3 *db) {
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA quick_check(1);", -1, &st, NULL) != SQLITE_OK) {
+        printf("    quick_check prepare failed: %s\n", sqlite3_errmsg(db));
+        return false;
+    }
+    bool ok = false;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *res = (const char *)sqlite3_column_text(st, 0);
+        ok = res && strcmp(res, "ok") == 0;
+        if (!ok) {
+            printf("    quick_check: %s\n", res ? res : "(null)");
+        }
+    } else {
+        printf("    quick_check step failed: %s\n", sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(st);
+    return ok;
+}
+
+/* Index `repo` into `db_path` and assert every stored blob is valid JSON.
+ * Returns 0 on success, 1 on failure (caller turns that into a test failure). */
+static int pg_index_and_verify(const char *repo, const char *db_path, const char *mode) {
+    cbm_pipeline_t *p = cbm_pipeline_new(repo, db_path, CBM_MODE_FULL);
+    if (!p || cbm_pipeline_run(p) != 0) {
+        printf("    %s: pipeline run failed\n", mode);
+        cbm_pipeline_free(p);
+        return 1;
+    }
+    cbm_pipeline_free(p);
+
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        printf("    %s: cannot open %s\n", mode, db_path);
+        sqlite3_close(db);
+        return 1;
+    }
+    int bad_nodes = pg_invalid_rows(db, "nodes", "label");
+    int bad_edges = pg_invalid_rows(db, "edges", "type");
+    bool qc = pg_quick_check_ok(db);
+    /* Valid is not enough: degrading every blob to "{}" would also satisfy the
+     * json_valid() sweep. The long-URL HTTP client call must still carry its
+     * url_path, so a future "fix" cannot buy validity by dropping the data. */
+    bool has_url = false;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT COUNT(*) FROM edges WHERE type = 'HTTP_CALLS' AND "
+                           "json_extract(properties,'$.url_path') LIKE '/api/p%'",
+                           -1, &st, NULL) == SQLITE_OK) {
+        has_url = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) > 0;
+        sqlite3_finalize(st);
+    }
+    sqlite3_close(db);
+
+    if (bad_nodes != 0 || bad_edges != 0 || !qc || !has_url) {
+        printf("    %s: %d malformed node blobs, %d malformed edge blobs, quick_check %s, "
+               "url_path preserved: %s\n",
+               mode, bad_nodes, bad_edges, qc ? "ok" : "FAILED", has_url ? "yes" : "NO");
+        return 1;
+    }
+    return 0;
+}
+
+TEST(pipeline_all_properties_valid_json) {
+    if (setup_test_repo() != 0) {
+        FAIL("failed to create temp dir");
+    }
+    if (!pg_create_fixture(g_tmpdir)) {
+        teardown_test_repo();
+        FAIL("failed to write properties fixture");
+    }
+
+    char db_seq[512];
+    char db_par[512];
+    snprintf(db_seq, sizeof(db_seq), "%s/props_seq.db", g_tmpdir);
+    snprintf(db_par, sizeof(db_par), "%s/props_par.db", g_tmpdir);
+
+    /* Sequential passes: pass_calls / pass_definitions / pass_usages. */
+    cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+    int seq_rc = pg_index_and_verify(g_tmpdir, db_seq, "sequential");
+
+    /* Parallel twins: pass_parallel (the default above 50 files). On a
+     * single-core host this degrades to the sequential path, which still
+     * passes — it just stops adding coverage. */
+    cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    int par_rc = pg_index_and_verify(g_tmpdir, db_par, "parallel");
+
+    teardown_test_repo();
+    ASSERT_EQ(seq_rc, 0);
+    ASSERT_EQ(par_rc, 0);
+    PASS();
+}
+
 /* ── Calls pass tests ──────────────────────────────────────────── */
 
 TEST(pipeline_calls_resolution) {
@@ -880,7 +1152,8 @@ TEST(githistory_limits_to_max) {
     int npairs = nfiles * (nfiles - 1) / 2;
     int ncommits = npairs * 3;
 
-    cbm_commit_files_t *commits = (cbm_commit_files_t *)calloc(ncommits, sizeof(cbm_commit_files_t));
+    cbm_commit_files_t *commits =
+        (cbm_commit_files_t *)calloc(ncommits, sizeof(cbm_commit_files_t));
     char **file_strs = (char **)calloc(nfiles, sizeof(char *));
     for (int i = 0; i < nfiles; i++) {
         file_strs[i] = (char *)malloc(32);
@@ -6282,6 +6555,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_definitions_properties);
     RUN_TEST(pipeline_def_props_valid_json_when_oversized);
     RUN_TEST(pipeline_edge_props_valid_json);
+    RUN_TEST(pipeline_all_properties_valid_json);
     /* Complexity propagation pass (Tier B) */
     RUN_TEST(pipeline_complexity_transitive_loop_depth);
     /* Calls pass */

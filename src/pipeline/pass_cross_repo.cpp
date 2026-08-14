@@ -14,6 +14,7 @@
 #include "foundation/constants.h"
 #include "foundation/log.h"
 #include "foundation/platform.h"
+#include "foundation/str_util.h" // cbm_json_escape, CBM_JSON_EMPTY_OBJECT
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 
@@ -92,20 +93,40 @@ static void build_cross_props(char *buf, size_t bufsz, const char *target_projec
                               const char *target_function, const char *target_file,
                               const char *url_or_channel, const char *extra_key,
                               const char *extra_val) {
+    /* Every value here is read back out of a stored properties blob or a nodes
+     * row — url_path/channel_name originate in source string literals, and
+     * json_str_prop() stops at the first '"', so an escaped value comes back
+     * with a trailing backslash. Re-escape before re-serializing, or the
+     * CROSS_HTTP_CALLS url_path (a generated column) is malformed. */
+    char esc_proj[CBM_SZ_256];
+    char esc_fn[CBM_SZ_256];
+    char esc_file[CBM_SZ_512];
+    char esc_uc[CBM_SZ_512];
+    char esc_ev[CBM_SZ_256];
+    cbm_json_escape(esc_proj, sizeof(esc_proj), target_project ? target_project : "");
+    cbm_json_escape(esc_fn, sizeof(esc_fn), target_function ? target_function : "");
+    cbm_json_escape(esc_file, sizeof(esc_file), target_file ? target_file : "");
+    cbm_json_escape(esc_uc, sizeof(esc_uc), url_or_channel ? url_or_channel : "");
+    cbm_json_escape(esc_ev, sizeof(esc_ev), extra_val ? extra_val : "");
     int n = snprintf(buf, bufsz,
                      "{\"target_project\":\"%s\",\"target_function\":\"%s\","
                      "\"target_file\":\"%s\"",
-                     target_project ? target_project : "", target_function ? target_function : "",
-                     target_file ? target_file : "");
-    if (url_or_channel && url_or_channel[0]) {
+                     esc_proj, esc_fn, esc_file);
+    if (esc_uc[0] && n > 0 && (size_t)n < bufsz) {
         n += snprintf(buf + n, bufsz - (size_t)n, ",\"%s\":\"%s\"",
-                      extra_key ? extra_key : "url_path", url_or_channel);
+                      extra_key ? extra_key : "url_path", esc_uc);
     }
-    if (extra_val && extra_val[0]) {
+    if (esc_ev[0] && n > 0 && (size_t)n < bufsz) {
         n += snprintf(buf + n, bufsz - (size_t)n, ",\"%s\":\"%s\"",
-                      extra_key ? "transport" : "method", extra_val);
+                      extra_key ? "transport" : "method", esc_ev);
     }
-    snprintf(buf + n, bufsz - (size_t)n, "}");
+    if (n <= 0 || (size_t)n >= bufsz - SKIP_ONE) {
+        /* Truncated: emit the empty object rather than an unterminated blob. */
+        snprintf(buf, bufsz, "%s", CBM_JSON_EMPTY_OBJECT);
+        return;
+    }
+    buf[n] = '}';
+    buf[n + SKIP_ONE] = '\0';
 }
 
 /* Delete all CROSS_* edges for a project from a store. */

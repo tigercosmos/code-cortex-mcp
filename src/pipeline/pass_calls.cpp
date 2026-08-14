@@ -11,7 +11,13 @@
  */
 #include "foundation/constants.h"
 
-enum { PC_RING = 4, PC_RING_MASK = 3, PC_SIG_SCAN = 15, PC_REGEX_GRP = 2 };
+enum {
+    PC_RING = 4,
+    PC_RING_MASK = 3,
+    PC_SIG_SCAN = 15,
+    PC_REGEX_GRP = 2,
+    SLEN_ARGS_OPEN = 9, /* strlen(",\"args\":[") */
+};
 /* Confidence for a service-pattern HTTP/ASYNC edge emitted when registry
  * resolution is empty (external, unindexed client library) — see #523. */
 #define PC_SVC_PATTERN_CONF 0.5
@@ -213,11 +219,15 @@ static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *ca
     char esc_fa[CBM_SZ_256];
     cbm_json_escape(esc_cn, sizeof(esc_cn), call->callee_name);
     cbm_json_escape(esc_fa, sizeof(esc_fa), call->first_string_arg);
-    char props[CBM_SZ_512];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"route_registration\"}", esc_cn,
-             esc_fa);
-    cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, route_id, "CALLS", props);
+    /* Must exceed both escaped values + wrapper (2 * CBM_SZ_256 + 54) or a long
+     * callee/URL pair cuts the blob mid-string — the parallel twin
+     * (emit_route_registration) already sizes this at CBM_SZ_1K. */
+    char props[CBM_SZ_1K];
+    int pn = snprintf(props, sizeof(props),
+                      "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"route_registration\"}",
+                      esc_cn, esc_fa);
+    cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, route_id, "CALLS",
+                         cbm_json_props_checked(props, pn, sizeof(props)));
     if (call->second_arg_name != NULL && call->second_arg_name[0] != '\0') {
         cbm_resolution_t hres = cbm_registry_resolve(ctx->registry, call->second_arg_name,
                                                      module_qn, imp_keys, imp_vals, imp_count);
@@ -228,8 +238,9 @@ static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *ca
                                            closing brace */
                 char esc_h[CBM_SZ_512];
                 cbm_json_escape(esc_h, sizeof(esc_h), hres.qualified_name);
-                snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
-                cbm_gbuf_insert_edge(ctx->gbuf, handler->id, route_id, "HANDLES", hprops);
+                int hn = snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
+                cbm_gbuf_insert_edge(ctx->gbuf, handler->id, route_id, "HANDLES",
+                                     cbm_json_props_checked(hprops, hn, sizeof(hprops)));
             }
         }
     }
@@ -285,18 +296,23 @@ static void calls_append_args(char *props, size_t cap, const CBMCall *call) {
     if (len < SKIP_ONE || props[len - SKIP_ONE] != '}') {
         return;
     }
-    /* Overwrite the trailing '}' and rebuild it after the args array. */
+    /* Overwrite the trailing '}' and rebuild it after the args array. The open
+     * bracket is only written when the closing "]}" + NUL is already guaranteed
+     * to fit, so this never leaves the blob on a ,"args":[ that no branch below
+     * can close. */
     size_t pos = len - SKIP_ONE;
-    int n = snprintf(props + pos, cap - pos, ",\"args\":[");
-    if (n <= 0 || (size_t)n >= cap - pos) {
-        return;
+    const size_t open_len = SLEN_ARGS_OPEN;
+    if (pos + open_len + PAIR_LEN + SKIP_ONE > cap) {
+        return; /* props keeps its trailing '}' — still valid JSON */
     }
-    pos += (size_t)n;
+    memcpy(props + pos, ",\"args\":[", open_len);
+    pos += open_len;
     for (int i = 0; i < call->arg_count; i++) {
         const CBMCallArg *a = &call->args[i];
         char esc_e[CBM_SZ_256];
         cbm_json_escape(esc_e, sizeof(esc_e), a->expr ? a->expr : "");
         char one[CBM_SZ_512];
+        int n;
         if (a->value) {
             char esc_v[CBM_SZ_256];
             cbm_json_escape(esc_v, sizeof(esc_v), a->value);
@@ -306,21 +322,37 @@ static void calls_append_args(char *props, size_t cap, const CBMCall *call) {
             n = snprintf(one, sizeof(one), "%s{\"i\":%d,\"e\":\"%s\"}", i > 0 ? "," : "", a->index,
                          esc_e);
         }
-        if (n <= 0 || (size_t)n >= cap - pos - PAIR_LEN) {
+        /* snprintf returns the UNtruncated length: a longer item was cut, so
+         * copying n bytes would read past `one` — drop the item whole. */
+        if (n >= (int)sizeof(one)) {
+            break;
+        }
+        /* Room for the item AND the closing "]}" + NUL. Computed as an addition
+         * so a nearly-full buffer cannot underflow the unsigned subtraction
+         * cap - pos - PAIR_LEN into a huge value that admits an overflowing
+         * memcpy. */
+        if (n <= 0 || pos + (size_t)n + PAIR_LEN + SKIP_ONE > cap) {
             break; /* not enough room — close the array with what fits */
         }
         memcpy(props + pos, one, (size_t)n);
         pos += (size_t)n;
     }
-    if (pos + PAIR_LEN < cap) {
-        props[pos++] = ']';
-        props[pos++] = '}';
-        props[pos] = '\0';
-    }
+    /* The break guard above keeps PAIR_LEN + NUL bytes in reserve, so the array
+     * always closes; an unclosed ,"args":[ would be malformed JSON. */
+    props[pos++] = ']';
+    props[pos++] = '}';
+    props[pos] = '\0';
 }
 
+/* n is the snprintf return value for the base blob in props: when it signals a
+ * truncation the blob is unterminated, so nothing may be spliced onto it and it
+ * must never reach the store. */
 static void calls_emit_edge(cbm_gbuf_t *gbuf, int64_t src, int64_t tgt, const char *type,
-                            char *props, size_t cap, const CBMCall *call) {
+                            char *props, size_t cap, int n, const CBMCall *call) {
+    if (n <= 0 || (size_t)n >= cap) {
+        cbm_gbuf_insert_edge(gbuf, src, tgt, type, CBM_JSON_EMPTY_OBJECT);
+        return;
+    }
     if (call && call->start_line > 0 && strcmp(type, "CALLS") == 0) {
         size_t len = strlen(props);
         if (len >= SKIP_ONE && props[len - SKIP_ONE] == '}' && len + CBM_SZ_32 < cap) {
@@ -360,11 +392,12 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         char esc_callee[CBM_SZ_256];
         cbm_json_escape(esc_callee, sizeof(esc_callee), call->callee_name);
         char props[CBM_SZ_512];
-        snprintf(props, sizeof(props),
-                 "{\"callee\":\"%s\",\"confidence\":%.2f,\"strategy\":\"%s\",\"candidates\":%d}",
-                 esc_callee, res->confidence, res->strategy ? res->strategy : "unknown",
-                 res->candidate_count);
-        calls_emit_edge(ctx->gbuf, source->id, target->id, "CALLS", props, sizeof(props), call);
+        int n = snprintf(props, sizeof(props),
+                         "{\"callee\":\"%s\",\"confidence\":%.2f,\"strategy\":\"%s\","
+                         "\"candidates\":%d}",
+                         esc_callee, res->confidence, res->strategy ? res->strategy : "unknown",
+                         res->candidate_count);
+        calls_emit_edge(ctx->gbuf, source->id, target->id, "CALLS", props, sizeof(props), n, call);
         return;
     }
     const char *edge_type = (svc == CBM_SVC_HTTP) ? "HTTP_CALLS" : "ASYNC_CALLS";
@@ -383,7 +416,12 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
      * "broker":"celery} on EVERY brokered ASYNC_CALLS edge — and its fixup
      * only handled truncation (it tested for a MISSING '}', which the format
      * string always supplies), so it never fired in the normal case (#898). */
-    char props[CBM_SZ_512];
+    /* Sized to hold BOTH escaped values plus the wrapper (2 * CBM_SZ_256 + 26 +
+     * method/broker); at CBM_SZ_512 a long callee/URL pair truncated the blob and
+     * every branch below then declined to close it, storing an unterminated
+     * "url_path" string on an edge whose url_path_gen generated column makes
+     * json_extract — and PRAGMA quick_check — fail. */
+    char props[CBM_SZ_1K];
     int n = snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"url_path\":\"%s\"", esc_callee,
                      esc_url);
     if (method && n > 0 && (size_t)n < sizeof(props)) {
@@ -392,11 +430,14 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
     if (broker && n > 0 && (size_t)n < sizeof(props)) {
         n += snprintf(props + n, sizeof(props) - (size_t)n, ",\"broker\":\"%s\"", broker);
     }
-    if (n > 0 && (size_t)n < sizeof(props) - 1) {
+    if (n > 0 && (size_t)n < (int)sizeof(props) - SKIP_ONE) {
         props[n] = '}';
-        props[n + 1] = '\0';
+        props[n + SKIP_ONE] = '\0';
+        n++;
+    } else {
+        n = -1; /* truncated somewhere above — never store the partial blob */
     }
-    calls_emit_edge(ctx->gbuf, source->id, route_id, edge_type, props, sizeof(props), call);
+    calls_emit_edge(ctx->gbuf, source->id, route_id, edge_type, props, sizeof(props), n, call);
 }
 
 /* Classify a resolved call and emit the appropriate edge. */
@@ -423,10 +464,12 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         char esc_k[CBM_SZ_256];
         cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
         cbm_json_escape(esc_k, sizeof(esc_k), call->first_string_arg ? call->first_string_arg : "");
-        char props[CBM_SZ_512];
-        snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"key\":\"%s\",\"confidence\":%.2f}",
-                 esc_c, esc_k, res->confidence);
-        calls_emit_edge(ctx->gbuf, source->id, target->id, "CONFIGURES", props, sizeof(props),
+        /* Two CBM_SZ_256 escapes + wrapper overflow CBM_SZ_512. */
+        char props[CBM_SZ_1K];
+        int n =
+            snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"key\":\"%s\",\"confidence\":%.2f}",
+                     esc_c, esc_k, res->confidence);
+        calls_emit_edge(ctx->gbuf, source->id, target->id, "CONFIGURES", props, sizeof(props), n,
                         call);
         return;
     }
@@ -436,11 +479,11 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
     char esc_c2[CBM_SZ_256];
     cbm_json_escape(esc_c2, sizeof(esc_c2), call->callee_name);
     char props[CBM_SZ_512];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"confidence\":%.2f,\"strategy\":\"%s\",\"candidates\":%d}",
-             esc_c2, res->confidence, res->strategy ? res->strategy : "unknown",
-             res->candidate_count);
-    calls_emit_edge(ctx->gbuf, source->id, target->id, "CALLS", props, sizeof(props), call);
+    int n = snprintf(
+        props, sizeof(props),
+        "{\"callee\":\"%s\",\"confidence\":%.2f,\"strategy\":\"%s\",\"candidates\":%d}", esc_c2,
+        res->confidence, res->strategy ? res->strategy : "unknown", res->candidate_count);
+    calls_emit_edge(ctx->gbuf, source->id, target->id, "CALLS", props, sizeof(props), n, call);
 }
 
 /* Find source node for a call: enclosing function or file node. */

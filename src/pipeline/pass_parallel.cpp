@@ -487,7 +487,9 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
                      def->is_test ? "true" : "false", def->is_entry_point ? "true" : "false");
     }
     if (n <= 0 || (size_t)n >= bufsize) {
-        buf[0] = '\0';
+        /* Never leave an empty blob: json_valid('') is 0, so "" is as malformed
+         * as a truncated object to every json_extract() consumer. */
+        snprintf(buf, bufsize, "%s", CBM_JSON_EMPTY_OBJECT);
         return;
     }
     size_t pos = (size_t)n;
@@ -726,16 +728,24 @@ static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_file_info
         char cpath[CBM_SZ_256];
         snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", rm,
                  cbm_route_canon_path(def->route_path, cpath, sizeof(cpath)));
+        char esc_rm[CBM_SZ_64]; /* decorator-derived verb: escape sliced text */
+        cbm_json_escape(esc_rm, sizeof(esc_rm), rm);
         char rprops[CBM_SZ_256];
-        snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", rm);
+        int rn = snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}",
+                          esc_rm);
         int64_t route_id =
             cbm_gbuf_upsert_node(ws->local_gbuf, "Route", def->route_path, route_qn,
-                                 def->file_path ? def->file_path : fi->rel_path, 0, 0, rprops);
-        char hprops[CBM_SZ_512];
+                                 def->file_path ? def->file_path : fi->rel_path, 0, 0,
+                                 cbm_json_props_checked(rprops, rn, sizeof(rprops)));
+        /* hprops must exceed the escaped QN + wrapper: at CBM_SZ_512 a deep
+         * qualified name cut the blob before its closing quote+brace (the
+         * sequential twin in pass_calls.cpp already uses CBM_SZ_1K). */
+        char hprops[CBM_SZ_1K];
         char esc_h[CBM_SZ_512];
         cbm_json_escape(esc_h, sizeof(esc_h), def->qualified_name);
-        snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
-        cbm_gbuf_insert_edge(ws->local_gbuf, func_id, route_id, "HANDLES", hprops);
+        int hn = snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
+        cbm_gbuf_insert_edge(ws->local_gbuf, func_id, route_id, "HANDLES",
+                             cbm_json_props_checked(hprops, hn, sizeof(hprops)));
     }
 }
 
@@ -1257,8 +1267,9 @@ static int create_imports_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *re
             char esc_ln[CBM_SZ_128];
             cbm_json_escape(esc_ln, sizeof(esc_ln), imp->local_name ? imp->local_name : "");
             char imp_props[CBM_SZ_256];
-            snprintf(imp_props, sizeof(imp_props), "{\"local_name\":\"%s\"}", esc_ln);
-            cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props);
+            int in = snprintf(imp_props, sizeof(imp_props), "{\"local_name\":\"%s\"}", esc_ln);
+            cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS",
+                                 cbm_json_props_checked(imp_props, in, sizeof(imp_props)));
             count++;
         }
     }
@@ -1293,19 +1304,22 @@ static void create_channel_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *r
         snprintf(channel_qn, sizeof(channel_qn), "__channel__%s__%s",
                  ch->transport ? ch->transport : "unknown", ch->channel_name);
         char esc_cn[CBM_SZ_256];
+        char esc_tr[CBM_SZ_64];
         cbm_json_escape(esc_cn, sizeof(esc_cn), ch->channel_name);
+        cbm_json_escape(esc_tr, sizeof(esc_tr), ch->transport ? ch->transport : "unknown");
         char channel_props[CBM_SZ_512];
-        snprintf(channel_props, sizeof(channel_props), "{\"transport\":\"%s\",\"name\":\"%s\"}",
-                 ch->transport ? ch->transport : "unknown", esc_cn);
-        int64_t channel_id = cbm_gbuf_upsert_node(ctx->gbuf, "Channel", ch->channel_name,
-                                                  channel_qn, "", 0, 0, channel_props);
+        int cn = snprintf(channel_props, sizeof(channel_props),
+                          "{\"transport\":\"%s\",\"name\":\"%s\"}", esc_tr, esc_cn);
+        int64_t channel_id =
+            cbm_gbuf_upsert_node(ctx->gbuf, "Channel", ch->channel_name, channel_qn, "", 0, 0,
+                                 cbm_json_props_checked(channel_props, cn, sizeof(channel_props)));
         const cbm_gbuf_node_t *src_node = find_channel_src(ctx, ch, rel);
         if (src_node && channel_id > 0) {
             const char *edge_type = ch->direction == CBM_CHANNEL_EMIT ? "EMITS" : "LISTENS_ON";
             char edge_props[CBM_SZ_128];
-            snprintf(edge_props, sizeof(edge_props), "{\"transport\":\"%s\"}",
-                     ch->transport ? ch->transport : "unknown");
-            cbm_gbuf_insert_edge(ctx->gbuf, src_node->id, channel_id, edge_type, edge_props);
+            int en = snprintf(edge_props, sizeof(edge_props), "{\"transport\":\"%s\"}", esc_tr);
+            cbm_gbuf_insert_edge(ctx->gbuf, src_node->id, channel_id, edge_type,
+                                 cbm_json_props_checked(edge_props, en, sizeof(edge_props)));
         }
     }
 }
@@ -1328,9 +1342,10 @@ static void create_env_configures(cbm_pipeline_ctx_t *ctx, const CBMFileResult *
         char esc_key[CBM_SZ_256];
         cbm_json_escape(esc_key, sizeof(esc_key), ea->env_key);
         char env_props[CBM_SZ_512];
-        snprintf(env_props, sizeof(env_props), "{\"env_key\":\"%s\"}", esc_key);
+        int en = snprintf(env_props, sizeof(env_props), "{\"env_key\":\"%s\"}", esc_key);
         int64_t env_id =
-            cbm_gbuf_upsert_node(ctx->gbuf, "EnvVar", ea->env_key, env_qn, "", 0, 0, env_props);
+            cbm_gbuf_upsert_node(ctx->gbuf, "EnvVar", ea->env_key, env_qn, "", 0, 0,
+                                 cbm_json_props_checked(env_props, en, sizeof(env_props)));
         if (env_id <= 0) {
             continue;
         }
@@ -1643,20 +1658,26 @@ static const char *find_route_path_in_args(const CBMCall *call, const char **out
 /* Build props JSON, append args, close brace, emit edge. */
 static void finalize_and_emit(cbm_gbuf_t *gbuf, int64_t src_id, int64_t tgt_id,
                               const char *edge_type, char *props, int n, const CBMCall *call) {
-    if (n > 0 && (size_t)n < CBM_SZ_2K - PP_ESC_SPACE) {
-        size_t pos = append_args_json(props, CBM_SZ_2K, (size_t)n, call);
-        if (call->start_line > 0 && strcmp(edge_type, "CALLS") == 0 &&
-            pos < CBM_SZ_2K - PP_LINE_MARGIN) {
-            int ln = snprintf(props + pos, CBM_SZ_2K - pos, ",\"line\":%d", call->start_line);
-            if (ln > 0) {
-                pos += (size_t)ln;
-            }
-        }
-        if (pos < CBM_SZ_2K - SKIP_ONE) {
-            props[pos] = '}';
-            props[pos + SKIP_ONE] = '\0';
+    if (n <= 0 || (size_t)n >= CBM_SZ_2K - PP_ESC_SPACE) {
+        /* The base blob did not fit: it has no closing brace and may be cut
+         * mid-string, so it is malformed JSON — never store it. */
+        cbm_gbuf_insert_edge(gbuf, src_id, tgt_id, edge_type, CBM_JSON_EMPTY_OBJECT);
+        return;
+    }
+    size_t pos = append_args_json(props, CBM_SZ_2K, (size_t)n, call);
+    if (call->start_line > 0 && strcmp(edge_type, "CALLS") == 0 &&
+        pos < CBM_SZ_2K - PP_LINE_MARGIN) {
+        int ln = snprintf(props + pos, CBM_SZ_2K - pos, ",\"line\":%d", call->start_line);
+        if (ln > 0) {
+            pos += (size_t)ln;
         }
     }
+    if (pos >= CBM_SZ_2K - SKIP_ONE) {
+        cbm_gbuf_insert_edge(gbuf, src_id, tgt_id, edge_type, CBM_JSON_EMPTY_OBJECT);
+        return;
+    }
+    props[pos] = '}';
+    props[pos + SKIP_ONE] = '\0';
     cbm_gbuf_insert_edge(gbuf, src_id, tgt_id, edge_type, props);
 }
 
@@ -1864,10 +1885,14 @@ static void detect_url_in_args(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
         char esc_n[CBM_SZ_256];
         cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
         cbm_json_escape(esc_n, sizeof(esc_n), norm);
-        char eprops[CBM_SZ_512];
-        snprintf(eprops, sizeof(eprops),
-                 "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"arg_url\"}", esc_c, esc_n);
-        cbm_gbuf_insert_edge(gbuf, source->id, route_id, "HTTP_CALLS", eprops);
+        /* Two CBM_SZ_256 escapes + wrapper overflow CBM_SZ_512, and a cut
+         * url_path is exactly what url_path_gen's json_extract chokes on. */
+        char eprops[CBM_SZ_1K];
+        int en =
+            snprintf(eprops, sizeof(eprops),
+                     "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"arg_url\"}", esc_c, esc_n);
+        cbm_gbuf_insert_edge(gbuf, source->id, route_id, "HTTP_CALLS",
+                             cbm_json_props_checked(eprops, en, sizeof(eprops)));
         break;
     }
 }
@@ -1965,13 +1990,21 @@ static void emit_grpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
     int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", route_name, route_qn, "", 0, 0,
                                             "{\"source\":\"grpc\"}");
 
+    /* service/method are sliced out of the callee name / resolved QN (a member
+     * expression can carry quotes, e.g. clients["billing"].BillingServiceClient),
+     * so both need escaping like the callee itself. */
     char esc_c[CBM_SZ_256];
+    char esc_svc[CBM_SZ_512];
+    char esc_m[CBM_SZ_512];
     cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"service\":\"%s\",\"method\":\"%s\",\"confidence\":%.2f}", esc_c,
-             service, method, res->confidence);
-    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRPC_CALLS", props);
+    cbm_json_escape(esc_svc, sizeof(esc_svc), service);
+    cbm_json_escape(esc_m, sizeof(esc_m), method);
+    char props[CBM_SZ_2K];
+    int n = snprintf(props, sizeof(props),
+                     "{\"callee\":\"%s\",\"service\":\"%s\",\"method\":\"%s\",\"confidence\":%.2f}",
+                     esc_c, esc_svc, esc_m, res->confidence);
+    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRPC_CALLS",
+                         cbm_json_props_checked(props, n, sizeof(props)));
 }
 
 /* Emit GRAPHQL_CALLS edge. Extract operation from first string arg if available. */
@@ -2001,12 +2034,19 @@ static void emit_graphql_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, c
     int64_t route_id =
         cbm_gbuf_upsert_node(gbuf, "Route", p, route_qn, "", 0, 0, "{\"source\":\"graphql\"}");
 
+    /* The operation is the GraphQL document itself — a template literal that
+     * routinely carries raw newlines and quotes (gql(`query {\n user(id:"1")\n}`)).
+     * Interpolated raw it produced malformed properties on every such call. */
     char esc_c[CBM_SZ_256];
+    char esc_op[CBM_SZ_512];
     cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
+    cbm_json_escape(esc_op, sizeof(esc_op), p);
     char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"operation\":\"%s\",\"confidence\":%.2f}",
-             esc_c, p, res->confidence);
-    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRAPHQL_CALLS", props);
+    int n = snprintf(props, sizeof(props),
+                     "{\"callee\":\"%s\",\"operation\":\"%s\",\"confidence\":%.2f}", esc_c, esc_op,
+                     res->confidence);
+    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRAPHQL_CALLS",
+                         cbm_json_props_checked(props, n, sizeof(props)));
 }
 
 /* Emit TRPC_CALLS edge. Extract procedure path from callee chain. */
@@ -2038,12 +2078,18 @@ static void emit_trpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
     int64_t route_id =
         cbm_gbuf_upsert_node(gbuf, "Route", p, route_qn, "", 0, 0, "{\"source\":\"trpc\"}");
 
+    /* The procedure path is sliced from the callee expression and can carry a
+     * quoted subscript (trpc["user"].getById.query()). */
     char esc_c[CBM_SZ_256];
+    char esc_p[CBM_SZ_512];
     cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
+    cbm_json_escape(esc_p, sizeof(esc_p), p);
     char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"procedure\":\"%s\",\"confidence\":%.2f}",
-             esc_c, p, res->confidence);
-    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "TRPC_CALLS", props);
+    int n = snprintf(props, sizeof(props),
+                     "{\"callee\":\"%s\",\"procedure\":\"%s\",\"confidence\":%.2f}", esc_c, esc_p,
+                     res->confidence);
+    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "TRPC_CALLS",
+                         cbm_json_props_checked(props, n, sizeof(props)));
 }
 
 /* When suppress_plain_calls is true (a TS/JS/TSX weak short-name member-call
@@ -2511,11 +2557,15 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        char uprops[CBM_SZ_256];
+        /* uprops must exceed the escaped value + wrapper (the sequential twin in
+         * pass_usages.cpp already uses CBM_SZ_512): at CBM_SZ_256 a long
+         * reference name cut the blob before its closing quote+brace. */
+        char uprops[CBM_SZ_512];
         char esc_ref[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
         cbm_json_escape(esc_ref, sizeof(esc_ref), usage->ref_name);
-        snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
-        cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id, "USAGE", uprops);
+        int un = snprintf(uprops, sizeof(uprops), "{\"callee\":\"%s\"}", esc_ref);
+        cbm_gbuf_insert_edge(ws->local_edge_buf, src->id, tgt->id, "USAGE",
+                             cbm_json_props_checked(uprops, un, sizeof(uprops)));
         ws->usages_resolved++;
     }
 }
@@ -2655,8 +2705,9 @@ static void resolve_def_decorators(resolve_ctx_t *rc, resolve_worker_state_t *ws
             char esc_dec[CBM_SZ_256];
             cbm_json_escape(esc_dec, sizeof(esc_dec), def->decorators[dc]);
             char dp[CBM_SZ_512];
-            snprintf(dp, sizeof(dp), "{\"decorator\":\"%s\"}", esc_dec);
-            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn_id, "DECORATES", dp);
+            int dpn = snprintf(dp, sizeof(dp), "{\"decorator\":\"%s\"}", esc_dec);
+            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn_id, "DECORATES",
+                                 cbm_json_props_checked(dp, dpn, sizeof(dp)));
             /* Ensure a reference-style edge exists so the decorator appears in queries
              * without being misclassified as a real call by downstream passes. */
             cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn_id, "USAGE", "{}");

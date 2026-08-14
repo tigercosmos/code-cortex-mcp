@@ -479,13 +479,19 @@ static int pass_structure(cbm_pipeline_t *p, const cbm_file_info_t *files, int f
         const char *slash = strrchr(rel, '/');
         const char *basename = slash ? slash + SKIP_ONE : rel;
 
+        /* The extension is a filename slice, so it can hold a quote or a
+         * backslash on any POSIX filesystem — escape it, as the githistory pass
+         * already does when it rewrites the same property. */
         char props[CBM_SZ_256];
         const char *ext = strrchr(basename, '.');
-        snprintf(props, sizeof(props), "{\"extension\":\"%s\"}", ext ? ext : "");
+        char ext_escaped[CBM_SZ_64];
+        cbm_json_escape(ext_escaped, (int)sizeof(ext_escaped), ext ? ext : "");
+        int pn = snprintf(props, sizeof(props), "{\"extension\":\"%s\"}", ext_escaped);
 
         const char *qualified_name = file_qn;
         const char *file_path = rel;
-        cbm_gbuf_upsert_node(p->gbuf, "File", basename, qualified_name, file_path, 0, 0, props);
+        cbm_gbuf_upsert_node(p->gbuf, "File", basename, qualified_name, file_path, 0, 0,
+                             cbm_json_props_checked(props, pn, sizeof(props)));
 
         /* CONTAINS_FILE edge: parent dir -> file */
         char *dir = strdup(rel);
@@ -557,6 +563,16 @@ static void *gh_compute_thread_fn(void *arg) {
 /* Process one infra binding: create Route node + INFRA_MAPS edge. */
 static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib,
                                      const char *rel_path) {
+    /* source_name/target_url are raw YAML/HCL scalars (only surrounding quotes
+     * are stripped), so they can carry quotes, backslashes and — for a
+     * multi-line scalar — raw newlines. The broker comes from a fixed table but
+     * is escaped alongside them so the whole blob has one rule. */
+    char esc_broker[CBM_SZ_64];
+    char esc_topic[CBM_SZ_256];
+    char esc_url[CBM_SZ_256];
+    cbm_json_escape(esc_broker, sizeof(esc_broker), ib->broker ? ib->broker : "async");
+    cbm_json_escape(esc_topic, sizeof(esc_topic), ib->source_name);
+    cbm_json_escape(esc_url, sizeof(esc_url), ib->target_url);
     char url_route_qn[CBM_ROUTE_QN_SIZE];
     snprintf(url_route_qn, sizeof(url_route_qn), "__route__infra__%s", ib->target_url);
     int64_t url_route_id = cbm_gbuf_upsert_node(gbuf, "Route", ib->target_url, url_route_qn,
@@ -574,19 +590,22 @@ static int process_one_infra_binding(cbm_gbuf_t *gbuf, const CBMInfraBinding *ib
          * call created the node first (e.g. a standalone scheduler/subscription
          * manifest). nodes.properties must be valid JSON (json_each/json_extract
          * consumers), not a bare broker token. */
-        char topic_props[CBM_SZ_256];
-        snprintf(topic_props, sizeof(topic_props), "{\"broker\":\"%s\",\"topic\":\"%s\"}",
-                 ib->broker ? ib->broker : "async", ib->source_name);
-        topic_route_id = cbm_gbuf_upsert_node(gbuf, "Route", ib->source_name, topic_route_qn,
-                                              rel_path, 0, 0, topic_props);
+        char topic_props[CBM_SZ_512];
+        int tn = snprintf(topic_props, sizeof(topic_props), "{\"broker\":\"%s\",\"topic\":\"%s\"}",
+                          esc_broker, esc_topic);
+        topic_route_id =
+            cbm_gbuf_upsert_node(gbuf, "Route", ib->source_name, topic_route_qn, rel_path, 0, 0,
+                                 cbm_json_props_checked(topic_props, tn, sizeof(topic_props)));
         if (topic_route_id <= 0) {
             return 0;
         }
     }
-    char props[CBM_SZ_512];
-    snprintf(props, sizeof(props), "{\"broker\":\"%s\",\"topic\":\"%s\",\"endpoint\":\"%s\"}",
-             ib->broker ? ib->broker : "async", ib->source_name, ib->target_url);
-    cbm_gbuf_insert_edge(gbuf, topic_route_id, url_route_id, "INFRA_MAPS", props);
+    char props[CBM_SZ_1K];
+    int pn =
+        snprintf(props, sizeof(props), "{\"broker\":\"%s\",\"topic\":\"%s\",\"endpoint\":\"%s\"}",
+                 esc_broker, esc_topic, esc_url);
+    cbm_gbuf_insert_edge(gbuf, topic_route_id, url_route_id, "INFRA_MAPS",
+                         cbm_json_props_checked(props, pn, sizeof(props)));
     return SKIP_ONE;
 }
 
@@ -649,14 +668,20 @@ static void try_upsert_infra_route(cbm_gbuf_t *gbuf, const CBMStringRef *sr, con
     }
     char route_qn[CBM_ROUTE_QN_SIZE];
     snprintf(route_qn, sizeof(route_qn), "__route__infra__%s", sr->value);
+    /* key_path is joined from RAW YAML key node text — a quoted key ("log.level":)
+     * keeps its quotes — so it must be escaped before it lands in properties. */
     char route_props[CBM_SZ_512];
+    int rn;
     if (sr->key_path) {
-        snprintf(route_props, sizeof(route_props), "{\"source\":\"infra\",\"key_path\":\"%s\"}",
-                 sr->key_path);
+        char esc_kp[CBM_SZ_256];
+        cbm_json_escape(esc_kp, sizeof(esc_kp), sr->key_path);
+        rn = snprintf(route_props, sizeof(route_props),
+                      "{\"source\":\"infra\",\"key_path\":\"%s\"}", esc_kp);
     } else {
-        snprintf(route_props, sizeof(route_props), "{\"source\":\"infra\"}");
+        rn = snprintf(route_props, sizeof(route_props), "{\"source\":\"infra\"}");
     }
-    cbm_gbuf_upsert_node(gbuf, "Route", sr->value, route_qn, fp, 0, 0, route_props);
+    cbm_gbuf_upsert_node(gbuf, "Route", sr->value, route_qn, fp, 0, 0,
+                         cbm_json_props_checked(route_props, rn, sizeof(route_props)));
 }
 
 /* A URL string_ref that does NOT denote a route the service serves: a value

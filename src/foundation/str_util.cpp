@@ -341,3 +341,13 @@ int cbm_json_escape(char *buf, int bufsize, const char *src) {
     buf[pos] = '\0';
     return pos;
 }
+
+/* See str_util.h. Fails closed: any snprintf return that signals an error or a
+ * truncation degrades the blob to the empty object rather than persisting an
+ * unterminated one. */
+const char *cbm_json_props_checked(const char *props, int n, size_t cap) {
+    if (props == nullptr || n <= 0 || (size_t)n >= cap) {
+        return CBM_JSON_EMPTY_OBJECT;
+    }
+    return props;
+}

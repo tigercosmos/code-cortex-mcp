@@ -14,6 +14,7 @@
 #include "foundation/hash_table.h"
 #include "foundation/log.h"
 #include "foundation/compat.h"
+#include "foundation/str_util.h" // cbm_json_escape, cbm_json_props_checked
 
 #include <stdint.h>
 #include <stdio.h>
@@ -281,13 +282,18 @@ static int strategy_key_symbols(cbm_gbuf_t *gb) {
             }
 
             if (confidence > 0.0) {
+                /* Config keys come from parsed config files, not identifiers. */
+                char esc_key[CBM_SZ_256];
+                cbm_json_escape(esc_key, sizeof(esc_key), config_entries[ci].name);
                 char props[CBM_SZ_512];
-                snprintf(props, sizeof(props),
-                         "{\"strategy\":\"key_symbol\",\"confidence\":%.2f,\"config_key\":\"%s\"}",
-                         confidence, config_entries[ci].name);
+                int pn = snprintf(
+                    props, sizeof(props),
+                    "{\"strategy\":\"key_symbol\",\"confidence\":%.2f,\"config_key\":\"%s\"}",
+                    confidence, esc_key);
 
                 cbm_gbuf_insert_edge(gb, code_entries[co].node_id, config_entries[ci].node_id,
-                                     "CONFIGURES", props);
+                                     "CONFIGURES",
+                                     cbm_json_props_checked(props, pn, sizeof(props)));
                 edge_count++;
             }
         }
@@ -448,13 +454,18 @@ static int strategy_dep_imports(cbm_gbuf_t *gb) {
             }
 
             if (confidence > 0.0) {
+                /* Dependency names come from manifest files (package.json,
+                 * requirements.txt, ...), not from validated identifiers. */
+                char esc_dep[CBM_SZ_256];
+                cbm_json_escape(esc_dep, sizeof(esc_dep), deps[di].name);
                 char props[CBM_SZ_512];
-                snprintf(
+                int pn = snprintf(
                     props, sizeof(props),
                     "{\"strategy\":\"dependency_import\",\"confidence\":%.2f,\"dep_name\":\"%s\"}",
-                    confidence, deps[di].name);
+                    confidence, esc_dep);
 
-                cbm_gbuf_insert_edge(gb, e->source_id, deps[di].node_id, "CONFIGURES", props);
+                cbm_gbuf_insert_edge(gb, e->source_id, deps[di].node_id, "CONFIGURES",
+                                     cbm_json_props_checked(props, pn, sizeof(props)));
                 edge_count++;
             }
         }

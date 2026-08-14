@@ -27,6 +27,7 @@ enum { PD_JSON_FIELD_OVERHEAD = 6 };
 #include "cbm.h"
 #include "simhash/minhash.h"
 #include "semantic/ast_profile.h"
+#include "foundation/str_util.h" // cbm_json_escape, cbm_json_props_checked
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -276,7 +277,9 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     }
 
     if (n <= 0 || (size_t)n >= bufsize) {
-        buf[0] = '\0';
+        /* Never leave an empty blob: json_valid('') is 0, so "" is as malformed
+         * as a truncated object to every json_extract() consumer. */
+        snprintf(buf, bufsize, "%s", CBM_JSON_EMPTY_OBJECT);
         return;
     }
     size_t pos = (size_t)n;
@@ -416,19 +419,29 @@ static void create_channel_edges_for_file(cbm_pipeline_ctx_t *ctx, const CBMFile
         char channel_qn[CBM_SZ_512];
         snprintf(channel_qn, sizeof(channel_qn), "__channel__%s__%s",
                  ch->transport ? ch->transport : "unknown", ch->channel_name);
+        /* channel_name is the raw inter-quote slice of the emit/subscribe
+         * argument, so it carries whatever the literal held — socket.emit('say
+         * "hi"') or a backticked multi-line topic. Escape it exactly like the
+         * parallel twin (create_channel_edges in pass_parallel.cpp) does; raw
+         * interpolation stored malformed Channel-node properties. */
+        char esc_cn[CBM_SZ_256];
+        char esc_tr[CBM_SZ_64];
+        cbm_json_escape(esc_cn, sizeof(esc_cn), ch->channel_name);
+        cbm_json_escape(esc_tr, sizeof(esc_tr), ch->transport ? ch->transport : "unknown");
         char channel_props[CBM_SZ_512];
-        snprintf(channel_props, sizeof(channel_props), "{\"transport\":\"%s\",\"name\":\"%s\"}",
-                 ch->transport ? ch->transport : "unknown", ch->channel_name);
-        int64_t channel_id = cbm_gbuf_upsert_node(ctx->gbuf, "Channel", ch->channel_name,
-                                                  channel_qn, "", 0, 0, channel_props);
+        int cn = snprintf(channel_props, sizeof(channel_props),
+                          "{\"transport\":\"%s\",\"name\":\"%s\"}", esc_tr, esc_cn);
+        int64_t channel_id =
+            cbm_gbuf_upsert_node(ctx->gbuf, "Channel", ch->channel_name, channel_qn, "", 0, 0,
+                                 cbm_json_props_checked(channel_props, cn, sizeof(channel_props)));
 
         const cbm_gbuf_node_t *src_node = find_channel_source(ctx, ch, rel);
         if (src_node && channel_id > 0) {
             const char *edge_type = ch->direction == CBM_CHANNEL_EMIT ? "EMITS" : "LISTENS_ON";
             char edge_props[CBM_SZ_128];
-            snprintf(edge_props, sizeof(edge_props), "{\"transport\":\"%s\"}",
-                     ch->transport ? ch->transport : "unknown");
-            cbm_gbuf_insert_edge(ctx->gbuf, src_node->id, channel_id, edge_type, edge_props);
+            int en = snprintf(edge_props, sizeof(edge_props), "{\"transport\":\"%s\"}", esc_tr);
+            cbm_gbuf_insert_edge(ctx->gbuf, src_node->id, channel_id, edge_type,
+                                 cbm_json_props_checked(edge_props, en, sizeof(edge_props)));
         }
     }
 }
@@ -451,10 +464,13 @@ static int create_env_configures_for_file(cbm_pipeline_ctx_t *ctx, const CBMFile
         }
         char env_qn[CBM_SZ_512];
         snprintf(env_qn, sizeof(env_qn), "__env__%s", ea->env_key);
+        char esc_key[CBM_SZ_256];
+        cbm_json_escape(esc_key, sizeof(esc_key), ea->env_key);
         char env_props[CBM_SZ_512];
-        snprintf(env_props, sizeof(env_props), "{\"env_key\":\"%s\"}", ea->env_key);
+        int en = snprintf(env_props, sizeof(env_props), "{\"env_key\":\"%s\"}", esc_key);
         int64_t env_id =
-            cbm_gbuf_upsert_node(ctx->gbuf, "EnvVar", ea->env_key, env_qn, "", 0, 0, env_props);
+            cbm_gbuf_upsert_node(ctx->gbuf, "EnvVar", ea->env_key, env_qn, "", 0, 0,
+                                 cbm_json_props_checked(env_props, en, sizeof(env_props)));
         if (env_id <= 0) {
             continue;
         }
@@ -504,10 +520,19 @@ static int create_import_edges_for_file(cbm_pipeline_ctx_t *ctx, const CBMFileRe
         const cbm_gbuf_node_t *target =
             cbm_pipeline_resolve_import_node(ctx, rel, file_qn, imp, namespace_map);
         if (target && target->id != source_node->id) {
+            /* local_name is raw node text for every language that falls through
+             * to the generic import parser (Elixir/Scala/Swift/Perl/OCaml/...),
+             * so it can carry quotes and raw newlines. It is ALSO the source of
+             * the edges table's local_name_gen generated column: a malformed
+             * blob here makes json_extract — and with it PRAGMA quick_check —
+             * fail, which quarantines the whole database. Escape it like the
+             * parallel twin (create_imports_edges in pass_parallel.cpp). */
+            char esc_ln[CBM_SZ_128];
+            cbm_json_escape(esc_ln, sizeof(esc_ln), imp->local_name ? imp->local_name : "");
             char imp_props[CBM_SZ_256];
-            snprintf(imp_props, sizeof(imp_props), "{\"local_name\":\"%s\"}",
-                     imp->local_name ? imp->local_name : "");
-            cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS", imp_props);
+            int in = snprintf(imp_props, sizeof(imp_props), "{\"local_name\":\"%s\"}", esc_ln);
+            cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, target->id, "IMPORTS",
+                                 cbm_json_props_checked(imp_props, in, sizeof(imp_props)));
             count++;
         }
     }

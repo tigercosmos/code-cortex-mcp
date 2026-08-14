@@ -22,6 +22,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/limits.h"
 #include "cbm.h"
+#include "foundation/str_util.h" // cbm_json_escape, cbm_json_props_checked
 
 #include <stdlib.h>
 #include <string.h>
@@ -364,11 +365,17 @@ static void k8s_link_selectors(cbm_pipeline_ctx_t *ctx, const k8s_record_array_t
                 continue;
             }
             if (k8s_selector_matches(svc, wl)) {
-                char props[CBM_SZ_256];
-                snprintf(props, sizeof(props),
-                         "{\"kind\":\"selector\",\"service\":\"%s\",\"workload\":\"%s\"}",
-                         svc->name, wl->name);
-                cbm_gbuf_insert_edge(ctx->gbuf, svc->node_id, wl->node_id, "INFRA_MAPS", props);
+                /* Manifest metadata.name is an unvalidated YAML scalar here. */
+                char esc_svc[CBM_SZ_256];
+                char esc_wl[CBM_SZ_256];
+                cbm_json_escape(esc_svc, sizeof(esc_svc), svc->name);
+                cbm_json_escape(esc_wl, sizeof(esc_wl), wl->name);
+                char props[CBM_SZ_1K];
+                int pn = snprintf(props, sizeof(props),
+                                  "{\"kind\":\"selector\",\"service\":\"%s\",\"workload\":\"%s\"}",
+                                  esc_svc, esc_wl);
+                cbm_gbuf_insert_edge(ctx->gbuf, svc->node_id, wl->node_id, "INFRA_MAPS",
+                                     cbm_json_props_checked(props, pn, sizeof(props)));
                 edges++;
             }
         }
