@@ -154,11 +154,14 @@ int64_t cbm_file_mtime(const char *path) {
         return CBM_NOT_FOUND;
     }
     /* FILETIME is 100ns ticks since 1601; scale to seconds. The epoch offset
-     * does not matter — this value is only ever compared against itself. */
+     * does not matter — this value is only ever compared against itself.
+     * The suppressions mirror cbm_file_size above: cppcheck reads the two
+     * half-assignments as unread because it does not model the union. */
+    enum { FILETIME_TICKS_PER_SEC = 10000000 };
     ULARGE_INTEGER t;
-    t.HighPart = fad.ftLastWriteTime.dwHighDateTime;
-    t.LowPart = fad.ftLastWriteTime.dwLowDateTime;
-    return (int64_t)(t.QuadPart / 10000000ULL);
+    t.HighPart = fad.ftLastWriteTime.dwHighDateTime; // cppcheck-suppress unreadVariable
+    t.LowPart = fad.ftLastWriteTime.dwLowDateTime;   // cppcheck-suppress unreadVariable
+    return (int64_t)(t.QuadPart / FILETIME_TICKS_PER_SEC);
 }
 
 char *cbm_normalize_path_sep(char *path) {
