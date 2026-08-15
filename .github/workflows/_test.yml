@@ -31,7 +31,14 @@ jobs:
             cc: cc
             cxx: c++
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # The ubuntu-24.04-arm leg runs the same suite ~6x slower than its x86
+    # sibling (9.5 min vs ~60) and has been finishing within a minute of a
+    # 60-minute ceiling for weeks — 59.3 min on 2026-08-01, 59.9 on 2026-08-10 —
+    # so the next test added anywhere in the suite was always going to cancel
+    # it, as one did on 2026-08-15. Raised for headroom; the arm/x86 gap itself
+    # is unexplained and worth its own investigation, since nothing about this
+    # suite should be architecture-sensitive by that factor.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
