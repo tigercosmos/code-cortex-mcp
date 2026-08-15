@@ -25,6 +25,10 @@
 #include <fcntl.h>  /* _O_RDONLY */
 #include <io.h>     /* _wunlink, _open_osfhandle, _close */
 #include <stdint.h> /* intptr_t */
+/* struct _stat64 and _wstat64 arrive transitively on MinGW, but the _S_IFMT /
+ * _S_IFREG macros cbm_is_regular_file tests with do not — without this the
+ * Windows build fails on "use of undeclared identifier '_S_IFMT'". */
+#include <sys/stat.h>
 #include "foundation/log.h"
 #include "foundation/win_utf8.h"
 
