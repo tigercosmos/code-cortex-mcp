@@ -1757,7 +1757,13 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     uint64_t deadline_ms = cbm_now_ms() + MCP_FALLBACK_SCAN_TIMEOUT_MS;
     bool incomplete = false;
 
-    if (!d) {
+    /* A cache directory that does not exist yet is the normal state of a fresh
+     * install — nothing has been indexed — not a failure. Reporting it as an
+     * error made list_projects the one tool that cannot answer "nothing yet",
+     * and it hid the difference from a directory that exists but cannot be
+     * READ, which is a real permissions problem worth naming. Only the latter
+     * is an error now; the former falls through to an empty list. */
+    if (!d && cbm_is_dir(dir_path)) {
         char msg[CBM_SZ_1K];
         snprintf(msg, sizeof(msg),
                  "{\"error\":\"cannot read cache directory: %s\",\"hint\":"
@@ -1768,7 +1774,7 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     }
 
     cbm_dirent_t *entry;
-    while ((entry = cbm_readdir(d)) != NULL) {
+    while (d && (entry = cbm_readdir(d)) != NULL) {
         if (cbm_now_ms() >= deadline_ms) {
             incomplete = true;
             break;
@@ -1793,7 +1799,9 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
             incomplete = true;
         }
     }
-    cbm_closedir(d);
+    if (d) {
+        cbm_closedir(d);
+    }
 
     yyjson_mut_obj_add_val(doc, root, "projects", arr);
     yyjson_mut_obj_add_bool(doc, root, "incomplete", incomplete);
