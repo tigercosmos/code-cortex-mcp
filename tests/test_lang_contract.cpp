@@ -554,6 +554,50 @@ TEST(contract_python_absolute_aliased_from_import_calls) {
     PASS();
 }
 
+/* Python: an UNRESOLVABLE module plus an alias must emit no CALLS at all — no
+ * invented edge. This is the negative half of the two tests above, and it
+ * matters specifically because the fast path now routes through
+ * cbm_pipeline_resolve_import_node, which has more strategies than the old
+ * cbm_pipeline_fqn_module lookup and therefore more ways to fabricate a target
+ * for a module that is not in the project. */
+TEST(contract_python_ghost_module_aliased_from_import_no_calls) {
+    static const LangFile f[] = {{"router.py", "from ghost_module import nope as alias\n\n\n"
+                                               "def submit_task(y):\n    return alias(y)\n"}};
+    LangProj lp;
+    cbm_store_t *store = lang_index_files(&lp, f, 1);
+    ASSERT_TRUE(store != NULL);
+    cbm_node_t *nodes = NULL;
+    int ncount = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(store, lp.project, "submit_task", &nodes, &ncount),
+              CBM_STORE_OK);
+    ASSERT_TRUE(ncount >= 1);
+    char **callers = NULL;
+    char **callees = NULL;
+    int n_callers = 0;
+    int n_callees = 0;
+    ASSERT_EQ(cbm_store_node_neighbor_names(store, nodes[0].id, 32, &callers, &n_callers, &callees,
+                                            &n_callees),
+              0);
+    int saw_any_callee = 0;
+    for (int i = 0; i < n_callees; i++) {
+        if (callees[i] && callees[i][0]) {
+            saw_any_callee = 1;
+        }
+    }
+    for (int i = 0; i < n_callers; i++) {
+        free(callers[i]);
+    }
+    for (int i = 0; i < n_callees; i++) {
+        free(callees[i]);
+    }
+    free(callers);
+    free(callees);
+    cbm_store_free_nodes(nodes, ncount);
+    lang_cleanup(&lp, store);
+    ASSERT_FALSE(saw_any_callee);
+    PASS();
+}
+
 /* TypeScript: a relative import resolves to a sibling module → IMPORTS edge. */
 TEST(contract_typescript_relative_import) {
     static const LangFile f[] = {
@@ -1441,6 +1485,7 @@ SUITE(lang_contract) {
     RUN_TEST(contract_python_relative_import);
     RUN_TEST(contract_python_aliased_from_import_calls);
     RUN_TEST(contract_python_absolute_aliased_from_import_calls);
+    RUN_TEST(contract_python_ghost_module_aliased_from_import_no_calls);
     RUN_TEST(contract_typescript_relative_import);
 
     /* Graph-level breadth across all grammars (P4). */
