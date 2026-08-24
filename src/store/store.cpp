@@ -67,6 +67,7 @@ enum {
 #include "foundation/log.h"
 #include "foundation/compat_regex.h"
 #include "foundation/str_util.h"
+#include "foundation/hash_table.h"
 
 #define XXH_INLINE_ALL
 #include "xxhash/xxhash.h"
@@ -2138,6 +2139,22 @@ static void cov_json_escape(char *dst, size_t dstsz, const char *src) {
  * {kind, detail}. Queryable via query_graph(graph="missed") with zero
  * cypher-engine changes; the real project's graph gains no rows. Derived
  * data — rebuilt from the authoritative (post-prune) table contents. */
+/* cbm_ht_set BORROWS its key (HashMap is keyed on const char *), so the memo
+ * below owns both the duplicated key and the boxed id. */
+static void cov_dir_ids_free_entry(const char *key, void *val, void *ud) {
+    (void)ud;
+    free((void *)key);
+    free(val);
+}
+
+static void cov_dir_ids_free(CBMHashTable *ht) {
+    if (!ht) {
+        return;
+    }
+    cbm_ht_foreach(ht, cov_dir_ids_free_entry, NULL);
+    cbm_ht_free(ht);
+}
+
 static void cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
     char covproj[CBM_SZ_512];
     cbm_store_coverage_shadow_project(covproj, sizeof(covproj), project);
@@ -2189,6 +2206,16 @@ static void cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
                        .properties_json = "{}"};
     int64_t root_id = cbm_store_upsert_node(s, &root);
 
+    /* Directory nodes repeat massively across failure rows — upstream measured
+     * 13k parse-partial files under one tests/ subtree costing ~80k redundant
+     * upsert/edge round-trips, 9.1 s of a 9.2 s coverage_replace on the
+     * TypeScript corpus. Dedup them in memory for the rebuild: the first sight
+     * of a directory creates its node and containment edge, every later file
+     * under it is a hash hit. The resulting graph is identical — the edges were
+     * already deduped by unique key, so the round-trips were pure waste.
+     * A NULL table (allocation failure) simply degrades to the old behaviour. */
+    CBMHashTable *dir_ids = cbm_ht_create(CBM_SZ_256);
+
     for (int i = 0; i < count; i++) {
         const char *rel = rows[i].rel_path;
         if (!rel || !rel[0] || root_id <= 0) {
@@ -2211,6 +2238,12 @@ static void cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
             /* Truncate at this slash → pathbuf is the directory prefix; the
              * upsert binds copies, so restore the slash right after. */
             *p = '\0';
+            const int64_t *cached = dir_ids ? (const int64_t *)cbm_ht_get(dir_ids, pathbuf) : NULL;
+            if (cached) {
+                parent = *cached;
+                *p = '/';
+                continue;
+            }
             const char *seg = strrchr(pathbuf, '/');
             cbm_node_t folder = {.project = covproj,
                                  .label = "Folder",
@@ -2219,7 +2252,6 @@ static void cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
                                  .file_path = pathbuf,
                                  .properties_json = "{}"};
             int64_t fid = cbm_store_upsert_node(s, &folder);
-            *p = '/';
             if (fid > 0) {
                 cbm_edge_t e = {.project = covproj,
                                 .source_id = parent,
@@ -2228,7 +2260,20 @@ static void cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
                                 .properties_json = "{}"};
                 (void)cbm_store_insert_edge(s, &e);
                 parent = fid;
+                /* Memoize only a directory whose node AND edge landed, so a
+                 * failed upsert is retried on the next row rather than
+                 * cached. */
+                if (dir_ids) {
+                    int64_t *idv = (int64_t *)malloc(sizeof(*idv));
+                    char *kdup = idv ? strdup(pathbuf) : NULL;
+                    if (kdup) {
+                        cbm_ht_set(dir_ids, kdup, idv);
+                    } else {
+                        free(idv);
+                    }
+                }
             }
+            *p = '/';
         }
 
         const char *base = strrchr(rel, '/');
@@ -2253,6 +2298,7 @@ static void cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {
             (void)cbm_store_insert_edge(s, &e);
         }
     }
+    cov_dir_ids_free(dir_ids);
     cbm_store_free_coverage(rows, count);
 }
 
