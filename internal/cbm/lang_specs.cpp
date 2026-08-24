@@ -637,13 +637,17 @@ static const char *hcl_call_types[] = {"function_call", NULL};
 static const char *hcl_var_types[] = {"attribute", NULL};
 
 // ==================== SQL ====================
-static const char *sql_func_types[] = {"create_function", "function_declaration", NULL};
+static const char *sql_func_types[] = {"create_function", "function_declaration",
+                                       "create_procedure", NULL};
 static const char *sql_field_types[] = {"column_definition", NULL};
-static const char *sql_class_types[] = {"custom_type", NULL};
+// create_table/create_view route through the class-def path where
+// extract_sql_ddl_class_def turns them into first-class Table/View nodes
+// (previously they were generic Variable nodes via sql_var_types).
+static const char *sql_class_types[] = {"custom_type", "create_table", "create_view",
+                                        "create_materialized_view", NULL};
 static const char *sql_module_types[] = {"program", NULL};
 static const char *sql_call_types[] = {"function_call", "invocation", "command", NULL};
 static const char *sql_branch_types[] = {"if_statement", "case_expression", NULL};
-static const char *sql_var_types[] = {"create_table", "create_view", NULL};
 
 // ==================== DOCKERFILE ====================
 static const char *dockerfile_module_types[] = {"source_file", NULL};
@@ -2169,7 +2173,7 @@ static const std::array<CBMLangSpec, CBM_LANG_COUNT> &lang_specs_table() {
                            empty_types,
                            empty_types,
                            sql_branch_types,
-                           sql_var_types,
+                           empty_types,
                            empty_types,
                            empty_types,
                            NULL,

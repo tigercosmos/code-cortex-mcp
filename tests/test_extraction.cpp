@@ -3287,6 +3287,80 @@ TEST(extract_python_method_test_dir_marks_is_test_issue1294) {
     PASS();
 }
 
+/* CREATE TABLE / CREATE VIEW / CREATE MATERIALIZED VIEW produce first-class
+ * Table and View nodes; CREATE PROCEDURE produces a Function. All four were
+ * previously either generic Variable nodes or absent from the graph entirely. */
+TEST(sql_ddl_node_labels) {
+    CBMFileResult *r = extract("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n"
+                               "CREATE VIEW active_users AS SELECT * FROM users;\n"
+                               "CREATE MATERIALIZED VIEW mv AS SELECT * FROM users;\n",
+                               CBM_LANG_SQL, "t", "schema.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Table", "users"));
+    ASSERT(has_def(r, "View", "active_users"));
+    ASSERT(has_def(r, "View", "mv"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* CREATE PROCEDURE has the same object_reference -> identifier shape as
+ * CREATE FUNCTION. It is in sql_func_types, but without the matching arm in
+ * resolve_func_name_scripting it was walked and then discarded UNNAMED — which
+ * is why the fixture below pins the function alongside it. */
+TEST(sql_create_procedure_is_a_function) {
+    CBMFileResult *r =
+        extract("CREATE FUNCTION f1() RETURNS INT AS $$ SELECT 1; $$ LANGUAGE SQL;\n"
+                "CREATE PROCEDURE p1() LANGUAGE SQL AS $$ SELECT 1; $$;\n",
+                CBM_LANG_SQL, "t", "f.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "f1"));
+    ASSERT(has_def(r, "Function", "p1"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(sql_view_lineage_usages) {
+    /* A view's FROM/JOIN relations are emitted as usages (ref_name = table),
+     * which pass_usages later resolves into view -> table USAGE lineage edges. */
+    CBMFileResult *r = extract("CREATE TABLE users (id INTEGER);\n"
+                               "CREATE VIEW active_users AS SELECT * FROM users;\n",
+                               CBM_LANG_SQL, "t", "schema.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int found_users = 0;
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && strcmp(r->usages.items[i].ref_name, "users") == 0) {
+            found_users = 1;
+        }
+    }
+    ASSERT(found_users);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(sql_schema_qualified_name) {
+    /* Schema-qualified DDL (schema.table) is named by the TABLE, not the schema,
+     * and FROM schema.table resolves to that table for lineage. */
+    CBMFileResult *r = extract("CREATE TABLE app.users (id INTEGER);\n"
+                               "CREATE VIEW app.active AS SELECT * FROM app.users;\n",
+                               CBM_LANG_SQL, "t", "schema.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Table", "users"));
+    ASSERT(has_def(r, "View", "active"));
+    int found_users = 0;
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && strcmp(r->usages.items[i].ref_name, "users") == 0) {
+            found_users = 1;
+        }
+    }
+    ASSERT(found_users);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* A Swift protocol requirement — a bodyless `func generate() -> String` inside a
  * protocol — was absent from the graph ENTIRELY. Swift codebases are heavily
  * protocol-driven, so the requirement is very often the declaration a reader is
@@ -3716,6 +3790,10 @@ SUITE(extraction) {
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
     RUN_TEST(extract_ts_template_string_url_issue1006);
+    RUN_TEST(sql_ddl_node_labels);
+    RUN_TEST(sql_create_procedure_is_a_function);
+    RUN_TEST(sql_view_lineage_usages);
+    RUN_TEST(sql_schema_qualified_name);
     RUN_TEST(extract_swift_protocol_requirement_is_indexed);
     RUN_TEST(extract_java_enum_constants_survive_alongside_methods);
     RUN_TEST(extract_c_test_dir_marks_is_test_issue1294);

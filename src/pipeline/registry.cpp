@@ -30,6 +30,7 @@ enum { REG_MAX_CANDIDATES = 256 };
 #include "foundation/dyn_array.h"
 #include "foundation/platform.h"
 
+#include "cbm.h"               /* cbm_label_is_relation — the resolve-time relation veto */
 #include "discover/discover.h" /* cbm_language_for_filename */
 #include <math.h>
 #include <stdio.h>
@@ -831,24 +832,11 @@ static cbm_resolution_t resolve_name_lookup(const cbm_registry_t *r, const char 
     return empty_result();
 }
 
-cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *callee_name,
-                                      const char *module_qn, const char **import_map_keys,
-                                      const char **import_map_vals, int import_map_count) {
-    if (!r || !callee_name) {
-        return empty_result();
-    }
-
-    /* Per-file cache: same callee_name in N call sites → 1 chain walk
-     * + N-1 O(1) hash hits. module_qn is constant per file so the
-     * cache key only needs callee_name. */
-    if (_resolve_cache) {
-        resolve_cache_entry_t *cached =
-            (resolve_cache_entry_t *)cbm_ht_get(_resolve_cache, callee_name);
-        if (cached) {
-            return cached->res;
-        }
-    }
-
+/* The strategy chain shared by both public resolve variants. No caching here —
+ * cbm_registry_resolve owns the per-file cache. */
+static cbm_resolution_t registry_resolve_chain(const cbm_registry_t *r, const char *callee_name,
+                                               const char *module_qn, const char **import_map_keys,
+                                               const char **import_map_vals, int import_map_count) {
     /* Split callee at the first path separator: "pkg.Func" → prefix="pkg",
      * suffix="Func".  Rust/C++ use "::" rather than ".", so honor whichever
      * separator appears first ("lib::square" → prefix="lib", suffix="square").
@@ -888,6 +876,40 @@ cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *calle
         res = resolve_name_lookup(r, callee_name, module_qn, import_map_vals, import_map_count);
     }
 
+    return res;
+}
+
+cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *callee_name,
+                                      const char *module_qn, const char **import_map_keys,
+                                      const char **import_map_vals, int import_map_count) {
+    if (!r || !callee_name) {
+        return empty_result();
+    }
+
+    /* Per-file cache: same callee_name in N call sites → 1 chain walk
+     * + N-1 O(1) hash hits. module_qn is constant per file so the
+     * cache key only needs callee_name. */
+    if (_resolve_cache) {
+        resolve_cache_entry_t *cached =
+            (resolve_cache_entry_t *)cbm_ht_get(_resolve_cache, callee_name);
+        if (cached) {
+            return cached->res;
+        }
+    }
+
+    cbm_resolution_t res = registry_resolve_chain(r, callee_name, module_qn, import_map_keys,
+                                                  import_map_vals, import_map_count);
+
+    /* Data relations (Table/View) are LINEAGE-ONLY registry members. Common
+     * table names (users, orders, config) collide with code identifiers in
+     * every language, so no CALLS/USAGE/READS/WRITES/THROWS/handler/decorator
+     * consumer may bind them. The SQL lineage path opts in explicitly through
+     * cbm_registry_resolve_lineage. */
+    if (res.qualified_name && res.qualified_name[0] &&
+        cbm_label_is_relation(cbm_registry_label_of(r, res.qualified_name))) {
+        res = empty_result();
+    }
+
     /* Cache the result (including empty — caching the negative answer
      * is just as valuable; same name asks the same question). */
     if (_resolve_cache) {
@@ -903,6 +925,21 @@ cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *calle
         }
     }
     return res;
+}
+
+cbm_resolution_t cbm_registry_resolve_lineage(const cbm_registry_t *r, const char *callee_name,
+                                              const char *module_qn, const char **import_map_keys,
+                                              const char **import_map_vals, int import_map_count) {
+    if (!r || !callee_name) {
+        return empty_result();
+    }
+    /* Relation-PERMITTING variant, for SQL FROM/JOIN lineage usages only.
+     * Deliberately uncached: the per-file cache is keyed by bare callee_name and
+     * stores the relation-VETOED answer of the default variant, so sharing it
+     * would poison one variant with the other's semantics. A SQL file holds few
+     * distinct relation refs, so the chain walk stays cheap. */
+    return registry_resolve_chain(r, callee_name, module_qn, import_map_keys, import_map_vals,
+                                  import_map_count);
 }
 
 /* ── Fuzzy Resolve ──────────────────────────────────────────────── */

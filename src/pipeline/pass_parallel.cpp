@@ -1220,14 +1220,9 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
     if (!def->name || !def->qualified_name || !def->label) {
         return 0;
     }
-    /* Register callable symbols + every type-like container (Class/Struct/
-     * Interface/Enum/Type/Trait) — see pass_definitions.c for rationale. Struct
-     * included so Rust/Go/Swift/D structs resolve as type targets. Variable/Field
-     * defs are registered too so READS/WRITES can resolve.
-     * KEEP IN SYNC with pass_definitions.c and pipeline_incremental.c. */
-    if (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
-        cbm_label_is_type_like(def->label) || strcmp(def->label, "Variable") == 0 ||
-        strcmp(def->label, "Field") == 0) {
+    /* Registry membership is defined ONCE by cbm_label_is_registry_symbol
+     * (helpers.cpp) — see pass_definitions.cpp for the per-label rationale. */
+    if (cbm_label_is_registry_symbol(def->label)) {
         cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
         (*reg_entries)++;
     }
@@ -2554,7 +2549,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
 /* Resolve usages for one file. */
 static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
                                 CBMFileResult *result, const char *rel, const char *module_qn,
-                                const char **imp_keys, const char **imp_vals, int imp_count) {
+                                const char **imp_keys, const char **imp_vals, int imp_count,
+                                CBMLanguage lang) {
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
         if (!usage->ref_name) {
@@ -2565,8 +2561,17 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!src) {
             continue;
         }
-        cbm_resolution_t res = cbm_registry_resolve(rc->registry, usage->ref_name, module_qn,
-                                                    imp_keys, imp_vals, imp_count);
+        /* SQL usages are FROM/JOIN LINEAGE refs and may bind Table/View targets
+         * (cbm_registry_resolve_lineage); every other language resolves through
+         * the default variant, whose central relation veto keeps same-named
+         * code identifiers out of the lineage layer.
+         * MUST mirror the sequential twin in pass_usages.cpp exactly. */
+        cbm_resolution_t res =
+            (lang == CBM_LANG_SQL)
+                ? cbm_registry_resolve_lineage(rc->registry, usage->ref_name, module_qn, imp_keys,
+                                               imp_vals, imp_count)
+                : cbm_registry_resolve(rc->registry, usage->ref_name, module_qn, imp_keys, imp_vals,
+                                       imp_count);
         if (!res.qualified_name || res.qualified_name[0] == '\0') {
             continue;
         }
@@ -3009,7 +3014,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         /* ── USAGE resolution ──────────────────────────────────── */
         _ph_t0 = extract_now_ns();
-        resolve_file_usages(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count);
+        resolve_file_usages(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count, lang);
         atomic_fetch_add_explicit(&rc->time_ns_usages, extract_now_ns() - _ph_t0,
                                   memory_order_relaxed);
 

@@ -270,12 +270,31 @@ static TSNode resolve_ocaml_func_name(TSNode node) {
     return null_node;
 }
 
-// SQL: resolve create_function name from object_reference→identifier or direct identifier.
+// Last identifier (DFS pre-order) under `node`. For a schema-qualified
+// object_reference (schema.table) this is the TABLE name; the schema prefix is
+// ignored. Leaves *found false and returns `best` unchanged if none is present.
+static TSNode sql_last_identifier(TSNode node, TSNode best, bool *found) {
+    if (strcmp(ts_node_type(node), "identifier") == 0) {
+        best = node;
+        *found = true;
+    }
+    uint32_t cc = ts_node_child_count(node);
+    for (uint32_t i = 0; i < cc; i++) {
+        best = sql_last_identifier(ts_node_child(node, i), best, found);
+    }
+    return best;
+}
+
+// SQL: resolve create_function / create_table / create_view name. The name sits
+// on an object_reference; for a schema-qualified name (schema.table) take the
+// LAST identifier (the table), not the first (the schema).
 static TSNode resolve_sql_func_name(TSNode node) {
     TSNode obj_ref = cbm_find_child_by_kind(node, "object_reference");
     if (!ts_node_is_null(obj_ref)) {
-        TSNode id = cbm_find_child_by_kind(obj_ref, "identifier");
-        if (!ts_node_is_null(id)) {
+        bool found = false;
+        TSNode empty = {};
+        TSNode id = sql_last_identifier(obj_ref, empty, &found);
+        if (found) {
             return id;
         }
     }
@@ -316,7 +335,11 @@ static TSNode resolve_func_name_scripting(TSNode node, CBMLanguage lang, const c
     if (lang == CBM_LANG_OCAML && strcmp(kind, "value_definition") == 0) {
         return resolve_ocaml_func_name(node);
     }
-    if (lang == CBM_LANG_SQL && strcmp(kind, "create_function") == 0) {
+    if (lang == CBM_LANG_SQL &&
+        (strcmp(kind, "create_function") == 0 || strcmp(kind, "create_procedure") == 0)) {
+        /* create_procedure has the same object_reference -> identifier shape as
+         * create_function; without it here the procedure is walked (it is in
+         * sql_func_types) and then discarded unnamed. */
         return resolve_sql_func_name(node);
     }
     if (lang == CBM_LANG_ZIG && strcmp(kind, "test_declaration") == 0) {
@@ -3448,11 +3471,72 @@ static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char
     return true;
 }
 
+// Collect FROM/JOIN table references (tree-sitter-sql `relation` nodes) anywhere
+// under `node` and emit them as usages scoped to enclosing_qn. pass_usages then
+// resolves each ref_name to the referenced Table/View def and creates a USAGE
+// lineage edge (a view -> the tables it selects from). Emitting them HERE rather
+// than via the generic identifier walker sets the correct enclosing scope and
+// bypasses the is_definition_name suppression that would drop them.
+static void collect_sql_relation_usages(CBMExtractCtx *ctx, TSNode node, const char *enclosing_qn) {
+    if (strcmp(ts_node_type(node), "relation") == 0) {
+        TSNode nm = resolve_sql_func_name(node); // object_reference -> identifier
+        if (!ts_node_is_null(nm)) {
+            char *tname = cbm_node_text(ctx->arena, nm, ctx->source);
+            if (tname && tname[0]) {
+                CBMUsage usage = {};
+                usage.ref_name = tname;
+                usage.enclosing_func_qn = enclosing_qn;
+                cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
+            }
+        }
+    }
+    uint32_t n = ts_node_child_count(node);
+    for (uint32_t i = 0; i < n; i++) {
+        collect_sql_relation_usages(ctx, ts_node_child(node, i), enclosing_qn);
+    }
+}
+
+// SQL DDL relation defs: CREATE TABLE / VIEW / MATERIALIZED VIEW become
+// first-class Table/View nodes rather than generic Variable nodes. The relation
+// name sits on an object_reference child (the same shape create_function uses).
+// Also emits FROM/JOIN dependencies as usages so lineage edges form. Returns
+// true if handled.
+static bool extract_sql_ddl_class_def(CBMExtractCtx *ctx, TSNode node, const char *kind) {
+    if (ctx->language != CBM_LANG_SQL) {
+        return false;
+    }
+    const char *label;
+    if (strcmp(kind, "create_table") == 0) {
+        label = "Table";
+    } else if (strcmp(kind, "create_view") == 0 || strcmp(kind, "create_materialized_view") == 0) {
+        label = "View";
+    } else {
+        return false;
+    }
+    TSNode name_node = resolve_sql_func_name(node);
+    if (ts_node_is_null(name_node)) {
+        return false;
+    }
+    char *name = cbm_node_text(ctx->arena, name_node, ctx->source);
+    if (!name || !name[0]) {
+        return false;
+    }
+    push_simple_class_def(ctx, node, name, label);
+    // MUST match push_simple_class_def's QN exactly, or pass_usages cannot find
+    // the enclosing def for the lineage source.
+    const char *qn = cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
+    collect_sql_relation_usages(ctx, node, qn);
+    return true;
+}
+
 static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
     CBMArena *a = ctx->arena;
     const char *kind = ts_node_type(node);
 
     if (extract_config_class_def(ctx, node, kind)) {
+        return;
+    }
+    if (extract_sql_ddl_class_def(ctx, node, kind)) {
         return;
     }
 

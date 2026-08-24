@@ -208,6 +208,14 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
 bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const char *target_file_path,
                                               const char *strategy);
 
+/* Relation-permitting resolve, for SQL FROM/JOIN lineage ONLY. The default
+ * cbm_registry_resolve vetoes Table/View results because common relation names
+ * collide with code identifiers in every language. Uncached by design — see the
+ * implementation. */
+cbm_resolution_t cbm_registry_resolve_lineage(const cbm_registry_t *r, const char *callee_name,
+                                              const char *module_qn, const char **import_map_keys,
+                                              const char **import_map_vals, int import_map_count);
+
 cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *callee_name,
                                       const char *module_qn, const char **import_map_keys,
                                       const char **import_map_vals, int import_map_count);

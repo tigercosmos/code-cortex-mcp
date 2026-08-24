@@ -25,6 +25,37 @@
  *
  * This pins the SQL mirrors to the C predicate in BOTH directions, so the next
  * type-like label fails here instead of quietly shrinking query results. */
+/* Same drift guard for the RELATION labels (Table/View — SQL data lineage).
+ * Relations are registry symbols but deliberately NOT type-like: the default
+ * cbm_registry_resolve vetoes them, so a code identifier sharing a table's name
+ * never binds into the lineage layer. */
+TEST(sql_relation_labels_match_cbm_label_is_relation) {
+    static const char *const relations[] = {"Table", "View"};
+    for (size_t i = 0; i < sizeof(relations) / sizeof(relations[0]); i++) {
+        ASSERT_TRUE(cbm_label_is_relation(relations[i]));
+        ASSERT_TRUE(cbm_label_is_registry_symbol(relations[i]));
+        ASSERT_FALSE(cbm_label_is_type_like(relations[i]));
+        char quoted[64];
+        snprintf(quoted, sizeof(quoted), "'%s'", relations[i]);
+        ASSERT_NOT_NULL(strstr(CBM_SQL_RELATION_LABELS, quoted));
+        /* Relations must NOT ride in the callable/type fragment — the arch
+         * queries opt in explicitly by appending CBM_SQL_RELATION_LABELS. */
+        ASSERT_NULL(strstr(CBM_SQL_CALLABLE_OR_TYPE_LABELS, quoted));
+    }
+    /* cbm_label_is_registry_symbol covers exactly the seeded families — the
+     * single predicate the full, parallel and incremental pipelines share. */
+    ASSERT_TRUE(cbm_label_is_registry_symbol("Function"));
+    ASSERT_TRUE(cbm_label_is_registry_symbol("Method"));
+    ASSERT_TRUE(cbm_label_is_registry_symbol("Class"));
+    ASSERT_TRUE(cbm_label_is_registry_symbol("Variable"));
+    ASSERT_TRUE(cbm_label_is_registry_symbol("Field"));
+    ASSERT_FALSE(cbm_label_is_registry_symbol("Module"));
+    ASSERT_FALSE(cbm_label_is_registry_symbol("File"));
+    ASSERT_FALSE(cbm_label_is_relation("Class"));
+    ASSERT_FALSE(cbm_label_is_relation(NULL));
+    PASS();
+}
+
 TEST(sql_label_allowlists_match_cbm_label_is_type_like) {
     /* Every label the C predicate accepts must appear in the SQL fragment. */
     static const char *const type_like[] = {"Class", "Struct", "Interface",
@@ -1641,6 +1672,7 @@ TEST(store_count_nodes_unknown_project) {
 
 SUITE(store_nodes) {
     RUN_TEST(sql_label_allowlists_match_cbm_label_is_type_like);
+    RUN_TEST(sql_relation_labels_match_cbm_label_is_relation);
     RUN_TEST(store_open_memory);
     RUN_TEST(store_close_null);
     RUN_TEST(store_open_memory_twice);

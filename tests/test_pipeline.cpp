@@ -6691,6 +6691,90 @@ TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725) {
     PASS();
 }
 
+/* Count edges of `type` running from a node named `src` to one named `tgt`. */
+static int named_edge_count(cbm_store_t *s, const char *project, const char *type, const char *src,
+                            const char *tgt) {
+    cbm_node_t *sources = NULL;
+    int nsrc = 0;
+    cbm_store_find_nodes_by_name(s, project, src, &sources, &nsrc);
+    cbm_node_t *targets = NULL;
+    int ntgt = 0;
+    cbm_store_find_nodes_by_name(s, project, tgt, &targets, &ntgt);
+    int hits = 0;
+    for (int i = 0; i < nsrc; i++) {
+        cbm_edge_t *edges = NULL;
+        int ne = 0;
+        cbm_store_find_edges_by_source_type(s, sources[i].id, type, &edges, &ne);
+        for (int e = 0; e < ne; e++) {
+            for (int t = 0; t < ntgt; t++) {
+                if (edges[e].target_id == targets[t].id) {
+                    hits++;
+                }
+            }
+        }
+        if (edges) {
+            cbm_store_free_edges(edges, ne);
+        }
+    }
+    cbm_store_free_nodes(sources, nsrc);
+    cbm_store_free_nodes(targets, ntgt);
+    return hits;
+}
+
+/* SQL DDL becomes first-class Table/View nodes wired into FROM/JOIN lineage,
+ * while the shared name registry must NOT leak those relations into other
+ * languages' textual resolution: a Python call or identifier sharing the table's
+ * name (`users`) would otherwise unique-name-bind a false CALLS/USAGE edge into
+ * the lineage layer. Pins the resolve-time relation veto (cbm_registry_resolve)
+ * together with the lineage opt-in (cbm_registry_resolve_lineage).
+ *
+ * The positive control is essential: asserting only the absences would pass on a
+ * build where SQL lineage never formed at all. */
+TEST(pipeline_sql_lineage_and_relation_isolation) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_sql_lineage_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "schema.sql",
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n"
+                    "CREATE VIEW active_users AS SELECT * FROM users;\n");
+    /* `users` exists project-wide ONLY as the SQL table, so without the relation
+     * veto the cross-file unique-name fallback would bind both the call and the
+     * bare reference below straight to the Table node. */
+    write_temp_file(tmp, "app.py",
+                    "def load_users():\n"
+                    "    return users()\n"
+                    "\n"
+                    "def show_users():\n"
+                    "    return users\n");
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/sql_lineage.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    int lineage = named_edge_count(s, project, "USAGE", "active_users", "users");
+    int py_calls = named_edge_count(s, project, "CALLS", "load_users", "users");
+    int py_usage = named_edge_count(s, project, "USAGE", "load_users", "users");
+    int py_ref = named_edge_count(s, project, "USAGE", "show_users", "users");
+    int py_reads = named_edge_count(s, project, "READS", "show_users", "users");
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+
+    ASSERT_EQ(lineage, 1); /* positive control: the view's FROM emits lineage */
+    ASSERT_EQ(py_calls, 0);
+    ASSERT_EQ(py_usage, 0);
+    ASSERT_EQ(py_ref, 0);
+    ASSERT_EQ(py_reads, 0);
+    PASS();
+}
+
 SUITE(pipeline) {
     /* Index lock */
     RUN_TEST(pipeline_lock_try_acquire);
@@ -6963,4 +7047,5 @@ SUITE(pipeline) {
     RUN_TEST(pkgmap_swift_scan_repo_finds_nested_manifest);
     RUN_TEST(pipeline_cross_language_same_name_does_not_share_calls_issue725);
     RUN_TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725);
+    RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
 }
