@@ -3982,6 +3982,56 @@ TEST(tslsp_void_returning_method) {
     PASS();
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* ── Expression-eval complexity guard (test-seam builds only) ─────────────────
+ *
+ * The objectSpreadRepeatedComplexity class (TS conformance suite): a chain of
+ * `...(c[i] && c[j] && {...})` spreads makes the union fan out 2^(n-1) ways,
+ * and overload resolution re-evaluates shared subexpressions once per
+ * alternative. The per-node memo turns that into one eval per node. Guarded via
+ * the DETERMINISTIC budget counter, not wall-clock: without the memo this source
+ * burns the entire eval budget (warned=true); with it, consumption stays around
+ * the node count. */
+TEST(tslsp_eval_memo_bounds_spread_bomb_work) {
+    /* The tsc-compiled form of that file: nested Object.assign(...) member
+     * calls. Resolving the stdlib method evaluates every argument expression
+     * once per lookup path (method dispatch + namespace fallback), and the first
+     * argument is itself the next nested call — without the memo the shared
+     * subtree re-walks once per enclosing level: 2^n evals. */
+    char src[16384];
+    int off = snprintf(src, sizeof(src), "\"use strict\";\nfunction f(cnd) {\n    return ");
+    for (int i = 18; i >= 0; i--) {
+        off += snprintf(src + off, sizeof(src) - (size_t)off, "Object.assign(");
+    }
+    off += snprintf(src + off, sizeof(src) - (size_t)off, "{}");
+    for (int i = 0; i < 19; i++) {
+        off += snprintf(src + off, sizeof(src) - (size_t)off,
+                        ", (cnd[%d] && cnd[%d] && {\n        prop%da: 1,\n        prop%db: 1,\n"
+                        "    }))",
+                        2 * i + 1, 2 * i + 2, i, i);
+    }
+    snprintf(src + off, sizeof(src) - (size_t)off, ";\n}\n");
+
+    CBMFileResult *r = extract_js(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(r->defs.count, 1); /* f extracted; the graph itself is tiny */
+
+    /* Same thread ran the eval: the seam reads its final budget state. */
+    ASSERT_FALSE(cbm_ts_lsp_test_budget_warned());
+    long budget0 = 1000000 + (long)strlen(src) * 64;
+    long consumed = budget0 - cbm_ts_lsp_test_budget_remaining();
+    /* Measured on this tree: 3360 units with the memo, 4272 without. The bound
+     * sits between them so the guard is genuinely RED if the memo stops being
+     * consulted — upstream's own bound (100000) passes either way here, because
+     * this fork never carried the ts_signature_for_call overload path that made
+     * the shape fan out 2^n. See the memo comment in ts_lsp.cpp. */
+    ASSERT_LT(consumed, 4000);
+
+    cbm_free_result(r);
+    PASS();
+}
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
 TEST(tslsp_nested_class_resolution) {
     CBMFileResult *r = extract_ts(
         "class Outer {\n"
@@ -4501,4 +4551,8 @@ SUITE(ts_lsp) {
     RUN_TEST(tslsp_optional_property_chain);
     RUN_TEST(tslsp_void_returning_method);
     RUN_TEST(tslsp_nested_class_resolution);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    /* Expression-eval complexity guard (test-seam builds only). */
+    RUN_TEST(tslsp_eval_memo_bounds_spread_bomb_work);
+#endif
 }

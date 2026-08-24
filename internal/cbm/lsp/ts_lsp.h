@@ -61,11 +61,25 @@ typedef struct {
 
     // Recursion guard for ts_eval_expr_type (mirrors c_lsp).
     int eval_depth;
+    // Expression-type memo: node.id -> evaluated type (lazily created on the
+    // first completed eval; see TsEvalMemo in ts_lsp.cpp). Kills the
+    // exponential re-evaluation of shared subexpressions under overload
+    // resolution. Arena-backed, so it dies with the file pass.
+    struct TsEvalMemo *eval_memo;
     // Recursion guard for lookup_member_type: cyclic type graphs (mutually
     // recursive unions/wrappers across registered types) otherwise recurse
     // without bound — stack overflow on real repos.
     int member_depth;
 } TSLSPContext;
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+// Complexity-regression seam: remaining expression-eval budget / warned flag
+// for the CALLING THREAD, valid after a cbm_run_ts_lsp on the same thread.
+// Budget units are a deterministic work counter, so a guard can assert that a
+// pathological shape stays within budget without measuring wall-clock.
+long cbm_ts_lsp_test_budget_remaining(void);
+bool cbm_ts_lsp_test_budget_warned(void);
+#endif
 
 // --- Initialization ---
 
