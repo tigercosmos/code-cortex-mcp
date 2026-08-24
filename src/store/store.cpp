@@ -112,6 +112,7 @@ struct cbm_store {
     sqlite3_stmt *stmt_find_node_by_qn_any; /* QN lookup without project filter */
     sqlite3_stmt *stmt_find_nodes_by_name;
     sqlite3_stmt *stmt_find_nodes_by_name_any; /* name lookup without project filter */
+    sqlite3_stmt *stmt_find_nodes;
     sqlite3_stmt *stmt_find_nodes_by_label;
     sqlite3_stmt *stmt_find_nodes_by_file;
     sqlite3_stmt *stmt_count_nodes;
@@ -1068,6 +1069,7 @@ void cbm_store_close(cbm_store_t *s) {
     finalize_stmt(&s->stmt_find_node_by_qn_any);
     finalize_stmt(&s->stmt_find_nodes_by_name);
     finalize_stmt(&s->stmt_find_nodes_by_name_any);
+    finalize_stmt(&s->stmt_find_nodes);
     finalize_stmt(&s->stmt_find_nodes_by_label);
     finalize_stmt(&s->stmt_find_nodes_by_file);
     finalize_stmt(&s->stmt_count_nodes);
@@ -1554,7 +1556,10 @@ static int find_nodes_generic(cbm_store_t *s, sqlite3_stmt **slot, const char *s
     }
 
     bind_text(stmt, SKIP_ONE, project);
-    bind_text(stmt, ST_COL_2, val);
+    /* val == NULL means the SQL has no second placeholder (project-wide scan). */
+    if (val) {
+        bind_text(stmt, ST_COL_2, val);
+    }
 
     int cap = ST_INIT_CAP_16;
     int n = 0;
@@ -1589,6 +1594,19 @@ int cbm_store_find_nodes_by_name(cbm_store_t *s, const char *project, const char
                               "start_line, end_line, properties FROM nodes "
                               "WHERE project = ?1 AND name = ?2;",
                               project, name, out, count);
+}
+
+int cbm_store_find_nodes(cbm_store_t *s, const char *project, cbm_node_t **out, int *count) {
+    if (!s) {
+        *out = NULL;
+        *count = 0;
+        return CBM_STORE_ERR;
+    }
+    return find_nodes_generic(s, &s->stmt_find_nodes,
+                              "SELECT id, project, label, name, qualified_name, file_path, "
+                              "start_line, end_line, properties FROM nodes "
+                              "WHERE project = ?1;",
+                              project, NULL, out, count);
 }
 
 int cbm_store_find_nodes_by_label(cbm_store_t *s, const char *project, const char *label,

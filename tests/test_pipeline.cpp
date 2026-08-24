@@ -6652,8 +6652,7 @@ TEST(pipeline_cross_language_same_name_does_not_share_calls_issue725) {
  * strategy and deliberately NOT suppressed. */
 TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725) {
     const char *files[] = {"app.py", "web/a/Ed1.js", "web/b/Ed2.js"};
-    const char *contents[] = {"def save():\n"
-                              "    return renderPanel()\n",
+    const char *contents[] = {"def save():\n    return renderPanel()\n",
                               "export function renderPanel() { return 1; }\n",
                               "export function renderPanel() { return 2; }\n"};
 

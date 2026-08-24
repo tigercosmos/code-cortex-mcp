@@ -337,6 +337,10 @@ int cbm_store_find_nodes_by_name_any(cbm_store_t *s, const char *name, cbm_node_
                                      int *count);
 
 /* Find nodes by label. */
+/* Find ALL nodes in a project. Returns an allocated array; caller frees with
+ * cbm_store_free_nodes. */
+int cbm_store_find_nodes(cbm_store_t *s, const char *project, cbm_node_t **out, int *count);
+
 int cbm_store_find_nodes_by_label(cbm_store_t *s, const char *project, const char *label,
                                   cbm_node_t **out, int *count);
 
