@@ -433,8 +433,22 @@ const char *cs_resolve_type_name(CSLSPContext *ctx, const char *raw) {
         if (the_short && *the_short) {
             const CBMRegisteredType *best = NULL;
             int best_score = -1;
+            int best_idx = -1;
             const char *namespace_dotted = cs_namespace_qn(ctx);
-            for (int i = 0; ctx->registry && i < ctx->registry->type_count; i++) {
+            /* Candidates come from the type SHORT-NAME INDEX, not a scan over
+             * every registered type: against the shared Tier-2 registry this
+             * fallback ran per unresolved type name during BOTH the registry
+             * build and per-file resolution, making each linear in the whole
+             * corpus. The iterator degrades to the same full scan on an
+             * unfinalized registry, and best-score ties keep the scan's
+             * first-in-registration-order winner via best_idx — bucket chains
+             * are not in types[] order. */
+            CBMTypeShortIter ts_it;
+            int i;
+            if (ctx->registry) {
+                cbm_registry_types_by_short_name(ctx->registry, the_short, &ts_it);
+            }
+            while (ctx->registry && (i = cbm_type_short_iter_next(&ts_it)) >= 0) {
                 const CBMRegisteredType *cand = &ctx->registry->types[i];
                 if (!cand->short_name || strcmp(cand->short_name, the_short) != 0) continue;
                 int score = 0;
@@ -447,9 +461,10 @@ const char *cs_resolve_type_name(CSLSPContext *ctx, const char *raw) {
                         q++;
                     }
                 }
-                if (score > best_score) {
+                if (score > best_score || (score == best_score && best_idx >= 0 && i < best_idx)) {
                     best_score = score;
                     best = cand;
+                    best_idx = i;
                 }
             }
             if (best) return best->qualified_name;
@@ -530,8 +545,22 @@ static const CBMRegisteredFunc *cs_lookup_extension(CSLSPContext *ctx,
     /* Walk every static class accessible in scope. We approximate accessibility
      * by checking that the function's qualified_name's first dotted prefixes
      * line up with one of: the file's namespace, an imported using namespace,
-     * or the file's module. */
-    for (int i = 0; i < ctx->registry->func_count; i++) {
+     * or the file's module.
+     *
+     * Candidates come from the free-function SHORT-NAME INDEX, not a scan over
+     * reg->funcs: against the shared Tier-2 registry (963k funcs on
+     * dotnet/runtime) the old full scan ran per unresolved invocation and made
+     * per-file resolve cost proportional to the whole corpus. The iterator
+     * degrades to the same full scan on an unfinalized registry, and the
+     * min-index selection below preserves the scan's
+     * first-match-in-registration-order tie-break EXACTLY — bucket chains are
+     * not in funcs[] order. */
+    CBMFreeFuncIter ext_it;
+    cbm_registry_free_funcs_by_short_name(ctx->registry, method_name, &ext_it);
+    const CBMRegisteredFunc *best = NULL;
+    int best_idx = -1;
+    int i;
+    while ((i = cbm_free_func_iter_next(&ext_it)) >= 0) {
         const CBMRegisteredFunc *cand = &ctx->registry->funcs[i];
         if (!cand->short_name || strcmp(cand->short_name, method_name) != 0) continue;
         if (cand->receiver_type) continue; /* must be a free static method */
@@ -583,9 +612,12 @@ static const CBMRegisteredFunc *cs_lookup_extension(CSLSPContext *ctx,
         /* Accessibility check: the candidate's namespace must be in
          * usings or namespace stack. We'll be lenient here — the user's
          * project tree generally has consistent namespaces. */
-        return cand;
+        if (best_idx < 0 || i < best_idx) {
+            best = cand;
+            best_idx = i;
+        }
     }
-    return NULL;
+    return best;
 }
 
 /* ── type AST parsing ───────────────────────────────────────────── */
@@ -2963,15 +2995,46 @@ static void cs_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg,
 /* Tier 2: build a project-wide C# registry ONCE from all defs (filters
  * by lang). Shared READ-ONLY across resolve workers. Def-driven →
  * identical entries to the per-file build, zero quality loss. */
+/* True iff a CS def registers as a TYPE — MUST mirror cs_register_lsp_defs' own
+ * label branch exactly, or the two-phase split below silently mis-buckets. */
+static bool cs_def_is_type(const CBMLSPDef *d) {
+    return d->label && (strcmp(d->label, "Class") == 0 || strcmp(d->label, "Interface") == 0 ||
+                        strcmp(d->label, "Struct") == 0 || strcmp(d->label, "Record") == 0 ||
+                        strcmp(d->label, "Enum") == 0 || strcmp(d->label, "Type") == 0);
+}
+
 CBMTypeRegistry *cbm_cs_build_cross_registry(CBMArena *arena, CBMLSPDef *defs, int def_count) {
     if (!arena) return NULL;
     CBMTypeRegistry *reg = (CBMTypeRegistry *)cbm_arena_alloc(arena, sizeof(*reg));
     if (!reg) return NULL;
     cbm_registry_init(reg, arena);
     cbm_csharp_stdlib_register(reg, arena);
-    for (int i = 0; i < def_count; i++) {
-        if (defs[i].lang != CBM_LANG_CSHARP) continue;
-        cs_register_lsp_defs(arena, reg, &defs[i], 1);
+    /* Two-phase registration, same fix as the Java builder: func registration
+     * parses signatures, and type-name qualification does registry lookups that
+     * are LINEAR scans until finalize builds the hash buckets — upstream
+     * measured one mixed pass over a 963k-def corpus at ~280 s of
+     * lsp_cross_prepare, 140 s two-phase. Register all TYPES (their
+     * registration does no lookups), finalize once so the type buckets exist,
+     * then register FUNCS with O(1) lookups, and finalize again to index them.
+     * Stable order per phase — overload ties resolve to the first registered QN
+     * match — so the partition is a two-pass copy, never a swap. */
+    if (def_count > 0) {
+        /* def_count == 0 is a valid corpus (no C# files): cbm_arena_alloc(a, 0)
+         * returns NULL, which must NOT be mistaken for OOM — the empty registry
+         * is still built, finalized and sealed. */
+        CBMLSPDef *cs = (CBMLSPDef *)cbm_arena_alloc(arena, (size_t)def_count * sizeof(*cs));
+        if (!cs) return NULL;
+        int total = 0;
+        for (int i = 0; i < def_count; i++) {
+            if (defs[i].lang == CBM_LANG_CSHARP && cs_def_is_type(&defs[i])) cs[total++] = defs[i];
+        }
+        int type_count = total;
+        for (int i = 0; i < def_count; i++) {
+            if (defs[i].lang == CBM_LANG_CSHARP && !cs_def_is_type(&defs[i])) cs[total++] = defs[i];
+        }
+        cs_register_lsp_defs(arena, reg, cs, type_count);
+        cbm_registry_finalize(reg);
+        cs_register_lsp_defs(arena, reg, cs + type_count, total - type_count);
     }
     cbm_registry_finalize(reg);
     reg->read_only = true; /* seal: shared Tier-2 registry is read-only during resolve */
