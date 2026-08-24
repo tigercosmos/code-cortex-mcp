@@ -378,7 +378,8 @@ enum { CBM_SPAWN_RETRY = 2, CBM_SPAWN_RETRY_ATTEMPTS = 6 };
 /* Exponential backoff, doubling from CBM_SPAWN_BACKOFF_BASE_MS: 10, 20, 40, 80,
  * 160, 320 — ~630ms of total patience on an ordinary build, and three further
  * doublings (640, 1280, 2560) to roughly 5s on a sanitized one. Both totals
- * follow from CBM_SPAWN_RETRY_ATTEMPTS above; if you change it, re-derive them.
+ * follow from CBM_SPAWN_RETRY_ATTEMPTS above and from the per-wait ceiling at
+ * cbm_spawn_backoff_ms; if you change either, re-derive them.
  *
  * The first version waited a flat 3 x 10ms, which was enough for a momentary
  * dip and NOT enough for the real thing: a CI runner building and testing in
@@ -392,7 +393,27 @@ enum { CBM_SPAWN_RETRY = 2, CBM_SPAWN_RETRY_ATTEMPTS = 6 };
  * beats hanging. The sanitized ceiling is ~5s for the same reason in reverse:
  * under instrumentation the starved window really does last that long, and only
  * a build that already accepts a large slowdown pays for the extra wait. */
-enum { CBM_SPAWN_BACKOFF_BASE_MS = 10, CBM_SPAWN_MS_PER_SEC = 1000, CBM_SPAWN_NS_PER_MS = 1000000 };
+/* The bound is on a single WAIT, and 2560ms (10 << 8) is the largest wait either
+ * budget produces today: 10..320 on an ordinary build, 10..2560 on a sanitized
+ * one. So this changes nothing now — it changes what happens next.
+ *
+ * The clamp it replaces bounded `attempt` by CBM_SPAWN_RETRY_ATTEMPTS, which no
+ * caller can reach: both retry loops return before passing the budget, so the
+ * clamp never fired and the comment claiming "the budget is the only bound
+ * needed" described a bound that did not exist. Doubling with nothing to stop it
+ * is the actual risk, and it grows fast — a budget of 12 would make the last
+ * wait ~20s and the total ~41s, which is precisely the "hang instead of fail
+ * fast" the retry was written to avoid. Flattening at the ceiling keeps a budget
+ * increase linear.
+ *
+ * Spelled as a shift so the value cannot overflow `long` on the way to being
+ * clamped. */
+enum {
+    CBM_SPAWN_BACKOFF_BASE_MS = 10,
+    CBM_SPAWN_BACKOFF_MAX_SHIFT = 8,
+    CBM_SPAWN_MS_PER_SEC = 1000,
+    CBM_SPAWN_NS_PER_MS = 1000000
+};
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* Deterministic EAGAIN injection: see the header. Counts DOWN, so a test asks
@@ -419,11 +440,7 @@ static bool cbm_spawn_eagain_injected(void) {
 #endif
 
 static long cbm_spawn_backoff_ms(int attempt) {
-    /* Cap the shift at the budget, not at a constant: with the sanitized budget
-     * of 9 a hard-coded 6 would flatten the last three waits to 320ms each
-     * instead of continuing to double. The budget is the only bound needed —
-     * callers never exceed it, and a second clamp would be dead code. */
-    int shift = attempt < CBM_SPAWN_RETRY_ATTEMPTS ? attempt : CBM_SPAWN_RETRY_ATTEMPTS;
+    int shift = attempt < CBM_SPAWN_BACKOFF_MAX_SHIFT ? attempt : CBM_SPAWN_BACKOFF_MAX_SHIFT;
     return static_cast<long>(CBM_SPAWN_BACKOFF_BASE_MS) << shift;
 }
 

@@ -183,10 +183,40 @@ void cbm_mem_init(double ram_fraction) {
         ram_fraction = DEFAULT_RAM_FRACTION;
     }
 
-    /* Reduce upfront memory: don't eagerly commit arenas.
-     * Force decommit on purge (MADV_FREE_REUSABLE on macOS) so RSS
-     * drops immediately instead of staying high until memory pressure. */
+    /* Force decommit on purge (MADV_FREE_REUSABLE on macOS) so RSS drops
+     * immediately instead of staying high until memory pressure.
+     *
+     * Arena commit is a PLATFORM decision, because the two costs trade off in
+     * opposite directions. Lazy commit (0) reduces upfront memory but pays
+     * address-space FRAGMENTATION: mimalloc commits a range with
+     * mprotect(PROT_READ|PROT_WRITE) over a sub-range of a PROT_NONE
+     * reservation (vendored/mimalloc/src/prim/unix/prim.c), and each partial
+     * commit SPLITS the reserved VMA. While mimalloc served only the bound
+     * populations (sqlite, tree_sitter) that was a handful of mappings; once
+     * ordinary malloc/new routes through mimalloc, every worker thread
+     * fragments the address space independently and the mapping count tracks
+     * CONCURRENCY rather than corpus size — upstream measured an index worker
+     * at ~22k mappings against v0.9.0's 10 (Go corpus, 18 workers; 999 at 1
+     * worker, 8460 at 4, 11965 at 18).
+     *
+     * On Linux that has two consequences, both reported upstream as #1654 from
+     * a 96-CPU/376 GB host: the mmap/mprotect churn serialises on the kernel's
+     * per-process mmap_lock, and the VMA count climbs toward vm.max_map_count,
+     * after which mmap fails for ANY size — mimalloc reporting it "cannot
+     * allocate" 10 KB while `free -g` still showed 246 GB available.
+     *
+     * mimalloc's own default is 2, "eager-commit arenas only on an OS with
+     * overcommit (i.e. linux)" — precisely because commit is free there until
+     * the pages are touched. Setting 0 opted Linux out of the default written
+     * for it. Restore the default on Linux; keep the lazy setting everywhere
+     * else, where commit is NOT free and the upfront-memory reason still holds
+     * (Windows especially). Upstream measured 22450 -> 17312 mappings with wall
+     * time and peak RSS unchanged. */
+#if defined(__linux__)
+    mi_option_set(mi_option_arena_eager_commit, 2);
+#else
     mi_option_set(mi_option_arena_eager_commit, 0);
+#endif
     mi_option_set(mi_option_purge_decommits, SKIP_ONE);
     mi_option_set(mi_option_purge_delay, 0); /* immediate purge, no 1s delay */
     /* v3 (#832): reclaim abandoned pages on ANY thread's free (=1), restoring the
@@ -238,8 +268,8 @@ size_t cbm_mem_rss(void) {
      * peak_rss (from getrusage's ru_maxrss). current_rss therefore keeps
      * mi_process_info()'s default of pinfo.current_commit: mimalloc's OWN
      * committed-page counter, which this project deliberately tunes low via
-     * mi_option_arena_eager_commit=0 + purge_decommits=1 + purge_delay=0
-     * (cbm_mem_init) to reduce upfront memory. So on Linux "current_rss" is a
+     * purge_decommits=1 + purge_delay=0 (cbm_mem_init) so purged pages leave
+     * the count immediately. So on Linux "current_rss" is a
      * low-biased mimalloc-internal metric, not true RSS: under concurrent
      * large-file parsing it can read a few MB while real RSS is multiple GB,
      * silently blinding cbm_mem_over_budget()'s backpressure to real memory

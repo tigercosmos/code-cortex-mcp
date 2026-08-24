@@ -15,6 +15,7 @@
 #include "cbm.h"
 
 #include "../src/foundation/cbm_atomic.h"
+#include <mimalloc.h>
 #include <sys/stat.h>
 
 /* ASan detection — mimalloc MI_OVERRIDE=0 under ASan, mi_process_info
@@ -29,6 +30,33 @@
 #endif
 
 /* ── mem basic tests ──────────────────────────────────────────── */
+
+/* Arena commit is a PLATFORM decision and the two costs trade off in opposite
+ * directions, so the split must not be silently collapsed to one value.
+ *
+ * Lazy commit (0) reduces upfront memory but pays address-space
+ * FRAGMENTATION: mimalloc commits sub-ranges via
+ * mprotect(PROT_READ|PROT_WRITE) over a PROT_NONE reservation, and each
+ * partial commit SPLITS the reserved VMA. Once ordinary malloc/new routes
+ * through mimalloc the mapping count tracks CONCURRENCY, not corpus size —
+ * upstream measured an index worker at ~22k mappings against v0.9.0's 10. On
+ * Linux that both serialises on the kernel's per-process mmap_lock and walks
+ * the VMA count toward vm.max_map_count, after which mmap fails for ANY size
+ * (upstream #1654: a 10 KB allocation refused while `free -g` showed 246 GB).
+ * mimalloc's own default is 2 — "eager-commit arenas only on an OS with
+ * overcommit (i.e. linux)" — because commit is free there until the pages are
+ * touched, so 0 opted Linux out of the default written for it. Everywhere else
+ * commit is NOT free (Windows especially) and the lazy setting stays. */
+TEST(mem_arena_eager_commit_follows_platform_commit_cost) {
+    cbm_mem_init(0.5);
+    long eager = mi_option_get(mi_option_arena_eager_commit);
+#if defined(__linux__)
+    ASSERT_EQ(eager, 2);
+#else
+    ASSERT_EQ(eager, 0);
+#endif
+    PASS();
+}
 
 TEST(mem_rss_tracking) {
     cbm_mem_init(0.5);
@@ -630,6 +658,7 @@ TEST(parallel_extract_with_slab) {
 SUITE(mem) {
     /* mem API */
     RUN_TEST(mem_rss_tracking);
+    RUN_TEST(mem_arena_eager_commit_follows_platform_commit_cost);
     RUN_TEST(mem_collect_reclaims);
     RUN_TEST(mem_budget_check);
     /* Budget edge cases */
