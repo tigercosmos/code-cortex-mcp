@@ -451,6 +451,109 @@ TEST(contract_python_relative_import) {
     PASS();
 }
 
+/* Python: a RELATIVE aliased from-import must CALLS the real def (execute), not
+ * a ghost named after the local alias (bridge_execute). The sequential import
+ * map used to key on cbm_pipeline_fqn_module(module_path), but a Python
+ * from-import stores "pkg.symbol" there — not a rel-path — so the def node was
+ * never found and no CALLS edge was emitted at all. */
+TEST(contract_python_aliased_from_import_calls) {
+    static const LangFile f[] = {
+        {"gate.py", "def execute(x):\n    return x\n"},
+        {"router.py", "from .gate import execute as bridge_execute\n\n\n"
+                      "def submit_task(y):\n    return bridge_execute(y)\n"}};
+    LangProj lp;
+    cbm_store_t *store = lang_index_files(&lp, f, 2);
+    ASSERT_TRUE(store != NULL);
+    cbm_node_t *nodes = NULL;
+    int ncount = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(store, lp.project, "submit_task", &nodes, &ncount),
+              CBM_STORE_OK);
+    ASSERT_TRUE(ncount >= 1);
+    char **callers = NULL;
+    char **callees = NULL;
+    int n_callers = 0;
+    int n_callees = 0;
+    ASSERT_EQ(cbm_store_node_neighbor_names(store, nodes[0].id, 32, &callers, &n_callers, &callees,
+                                            &n_callees),
+              0);
+    int saw_execute = 0;
+    int saw_alias_ghost = 0;
+    for (int i = 0; i < n_callees; i++) {
+        if (callees[i] && strcmp(callees[i], "execute") == 0) {
+            saw_execute = 1;
+        }
+        if (callees[i] && strcmp(callees[i], "bridge_execute") == 0) {
+            saw_alias_ghost = 1;
+        }
+    }
+    for (int i = 0; i < n_callers; i++) {
+        free(callers[i]);
+    }
+    for (int i = 0; i < n_callees; i++) {
+        free(callees[i]);
+    }
+    free(callers);
+    free(callees);
+    cbm_store_free_nodes(nodes, ncount);
+    lang_cleanup(&lp, store);
+    ASSERT_TRUE(saw_execute);
+    ASSERT_FALSE(saw_alias_ghost);
+    PASS();
+}
+
+/* Python: an ABSOLUTE aliased from-import must CALLS the real def too.
+ * resolve_module lands on the Module node for a "pkg.mod.symbol" path, which
+ * carries neither the alias nor the def, so the IMPORTS edge has to retarget to
+ * the member Function before the call can import_map onto it. */
+TEST(contract_python_absolute_aliased_from_import_calls) {
+    static const LangFile f[] = {
+        {"services/satori_bridge/__init__.py", ""},
+        {"services/satori_bridge/gate.py", "def execute(x):\n    return x\n"},
+        {"services/yui_core/__init__.py", ""},
+        {"services/yui_core/router.py",
+         "from services.satori_bridge.gate import execute as bridge_execute\n\n\n"
+         "def submit_task(y):\n    return bridge_execute(y)\n"},
+        {"services/__init__.py", ""}};
+    LangProj lp;
+    cbm_store_t *store = lang_index_files(&lp, f, 5);
+    ASSERT_TRUE(store != NULL);
+    cbm_node_t *nodes = NULL;
+    int ncount = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(store, lp.project, "submit_task", &nodes, &ncount),
+              CBM_STORE_OK);
+    ASSERT_TRUE(ncount >= 1);
+    char **callers = NULL;
+    char **callees = NULL;
+    int n_callers = 0;
+    int n_callees = 0;
+    ASSERT_EQ(cbm_store_node_neighbor_names(store, nodes[0].id, 32, &callers, &n_callers, &callees,
+                                            &n_callees),
+              0);
+    int saw_execute = 0;
+    int saw_alias_ghost = 0;
+    for (int i = 0; i < n_callees; i++) {
+        if (callees[i] && strcmp(callees[i], "execute") == 0) {
+            saw_execute = 1;
+        }
+        if (callees[i] && strcmp(callees[i], "bridge_execute") == 0) {
+            saw_alias_ghost = 1;
+        }
+    }
+    for (int i = 0; i < n_callers; i++) {
+        free(callers[i]);
+    }
+    for (int i = 0; i < n_callees; i++) {
+        free(callees[i]);
+    }
+    free(callers);
+    free(callees);
+    cbm_store_free_nodes(nodes, ncount);
+    lang_cleanup(&lp, store);
+    ASSERT_TRUE(saw_execute);
+    ASSERT_FALSE(saw_alias_ghost);
+    PASS();
+}
+
 /* TypeScript: a relative import resolves to a sibling module → IMPORTS edge. */
 TEST(contract_typescript_relative_import) {
     static const LangFile f[] = {
@@ -1336,6 +1439,8 @@ SUITE(lang_contract) {
     RUN_TEST(contract_java_methods);
     RUN_TEST(contract_kotlin_methods);
     RUN_TEST(contract_python_relative_import);
+    RUN_TEST(contract_python_aliased_from_import_calls);
+    RUN_TEST(contract_python_absolute_aliased_from_import_calls);
     RUN_TEST(contract_typescript_relative_import);
 
     /* Graph-level breadth across all grammars (P4). */

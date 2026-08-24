@@ -416,6 +416,30 @@ TEST(resolve_caps_unresolvably_ambiguous_names) {
 
 /* ── Import map suffix resolution ─────────────────────────────── */
 
+/* `from M import execute as bridge_execute` + `bridge_execute()` — the IMPORTS
+ * target is ALREADY the def QN, so the suffix-less direct-hit path must return
+ * it rather than appending the local alias onto the module. Adversarial pin: the
+ * behaviour is already correct here, and this is what keeps it that way while
+ * the pkgmap/pass_calls side of the aliased-from-import fix moves around it. */
+TEST(resolve_import_map_aliased_from_import) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "execute", "proj.services.satori_bridge.gate.execute", "Function");
+    /* The alias ghost must not win even if something registered it. */
+    cbm_registry_add(r, "bridge_execute", "proj.services.satori_bridge.gate.bridge_execute",
+                     "Function");
+
+    const char *keys[] = {"bridge_execute"};
+    const char *vals[] = {"proj.services.satori_bridge.gate.execute"};
+
+    cbm_resolution_t res =
+        cbm_registry_resolve(r, "bridge_execute", "proj.services.yui_core.router", keys, vals, 1);
+    ASSERT_STR_EQ(res.qualified_name, "proj.services.satori_bridge.gate.execute");
+    ASSERT_STR_EQ(res.strategy, "import_map");
+
+    cbm_registry_free(r);
+    PASS();
+}
+
 TEST(resolve_import_map_suffix) {
     cbm_registry_t *r = cbm_registry_new();
     cbm_registry_add(r, "Foo", "proj.other.sub.Foo", "Function");
@@ -668,6 +692,7 @@ SUITE(registry) {
     /* Suffix match + import map suffix */
     RUN_TEST(resolve_suffix_match);
     RUN_TEST(resolve_caps_unresolvably_ambiguous_names);
+    RUN_TEST(resolve_import_map_aliased_from_import);
     RUN_TEST(resolve_import_map_suffix);
     /* Import reachability */
     RUN_TEST(resolve_is_import_reachable);

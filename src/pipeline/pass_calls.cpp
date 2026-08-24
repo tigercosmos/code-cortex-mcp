@@ -120,22 +120,30 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
     *out_vals = NULL;
     *out_count = 0;
 
-    /* Fast path: build from cached extraction result (no JSON parsing) */
+    /* Fast path: build from cached extraction via the SAME resolver that emits
+     * the IMPORTS edges. Do NOT use cbm_pipeline_fqn_module(module_path):
+     * Python from-imports store "pkg.symbol" (and aliases) in module_path,
+     * which is not a filesystem rel-path, so the lookup missed the def node
+     * entirely and `from M import f as g` + `g()` emitted no CALLS at all.
+     *
+     * The parallel twin (pass_parallel.cpp build_import_map) never had this
+     * defect — it reads the already-resolved IMPORTS edges out of the graph
+     * buffer, so it inherits resolve_import_node's answer by construction. */
     if (result && result->imports.count > 0) {
         const char **keys =
             (const char **)calloc((size_t)result->imports.count, sizeof(const char *));
         const char **vals =
             (const char **)calloc((size_t)result->imports.count, sizeof(const char *));
         int count = 0;
+        char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel_path, "__file__");
 
         for (int i = 0; i < result->imports.count; i++) {
             const CBMImport *imp = &result->imports.items[i];
             if (!imp->local_name || !imp->local_name[0] || !imp->module_path) {
                 continue;
             }
-            char *target_qn = cbm_pipeline_fqn_module(ctx->project_name, imp->module_path);
-            const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(ctx->gbuf, target_qn);
-            free(target_qn);
+            const cbm_gbuf_node_t *target =
+                cbm_pipeline_resolve_import_node(ctx, rel_path, file_qn, imp, NULL);
             if (!target) {
                 continue;
             }
@@ -143,11 +151,20 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
             vals[count] = target->qualified_name; /* borrowed from gbuf */
             count++;
         }
+        free(file_qn);
 
-        *out_keys = keys;
-        *out_vals = vals;
-        *out_count = count;
-        return 0;
+        if (count > 0) {
+            *out_keys = keys;
+            *out_vals = vals;
+            *out_count = count;
+            return 0;
+        }
+        free((void *)keys);
+        free((void *)vals);
+        /* Fall through to the IMPORTS-edge scan when no extraction path
+         * resolved — rare now that resolve_import_node is used, but a file
+         * whose imports all point outside the project must still pick up any
+         * edge the definitions pass managed to emit. */
     }
 
     /* Slow path: scan graph buffer IMPORTS edges + parse JSON properties */
