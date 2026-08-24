@@ -328,6 +328,7 @@ cbm_add_cxx_library(cbm_extraction
         ${CBM_INTERNAL}/extract_env_accesses.cpp
         ${CBM_INTERNAL}/extract_channels.cpp
         ${CBM_INTERNAL}/extract_k8s.cpp
+        ${CBM_INTERNAL}/extract_dbt.cpp
         ${CBM_INTERNAL}/helpers.cpp
         ${CBM_INTERNAL}/service_patterns.cpp)
 

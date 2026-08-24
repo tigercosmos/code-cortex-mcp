@@ -3287,6 +3287,98 @@ TEST(extract_python_method_test_dir_marks_is_test_issue1294) {
     PASS();
 }
 
+/* --- dbt Jinja lineage --- */
+
+/* Helper: does the file's usage list carry `name`? */
+static int has_usage(CBMFileResult *r, const char *name) {
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && strcmp(r->usages.items[i].ref_name, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+TEST(dbt_model_and_ref_lineage) {
+    /* A dbt model: the file STEM is the model identity, and each ref() is a
+     * dependency on another model. The SQL grammar cannot read `{{ ref(..) }}`
+     * at all — it is a parse error to it — so without the dbt pass this file
+     * yields no lineage whatsoever. */
+    CBMFileResult *r = extract("SELECT o.id, c.name\n"
+                               "FROM {{ ref('stg_orders') }} o\n"
+                               "JOIN {{ ref('stg_customers') }} c ON c.id = o.customer_id\n",
+                               CBM_LANG_SQL, "t", "models/marts/orders_enriched.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_def(r, "Model", "orders_enriched"));
+    ASSERT(has_usage(r, "stg_orders"));
+    ASSERT(has_usage(r, "stg_customers"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(dbt_source_and_two_arg_ref) {
+    /* Both dbt builtins name the relation in their LAST string argument:
+     * source('group','table') -> table, and the two-argument
+     * ref('package','model') form -> model. */
+    CBMFileResult *r =
+        extract("SELECT * FROM {{ source('raw', 'customers') }}\n"
+                "UNION ALL SELECT * FROM {{ ref('analytics', 'legacy_customers') }}\n",
+                CBM_LANG_SQL, "t", "models/stg_customers.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_def(r, "Model", "stg_customers"));
+    ASSERT(has_usage(r, "customers"));
+    ASSERT(has_usage(r, "legacy_customers"));
+    /* The group/package argument is NOT the relation. */
+    ASSERT_FALSE(has_usage(r, "raw"));
+    ASSERT_FALSE(has_usage(r, "analytics"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(dbt_ignores_non_dbt_jinja) {
+    /* Templated SQL is not dbt SQL. An Airflow-style parameter substitution has
+     * Jinja but no dbt builtin, so the dbt pass must contribute NOTHING — no
+     * Model node named after the file, and no usage minted from the template
+     * variables. This is the gate that keeps every non-dbt repository free of
+     * fabricated data-lineage vocabulary. */
+    CBMFileResult *r = extract("SELECT * FROM events WHERE day = '{{ ds }}'\n"
+                               "  AND region = '{{ params.region_code }}'\n",
+                               CBM_LANG_SQL, "t", "queries/daily_events.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(has_def(r, "Model", "daily_events"));
+
+    /* Control: the same statement with the templates replaced by plain string
+     * literals. Both parse as SQL identically, so an EQUAL usage count is the
+     * precise statement of "the dbt pass contributed nothing here" — stronger
+     * than naming individual identifiers, and immune to how SQL happens to
+     * tokenize the template text. */
+    CBMFileResult *plain = extract("SELECT * FROM events WHERE day = '2026-01-01'\n"
+                                   "  AND region = 'eu-west'\n",
+                                   CBM_LANG_SQL, "t", "queries/daily_events.sql");
+    ASSERT_NOT_NULL(plain);
+    ASSERT_FALSE(has_def(plain, "Model", "daily_events"));
+    ASSERT_EQ(r->usages.count, plain->usages.count);
+    ASSERT_EQ(r->defs.count, plain->defs.count);
+    cbm_free_result(plain);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(dbt_plain_sql_untouched) {
+    /* Plain DDL keeps producing exactly the Table/View relations it did before
+     * the dbt pass existed — no Model node, and the FROM lineage is unchanged. */
+    CBMFileResult *r = extract("CREATE TABLE users (id INTEGER);\n"
+                               "CREATE VIEW active_users AS SELECT * FROM users;\n",
+                               CBM_LANG_SQL, "t", "schema.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Table", "users"));
+    ASSERT(has_def(r, "View", "active_users"));
+    ASSERT_FALSE(has_def(r, "Model", "schema"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* CREATE TABLE / CREATE VIEW / CREATE MATERIALIZED VIEW produce first-class
  * Table and View nodes; CREATE PROCEDURE produces a Function. All four were
  * previously either generic Variable nodes or absent from the graph entirely. */
@@ -3790,6 +3882,10 @@ SUITE(extraction) {
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
     RUN_TEST(extract_ts_template_string_url_issue1006);
+    RUN_TEST(dbt_model_and_ref_lineage);
+    RUN_TEST(dbt_source_and_two_arg_ref);
+    RUN_TEST(dbt_ignores_non_dbt_jinja);
+    RUN_TEST(dbt_plain_sql_untouched);
     RUN_TEST(sql_ddl_node_labels);
     RUN_TEST(sql_create_procedure_is_a_function);
     RUN_TEST(sql_view_lineage_usages);

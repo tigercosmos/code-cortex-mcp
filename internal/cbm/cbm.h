@@ -654,6 +654,11 @@ bool cbm_label_is_type_like(const char *label);
 // CALLS/THROWS/READS/WRITES targets. `label` may be NULL.
 bool cbm_label_is_relation(const char *label);
 
+// dbt lineage for Jinja-templated SQL models: emits a Model def plus one usage
+// per ref()/source() call. No-op unless the file parses as SQL and actually
+// contains a dbt builtin call. Defined in extract_dbt.cpp.
+void cbm_extract_dbt(CBMExtractCtx *ctx);
+
 // True for labels admitted to the cross-file name registry: Function, Method,
 // every type-like container, Variable, Field, and the relation labels. Single
 // source of truth for registry seeding, so the full, parallel and incremental
