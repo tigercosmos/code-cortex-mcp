@@ -5958,29 +5958,76 @@ static bool search_result_score_greater(const search_result_t &a, const search_r
     return a.score > b.score; /* descending by score */
 }
 
+/* Moving an arbitrary file_pattern ahead of Select-String is NOT generally
+ * results-preserving: the Windows path applies PowerShell -like to the full
+ * MatchInfo.Path, while POSIX delegates glob semantics to grep --include.
+ * Restrict the optimization to plain suffix globs, whose meaning cannot depend
+ * on path-separator normalization or directory components. The original
+ * post-scan filter stays in place as a second guard. */
+bool cbm_search_code_file_pattern_can_prefilter(const char *file_pattern) {
+    if (!file_pattern || file_pattern[0] != '*' || file_pattern[1] != '.' ||
+        file_pattern[2] == '\0') {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)file_pattern + 2; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+              *p == '.' || *p == '_' || *p == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Windows PowerShell 5.1 encodes stdout for a native-process pipe in the console
+ * OEM codepage, so any character the inherited CP cannot carry (Cyrillic under
+ * CP437/850, and so on) degrades to '?' before it ever reaches
+ * collect_grep_matches — and WHETHER it degrades depends on the console the
+ * server happened to inherit, which makes the bug look intermittent. Pin the
+ * pipe to UTF-8 inside every generated command so raw search content is
+ * codepage-independent. The read side is already safe: Select-String decodes
+ * BOM-less UTF-8 via .NET StreamReader defaults. */
+#define CBM_PS_UTF8_PRELUDE "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+
 /* Build the grep/search command string based on scoped vs recursive mode.
  * On Windows, uses PowerShell Select-String with tab-delimited output.
  * On POSIX, uses grep with colon-delimited output. */
-static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped,
-                           const char *file_pattern, const char *tmpfile, const char *filelist,
-                           const char *root_path) {
+void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped,
+                                    const char *file_pattern, const char *tmpfile,
+                                    const char *filelist, const char *root_path) {
 #ifdef _WIN32
     const char *sm = use_regex ? "" : " -SimpleMatch";
     if (scoped) {
         if (file_pattern) {
-            snprintf(
-                cmd, cmd_sz,
-                "powershell -Command \"$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
-                "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
-                "-LiteralPath $_ -Pattern $pat%s "
-                "-ErrorAction SilentlyContinue }"
-                " | Where-Object { $_.Path -like '*%s' }"
-                " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                tmpfile, filelist, sm, file_pattern);
+            if (cbm_search_code_file_pattern_can_prefilter(file_pattern)) {
+                /* Drop non-matching paths BEFORE Select-String opens them. */
+                snprintf(
+                    cmd, cmd_sz,
+                    "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                    "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
+                    "Get-Content -Encoding UTF8 -LiteralPath '%s'"
+                    " | Where-Object { $_ -like '%s' }"
+                    " | ForEach-Object { Select-String -LiteralPath $_ -Pattern $pat%s "
+                    "-ErrorAction SilentlyContinue }"
+                    " | Where-Object { $_.Path -like '*%s' }"
+                    " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
+                    tmpfile, filelist, file_pattern, sm, file_pattern);
+            } else {
+                snprintf(
+                    cmd, cmd_sz,
+                    "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                    "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
+                    "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
+                    "-LiteralPath $_ -Pattern $pat%s "
+                    "-ErrorAction SilentlyContinue }"
+                    " | Where-Object { $_.Path -like '*%s' }"
+                    " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
+                    tmpfile, filelist, sm, file_pattern);
+            }
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
+                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                 "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
                 "-LiteralPath $_ -Pattern $pat%s "
                 "-ErrorAction SilentlyContinue }"
@@ -5991,7 +6038,8 @@ static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped
         if (file_pattern) {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
+                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
                 "-ErrorAction SilentlyContinue"
                 " | Select-String -Pattern (Get-Content -Encoding UTF8 -LiteralPath '%s')%s "
                 "-ErrorAction SilentlyContinue"
@@ -6000,7 +6048,8 @@ static void build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
+                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
                 "SilentlyContinue"
                 " | Select-String -Pattern (Get-Content -Encoding UTF8 -LiteralPath '%s')%s "
                 "-ErrorAction SilentlyContinue"
@@ -6744,8 +6793,8 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         cbm_unlink(filelist);
     } else {
         char cmd[CBM_SZ_4K];
-        build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, file_pattern, tmpfile, filelist,
-                       root_path);
+        cbm_search_code_build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, file_pattern, tmpfile,
+                                       filelist, root_path);
 
         FILE *fp = cbm_popen(cmd, "r");
         if (!fp) {

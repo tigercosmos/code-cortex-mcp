@@ -2968,6 +2968,60 @@ TEST(tool_list_projects_pages_deterministically) {
     PASS();
 }
 
+/* The prefilter is only safe for plain suffix globs. Moving an arbitrary
+ * file_pattern ahead of Select-String is NOT results-preserving: the Windows
+ * path applies PowerShell -like to the FULL MatchInfo.Path, while POSIX
+ * delegates glob semantics to grep --include. These are the boundary cases that
+ * separate "cannot change meaning" from "might".
+ *
+ * Runs on every platform — the predicate is pure. */
+TEST(search_code_file_pattern_prefilter_boundaries) {
+    ASSERT_TRUE(cbm_search_code_file_pattern_can_prefilter("*.pas"));
+    ASSERT_TRUE(cbm_search_code_file_pattern_can_prefilter("*.PAS"));
+    ASSERT_TRUE(cbm_search_code_file_pattern_can_prefilter("*.d.ts"));
+    ASSERT_TRUE(cbm_search_code_file_pattern_can_prefilter("*.foo-bar_1"));
+
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter(NULL));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter(""));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter(".pas"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("*.*"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("src/*.pas"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("src\\*.pas"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("*.c++"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("*R&D*.go"));
+    PASS();
+}
+
+/* Pins the PowerShell pipeline ORDERING without starting a shell: the cheap
+ * path prefilter must run BEFORE the content scan, and the original post-scan
+ * filter must survive as a second guard. Windows-only, because the command is
+ * only built there. */
+TEST(search_code_windows_prefilter_precedes_content_scan) {
+#ifdef _WIN32
+    char command[CBM_SZ_4K];
+    cbm_search_code_build_grep_cmd(command, sizeof(command), false, true, "*.go", "C:/tmp/pattern",
+                                   "C:/tmp/filelist", "C:/tmp/root");
+
+    const char *prefilter = strstr(command, "Where-Object { $_ -like '*.go' }");
+    const char *content_scan = strstr(command, "ForEach-Object { Select-String");
+    const char *postfilter = strstr(command, "Where-Object { $_.Path -like '**.go' }");
+    ASSERT_NOT_NULL(prefilter);
+    ASSERT_NOT_NULL(content_scan);
+    ASSERT_NOT_NULL(postfilter);
+    ASSERT_TRUE(prefilter < content_scan);
+    ASSERT_TRUE(content_scan < postfilter);
+
+    /* A pattern with an interior wildcard must NOT be prefiltered. */
+    cbm_search_code_build_grep_cmd(command, sizeof(command), false, true, "*handler*.go",
+                                   "C:/tmp/pattern", "C:/tmp/filelist", "C:/tmp/root");
+    ASSERT_NULL(strstr(command, "Where-Object { $_ -like '*handler*.go' }"));
+    ASSERT_NOT_NULL(strstr(command, "Where-Object { $_.Path -like '**handler*.go' }"));
+    PASS();
+#else
+    SKIP_PLATFORM("PowerShell prefilter runs on Windows");
+#endif
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
@@ -3049,6 +3103,8 @@ SUITE(mcp) {
     RUN_TEST(search_graph_semantic_only_skips_structural_scan);
     RUN_TEST(index_response_reports_persisted_coverage_on_reindex);
     RUN_TEST(tool_list_projects_pages_deterministically);
+    RUN_TEST(search_code_file_pattern_prefilter_boundaries);
+    RUN_TEST(search_code_windows_prefilter_precedes_content_scan);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
     RUN_TEST(tool_search_graph_basic);

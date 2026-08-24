@@ -25,6 +25,18 @@ extern "C" {
 bool cbm_detect_node_in_hunks(const cbm_node_t *node, const cbm_changed_hunk_t *hunks,
                               int hunk_count, const char *file);
 
+/* search_code Windows pre-scan optimization: only simple suffix globs can be
+ * moved ahead of Select-String without changing the existing full-path
+ * PowerShell -like contract. Exposed for direct boundary tests only. */
+bool cbm_search_code_file_pattern_can_prefilter(const char *file_pattern);
+
+/* Internal command builder, exposed so tests can pin the PowerShell pipeline
+ * ORDERING without starting an external shell — the Windows branch cannot be
+ * exercised end-to-end from a POSIX CI host. */
+void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped,
+                                    const char *file_pattern, const char *tmpfile,
+                                    const char *filelist, const char *root_path);
+
 #ifdef __cplusplus
 }
 #endif
