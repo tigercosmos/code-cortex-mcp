@@ -706,6 +706,8 @@ typedef struct {
      * While set, pulls skip the nap (the designed soft overshoot); the cheap
      * over-budget probe re-arms the gate once RSS drains under budget. */
     std::atomic<int> bp_futile;
+    /* Superlinearity probe — see foundation/profile.h. Ticked on each file claim. */
+    cbm_scale_probe_t scale;
 } extract_ctx_t;
 
 /* Cap on the number of index.file_oversized WARN lines (the full list still goes
@@ -779,6 +781,7 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
         if (sort_pos >= ec->file_count) {
             break;
         }
+        cbm_scale_tick(&ec->scale, sort_pos);
         if (atomic_load_explicit(ec->cancelled, memory_order_relaxed)) {
             break;
         }
@@ -1144,12 +1147,14 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
     atomic_init(&ec.retain_cap_warned, 0);
     atomic_init(&ec.oversized_warned, 0);
     atomic_init(&ec.bp_futile, 0);
+    cbm_scale_begin(&ec.scale, "parallel_extract", (long)file_count);
 
     /* Sub-phase: Dispatch workers (parse + extract per file, PARALLEL) */
     CBM_PROF_START(t_dispatch);
     cbm_parallel_for_opts_t pf_opts = {.max_workers = worker_count, .force_pthreads = false};
     cbm_parallel_for(worker_count, extract_worker, &ec, pf_opts);
     CBM_PROF_END_N("parallel_extract", "3_dispatch_workers_parallel", t_dispatch, file_count);
+    cbm_scale_end(&ec.scale);
 
     /* Sub-phase: Merge all local gbufs into main gbuf (SEQUENTIAL, gbuf not thread-safe) */
     CBM_PROF_START(t_merge);
@@ -1520,6 +1525,10 @@ typedef struct {
     std::atomic<uint64_t> time_ns_rc_target;     /* gbuf_find_by_qn for target */
     std::atomic<uint64_t> time_ns_rc_emit;       /* emit_service_edge */
     std::atomic<uint64_t> time_ns_rc_source;     /* find_source_node */
+    /* Superlinearity probe — see foundation/profile.h. This is the pass that made
+     * it necessary (cross-file LSP was 87% of a Java index upstream), so it is
+     * the one that must never again grow superlinear without saying so. */
+    cbm_scale_probe_t scale;
 } resolve_ctx_t;
 
 /* Minimum buffer space needed per arg JSON object */
@@ -2818,6 +2827,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         if (file_idx >= rc->file_count) {
             break;
         }
+        cbm_scale_tick(&rc->scale, file_idx);
         if (atomic_load_explicit(rc->cancelled, memory_order_relaxed)) {
             break;
         }
@@ -3087,6 +3097,7 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     atomic_init(&rc.rust_shared_reg, (CBMTypeRegistry *)nullptr);
     cbm_mutex_init(&rc.rust_shared_mu);
     rc.rust_shared_arena_live = false;
+    cbm_scale_begin(&rc.scale, "parallel_resolve", (long)file_count);
 
     /* Sub-phase: Dispatch resolve workers (per-file call/usage resolution, PARALLEL) */
     CBM_PROF_START(t_resolve_dispatch);
@@ -3094,6 +3105,7 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     cbm_parallel_for(worker_count, resolve_worker, &rc, opts);
     CBM_PROF_END_N("parallel_resolve", "1_dispatch_workers_parallel", t_resolve_dispatch,
                    file_count);
+    cbm_scale_end(&rc.scale);
     /* Workers joined: the shared Rust registry (if built) is no longer read.
      * Free its dedicated arena + the lock (registry was self-contained: it strdup'd
      * all QNs, so freeing all_defs afterward is safe). */
@@ -3145,6 +3157,59 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
         "files_skipped_no_source",
         itoa_log(atomic_load_explicit(&rc.lsp_cross_skipped_no_source, memory_order_relaxed)),
         "defs_total", itoa_log(def_count));
+
+    /* Cross-LSP cost, NORMALISED. Wall time alone cannot distinguish "big repo"
+     * from "superlinear pass"; us_per_file can. For a pass that is linear in
+     * file count this number is roughly CONSTANT across repo sizes. When
+     * cross-file LSP rebuilds its registry from a corpus-scaled def set,
+     * per-file cost tracks defs_total instead — upstream measured 35ms/file at
+     * 5.8k files and 209ms/file at 46k on the same tree, the O(n^2) that cost a
+     * 6x Java regression and took an 11-corpus two-binary A/B to find. Emitted
+     * next to defs_total so one grep on two differently sized repos answers it.
+     *
+     * us_per_file_per_kdef is the tie-breaker: per-file cost RISING while
+     * per-kdef stays flat is the fingerprint of work proportional to the whole
+     * corpus (files x defs), which the in-run scaling probe cannot see. */
+    int cross_files = atomic_load_explicit(&rc.lsp_cross_processed, memory_order_relaxed);
+    uint64_t cross_us = atomic_load_explicit(&rc.time_ns_cross_lsp, memory_order_relaxed) / 1000ULL;
+    if (cross_files > 0) {
+        char cf_buf[CBM_SZ_32];
+        char nf_buf[CBM_SZ_32];
+        char cu_buf[CBM_SZ_32];
+        char pk_buf[CBM_SZ_32];
+        snprintf(cf_buf, sizeof(cf_buf), "%llu",
+                 (unsigned long long)(cross_us / (uint64_t)cross_files));
+        snprintf(nf_buf, sizeof(nf_buf), "%d", cross_files);
+        snprintf(cu_buf, sizeof(cu_buf), "%llu", (unsigned long long)(cross_us / 1000ULL));
+        snprintf(pk_buf, sizeof(pk_buf), "%llu",
+                 (unsigned long long)(def_count > 0
+                                          ? (cross_us * 1000ULL) /
+                                                ((uint64_t)cross_files * (uint64_t)def_count)
+                                          : 0ULL));
+        cbm_log_info("parallel.resolve.cross_lsp_cost", "cross_lsp_ms", cu_buf, "files", nf_buf,
+                     "us_per_file", cf_buf, "defs_total", itoa_log(def_count),
+                     "us_per_file_per_kdef", pk_buf);
+    }
+
+    /* What the PER-FILE registry build actually cost, for the languages that
+     * still take that path. defs_per_file is the lever: if it tracks defs_total
+     * rather than the file's own module plus imports, the module filter is not
+     * containing the work. */
+    uint64_t reg_defs = 0;
+    uint64_t reg_files = 0;
+    uint64_t flt_files = 0;
+    uint64_t flt_failed = 0;
+    cbm_pxc_filter_stats(&reg_defs, &reg_files, &flt_files, &flt_failed);
+    if (reg_files > 0) {
+        char rd_buf[CBM_SZ_32];
+        char ff_buf[CBM_SZ_32];
+        char fp_buf[CBM_SZ_32];
+        snprintf(rd_buf, sizeof(rd_buf), "%llu", (unsigned long long)(reg_defs / reg_files));
+        snprintf(ff_buf, sizeof(ff_buf), "%llu", (unsigned long long)flt_failed);
+        snprintf(fp_buf, sizeof(fp_buf), "%llu", (unsigned long long)flt_files);
+        cbm_log_info("parallel.resolve.perfile_registry", "defs_per_file", rd_buf, "defs_total",
+                     itoa_log(def_count), "filtered_files", fp_buf, "filter_failed", ff_buf);
+    }
 
     cbm_log_info("parallel.resolve.done", "calls", itoa_log(total_calls), "usages",
                  itoa_log(total_usages), "semantic", itoa_log(total_semantic + go_impl),

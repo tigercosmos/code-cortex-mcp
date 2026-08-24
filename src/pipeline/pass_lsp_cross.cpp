@@ -628,6 +628,32 @@ void cbm_pxc_run_one_ts(CBMFileResult *r, const char *source, int source_len, co
  * `rust_shared_get` supplies the lazily-built shared Rust all-defs registry
  * (the parallel resolver owns its once-guard); NULL means "no shared rust
  * registry available" and rust NULL-filter files take the per-file build. */
+/* Per-file registry-build cost counters. Surfaced by pass_parallel at the end of
+ * resolve: per-file registry build cost is driven by defs_per_file, so if that
+ * tracks the CORPUS rather than the file's own module plus imports, the module
+ * filter is not containing the work and cross-file LSP is O(files x corpus_defs)
+ * — the exact shape the in-run scaling probe cannot see. */
+static cbm_atomic_uint64 g_pxc_defs_registered{0};
+static cbm_atomic_uint64 g_pxc_build_files{0};
+static cbm_atomic_uint64 g_pxc_filter_files{0};
+static cbm_atomic_uint64 g_pxc_filter_failed{0};
+
+void cbm_pxc_filter_stats(uint64_t *defs_registered, uint64_t *build_files, uint64_t *filter_files,
+                          uint64_t *filter_failed) {
+    if (defs_registered) {
+        *defs_registered = atomic_load_explicit(&g_pxc_defs_registered, memory_order_relaxed);
+    }
+    if (build_files) {
+        *build_files = atomic_load_explicit(&g_pxc_build_files, memory_order_relaxed);
+    }
+    if (filter_files) {
+        *filter_files = atomic_load_explicit(&g_pxc_filter_files, memory_order_relaxed);
+    }
+    if (filter_failed) {
+        *filter_failed = atomic_load_explicit(&g_pxc_filter_failed, memory_order_relaxed);
+    }
+}
+
 void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *source,
                            int source_len, const char *rel, const char *def_module,
                            const CBMCrossLspRegistries *cross_registries,
@@ -733,11 +759,19 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         filtered =
             cbm_pxc_filter_defs_for_file(module_def_index, all_defs, lang, result->namespace_name,
                                          def_module, imp_vals, imp_count, &filtered_count);
+        atomic_fetch_add_explicit(&g_pxc_filter_files, 1, memory_order_relaxed);
         if (filtered) {
             file_defs = filtered;
             file_def_count = filtered_count;
+        } else {
+            atomic_fetch_add_explicit(&g_pxc_filter_failed, 1, memory_order_relaxed);
         }
     }
+    /* Charged whichever path runs: a failed filter means the file registered the
+     * WHOLE corpus, which is precisely what this number exists to reveal. */
+    atomic_fetch_add_explicit(&g_pxc_defs_registered, (uint64_t)file_def_count,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_pxc_build_files, 1, memory_order_relaxed);
     if (lang == CBM_LANG_RUST) {
         CBMTypeRegistry *shared = rust_shared_get ? rust_shared_get(rust_shared_ctx) : NULL;
         if (shared) {

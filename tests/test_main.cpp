@@ -19,6 +19,7 @@ extern void suite_str_intern(void);
 extern void suite_log(void);
 extern void suite_str_util(void);
 extern void suite_platform(void);
+extern void suite_diagnostics(void);
 extern void suite_extraction(void);
 extern void suite_extraction_inheritance(void);
 extern void suite_extraction_imports(void);
@@ -111,6 +112,7 @@ int main(void) {
     RUN_SUITE(log);
     RUN_SUITE(str_util);
     RUN_SUITE(platform);
+    RUN_SUITE(diagnostics);
 
     /* Existing C code regression tests */
     RUN_SUITE(ac);

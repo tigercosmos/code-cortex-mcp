@@ -434,7 +434,7 @@ set(CBM_TEST_SRCS
     tests/test_py_lsp.cpp tests/test_py_lsp_bench.cpp tests/test_py_lsp_stress.cpp
     tests/test_py_lsp_scale.cpp tests/test_ts_lsp.cpp
     # cli / mem / security / yaml / simhash
-    tests/test_cli.cpp tests/test_mem.cpp
+    tests/test_cli.cpp tests/test_mem.cpp tests/test_diagnostics.cpp
     tests/test_security.cpp tests/test_yaml.cpp tests/test_simhash.cpp
     tests/test_stack_overflow.cpp
     # integration

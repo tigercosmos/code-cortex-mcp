@@ -118,6 +118,11 @@ typedef struct {
      * LAZILY inside cbm_parallel_resolve (first NULL-filter rust file), not eagerly. */
 } CBMCrossLspRegistries;
 
+/* Per-file registry-build cost: how many defs the per-file cross-LSP path
+ * actually registered, and how often the module filter failed. */
+void cbm_pxc_filter_stats(uint64_t *defs_registered, uint64_t *build_files, uint64_t *filter_files,
+                          uint64_t *filter_failed);
+
 /* Return the appropriate pre-built registry for a language, or NULL
  * if none was built (or language has no cross-LSP entrypoint). */
 static inline CBMTypeRegistry *cbm_pxc_registry_for_lang(const CBMCrossLspRegistries *r,
