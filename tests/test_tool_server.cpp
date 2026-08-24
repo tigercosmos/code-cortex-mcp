@@ -10,7 +10,12 @@
  * The worker is stood up through cbm_tool_server_set_argv_for_testing rather
  * than the real `<self> cli --tool-server`, because the test binary is not the
  * server binary. The stand-in speaks the same framing and reports its own pid,
- * which is what makes "same worker" and "new worker" directly observable. */
+ * which is what makes "same worker" and "new worker" directly observable.
+ *
+ * POSIX only, for two independent reasons: Windows has no piped spawn, so
+ * cbm_tool_server_call refuses outright and the per-call worker is used there
+ * instead (see tool_server.h); and the stand-in worker is a /bin/sh script.
+ * Both constraints lift together if the worker is ever ported. */
 #include "../src/foundation/compat.h"
 #include "../src/foundation/platform.h" /* cbm_now_ms */
 #include "test_framework.h"
@@ -19,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef CBM_ENABLE_TEST_SEAMS
+#if defined(CBM_ENABLE_TEST_SEAMS) && !defined(_WIN32)
 
 /* A POSIX-sh worker: read "<tool_len> <args_len>\n", the tool name and the
  * args, then reply "<len>\n<body>" with a body naming the tool and the pid.
@@ -246,7 +251,7 @@ TEST(tool_server_rejects_unsafe_tool_names) {
     PASS();
 }
 
-#endif /* CBM_ENABLE_TEST_SEAMS */
+#endif /* CBM_ENABLE_TEST_SEAMS && !_WIN32 */
 
 /* A worker wedged BEFORE it ever reads: it never drains stdin. The parent's
  * request then fills the pipe buffer (64KB on most systems) and the rest of
@@ -335,7 +340,7 @@ TEST(tool_server_timeout_covers_the_whole_call_once) {
 }
 
 void suite_tool_server(void) {
-#ifdef CBM_ENABLE_TEST_SEAMS
+#if defined(CBM_ENABLE_TEST_SEAMS) && !defined(_WIN32)
     RUN_TEST(tool_server_one_worker_serves_many_calls);
     RUN_TEST(tool_server_crash_is_classified_and_the_next_call_respawns);
     RUN_TEST(tool_server_deadline_kills_the_worker_and_the_next_call_succeeds);
