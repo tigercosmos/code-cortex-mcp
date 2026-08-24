@@ -3287,6 +3287,59 @@ TEST(extract_python_method_test_dir_marks_is_test_issue1294) {
     PASS();
 }
 
+/* A Swift protocol requirement — a bodyless `func generate() -> String` inside a
+ * protocol — was absent from the graph ENTIRELY. Swift codebases are heavily
+ * protocol-driven, so the requirement is very often the declaration a reader is
+ * looking for, and "who declares generate()" had no answer.
+ *
+ * Three things had to line up: protocol_body joins the class-body types so a
+ * protocol's members are walked at all; protocol_function_declaration joins
+ * swift_func_types, because extract_class_methods gates on that set and would
+ * otherwise walk the requirement and discard it; and both name resolvers accept
+ * the node, which has the same simple_identifier shape as function_declaration. */
+TEST(extract_swift_protocol_requirement_is_indexed) {
+    CBMFileResult *r = extract("protocol StudyRunning {\n    func generate() -> String\n}\n",
+                               CBM_LANG_SWIFT, "t", "StudyRunning.swift");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Interface", "StudyRunning"));
+    ASSERT(has_def(r, "Method", "generate"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A Java enum's CONSTANTS must survive alongside its methods. Reaching the
+ * methods means descending into enum_body_declarations, and the tempting way to
+ * do that — redirecting the shared find_class_body — also makes the constants
+ * unreachable, because they are SIBLINGS of that node rather than children.
+ * These assertions are what stop that distinction being collapsed. Upstream
+ * added them to an existing enum test (@1acd8791); this tree has no such test,
+ * so the guard is standalone here. */
+TEST(extract_java_enum_constants_survive_alongside_methods) {
+    const char *src = "public enum Day {\n"
+                      "    MON, SAT, SUN;\n"
+                      "    public boolean isWeekend() { return this == SAT || this == SUN; }\n"
+                      "    public String label() { return name(); }\n"
+                      "}\n";
+    CBMFileResult *r = extract(src, CBM_LANG_JAVA, "t", "Day.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Enum", "Day"));
+    /* NOTE — divergence from upstream, pinned deliberately rather than hidden:
+     * upstream labels an enum's methods "Method" (parented to the Enum); this
+     * tree labels them "Function". The claim under test is that the CONSTANTS
+     * survive ALONGSIDE the methods, which holds either way, so the guard is
+     * written against this tree's actual labels. If enum methods are ever
+     * reparented to the Enum, this assertion is where that shows up. */
+    ASSERT(has_def(r, "Function", "isWeekend"));
+    ASSERT(has_def(r, "Function", "label"));
+    ASSERT(has_def(r, "Variable", "MON"));
+    ASSERT(has_def(r, "Variable", "SAT"));
+    ASSERT(has_def(r, "Variable", "SUN"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* A file that does not end with a newline leaves the grammar's mandatory line
  * terminator MISSING — a ZERO-WIDTH node at EOF. The parser consumed no source
  * for it, so nothing was dropped, and flagging it made the verdict depend on a
@@ -3663,6 +3716,8 @@ SUITE(extraction) {
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
     RUN_TEST(extract_ts_template_string_url_issue1006);
+    RUN_TEST(extract_swift_protocol_requirement_is_indexed);
+    RUN_TEST(extract_java_enum_constants_survive_alongside_methods);
     RUN_TEST(extract_c_test_dir_marks_is_test_issue1294);
     RUN_TEST(extract_python_method_test_dir_marks_is_test_issue1294);
     RUN_TEST(extract_missing_final_newline_not_flagged_issue1610);

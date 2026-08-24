@@ -524,7 +524,11 @@ static const char *objc_var_types[] = {"declaration", NULL};
 static const char *objc_assign_types[] = {"assignment_expression", NULL};
 
 // ==================== SWIFT ====================
-static const char *swift_func_types[] = {"function_declaration", "macro_declaration", NULL};
+// protocol_function_declaration: a protocol's method requirements. Needed here
+// as well as in the name resolvers — extract_class_methods gates on this set,
+// so without the entry the requirement is walked and then discarded.
+static const char *swift_func_types[] = {"function_declaration", "protocol_function_declaration",
+                                         "macro_declaration", NULL};
 static const char *swift_class_types[] = {"class_declaration", "protocol_declaration",
                                           "struct_declaration", "enum_declaration", NULL};
 static const char *swift_field_types[] = {"property_declaration", NULL};
