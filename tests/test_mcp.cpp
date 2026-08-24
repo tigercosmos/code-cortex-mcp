@@ -2817,6 +2817,157 @@ TEST(search_graph_semantic_only_skips_structural_scan) {
     PASS();
 }
 
+/* Coverage gaps must survive an incremental run that does not revisit them.
+ * The response used to be built from the PER-RUN parser errors, so re-indexing
+ * after touching only a clean neighbour reported parse_partial_count = 0 and
+ * the known-broken files appeared to have been fixed. Measured before the fix:
+ * 8 -> 0 across two runs of the same tree; after: 8 -> 8.
+ *
+ * The pipeline persists the complete current coverage set before this response
+ * is built, so that set is authoritative and the per-run errors are only the
+ * fallback for when it cannot be read. */
+TEST(index_response_reports_persisted_coverage_on_reindex) {
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-persistcov-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        PASS();
+    }
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-persistcov-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        cbm_rmdir(tmp_dir);
+        PASS();
+    }
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char broken_path[512];
+    char clean_path[512];
+    snprintf(broken_path, sizeof(broken_path), "%s/broken.rs", tmp_dir);
+    snprintf(clean_path, sizeof(clean_path), "%s/clean.rs", tmp_dir);
+    FILE *fp = cbm_fopen(broken_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("fn broken( { let x = ;;; unterminated\n", fp);
+    ASSERT_EQ(fclose(fp), 0);
+    fp = cbm_fopen(clean_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("fn clean_one() {}\n", fp);
+    ASSERT_EQ(fclose(fp), 0);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char args[700];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp_dir);
+    char *resp = cbm_mcp_handle_tool(srv, "index_repository", args);
+    ASSERT_NOT_NULL(resp);
+    bool first_saw_gap = strstr(resp, "\\\"parse_partial_count\\\":0") == NULL;
+    free(resp);
+
+    /* Re-index after changing ONLY the clean neighbour, so the broken file is
+     * not revisited and produces no fresh parser error. */
+    fp = cbm_fopen(clean_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("fn clean_one() {}\nfn clean_two() {}\n", fp);
+    ASSERT_EQ(fclose(fp), 0);
+
+    resp = cbm_mcp_handle_tool(srv, "index_repository", args);
+    ASSERT_NOT_NULL(resp);
+    bool reindex_kept_gap = strstr(resp, "\\\"parse_partial_count\\\":0") == NULL;
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    remove(broken_path);
+    remove(clean_path);
+    th_rmtree(cache);
+    cbm_rmdir(tmp_dir);
+
+    ASSERT_TRUE(first_saw_gap);    /* control: the fixture really is partial */
+    ASSERT_TRUE(reindex_kept_gap); /* the claim */
+    PASS();
+}
+
+/* list_projects pages DETERMINISTICALLY. Without the sort, paging over readdir
+ * order is meaningless — the order is filesystem-dependent, so page 2 could
+ * repeat or skip entries from page 1, and even the unpaginated list differed
+ * across platforms.
+ *
+ * Details are now OPT-IN: opening every project's database to count nodes and
+ * edges is what made this slow on a large install, and it now happens for at
+ * most `limit` of them. The NAME is always present, because it is the
+ * identifier every other tool takes. */
+TEST(tool_list_projects_pages_deterministically) {
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-lp-page-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        PASS();
+    }
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    /* Created in NON-alphabetical order so a passing sort cannot be readdir
+     * order by luck. */
+    static const char *kNames[] = {"zeta", "alpha", "mike", "bravo"};
+    for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); i++) {
+        char dbpath[512];
+        snprintf(dbpath, sizeof(dbpath), "%s/%s.db", cache, kNames[i]);
+        cbm_store_t *st = cbm_store_open_path(dbpath);
+        if (st) {
+            cbm_store_upsert_project(st, kNames[i], "/tmp/x");
+            cbm_node_t n = {.project = kNames[i],
+                            .label = "Function",
+                            .name = "f",
+                            .qualified_name = "x.f",
+                            .file_path = "a.py",
+                            .start_line = 1,
+                            .end_line = 1};
+            cbm_store_upsert_node(st, &n);
+            cbm_store_close(st);
+        }
+    }
+
+    char *resp = cbm_mcp_handle_tool(srv, "list_projects", "{\"offset\":1,\"limit\":2}");
+    ASSERT_NOT_NULL(resp);
+    const char *bravo = strstr(resp, "bravo");
+    const char *mike = strstr(resp, "mike");
+    bool sliced = bravo && mike && bravo < mike;      /* the middle two, in order */
+    bool excluded_ends = !strstr(resp, "alpha") && !strstr(resp, "zeta");
+    bool no_details_by_default = strstr(resp, "size_bytes") == NULL;
+    free(resp);
+
+    /* Control: details come back when asked for. */
+    resp = cbm_mcp_handle_tool(srv, "list_projects", "{\"include_details\":true}");
+    ASSERT_NOT_NULL(resp);
+    bool details_on_request = strstr(resp, "size_bytes") != NULL;
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_rmtree(cache);
+
+    ASSERT_TRUE(sliced);
+    ASSERT_TRUE(excluded_ends);
+    ASSERT_TRUE(no_details_by_default);
+    ASSERT_TRUE(details_on_request);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
@@ -2896,6 +3047,8 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_totals_respect_test_filter_tests_root_subtree_issue1294);
     RUN_TEST(search_code_full_preserves_utf8_source);
     RUN_TEST(search_graph_semantic_only_skips_structural_scan);
+    RUN_TEST(index_response_reports_persisted_coverage_on_reindex);
+    RUN_TEST(tool_list_projects_pages_deterministically);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
     RUN_TEST(tool_search_graph_basic);

@@ -534,8 +534,13 @@ static const tool_def_t TOOLS[] = {
      "offset parameter — raise limit or narrow with file_pattern / path_filter to see more."
      "\",\"default\":10}},\"required\":[\"pattern\",\"project\"]}"},
 
-    {"list_projects", "List projects", "List all indexed projects",
-     "{\"type\":\"object\",\"properties\":{}}"},
+    {"list_projects", "List projects", "List indexed projects with deterministic pagination",
+     "{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\","
+     "\"minimum\":0,\"default\":0},"
+     "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":50},"
+     "\"include_details\":{\"type\":\"boolean\",\"default\":false,"
+     "\"description\":\"Include root_path, git context, node/edge counts and database "
+     "size. Slower: it opens every listed project's database.\"}}}"},
     {"delete_project", "Delete project", "Delete a project from the index",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
@@ -1692,7 +1697,7 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incom
 static db_project_result_t build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                                     const char *dir_path, const char *name,
                                                     size_t name_len, int64_t size_bytes,
-                                                    uint64_t deadline_ms) {
+                                                    uint64_t deadline_ms, bool include_details) {
     (void)name_len;
 
     char full_path[CBM_SZ_2K];
@@ -1750,21 +1755,46 @@ static db_project_result_t build_project_json_entry(yyjson_mut_doc *doc, yyjson_
     }
 
     yyjson_mut_val *p = yyjson_mut_obj(doc);
+    /* The NAME is always present — it is the identifier every other tool takes,
+     * and the reason list_projects exists. The rest is opt-in. */
     yyjson_mut_obj_add_strcpy(doc, p, "name", project_name);
-    yyjson_mut_obj_add_strcpy(doc, p, "root_path", root_path_buf);
-    add_git_context_json(doc, p, root_path_buf[0] ? root_path_buf : NULL);
-    yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
-    yyjson_mut_obj_add_int(doc, p, "edges", edges);
-    yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
+    if (include_details) {
+        yyjson_mut_obj_add_strcpy(doc, p, "root_path", root_path_buf);
+        add_git_context_json(doc, p, root_path_buf[0] ? root_path_buf : NULL);
+        yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
+        yyjson_mut_obj_add_int(doc, p, "edges", edges);
+        yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
+    }
     yyjson_mut_arr_add_val(arr, p);
     return DB_PROJECT_FOUND;
+}
+
+static int project_db_name_cmp(const void *a, const void *b) {
+    const char *const *sa = (const char *const *)a;
+    const char *const *sb = (const char *const *)b;
+    return strcmp(*sa, *sb);
 }
 
 /* list_projects: scan cache directory for .db files.
  * Each project is a single .db file — no central registry needed. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     (void)srv;
-    (void)args;
+
+    /* Pagination is DETERMINISTIC because the names are sorted below. Without
+     * that, paging over readdir order is meaningless — the order is
+     * filesystem-dependent, so page 2 could repeat or skip entries from page 1,
+     * and even the unpaginated list differed across platforms. */
+    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
+    int limit = cbm_mcp_get_int_arg(args, "limit", 50);
+    bool include_details = cbm_mcp_get_bool_arg(args, "include_details");
+    if (offset < 0) {
+        offset = 0;
+    }
+    if (limit < 1) {
+        limit = 1;
+    } else if (limit > 100) {
+        limit = 100;
+    }
 
     char dir_path[CBM_SZ_1K];
     cache_dir(dir_path, sizeof(dir_path));
@@ -1794,6 +1824,15 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result(msg, true);
     }
 
+    /* Collect names first, sort, THEN page and open only the slice's databases.
+     * Opening every project's db to count nodes/edges is what made this slow on
+     * a large install; now it happens for at most `limit` of them, and only
+     * when details were asked for. */
+    char **db_names = NULL;
+    size_t db_count = 0;
+    size_t db_cap = 0;
+    bool name_collection_failed = false;
+
     cbm_dirent_t *entry;
     while (d && (entry = cbm_readdir(d)) != NULL) {
         if (cbm_now_ms() >= deadline_ms) {
@@ -1810,21 +1849,77 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         if (!cbm_is_regular_file(full_path)) {
             continue;
         }
-        int64_t size_bytes = cbm_file_size(full_path);
-        if (size_bytes < 0) {
+        if (cbm_file_size(full_path) < 0) {
             continue;
         }
-        db_project_result_t entry_result =
-            build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, deadline_ms);
-        if (entry_result == DB_PROJECT_BUSY || entry_result == DB_PROJECT_DEADLINE) {
-            incomplete = true;
+        if (db_count == db_cap) {
+            size_t next_cap = db_cap ? db_cap * 2 : 64;
+            char **grown = (char **)realloc(db_names, next_cap * sizeof(*db_names));
+            if (!grown) {
+                name_collection_failed = true;
+                break;
+            }
+            db_names = grown;
+            db_cap = next_cap;
         }
+        db_names[db_count] = strdup(name);
+        if (!db_names[db_count]) {
+            name_collection_failed = true;
+            break;
+        }
+        db_count++;
     }
     if (d) {
         cbm_closedir(d);
     }
 
+    /* Fail ATOMICALLY rather than silently returning a truncated list that the
+     * caller cannot distinguish from "these are all the projects". */
+    if (name_collection_failed) {
+        for (size_t i = 0; i < db_count; i++) {
+            free(db_names[i]);
+        }
+        free(db_names);
+        yyjson_mut_doc_free(doc);
+        return cbm_mcp_text_result("{\"error\":\"out of memory while collecting indexed "
+                                   "projects\"}",
+                                   true);
+    }
+
+    if (db_count > 1) {
+        qsort(db_names, db_count, sizeof(*db_names), project_db_name_cmp);
+    }
+    size_t start = (size_t)offset < db_count ? (size_t)offset : db_count;
+    size_t end = start + (size_t)limit;
+    if (end > db_count) {
+        end = db_count;
+    }
+    for (size_t i = start; i < end; i++) {
+        const char *name = db_names[i];
+        size_t len = strlen(name);
+        char full_path[CBM_SZ_2K];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
+        int64_t size_bytes = cbm_file_size(full_path);
+        if (size_bytes < 0) {
+            continue;
+        }
+        db_project_result_t entry_result = build_project_json_entry(
+            doc, arr, dir_path, name, len, size_bytes, deadline_ms, include_details);
+        if (entry_result == DB_PROJECT_BUSY || entry_result == DB_PROJECT_DEADLINE) {
+            incomplete = true;
+        }
+    }
+    for (size_t i = 0; i < db_count; i++) {
+        free(db_names[i]);
+    }
+    free(db_names);
+
     yyjson_mut_obj_add_val(doc, root, "projects", arr);
+    yyjson_mut_obj_add_uint(doc, root, "total", db_count);
+    yyjson_mut_obj_add_int(doc, root, "offset", offset);
+    yyjson_mut_obj_add_int(doc, root, "limit", limit);
+    yyjson_mut_obj_add_uint(doc, root, "returned", yyjson_mut_arr_size(arr));
+    yyjson_mut_obj_add_bool(doc, root, "has_more", end < db_count);
     yyjson_mut_obj_add_bool(doc, root, "incomplete", incomplete);
     if (incomplete) {
         yyjson_mut_obj_add_str(doc, root, "incomplete_hint",
@@ -4564,6 +4659,56 @@ static bool write_skip_logfile(const char *project, const cbm_file_error_t *errs
 
 /* Build the success portion of the index_repository response.
  * Returns true when status should be "degraded" (#334 plausibility gate). */
+/* The pipeline persists the complete CURRENT coverage set before this response
+ * is built. Prefer that set over the per-run errors, so an incremental run that
+ * does not revisit a flagged file — or an artifact bootstrap, which revisits
+ * nothing — does not make existing gaps appear to have VANISHED. By-design
+ * exclusions have their own response surface and are not failures. */
+static bool add_persisted_failure_summaries(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                            cbm_store_t *store, const char *project,
+                                            const char *logfile) {
+    cbm_coverage_row_t *rows = NULL;
+    int row_count = 0;
+    if (cbm_store_coverage_get(store, project, &rows, &row_count) != CBM_STORE_OK) {
+        return false;
+    }
+
+    int failure_count = 0;
+    for (int i = 0; i < row_count; i++) {
+        const char *kind = rows[i].kind ? rows[i].kind : "";
+        if (strcmp(kind, "not_indexed_dir") != 0 && strcmp(kind, "not_indexed_file") != 0) {
+            failure_count++;
+        }
+    }
+
+    cbm_file_error_t *failures =
+        failure_count > 0 ? (cbm_file_error_t *)calloc((size_t)failure_count, sizeof(*failures))
+                          : NULL;
+    if (failure_count > 0 && !failures) {
+        cbm_store_free_coverage(rows, row_count);
+        return false;
+    }
+
+    int n = 0;
+    for (int i = 0; i < row_count; i++) {
+        const char *kind = rows[i].kind ? rows[i].kind : "";
+        if (strcmp(kind, "not_indexed_dir") == 0 || strcmp(kind, "not_indexed_file") == 0) {
+            continue;
+        }
+        /* Borrowed from `rows`, which outlives both emitters below. */
+        failures[n].path = (char *)rows[i].rel_path;
+        failures[n].reason = (char *)rows[i].detail;
+        failures[n].phase = (char *)rows[i].kind;
+        n++;
+    }
+
+    add_skipped_summary(doc, root, failures, failure_count, logfile);
+    add_parse_partial_summary(doc, root, failures, failure_count);
+    free(failures);
+    cbm_store_free_coverage(rows, row_count);
+    return true;
+}
+
 static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *doc,
                                          yyjson_mut_val *root, const char *project_name,
                                          const char *repo_path, bool persistence, cbm_pipeline_t *p,
@@ -4571,8 +4716,6 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
                                          const cbm_file_error_t *file_errors, int file_error_count,
                                          const char *logfile) {
     add_excluded_summary(doc, root, excluded_dirs, excluded_count);
-    add_skipped_summary(doc, root, file_errors, file_error_count, logfile);
-    add_parse_partial_summary(doc, root, file_errors, file_error_count);
     add_not_indexed_files_summary(doc, root, p);
 
     int exp_nodes = -1;
@@ -4583,6 +4726,14 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
     const int min_floor = CBM_DUMP_VERIFY_MIN_FLOOR;
 
     cbm_store_t *store = resolve_store(srv, project_name);
+
+    /* Persisted coverage is authoritative; the per-run errors are the fallback
+     * for when it cannot be read at all. */
+    if (!store || !add_persisted_failure_summaries(doc, root, store, project_name, logfile)) {
+        add_skipped_summary(doc, root, file_errors, file_error_count, logfile);
+        add_parse_partial_summary(doc, root, file_errors, file_error_count);
+    }
+
     int nodes = 0;
     int edges = 0;
     bool degraded = false;
