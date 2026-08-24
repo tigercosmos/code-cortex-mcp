@@ -98,6 +98,21 @@ static void try_emit_usage(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
 //
 // The frame stack is sized by tree DEPTH rather than the old node stack's
 // breadth, so it also allocates far less on wide trees.
+/* Is the nearest enclosing call/import node close enough to gate this node?
+ * -1 means "no such ancestor".
+ *
+ * Kept out of line so the two call sites share one suppression. cppcheck reads
+ * the range test as constant because its value flow cannot follow the frame
+ * stack growing inside walk_usages' loop: it only ever sees the root frame
+ * (top == 1, hence depth == 0, hence nearest_depth == 0), and concludes
+ * 0 - 0 <= 10 is a tautology. At every deeper frame the comparison is exactly
+ * the MAX_PARENT_DEPTH bound the old ancestor climb enforced, and dropping it
+ * would change which usages are emitted. */
+static bool usage_ancestor_within_reach(int nearest_depth, int node_depth) {
+    // cppcheck-suppress knownConditionTrueFalse
+    return nearest_depth >= 0 && node_depth - nearest_depth <= MAX_PARENT_DEPTH;
+}
+
 static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     typedef struct {
         TSNode node;
@@ -120,8 +135,8 @@ static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec
         UsageFrame *f = &frames[top - 1];
         const int depth = top - 1;
         if (entering) {
-            bool inside_call = nearest_call >= 0 && depth - nearest_call <= MAX_PARENT_DEPTH;
-            bool inside_import = nearest_import >= 0 && depth - nearest_import <= MAX_PARENT_DEPTH;
+            bool inside_call = usage_ancestor_within_reach(nearest_call, depth);
+            bool inside_import = usage_ancestor_within_reach(nearest_import, depth);
             try_emit_usage(ctx, f->node, spec, inside_call, inside_import);
             f->saved_call = nearest_call;
             f->saved_import = nearest_import;
