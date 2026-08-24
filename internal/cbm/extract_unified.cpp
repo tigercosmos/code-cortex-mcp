@@ -1078,30 +1078,51 @@ static void scan_infra_bindings(CBMExtractCtx *ctx, TSNode node) {
     }
 }
 
-// JS/TS `export_statement` appears in import_node_types so re-exports
-// (`export { X } from './m'`) are treated as an import boundary.  But it also
-// wraps exported *declarations* (`export function f(cfg: Config) {}`), and
-// treating those as an import boundary wrongly suppresses USAGE edges for type
-// references inside the exported declaration's signature.  Return true when the
-// node is an export that contains a declaration child (i.e. NOT a bare re-export),
-// so the caller skips the import-scope push for it.
-static bool is_export_of_declaration(TSNode node) {
-    if (strcmp(ts_node_type(node), "export_statement") != 0) {
-        return false;
-    }
-    uint32_t n = ts_node_child_count(node);
-    for (uint32_t i = 0; i < n; i++) {
-        const char *ck = ts_node_type(ts_node_child(node, i));
-        if (strcmp(ck, "function_declaration") == 0 || strcmp(ck, "class_declaration") == 0 ||
-            strcmp(ck, "lexical_declaration") == 0 ||
-            strcmp(ck, "abstract_class_declaration") == 0 ||
-            strcmp(ck, "interface_declaration") == 0 || strcmp(ck, "enum_declaration") == 0 ||
-            strcmp(ck, "type_alias_declaration") == 0 || strcmp(ck, "variable_declaration") == 0 ||
-            strcmp(ck, "generator_function_declaration") == 0) {
-            return true;
+// A node listed in spec->import_node_types is not automatically an import
+// CONTEXT. Some entries are there so the IMPORT PASS can read them (C#'s
+// namespace_declaration supplies namespace-name mapping), and some are outright
+// grammar-name collisions with unrelated constructs (C#'s using_statement is the
+// RAII block, not the using directive). Pushing SCOPE_IMPORT for those puts a
+// whole file body behind inside_import, which both suppresses ordinary usage
+// extraction there and routes every identifier through the ancestor-walking
+// import-binding check. Decide per language.
+static bool opens_import_scope(const CBMExtractCtx *ctx, TSNode node) {
+    const char *kind = ts_node_type(node);
+    switch (ctx->language) {
+    case CBM_LANG_CSHARP:
+        // cs_import_types lists namespace_declaration and using_statement for
+        // the reasons above, so EVERY namespaced C# file ran its whole body with
+        // inside_import=true. Upstream measured 92% of extract time in the
+        // resulting ancestor walks on wide files (490 s for one 147 KB
+        // dotnet/runtime JIT torture test) and +37% edges once the suppressed
+        // usages came back. Only the using DIRECTIVE opens an import scope.
+        return strcmp(kind, "using_directive") == 0 ||
+               strcmp(kind, "namespace_use_declaration") == 0;
+    case CBM_LANG_JAVASCRIPT:
+    case CBM_LANG_TYPESCRIPT:
+    case CBM_LANG_TSX:
+        if (strcmp(kind, "export_statement") == 0) {
+            // An export is an import context only in its RE-EXPORT forms:
+            // `export ... from 'mod'` (source field) or a bare specifier list
+            // `export { a, b }` with no declaration. An export OF a declaration
+            // must not put the declaration's body behind inside_import — that
+            // suppresses usage edges for the type references in its signature.
+            //
+            // This is positive detection, replacing a kind blacklist that had to
+            // enumerate every declaration form and missed the TS-only ones
+            // (ambient_declaration, function_signature, module_declaration), so
+            // declare-heavy code (.d.ts, `export namespace`) ran whole subtrees
+            // as import context.
+            if (!ts_node_is_null(ts_node_child_by_field_name(node, TS_FIELD("source")))) {
+                return true;
+            }
+            return !ts_node_is_null(cbm_find_child_by_kind(node, "export_clause")) &&
+                   ts_node_is_null(ts_node_child_by_field_name(node, TS_FIELD("declaration")));
         }
+        return true; // import_statement / import / require / extends: unchanged
+    default:
+        return true;
     }
-    return false;
 }
 
 // Push scope markers for function, class, call, and import boundary nodes.
@@ -1177,7 +1198,7 @@ static void push_boundary_scopes(CBMExtractCtx *ctx, TSNode node, const CBMLangS
         push_scope(state, SCOPE_CALL, depth, NULL);
     }
     if (spec->import_node_types && cbm_kind_in_set(node, spec->import_node_types) &&
-        !is_export_of_declaration(node)) {
+        opens_import_scope(ctx, node)) {
         push_scope(state, SCOPE_IMPORT, depth, NULL);
     }
     /* Loop / branch nesting for bottleneck metrics. Loops are gated on named
