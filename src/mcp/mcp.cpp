@@ -2304,9 +2304,24 @@ static void emit_semantic_results(yyjson_mut_doc *doc, yyjson_mut_val *root,
 /* Append the semantic_query vector-search results onto the doc.  Returns
  * true if semantic_query was provided as a non-array (type error — caller
  * should surface to the user). */
-static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *args,
-                               cbm_store_t *store, const char *project, int limit) {
+/* Run the semantic query and HAND BACK its results rather than emitting them, so
+ * the caller can decide whether the structural search should run at all. Sets
+ * *out_present when semantic_query was supplied (even if it matched nothing) —
+ * that is what distinguishes "semantic-only request" from "no semantic query".
+ * Returns true on a TYPE error (semantic_query present but not an array), which
+ * the caller surfaces to the user.
+ *
+ * Ownership: on success *out_results must be released with
+ * cbm_store_free_vector_results. */
+static bool run_semantic_query_core(const char *args, cbm_store_t *store, const char *project,
+                                    int limit, cbm_vector_result_t **out_results, int *out_count,
+                                    bool *out_present) {
     enum { MAX_KW_SEARCH = 32 };
+    *out_results = NULL;
+    *out_count = 0;
+    if (out_present) {
+        *out_present = false;
+    }
     yyjson_doc *args_doc = yyjson_read(args, strlen(args), 0);
     yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
     yyjson_val *sq_val = args_root ? yyjson_obj_get(args_root, "semantic_query") : NULL;
@@ -2314,6 +2329,9 @@ static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const 
     if (sq_val && !yyjson_is_arr(sq_val)) {
         type_error = true;
     } else if (sq_val && yyjson_arr_size(sq_val) > 0) {
+        if (out_present) {
+            *out_present = true;
+        }
         const char *keywords[MAX_KW_SEARCH];
         int ki = extract_semantic_keywords(sq_val, keywords, MAX_KW_SEARCH);
         cbm_vector_result_t *vresults = NULL;
@@ -2322,8 +2340,8 @@ static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const 
         if (cbm_store_vector_search(store, project, keywords, ki, sem_limit, &vresults, &vcount) ==
                 CBM_STORE_OK &&
             vcount > 0) {
-            emit_semantic_results(doc, root, vresults, vcount);
-            cbm_store_free_vector_results(vresults, vcount);
+            *out_results = vresults;
+            *out_count = vcount;
         }
     }
     if (args_doc) {
@@ -2386,6 +2404,36 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result("relationship must be uppercase letters and underscores", true);
     }
 
+    /* A semantic-only request must NOT also return the unfiltered graph. With no
+     * structural filter, cbm_store_search matches everything, so appending
+     * semantic hits to it produced a response byte-identical to "no filters at
+     * all" — measured: 31 of 31 nodes returned for a two-keyword semantic
+     * query. The semantic query then contributed nothing but noise. */
+    bool has_structural_filters = label || name_pattern || qn_pattern || file_pattern ||
+                                  relationship || exclude_entry_points ||
+                                  min_degree != CBM_NOT_FOUND || max_degree != CBM_NOT_FOUND;
+
+    cbm_vector_result_t *vresults = NULL;
+    int vcount = 0;
+    bool sq_present = false;
+    bool sq_type_error =
+        run_semantic_query_core(args, store, project, limit, &vresults, &vcount, &sq_present);
+    if (sq_type_error) {
+        free(project);
+        free(label);
+        free(name_pattern);
+        free(qn_pattern);
+        free(file_pattern);
+        free(relationship);
+        return cbm_mcp_text_result(
+            "semantic_query must be an array of keyword strings, e.g. "
+            "[\"send\",\"pubsub\",\"publish\"] — not a single string. Split your query "
+            "into individual keywords; each is scored independently via per-keyword "
+            "min-cosine.",
+            true);
+    }
+    bool semantic_only = sq_present && !has_structural_filters;
+
     cbm_search_params_t params = {
         .project = project,
         .label = label,
@@ -2402,7 +2450,9 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     };
 
     cbm_search_output_t out = {0};
-    cbm_store_search(store, &params, &out);
+    if (!semantic_only) {
+        cbm_store_search(store, &params, &out);
+    }
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -2431,27 +2481,14 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         }
     }
 
-    bool sq_type_error = run_semantic_query(doc, root, args, store, project, limit);
-
-    if (sq_type_error) {
-        for (int pi = 0; pi < props_doc_count; pi++) {
-            yyjson_doc_free(props_docs[pi]);
-        }
-        free(props_docs);
-        yyjson_mut_doc_free(doc);
-        cbm_store_search_free(&out);
-        free(project);
-        free(label);
-        free(name_pattern);
-        free(qn_pattern);
-        free(file_pattern);
-        free(relationship);
-        return cbm_mcp_text_result(
-            "semantic_query must be an array of keyword strings, e.g. "
-            "[\"send\",\"pubsub\",\"publish\"] — not a single string. Split your query "
-            "into individual keywords; each is scored independently via per-keyword "
-            "min-cosine.",
-            true);
+    /* Semantic hits were fetched before the structural search (so the
+     * semantic-only case could skip it) and are emitted here, in the same place
+     * and order as before. */
+    if (vcount > 0) {
+        emit_semantic_results(doc, root, vresults, vcount);
+        cbm_store_free_vector_results(vresults, vcount);
+        vresults = NULL;
+        vcount = 0;
     }
 
     char *json = yy_doc_to_str(doc);
@@ -5720,16 +5757,6 @@ static char *handle_get_code_snippet(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── search_code v2: graph-augmented code search ─────────────── */
 
-/* Strip non-ASCII bytes to guarantee valid UTF-8 JSON output */
-enum { ASCII_MAX = 127 };
-static void sanitize_ascii(char *s) {
-    for (unsigned char *p = (unsigned char *)s; *p; p++) {
-        if (*p > ASCII_MAX) {
-            *p = '?';
-        }
-    }
-}
-
 /* Intermediate grep match */
 typedef struct {
     char file[CBM_SZ_512];
@@ -5910,8 +5937,15 @@ static void attach_result_source(yyjson_mut_doc *doc, yyjson_mut_val *item, sear
     if (mode == MODE_FULL) {
         char *source = read_file_lines(abs_path, r->start_line, r->end_line);
         if (source) {
-            sanitize_ascii(source);
-            yyjson_mut_obj_add_strcpy(doc, item, "source", source);
+            /* Lossy UTF-8 repair, not ASCII stripping: sanitize_ascii replaced
+             * every byte > 127 with '?', so any non-English identifier, string
+             * or comment came back mangled even though it was perfectly valid
+             * UTF-8 and perfectly valid JSON. */
+            char *safe_source = sanitize_utf8_lossy(source);
+            if (safe_source) {
+                yyjson_mut_obj_add_strcpy(doc, item, "source", safe_source);
+                free(safe_source);
+            }
             free(source);
         }
     } else if (context_lines > 0 && r->match_count > 0) {
@@ -5922,9 +5956,12 @@ static void attach_result_source(yyjson_mut_doc *doc, yyjson_mut_val *item, sear
         }
         char *ctx = read_file_lines(abs_path, ctx_start, ctx_end);
         if (ctx) {
-            sanitize_ascii(ctx);
-            yyjson_mut_obj_add_strcpy(doc, item, "context", ctx);
-            yyjson_mut_obj_add_int(doc, item, "context_start", ctx_start);
+            char *safe_context = sanitize_utf8_lossy(ctx);
+            if (safe_context) {
+                yyjson_mut_obj_add_strcpy(doc, item, "context", safe_context);
+                yyjson_mut_obj_add_int(doc, item, "context_start", ctx_start);
+                free(safe_context);
+            }
             free(ctx);
         }
     }
@@ -6065,7 +6102,11 @@ static char *assemble_search_output(search_result_t *sr, int sr_count, grep_matc
 
     char *json = yy_doc_to_str(doc);
     if (json) {
-        sanitize_ascii(json);
+        char *safe_json = sanitize_utf8_lossy(json);
+        if (safe_json) {
+            free(json);
+            json = safe_json;
+        }
     }
     yyjson_mut_doc_free(doc);
 
@@ -6136,8 +6177,10 @@ static grep_match_t *collect_grep_matches(FILE *fp, const char *root_path, size_
         safe_grow(gm, gm_count, gm_cap, PAIR_LEN);
         snprintf(gm[gm_count].file, sizeof(gm[0].file), "%s", file);
         gm[gm_count].line = (int)strtol(sep1 + SKIP_ONE, NULL, CBM_DECIMAL_BASE);
-        snprintf(gm[gm_count].content, sizeof(gm[0].content), "%s", sep2 + SKIP_ONE);
-        sanitize_ascii(gm[gm_count].content);
+        char *safe_content = sanitize_utf8_lossy(sep2 + SKIP_ONE);
+        snprintf(gm[gm_count].content, sizeof(gm[0].content), "%s",
+                 safe_content ? safe_content : sep2 + SKIP_ONE);
+        free(safe_content);
         gm_count++;
     }
 
@@ -6558,6 +6601,11 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
             cbm_unlink(tmpfile);
             if (scoped) {
                 cbm_unlink(filelist);
+            }
+            /* Every other exit from this function releases the compiled path
+             * filter; the launch-failure path did not. */
+            if (has_path_filter) {
+                cbm_regfree(&path_regex);
             }
             free(root_path);
             free(pattern);

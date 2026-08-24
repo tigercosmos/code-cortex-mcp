@@ -2685,6 +2685,138 @@ TEST(tool_trace_totals_respect_test_filter_tests_root_subtree_issue1294) {
     PASS();
 }
 
+/* search_code full results must preserve valid UTF-8. The old sanitizer replaced
+ * every byte > 127 with '?', so any non-English identifier, string or comment
+ * came back mangled even though it was perfectly valid UTF-8 — and valid JSON.
+ * Measured on a Python fixture before the fix: 39 substituted bytes, zero
+ * readable Chinese; after: 0 and 0.
+ *
+ * Asserts on the BYTES appearing in the response rather than on a fixed JSON
+ * column index, so it does not bind to this tree's row layout. */
+TEST(search_code_full_preserves_utf8_source) {
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_srch_utf8_XXXXXX");
+    ASSERT_TRUE(cbm_mkdtemp(tmp) != NULL);
+
+    char design_dir[768];
+    snprintf(design_dir, sizeof(design_dir), "%s/design", tmp);
+    ASSERT_EQ(cbm_mkdir(design_dir), 0);
+
+    char source_path[900];
+    snprintf(source_path, sizeof(source_path), "%s/design.md", design_dir);
+    FILE *fp = cbm_fopen(source_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    static const char kCyrillic[] = "Русский текст: бухгалтерский учет.";
+    char body[256];
+    snprintf(body, sizeof(body), "# accounting-design\n%s\n", kCyrillic);
+    ASSERT_EQ(fwrite(body, 1, strlen(body), fp), strlen(body));
+    ASSERT_EQ(fclose(fp), 0);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    const char *project = "utf8-search";
+    cbm_mcp_server_set_project(srv, project);
+    cbm_store_upsert_project(st, project, tmp);
+
+    cbm_node_t section = {.project = project,
+                          .label = "Section",
+                          .name = "accounting-design",
+                          .qualified_name = "utf8-search.design.accounting-design",
+                          .file_path = "design/design.md",
+                          .start_line = 1,
+                          .end_line = 2};
+    ASSERT_GT(cbm_store_upsert_node(st, &section), 0);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":97,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_code\",\"arguments\":{"
+             "\"project\":\"utf8-search\",\"pattern\":\"accounting-design\","
+             "\"file_pattern\":\"*.md\",\"mode\":\"full\",\"limit\":5}}}");
+    bool kept_utf8 = resp && strstr(resp, "Русский") != NULL;
+    /* The control: if the search returned nothing at all, kept_utf8 would be
+     * false for the wrong reason. Require the row itself to be present. */
+    bool found_row = resp && strstr(resp, "accounting-design") != NULL;
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    cbm_unlink(source_path);
+    cbm_rmdir(design_dir);
+    cbm_rmdir(tmp);
+
+    ASSERT_TRUE(found_row);
+    ASSERT_TRUE(kept_utf8);
+    PASS();
+}
+
+/* A semantic-only search_graph must NOT also return the unfiltered graph. With
+ * no structural filter, cbm_store_search matches everything, so appending
+ * semantic hits to it produced a response byte-identical to "no filters at all"
+ * — measured on a 31-node fixture: 31 of 31 returned for a two-keyword semantic
+ * query, the semantic query contributing nothing but noise.
+ *
+ * The two controls matter as much as the claim: a STRUCTURAL query must be
+ * unaffected, and a NO-FILTER query must still return everything. Without them
+ * this would pass on a build that had simply broken search_graph. */
+TEST(search_graph_semantic_only_skips_structural_scan) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "semonly";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/semonly");
+
+    for (int i = 0; i < 5; i++) {
+        char name[32];
+        char qn[64];
+        snprintf(name, sizeof(name), "fn_%d", i);
+        snprintf(qn, sizeof(qn), "semonly.a.fn_%d", i);
+        cbm_node_t n = {.project = proj,
+                        .label = "Function",
+                        .name = name,
+                        .qualified_name = qn,
+                        .file_path = "a.py",
+                        .start_line = 1,
+                        .end_line = 2};
+        ASSERT_GT(cbm_store_upsert_node(st, &n), 0);
+    }
+
+    /* Semantic-only: no structural rows. (Vector search may legitimately return
+     * nothing without embeddings; the claim under test is the ABSENCE of the
+     * unfiltered structural dump.) */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"search_graph\",\"arguments\":{\"project\":\"semonly\","
+             "\"semantic_query\":[\"alpha\",\"beta\"]}}}");
+    ASSERT_NOT_NULL(resp);
+    bool semantic_leaked_structural = strstr(resp, "fn_0") != NULL;
+    free(resp);
+
+    /* Control 1: a structural query still returns its rows. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"search_graph\",\"arguments\":{\"project\":\"semonly\","
+             "\"label\":\"Function\"}}}");
+    ASSERT_NOT_NULL(resp);
+    bool structural_works = strstr(resp, "fn_0") != NULL;
+    free(resp);
+
+    /* Control 2: no filters at all still returns everything. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":82,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"search_graph\",\"arguments\":{\"project\":\"semonly\"}}}");
+    ASSERT_NOT_NULL(resp);
+    bool unfiltered_works = strstr(resp, "fn_0") != NULL;
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    ASSERT_FALSE(semantic_leaked_structural);
+    ASSERT_TRUE(structural_works);
+    ASSERT_TRUE(unfiltered_works);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
@@ -2762,6 +2894,8 @@ SUITE(mcp) {
     RUN_TEST(tool_list_projects_empty);
     RUN_TEST(tool_list_projects_includes_a_project_with_a_miss_graph);
     RUN_TEST(tool_trace_totals_respect_test_filter_tests_root_subtree_issue1294);
+    RUN_TEST(search_code_full_preserves_utf8_source);
+    RUN_TEST(search_graph_semantic_only_skips_structural_scan);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
     RUN_TEST(tool_search_graph_basic);
