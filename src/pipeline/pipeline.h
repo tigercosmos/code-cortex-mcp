@@ -201,6 +201,13 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
 /* Resolve a callee name using prioritized strategies.
  * import_map: NULL-terminated array of {local_name, resolved_qn} pairs, or NULL.
  * Returns result with qualified_name="" if unresolved. */
+
+/* #725: true when a suffix_match CALLS edge crosses a language boundary and
+ * should be dropped. unique_name (candidates == 1) is left alone; JS/TS/TSX are
+ * one family. Pure — unit-tested in test_registry.cpp. */
+bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const char *target_file_path,
+                                              const char *strategy);
+
 cbm_resolution_t cbm_registry_resolve(const cbm_registry_t *r, const char *callee_name,
                                       const char *module_qn, const char **import_map_keys,
                                       const char **import_map_vals, int import_map_count);

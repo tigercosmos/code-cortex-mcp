@@ -421,6 +421,41 @@ TEST(resolve_caps_unresolvably_ambiguous_names) {
  * it rather than appending the local alias onto the module. Adversarial pin: the
  * behaviour is already correct here, and this is what keeps it that way while
  * the pkgmap/pass_calls side of the aliased-from-import fix moves around it. */
+/* #725: two same-named symbols in different languages. suffix_match is the
+ * strategy that collapses them onto one winner by import distance, so a Python
+ * Store.commit() call lands on a JS `commit` and get_architecture reports a
+ * hotspot whose in-degree came from another language. unique_name
+ * (candidates == 1) is a different strategy and must survive, as must
+ * same_module / import_map / lsp_* — those have real evidence behind them. */
+TEST(cross_language_suffix_match_drops_py_vs_js) {
+    ASSERT_TRUE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "web/src/pages/Editor.js",
+                                                         "suffix_match"));
+    ASSERT_TRUE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_JAVASCRIPT, "store.py", "suffix_match"));
+    ASSERT_TRUE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_BASH, "cli/main.py", "suffix_match"));
+    /* Same language: keep. */
+    ASSERT_FALSE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "store.py", "suffix_match"));
+    /* Other strategies: keep, whatever the languages. */
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON,
+                                                          "web/src/pages/Editor.js", "unique_name"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON,
+                                                          "web/src/pages/Editor.js", "same_module"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON,
+                                                          "web/src/pages/Editor.js", "import_map"));
+    /* JS/TS/TSX are ONE family. */
+    ASSERT_FALSE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_JAVASCRIPT, "lib/util.ts", "suffix_match"));
+    ASSERT_FALSE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_TYPESCRIPT, "ui/Panel.tsx", "suffix_match"));
+    /* Unknown either side: keep — never guess. */
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, NULL, "suffix_match"));
+    ASSERT_FALSE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_COUNT, "store.py", "suffix_match"));
+    PASS();
+}
+
 TEST(resolve_import_map_aliased_from_import) {
     cbm_registry_t *r = cbm_registry_new();
     cbm_registry_add(r, "execute", "proj.services.satori_bridge.gate.execute", "Function");
@@ -692,6 +727,7 @@ SUITE(registry) {
     /* Suffix match + import map suffix */
     RUN_TEST(resolve_suffix_match);
     RUN_TEST(resolve_caps_unresolvably_ambiguous_names);
+    RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
     RUN_TEST(resolve_import_map_aliased_from_import);
     RUN_TEST(resolve_import_map_suffix);
     /* Import reachability */

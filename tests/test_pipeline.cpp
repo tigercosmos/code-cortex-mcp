@@ -6545,6 +6545,153 @@ TEST(pkgmap_swift_scan_repo_finds_nested_manifest) {
     PASS();
 }
 
+/* #725: two same-named symbols across languages must not share CALLS edges.
+ * Python Store.commit is the real callee of save(); the JS Editor.commit is a
+ * distinct binding and must have NO inbound CALLS from Python. unique_name
+ * (candidates == 1) is a different strategy and is not this claim.
+ *
+ * The positive half matters as much as the negative: asserting only "no JS
+ * edge" would pass on a build that resolved nothing at all. */
+TEST(pipeline_cross_language_same_name_does_not_share_calls_issue725) {
+    const char *files[] = {"store.py", "app.py", "web/src/pages/Editor.js"};
+    const char *contents[] = {"class Store:\n"
+                              "    def commit(self):\n"
+                              "        return True\n",
+
+                              "from store import Store\n"
+                              "\n"
+                              "def save():\n"
+                              "    return Store().commit()\n",
+
+                              "export function commit() {\n"
+                              "  return 1;\n"
+                              "}\n"};
+
+    if (setup_lang_repo(files, contents, 3) != 0) {
+        FAIL("tmpdir");
+    }
+    char db[512];
+    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(s);
+    const char *proj = cbm_pipeline_project_name(p);
+
+    cbm_node_t *commits = NULL;
+    int ncommit = 0;
+    cbm_store_find_nodes_by_name(s, proj, "commit", &commits, &ncommit);
+    ASSERT_GTE(ncommit, 2);
+
+    int64_t js_id = 0;
+    int64_t py_id = 0;
+    for (int i = 0; i < ncommit; i++) {
+        if (commits[i].file_path && strstr(commits[i].file_path, "Editor.js")) {
+            js_id = commits[i].id;
+        }
+        if (commits[i].file_path && strstr(commits[i].file_path, "store.py")) {
+            py_id = commits[i].id;
+        }
+    }
+    ASSERT_TRUE(js_id != 0);
+    ASSERT_TRUE(py_id != 0);
+
+    cbm_node_t *saves = NULL;
+    int nsave = 0;
+    cbm_store_find_nodes_by_name(s, proj, "save", &saves, &nsave);
+    ASSERT_GT(nsave, 0);
+
+    cbm_edge_t *from_save = NULL;
+    int nfrom = 0;
+    cbm_store_find_edges_by_source_type(s, saves[0].id, "CALLS", &from_save, &nfrom);
+    bool save_calls_py = false;
+    bool save_calls_js = false;
+    for (int i = 0; i < nfrom; i++) {
+        if (from_save[i].target_id == py_id) {
+            save_calls_py = true;
+        }
+        if (from_save[i].target_id == js_id) {
+            save_calls_js = true;
+        }
+    }
+
+    cbm_edge_t *into_js = NULL;
+    int njs = 0;
+    cbm_store_find_edges_by_target_type(s, js_id, "CALLS", &into_js, &njs);
+
+    if (from_save) {
+        cbm_store_free_edges(from_save, nfrom);
+    }
+    if (into_js) {
+        cbm_store_free_edges(into_js, njs);
+    }
+    cbm_store_free_nodes(commits, ncommit);
+    cbm_store_free_nodes(saves, nsave);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+
+    ASSERT_TRUE(save_calls_py);
+    ASSERT_FALSE(save_calls_js);
+    ASSERT_EQ(njs, 0);
+    PASS();
+}
+
+/* #725, the DISCRIMINATING case. The fixture above does not exercise the guard
+ * on this tree: with one Python and one JS candidate the Python one wins on
+ * import distance anyway, so the bad edge never forms. It takes TWO same-named
+ * candidates that are BOTH in the other language — then suffix_match picks a JS
+ * winner for a Python call site and emits it.
+ *
+ * Measured on the pre-guard binary: save (app.py) -> renderPanel
+ * (web/a/Ed1.js), strategy suffix_match. With the guard: no CALLS edge at all.
+ * A single candidate would resolve as unique_name instead, which is a different
+ * strategy and deliberately NOT suppressed. */
+TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725) {
+    const char *files[] = {"app.py", "web/a/Ed1.js", "web/b/Ed2.js"};
+    const char *contents[] = {"def save():\n"
+                              "    return renderPanel()\n",
+                              "export function renderPanel() { return 1; }\n",
+                              "export function renderPanel() { return 2; }\n"};
+
+    if (setup_lang_repo(files, contents, 3) != 0) {
+        FAIL("tmpdir");
+    }
+    char db[512];
+    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(s);
+    const char *proj = cbm_pipeline_project_name(p);
+
+    cbm_node_t *saves = NULL;
+    int nsave = 0;
+    cbm_store_find_nodes_by_name(s, proj, "save", &saves, &nsave);
+    ASSERT_GT(nsave, 0);
+
+    cbm_edge_t *from_save = NULL;
+    int nfrom = 0;
+    cbm_store_find_edges_by_source_type(s, saves[0].id, "CALLS", &from_save, &nfrom);
+
+    if (from_save) {
+        cbm_store_free_edges(from_save, nfrom);
+    }
+    cbm_store_free_nodes(saves, nsave);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+
+    ASSERT_EQ(nfrom, 0);
+    PASS();
+}
+
 SUITE(pipeline) {
     /* Index lock */
     RUN_TEST(pipeline_lock_try_acquire);
@@ -6815,4 +6962,6 @@ SUITE(pipeline) {
     RUN_TEST(pkgmap_swift_target_name_dependency_does_not_leak_entry);
     RUN_TEST(pkgmap_swift_ambiguous_target_name_fails_closed);
     RUN_TEST(pkgmap_swift_scan_repo_finds_nested_manifest);
+    RUN_TEST(pipeline_cross_language_same_name_does_not_share_calls_issue725);
+    RUN_TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725);
 }

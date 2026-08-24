@@ -668,6 +668,12 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     if (!target_node || source_node->id == target_node->id) {
         return 0;
     }
+    /* #725: suffix_match is language-agnostic and will attach a Python
+     * Store.commit() call to a JS function named commit (or a Bash main to a
+     * Python main). Drop that weak cross-language edge. */
+    if (cbm_suppress_cross_language_suffix_match(lang, target_node->file_path, res.strategy)) {
+        return 0;
+    }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
                          imp_count, tsjs_drop_plain_call);
     return SKIP_ONE;

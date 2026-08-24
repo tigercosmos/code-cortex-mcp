@@ -30,6 +30,7 @@ enum { REG_MAX_CANDIDATES = 256 };
 #include "foundation/dyn_array.h"
 #include "foundation/platform.h"
 
+#include "discover/discover.h" /* cbm_language_for_filename */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1035,4 +1036,56 @@ int cbm_registry_find_ending_with(const cbm_registry_t *r, const char *suffix, c
 bool cbm_registry_is_import_reachable(const char *candidate_qn, const char **import_vals,
                                       int import_count) {
     return is_import_reachable(candidate_qn, import_vals, import_count);
+}
+
+/* #725: drop a suffix_match CALLS edge when the caller language and the target
+ * file's language disagree.
+ *
+ * suffix_match is language-AGNOSTIC: two same-named symbols in different
+ * languages collapse onto one winner chosen by import distance, so a Python
+ * Store.commit() call attaches to a JS function named commit, and a Bash main
+ * to a Python main. get_architecture then reports hotspots whose in-degree is
+ * inherited from another language entirely.
+ *
+ * unique_name (candidates == 1) is a different strategy and is deliberately
+ * left alone; so are same_module / import_map / lsp_*, which all have real
+ * evidence behind them. JS/TS/TSX are ONE family, so a .ts helper calling a
+ * .tsx function is not dropped. Pure; unit-tested in test_registry.cpp. */
+static bool cbm_js_ts_family(CBMLanguage lang) {
+    return lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+}
+
+static const char *cbm_reg_path_basename(const char *path) {
+    if (!path || !path[0]) {
+        return path;
+    }
+    const char *slash = strrchr(path, '/');
+#ifdef _WIN32
+    const char *bslash = strrchr(path, '\\');
+    if (bslash && (!slash || bslash > slash)) {
+        slash = bslash;
+    }
+#endif
+    return slash ? slash + 1 : path;
+}
+
+bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const char *target_file_path,
+                                              const char *strategy) {
+    if (!strategy || strcmp(strategy, "suffix_match") != 0) {
+        return false;
+    }
+    if (caller_lang == CBM_LANG_COUNT || !target_file_path || !target_file_path[0]) {
+        return false;
+    }
+    CBMLanguage target_lang = cbm_language_for_filename(cbm_reg_path_basename(target_file_path));
+    if (target_lang == CBM_LANG_COUNT) {
+        return false;
+    }
+    if (caller_lang == target_lang) {
+        return false;
+    }
+    if (cbm_js_ts_family(caller_lang) && cbm_js_ts_family(target_lang)) {
+        return false;
+    }
+    return true;
 }
