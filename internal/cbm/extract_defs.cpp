@@ -3219,6 +3219,14 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
         def.is_test = true;
     }
 
+    // A function defined in a file cbm treats as a test file is itself a test,
+    // regardless of its own name: tests/helpers/fixtures.c has none of the
+    // test_/_test naming conventions, but every function in it is test code
+    // (#1294). OR'd, so the Rust attribute check — which additionally catches
+    // #[test] functions embedded in an otherwise regular .rs file — is never
+    // downgraded by this.
+    def.is_test = def.is_test || ctx->result->is_test_file;
+
     // Docstring
     def.docstring = extract_docstring(a, node, ctx->source, ctx->language);
 
@@ -3973,6 +3981,9 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
     def.name = name;
     def.qualified_name = method_qn;
     def.label = "Method";
+    // A method on a class defined in a test file (a JUnit/pytest TestFoo.test_bar)
+    // is itself a test, same as free functions (#1294).
+    def.is_test = def.is_test || ctx->result->is_test_file;
     def.file_path = ctx->rel_path;
     def.parent_class = class_qn;
     def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;

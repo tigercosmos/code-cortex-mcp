@@ -2605,6 +2605,86 @@ TEST(tool_list_projects_includes_a_project_with_a_miss_graph) {
     PASS();
 }
 
+/* The test-side caller lives directly under a PROJECT-ROOT tests/ directory
+ * with no test_/_test naming (tests/repro/helper.c). is_test_file() in mcp.cpp
+ * matched a NESTED ".../tests/..." path but not a project-root-relative one, so
+ * this row leaked into results with the default include_tests=false (#1294,
+ * secondary bug). The include_tests=true half is the control: it proves the row
+ * exists at all, so the default-filtered count cannot pass vacuously. */
+TEST(tool_trace_totals_respect_test_filter_tests_root_subtree_issue1294) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    const char *proj = "totproj2";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/tot2");
+
+    cbm_node_t tgt = {.project = proj,
+                      .label = "Function",
+                      .name = "tgt2",
+                      .qualified_name = "totproj2.a.tgt2",
+                      .file_path = "a.c",
+                      .start_line = 1,
+                      .end_line = 5};
+    int64_t tid = cbm_store_upsert_node(st, &tgt);
+    ASSERT_GT(tid, 0);
+    cbm_node_t prod = {.project = proj,
+                       .label = "Function",
+                       .name = "prod_caller2",
+                       .qualified_name = "totproj2.a.prod_caller2",
+                       .file_path = "a.c",
+                       .start_line = 10,
+                       .end_line = 15};
+    int64_t pid = cbm_store_upsert_node(st, &prod);
+    ASSERT_GT(pid, 0);
+    cbm_node_t tst = {.project = proj,
+                      .label = "Function",
+                      .name = "repro_caller",
+                      .qualified_name = "totproj2.t.repro_caller",
+                      .file_path = "tests/repro/helper.c",
+                      .start_line = 1,
+                      .end_line = 5};
+    int64_t xid = cbm_store_upsert_node(st, &tst);
+    ASSERT_GT(xid, 0);
+    cbm_edge_t e1 = {.project = proj, .source_id = pid, .target_id = tid, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(st, &e1), 0);
+    cbm_edge_t e2 = {.project = proj, .source_id = xid, .target_id = tid, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(st, &e2), 0);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":92,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_call_path\",\"arguments\":{\"project\":\"totproj2\","
+             "\"function_name\":\"tgt2\",\"direction\":\"inbound\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    free(resp);
+    ASSERT_NOT_NULL(inner);
+    /* Assert on the caller NAMES rather than upstream's callers_total field,
+     * which this tree's trace output does not emit. Stronger anyway: it names
+     * exactly which row is present and which is filtered. */
+    bool default_has_prod = strstr(inner, "prod_caller2") != NULL;
+    bool default_has_test = strstr(inner, "repro_caller") != NULL;
+    free(inner);
+    ASSERT_TRUE(default_has_prod);
+    ASSERT_FALSE(default_has_test); /* tests/repro/ row filtered by default */
+
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":93,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_call_path\",\"arguments\":{\"project\":\"totproj2\","
+             "\"function_name\":\"tgt2\",\"direction\":\"inbound\",\"include_tests\":true}}}");
+    ASSERT_NOT_NULL(resp);
+    inner = extract_text_content(resp);
+    free(resp);
+    ASSERT_NOT_NULL(inner);
+    bool incl_has_prod = strstr(inner, "prod_caller2") != NULL;
+    bool incl_has_test = strstr(inner, "repro_caller") != NULL;
+    free(inner);
+    ASSERT_TRUE(incl_has_prod);
+    ASSERT_TRUE(incl_has_test); /* control: the row exists, so the filter above is real */
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
@@ -2681,6 +2761,7 @@ SUITE(mcp) {
     /* Tool handlers */
     RUN_TEST(tool_list_projects_empty);
     RUN_TEST(tool_list_projects_includes_a_project_with_a_miss_graph);
+    RUN_TEST(tool_trace_totals_respect_test_filter_tests_root_subtree_issue1294);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
     RUN_TEST(tool_search_graph_basic);

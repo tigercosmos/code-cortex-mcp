@@ -3191,6 +3191,102 @@ TEST(extract_cpp_preproc_macro_generated_callable_skipped_issue949) {
     PASS();
 }
 
+/* Function.is_test must follow the FILE's test-directory membership, not just a
+ * test_/_test basename convention. A helper under tests/ with none of those
+ * naming conventions (tests/helpers/fixtures.c) was indexed as an ordinary
+ * non-test Function — invisible to store.cpp's `is_test != 1` filters — even
+ * though trace_path's own independent path check already treated the same file
+ * as a test (#1294). */
+TEST(extract_c_test_dir_marks_is_test_issue1294) {
+    const char *src = "void helper(void) {}\n";
+
+    /* Regression: a test_*-named file directly under tests/ stays a test. */
+    CBMFileResult *r1 = extract(src, CBM_LANG_C, "t", "tests/test_pipeline.c");
+    ASSERT_NOT_NULL(r1);
+    ASSERT_FALSE(r1->has_error);
+    ASSERT(has_def(r1, "Function", "helper"));
+    int r1_flag = -1;
+    for (int i = 0; i < r1->defs.count; i++) {
+        if (strcmp(r1->defs.items[i].label, "Function") == 0 && r1->defs.items[i].name &&
+            strcmp(r1->defs.items[i].name, "helper") == 0) {
+            r1_flag = r1->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    cbm_free_result(r1);
+    ASSERT(r1_flag == 1 && "test_*.c directly under tests/ is a test (regression)");
+
+    /* Positive: a file under tests/ matching NO naming convention is now a test. */
+    CBMFileResult *r2 = extract(src, CBM_LANG_C, "t", "tests/helpers/fixtures.c");
+    ASSERT_NOT_NULL(r2);
+    ASSERT_FALSE(r2->has_error);
+    ASSERT(has_def(r2, "Function", "helper"));
+    int r2_flag = -1;
+    for (int i = 0; i < r2->defs.count; i++) {
+        if (strcmp(r2->defs.items[i].label, "Function") == 0 && r2->defs.items[i].name &&
+            strcmp(r2->defs.items[i].name, "helper") == 0) {
+            r2_flag = r2->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    cbm_free_result(r2);
+    ASSERT(r2_flag == 1 && "non-test_-named file under tests/ is now a test");
+
+    /* Negative: detection must NOT widen beyond the tests/ tree. */
+    CBMFileResult *r3 = extract(src, CBM_LANG_C, "t", "src/pipeline/helper.c");
+    ASSERT_NOT_NULL(r3);
+    ASSERT_FALSE(r3->has_error);
+    ASSERT(has_def(r3, "Function", "helper"));
+    int r3_flag = -1;
+    for (int i = 0; i < r3->defs.count; i++) {
+        if (strcmp(r3->defs.items[i].label, "Function") == 0 && r3->defs.items[i].name &&
+            strcmp(r3->defs.items[i].name, "helper") == 0) {
+            r3_flag = r3->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    cbm_free_result(r3);
+    ASSERT(r3_flag == 0 && "file outside tests/ is never a test");
+    PASS();
+}
+
+/* Same convergence for Method definitions, which take a SEPARATE code path
+ * (push_method_def) from free functions (#1294). */
+TEST(extract_python_method_test_dir_marks_is_test_issue1294) {
+    const char *src = "class Foo:\n"
+                      "    def helper(self):\n"
+                      "        pass\n";
+
+    /* Python's LSP layer injects synthetic builtin stub Methods (str.upper,
+     * dict.get, ...) alongside real ones, so matching must key on NAME, not
+     * just label == "Method". */
+    CBMFileResult *r1 = extract(src, CBM_LANG_PYTHON, "t", "tests/helpers/base.py");
+    ASSERT_NOT_NULL(r1);
+    ASSERT_FALSE(r1->has_error);
+    ASSERT(has_def(r1, "Method", "helper"));
+    int r1_flag = -1;
+    for (int i = 0; i < r1->defs.count; i++) {
+        if (strcmp(r1->defs.items[i].label, "Method") == 0 && r1->defs.items[i].name &&
+            strcmp(r1->defs.items[i].name, "helper") == 0) {
+            r1_flag = r1->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    cbm_free_result(r1);
+    ASSERT(r1_flag == 1 && "method on a class under tests/helpers/ is a test");
+
+    CBMFileResult *r2 = extract(src, CBM_LANG_PYTHON, "t", "app/models/base.py");
+    ASSERT_NOT_NULL(r2);
+    ASSERT_FALSE(r2->has_error);
+    ASSERT(has_def(r2, "Method", "helper"));
+    int r2_flag = -1;
+    for (int i = 0; i < r2->defs.count; i++) {
+        if (strcmp(r2->defs.items[i].label, "Method") == 0 && r2->defs.items[i].name &&
+            strcmp(r2->defs.items[i].name, "helper") == 0) {
+            r2_flag = r2->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    cbm_free_result(r2);
+    ASSERT(r2_flag == 0 && "method outside tests/ is not a test");
+    PASS();
+}
+
 /* A file that does not end with a newline leaves the grammar's mandatory line
  * terminator MISSING — a ZERO-WIDTH node at EOF. The parser consumed no source
  * for it, so nothing was dropped, and flagging it made the verdict depend on a
@@ -3567,6 +3663,8 @@ SUITE(extraction) {
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
     RUN_TEST(extract_ts_template_string_url_issue1006);
+    RUN_TEST(extract_c_test_dir_marks_is_test_issue1294);
+    RUN_TEST(extract_python_method_test_dir_marks_is_test_issue1294);
     RUN_TEST(extract_missing_final_newline_not_flagged_issue1610);
     RUN_TEST(extract_final_newline_present_still_clean_issue1610);
     RUN_TEST(extract_missing_final_newline_across_grammars_issue1610);

@@ -3640,14 +3640,23 @@ static yyjson_doc *resolve_trace_edge_types(const char *args, const char *mode,
     return NULL;
 }
 
-/* Check if a file path looks like a test file. */
+/* Check if a file path looks like a test file. The substring checks below only
+ * catch a tests/ directory nested under another path component
+ * (".../tests/foo"); a PROJECT-ROOT-RELATIVE path like "tests/repro/foo.c" has
+ * no leading slash before "tests" and fell through undetected, leaking whole
+ * test subtrees into trace_path results with the default include_tests=false
+ * (#1294). */
 static bool is_test_file(const char *path) {
     if (!path) {
         return false;
     }
     return strstr(path, "/test") != NULL || strstr(path, "test_") != NULL ||
            strstr(path, "_test.") != NULL || strstr(path, "/tests/") != NULL ||
-           strstr(path, "/spec/") != NULL || strstr(path, ".test.") != NULL;
+           strstr(path, "/spec/") != NULL || strstr(path, ".test.") != NULL ||
+           strncmp(path, "tests/", SLEN("tests/")) == 0 ||
+           strncmp(path, "test/", SLEN("test/")) == 0 ||
+           strncmp(path, "spec/", SLEN("spec/")) == 0 ||
+           strncmp(path, "__tests__/", SLEN("__tests__/")) == 0;
 }
 
 /* Convert BFS traversal results into a yyjson_mut array. */
@@ -3767,15 +3776,48 @@ static yyjson_mut_val *bfs_to_json_array(yyjson_mut_doc *doc, cbm_traverse_resul
     return arr;
 }
 
+/* True when every visited node carrying this NAME was removed by the
+ * include_tests filter. Conservative on purpose: if any non-test node shares
+ * the name, the edge is kept.
+ *
+ * FORK-LOCAL. This payload names callers in two places — the callers/callees
+ * arrays (filtered by is_test_file) and the caller_edges/callee_edges arrays
+ * (previously not). Before test-directory detection was fixed, both leaked a
+ * tests/ caller and at least AGREED; filtering only the first would leave the
+ * edge array naming a caller absent from the caller list, which is worse than
+ * either. Edges are keyed by name here, exactly as the node arrays are, so
+ * dropping by name keeps the two consistent. */
+static bool bfs_name_is_filtered_test(const cbm_traverse_result_t *tr, const char *name) {
+    if (!name || !name[0]) {
+        return false;
+    }
+    bool saw = false;
+    for (int i = 0; i < tr->visited_count; i++) {
+        const char *nn = tr->visited[i].node.name;
+        if (!nn || strcmp(nn, name) != 0) {
+            continue;
+        }
+        saw = true;
+        if (!is_test_file(tr->visited[i].node.file_path)) {
+            return false; /* a non-test node owns this name */
+        }
+    }
+    return saw;
+}
+
 /* Serialize the edge list from a BFS traversal, optionally filtered by
  * min_confidence. Surfacing edges (with type/confidence) lets agents reason
  * about resolution quality, not just connectivity. */
 static yyjson_mut_val *bfs_edges_to_json_array(yyjson_mut_doc *doc, const cbm_traverse_result_t *tr,
-                                               double min_confidence) {
+                                               double min_confidence, bool include_tests) {
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
     for (int i = 0; i < tr->edge_count; i++) {
         const cbm_edge_info_t *e = &tr->edges[i];
         if (e->confidence < min_confidence) {
+            continue;
+        }
+        if (!include_tests && (bfs_name_is_filtered_test(tr, e->from_name) ||
+                               bfs_name_is_filtered_test(tr, e->to_name))) {
             continue;
         }
         yyjson_mut_val *item = yyjson_mut_obj(doc);
@@ -4081,8 +4123,9 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         yyjson_mut_obj_add_val(
             doc, root, "callees",
             bfs_to_json_array(doc, &tr_out, risk_labels, include_tests, min_confidence, data_flow));
-        yyjson_mut_obj_add_val(doc, root, "callee_edges",
-                               bfs_edges_to_json_array(doc, &tr_out, min_confidence));
+        yyjson_mut_obj_add_val(
+            doc, root, "callee_edges",
+            bfs_edges_to_json_array(doc, &tr_out, min_confidence, include_tests));
     }
 
     if (do_inbound) {
@@ -4092,7 +4135,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
             doc, root, "callers",
             bfs_to_json_array(doc, &tr_in, risk_labels, include_tests, min_confidence, data_flow));
         yyjson_mut_obj_add_val(doc, root, "caller_edges",
-                               bfs_edges_to_json_array(doc, &tr_in, min_confidence));
+                               bfs_edges_to_json_array(doc, &tr_in, min_confidence, include_tests));
     }
 
     /* Serialize BEFORE freeing traversal results (yyjson borrows strings) */
