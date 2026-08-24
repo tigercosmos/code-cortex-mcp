@@ -6,44 +6,13 @@
 #include "foundation/constants.h"
 #include "extract_node_stack.h"
 
-enum { MAX_PARENT_DEPTH = 10, LAST_IDX = 1 };
+enum { MAX_PARENT_DEPTH = 10 };
 #include <stdint.h> // uint32_t
 #include <string.h>
 #include <ctype.h>
 
 // Forward declaration
 static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec);
-
-// Check if a node is inside a call expression (to avoid double-counting as usage)
-static bool is_inside_call(TSNode node, const CBMLangSpec *spec) {
-    TSNode cur = ts_node_parent(node);
-    int depth = 0;
-    while (!ts_node_is_null(cur) && depth < MAX_PARENT_DEPTH) {
-        if (cbm_kind_in_set(cur, spec->call_node_types)) {
-            return true;
-        }
-        cur = ts_node_parent(cur);
-        depth++;
-    }
-    return false;
-}
-
-// Check if a node is inside an import statement
-static bool is_inside_import(TSNode node, const CBMLangSpec *spec) {
-    if (!spec->import_node_types || !spec->import_node_types[0]) {
-        return false;
-    }
-    TSNode cur = ts_node_parent(node);
-    int depth = 0;
-    while (!ts_node_is_null(cur) && depth < MAX_PARENT_DEPTH) {
-        if (cbm_kind_in_set(cur, spec->import_node_types)) {
-            return true;
-        }
-        cur = ts_node_parent(cur);
-        depth++;
-    }
-    return false;
-}
 
 // Is this an identifier-like node that represents a reference?
 static bool is_reference_node(TSNode node, CBMLanguage lang) {
@@ -87,11 +56,12 @@ static bool is_definition_name(TSNode node) {
 }
 
 // Try to emit a usage for a reference node. Returns early if the node should be skipped.
-static void try_emit_usage(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
+static void try_emit_usage(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
+                           bool inside_call, bool inside_import) {
     if (!is_reference_node(node, ctx->language)) {
         return;
     }
-    if (is_inside_call(node, spec) || is_inside_import(node, spec)) {
+    if (inside_call || inside_import) {
         return;
     }
     if (is_definition_name(node)) {
@@ -106,18 +76,85 @@ static void try_emit_usage(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
     }
 }
 
-// Iterative usage walker — explicit stack
+// Iterative usage walker — explicit stack, pre-order, children in source order.
+//
+// The call/import ancestry that gates usage emission is carried ON the walk as
+// the tree depth of the NEAREST enclosing call / import node, instead of a
+// per-node ancestor re-walk. ts_node_parent RE-DESCENDS from the root scanning
+// siblings, so the ancestor-climbing predicates this replaces cost
+// O(depth x sibling-position) for EVERY reference node and went quadratic on
+// wide nodes — upstream measured 92% of extract time in those walks on
+// dotnet/runtime's JIT torture tests (490 s for one 147 KB file, 6.8 s after).
+// Both gates are now O(1).
+//
+// Semantics are preserved exactly, INCLUDING this tree's MAX_PARENT_DEPTH bound,
+// which upstream does not have (its predicates climbed to the root, so its own
+// port could use plain enter/exit counters). The predicates examined STRICT
+// ancestors at distance 1..MAX_PARENT_DEPTH, so the nearest enclosing
+// call/import counts only while it is within that distance; nearest is
+// sufficient, because if the nearest is out of range every farther one is too. A
+// node is gated BEFORE its own kind updates the trackers, so a call node is not
+// itself "inside a call".
+//
+// The frame stack is sized by tree DEPTH rather than the old node stack's
+// breadth, so it also allocates far less on wide trees.
 static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
-    TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, 4096);
-    ts_nstack_push(&stack, ctx->arena, root);
+    typedef struct {
+        TSNode node;
+        uint32_t next_child;
+        int saved_call;   /* nearest-call depth to restore when this frame exits */
+        int saved_import; /* likewise for imports */
+    } UsageFrame;
+    int cap = 256;
+    UsageFrame *frames = (UsageFrame *)cbm_arena_alloc(ctx->arena, (size_t)cap * sizeof(*frames));
+    if (!frames) {
+        return;
+    }
+    int nearest_call = -1; /* tree depth of the nearest enclosing call node */
+    int nearest_import = -1;
+    int top = 0;
+    frames[top++] = (UsageFrame){root, 0, -1, -1};
+    bool entering = true;
 
-    while (stack.count > 0) {
-        TSNode node = ts_nstack_pop(&stack);
-        try_emit_usage(ctx, node, spec);
-        uint32_t count = ts_node_child_count(node);
-        for (int i = (int)count - LAST_IDX; i >= 0; i--) {
-            ts_nstack_push(&stack, ctx->arena, ts_node_child(node, (uint32_t)i));
+    while (top > 0) {
+        UsageFrame *f = &frames[top - 1];
+        const int depth = top - 1;
+        if (entering) {
+            bool inside_call = nearest_call >= 0 && depth - nearest_call <= MAX_PARENT_DEPTH;
+            bool inside_import = nearest_import >= 0 && depth - nearest_import <= MAX_PARENT_DEPTH;
+            try_emit_usage(ctx, f->node, spec, inside_call, inside_import);
+            f->saved_call = nearest_call;
+            f->saved_import = nearest_import;
+            if (cbm_kind_in_set(f->node, spec->call_node_types)) {
+                nearest_call = depth;
+            }
+            if (cbm_kind_in_set(f->node, spec->import_node_types)) {
+                nearest_import = depth;
+            }
+        }
+        uint32_t count = ts_node_child_count(f->node);
+        if (f->next_child < count) {
+            TSNode child = ts_node_child(f->node, f->next_child);
+            f->next_child++;
+            if (top == cap) {
+                int new_cap = cap * 2;
+                UsageFrame *grown =
+                    (UsageFrame *)cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*grown));
+                if (!grown) {
+                    return;
+                }
+                memcpy(grown, frames, (size_t)cap * sizeof(*frames));
+                frames = grown;
+                cap = new_cap;
+            }
+            /* `f` is deliberately not touched after a growth — it may dangle. */
+            frames[top++] = (UsageFrame){child, 0, -1, -1};
+            entering = true;
+        } else {
+            nearest_call = f->saved_call;
+            nearest_import = f->saved_import;
+            top--;
+            entering = false;
         }
     }
 }
