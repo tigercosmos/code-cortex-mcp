@@ -2836,6 +2836,60 @@ TEST(extract_ts_template_string_url_issue1006) {
     PASS();
 }
 
+/* Issue #1249: a mux route built as `configVar + "/literal"` (Go's idiomatic
+ * configurable-base-path pattern) must index the literal suffix, both for a
+ * route registration and for an outbound URL built the same way. Before this
+ * fix extract_positional_url had no branch for binary_expression at all, so
+ * first_string_arg stayed NULL — a real BFF with 47 such registrations produced
+ * only 9 Route nodes. */
+TEST(extract_go_binary_concat_url_issue1249) {
+    CBMFileResult *r = extract("package main\n"
+                               "import \"net/http\"\n"
+                               "func setup(mux *http.ServeMux, base string) {\n"
+                               "    mux.HandleFunc(base+\"/login\", loginHandler)\n"
+                               "}\n"
+                               "func report(host string, port string) {\n"
+                               "    http.Get(\"http://\" + host + \":\" + port + \"/log\")\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "routes.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMCall *reg = find_call_by_callee(r, "mux.HandleFunc");
+    ASSERT_NOT_NULL(reg);
+    ASSERT_NOT_NULL(reg->first_string_arg);
+    ASSERT_STR_EQ(reg->first_string_arg, "/login");
+
+    const CBMCall *out = find_call_by_callee(r, "http.Get");
+    ASSERT_NOT_NULL(out);
+    ASSERT_NOT_NULL(out->first_string_arg);
+    ASSERT_STR_EQ(out->first_string_arg, "/log");
+
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Same issue: when the right side of the concatenation is not itself a literal
+ * (`base + suffixVar`), there is no literal route to recover. The fix must
+ * leave this unresolved rather than fabricate a path. */
+TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249) {
+    CBMFileResult *r = extract("package main\n"
+                               "func setup(mux *http.ServeMux, base string, suffix string) {\n"
+                               "    mux.HandleFunc(base+suffix, dynHandler)\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "routes.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMCall *reg = find_call_by_callee(r, "mux.HandleFunc");
+    ASSERT_NOT_NULL(reg);
+    ASSERT_NULL(reg->first_string_arg);
+
+    cbm_free_result(r);
+    PASS();
+}
+
+
 /* Issue #213: large TS files were indexed as a File node with zero children. */
 TEST(extract_large_ts_has_functions_issue213) {
     enum { NFUNCS = 4000 };
@@ -3442,6 +3496,8 @@ SUITE(extraction) {
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
     RUN_TEST(extract_ts_template_string_url_issue1006);
+    RUN_TEST(extract_go_binary_concat_url_issue1249);
+    RUN_TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249);
     RUN_TEST(extract_large_ts_has_functions_issue213);
 
     /* Per-function complexity metrics (Tier A) */
