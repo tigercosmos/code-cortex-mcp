@@ -412,7 +412,7 @@ bool cbm_pxc_has_cross_lsp(CBMLanguage lang) {
     case CBM_LANG_TSX:
     case CBM_LANG_PHP:
     case CBM_LANG_CSHARP: /* tier-2 prebuilt registry path (pass_parallel.c) */
-    case CBM_LANG_JAVA:   /* fallback cbm_pxc_run_one path */
+    case CBM_LANG_JAVA:   /* tier-2 prebuilt registry path (pass_parallel.c) */
     case CBM_LANG_KOTLIN: /* fallback cbm_pxc_run_one path */
     case CBM_LANG_RUST:   /* fallback cbm_pxc_run_one path (manifest-aware) */
         return true;
@@ -667,6 +667,14 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
             cbm_run_cs_lsp_cross_with_registry(&result->arena, source, source_len, def_module,
                                                prebuilt, imp_vals, imp_count, result->cached_tree,
                                                &result->resolved_calls);
+            used_prebuilt = true;
+            break;
+        case CBM_LANG_JAVA:
+            /* Own-FILE defs go into a per-file overlay; imports, same-package
+             * siblings and stdlib all resolve through the shared base. */
+            cbm_run_java_lsp_cross_with_registry(
+                &result->arena, result, source, source_len, def_module, prebuilt, imp_keys,
+                imp_vals, imp_count, result->cached_tree, &result->resolved_calls);
             used_prebuilt = true;
             break;
         case CBM_LANG_JAVASCRIPT:

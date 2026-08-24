@@ -34,6 +34,7 @@
 #include "lsp/py_lsp.h"   /* cbm_py_build_cross_registry / cbm_run_py_lsp_cross_with_registry */
 #include "lsp/c_lsp.h"    /* cbm_c_build_cross_registry / cbm_run_c_lsp_cross_with_registry */
 #include "lsp/cs_lsp.h"   /* cbm_cs_build_cross_registry / cbm_run_cs_lsp_cross_with_registry */
+#include "lsp/java_lsp.h" /* cbm_java_build_cross_registry / cbm_run_java_lsp_cross_with_registry */
 #include "lsp/ts_lsp.h"   /* cbm_ts_build_cross_registry / cbm_run_ts_lsp_cross_with_registry */
 #include "lsp/rust_lsp.h" /* cbm_rust_build_cross_registry / cbm_run_rust_lsp_cross_with_registry */
 #include "pipeline/pipeline_internal.h"
@@ -112,6 +113,7 @@ typedef struct {
     CBMTypeRegistry *ts;     /* CBM_LANG_JAVASCRIPT, TYPESCRIPT, TSX */
     CBMTypeRegistry *php;    /* CBM_LANG_PHP */
     CBMTypeRegistry *cs;     /* CBM_LANG_CSHARP */
+    CBMTypeRegistry *java;   /* CBM_LANG_JAVA (JVM def universe, incl. Kotlin defs) */
     /* CBM_LANG_RUST: intentionally absent — the shared rust registry is built
      * LAZILY inside cbm_parallel_resolve (first NULL-filter rust file), not eagerly. */
 } CBMCrossLspRegistries;
@@ -139,6 +141,8 @@ static inline CBMTypeRegistry *cbm_pxc_registry_for_lang(const CBMCrossLspRegist
         return r->php;
     case CBM_LANG_CSHARP:
         return r->cs;
+    case CBM_LANG_JAVA:
+        return r->java;
     default:
         return NULL; /* incl. CBM_LANG_RUST — its shared registry is built lazily */
     }

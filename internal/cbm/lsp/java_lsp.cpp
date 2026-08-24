@@ -3601,18 +3601,11 @@ void cbm_run_java_lsp(CBMArena *arena, CBMFileResult *result, const char *source
 
 /* ── Cross-file LSP ───────────────────────────────────────────────── */
 
-void cbm_run_java_lsp_cross(CBMArena *arena, const char *source, int source_len,
-                            const char *module_qn, CBMLSPDef *defs, int def_count,
-                            const char **import_names, const char **import_qns, int import_count,
-                            TSTree *cached_tree, CBMResolvedCallArray *out) {
-    if (!arena || !source)
-        return;
-
-    CBMTypeRegistry reg;
-    cbm_registry_init(&reg, arena);
-    cbm_java_stdlib_register(&reg, arena);
-
-    /* Register cross-file defs. */
+/* Register a batch of cross-file defs into `reg`. Factored out of
+ * cbm_run_java_lsp_cross so cbm_java_build_cross_registry can call it TWICE —
+ * types, then funcs — around a finalize. */
+static void java_register_lsp_defs(CBMArena *arena, CBMTypeRegistry *reg, CBMLSPDef *defs,
+                                   int def_count) {
     for (int i = 0; i < def_count; i++) {
         CBMLSPDef *d = &defs[i];
         if (!d->qualified_name || !d->short_name || !d->label)
@@ -3648,7 +3641,7 @@ void cbm_run_java_lsp_cross(CBMArena *arena, const char *source, int source_len,
                 emb[idx] = NULL;
                 rt.embedded_types = emb;
             }
-            cbm_registry_add_type(&reg, rt);
+            cbm_registry_add_type(reg, rt);
         } else if (strcmp(d->label, "Method") == 0 || strcmp(d->label, "Function") == 0 ||
                    strcmp(d->label, "Constructor") == 0) {
             CBMRegisteredFunc rf;
@@ -3677,9 +3670,155 @@ void cbm_run_java_lsp_cross(CBMArena *arena, const char *source, int source_len,
                 rtypes[1] = NULL;
             }
             rf.signature = cbm_type_func(arena, NULL, NULL, rtypes);
-            cbm_registry_add_func(&reg, rf);
+            cbm_registry_add_func(reg, rf);
         }
     }
+}
+
+/* ── Tier 2: shared cross-registry + per-file overlay ────────────────────
+ *
+ * Without this, every Java file rebuilt a whole registry from its filtered def
+ * set. That set is reduced by a constant FACTOR, not to a constant SIZE, so it
+ * grows with the corpus (upstream measured 1,292 -> 5,031 defs/file as a tree
+ * went 179k -> 689k defs) and cross-file LSP becomes O(files x corpus_defs) —
+ * 87% of a Java index.
+ *
+ * Build the JVM def universe ONCE, seal it read-only, and share it across
+ * resolve workers. Kotlin defs are included deliberately: a mixed source root
+ * resolves Java->Kotlin calls, and dropping them here would silently lose those
+ * edges. */
+static bool java_def_is_type(const CBMLSPDef *d) {
+    const char *lb = d->label;
+    return lb && (strcmp(lb, "Class") == 0 || strcmp(lb, "Interface") == 0 ||
+                  strcmp(lb, "Enum") == 0 || strcmp(lb, "Type") == 0);
+}
+
+static bool java_def_is_jvm(const CBMLSPDef *d) {
+    return d->lang == CBM_LANG_JAVA || d->lang == CBM_LANG_KOTLIN;
+}
+
+CBMTypeRegistry *cbm_java_build_cross_registry(CBMArena *arena, CBMLSPDef *defs, int def_count) {
+    if (!arena) return NULL;
+    CBMTypeRegistry *reg = (CBMTypeRegistry *)cbm_arena_alloc(arena, sizeof(*reg));
+    if (!reg) return NULL;
+    cbm_registry_init(reg, arena);
+    cbm_java_stdlib_register(reg, arena);
+
+    /* Two-phase registration.
+     *
+     * Func registration parses signatures, and parse_param_text qualifies bare
+     * type names through cbm_registry_lookup_type. Before finalize that lookup
+     * is a LINEAR scan over every type registered so far, so ONE mixed pass is
+     * O(defs x types) — upstream measured 0.44 ms/def at 689k defs, a ~300 s
+     * sequential build that erased the win of sharing the registry at all.
+     *
+     * Register all TYPES first (their registration does no lookups), finalize
+     * once so the type-QN buckets exist, then register FUNCS with O(1) type
+     * lookups, and finalize again to index the funcs. Two-phase measured
+     * 306 s -> 2.8 s upstream. Bonus over the one-pass order: a signature can
+     * now resolve a type appearing LATER in defs[], the same source-order
+     * independence the per-file path already guarantees. */
+    if (def_count > 0) {
+        CBMLSPDef *jvm = (CBMLSPDef *)cbm_arena_alloc(arena, (size_t)def_count * sizeof(*jvm));
+        if (!jvm) return NULL;
+        /* Stable two-pass partition: types in defs[] order, then funcs in
+         * defs[] order. Func registration order is load-bearing — overload ties
+         * resolve to the FIRST registered QN match — so no swap-based
+         * partition. */
+        int total = 0;
+        for (int i = 0; i < def_count; i++) {
+            if (java_def_is_jvm(&defs[i]) && java_def_is_type(&defs[i])) jvm[total++] = defs[i];
+        }
+        int type_count = total;
+        for (int i = 0; i < def_count; i++) {
+            if (java_def_is_jvm(&defs[i]) && !java_def_is_type(&defs[i])) jvm[total++] = defs[i];
+        }
+        java_register_lsp_defs(arena, reg, jvm, type_count);
+        cbm_registry_finalize(reg);
+        java_register_lsp_defs(arena, reg, jvm + type_count, total - type_count);
+    }
+    cbm_registry_finalize(reg);
+    reg->read_only = true; /* seal: shared Tier-2 registry is read-only during resolve */
+    return reg;
+}
+
+/* Per-file resolve against the shared base. The overlay holds exactly THIS
+ * FILE's own definitions, because the AST-driven refinements below write
+ * refined signatures whose types live in the per-file arena — they must land on
+ * a private copy, and the shared base is sealed read-only. Everything else,
+ * same-package siblings included, resolves through overlay.fallback into the
+ * shared registry.
+ *
+ * Scope matters for complexity, not just safety: a MODULE- or NAMESPACE-scoped
+ * overlay pays package-size per file, which is quadratic on repos that
+ * concentrate files in large packages — exactly the growth pattern this change
+ * exists to remove. Own-file scope is O(file). */
+void cbm_run_java_lsp_cross_with_registry(CBMArena *arena, CBMFileResult *result,
+                                          const char *source, int source_len, const char *module_qn,
+                                          CBMTypeRegistry *reg, const char **import_names,
+                                          const char **import_qns, int import_count,
+                                          TSTree *cached_tree, CBMResolvedCallArray *out) {
+    if (!arena || !result || !source || !reg || !out) return;
+
+    CBMTypeRegistry overlay;
+    cbm_registry_init(&overlay, arena);
+    overlay.fallback = reg;
+
+    JavaLSPContext ctx;
+    java_lsp_init(&ctx, arena, source, source_len, &overlay, NULL, module_qn, out);
+
+    register_local_func_or_type_from_file(&ctx, &overlay, result);
+
+    /* Index the OVERLAY only — the base is already finalized. Scratch arena so
+     * per-file bucket allocations do not accumulate in the pipeline-lifetime
+     * arena across a large repo. */
+    CBMArena idx_arena;
+    cbm_arena_init(&idx_arena);
+    cbm_registry_finalize_into(&overlay, &idx_arena);
+
+    TSTree *tree = cached_tree;
+    bool owns_tree = false;
+    if (!tree) {
+        TSParser *parser = ts_parser_new();
+        if (!parser) {
+            cbm_arena_destroy(&idx_arena);
+            return;
+        }
+        ts_parser_set_language(parser, tree_sitter_java());
+        tree = ts_parser_parse_string(parser, NULL, source, (uint32_t)source_len);
+        ts_parser_delete(parser);
+        owns_tree = true;
+    }
+    if (!tree) {
+        cbm_arena_destroy(&idx_arena);
+        return;
+    }
+    TSNode root = ts_tree_root_node(tree);
+
+    for (int i = 0; i < import_count; i++) {
+        if (!import_names[i] || !import_qns[i]) continue;
+        java_lsp_add_import(&ctx, import_names[i], import_qns[i], CBM_JAVA_IMPORT_TYPE);
+    }
+
+    java_lsp_process_file(&ctx, root);
+    cbm_arena_destroy(&idx_arena);
+
+    if (owns_tree) ts_tree_delete(tree);
+}
+
+void cbm_run_java_lsp_cross(CBMArena *arena, const char *source, int source_len,
+                            const char *module_qn, CBMLSPDef *defs, int def_count,
+                            const char **import_names, const char **import_qns, int import_count,
+                            TSTree *cached_tree, CBMResolvedCallArray *out) {
+    if (!arena || !source)
+        return;
+
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, arena);
+    cbm_java_stdlib_register(&reg, arena);
+
+    /* Register cross-file defs. */
+    java_register_lsp_defs(arena, &reg, defs, def_count);
 
     /* Build the hash indexes: without this every lookup_type/func/method in
      * the walk below is a LINEAR scan over the whole cross registry —

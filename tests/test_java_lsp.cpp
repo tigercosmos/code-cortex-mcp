@@ -1772,6 +1772,50 @@ TEST(jlsp_real_corpus_parity_90_percent) {
 
 /* ── Suite registration ──────────────────────────────────────────── */
 
+/* Tier-2 shared cross registry: build once, seal, share.
+ *
+ * A corpus with NO Java files is a valid corpus, and cbm_arena_alloc(arena, 0)
+ * returns NULL — which must NOT be read as OOM. The empty registry is still
+ * built, finalized and sealed, because a NULL return makes the whole language
+ * silently fall back to the per-file registry build this exists to remove. */
+TEST(jlsp_cross_registry_zero_defs_is_not_oom) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMTypeRegistry *reg = cbm_java_build_cross_registry(&arena, NULL, 0);
+    ASSERT_NOT_NULL(reg);
+    ASSERT_TRUE(reg->read_only); /* sealed for shared read-only resolve */
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
+/* Two-phase registration (types -> finalize -> funcs) makes the shared build
+ * SOURCE-ORDER INDEPENDENT: a method signature can name a type that appears
+ * later in defs[]. A single mixed pass could only qualify types already seen. */
+TEST(jlsp_cross_registry_resolves_type_declared_after_use) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMLSPDef defs[2];
+    memset(defs, 0, sizeof(defs));
+    /* Func FIRST, its return type declared SECOND. */
+    defs[0].lang = CBM_LANG_JAVA;
+    defs[0].label = "Method";
+    defs[0].qualified_name = "com.acme.Factory.make";
+    defs[0].short_name = "make";
+    defs[0].return_types = "Widget";
+    defs[0].def_module_qn = "com.acme";
+    defs[1].lang = CBM_LANG_JAVA;
+    defs[1].label = "Class";
+    defs[1].qualified_name = "com.acme.Widget";
+    defs[1].short_name = "Widget";
+
+    CBMTypeRegistry *reg = cbm_java_build_cross_registry(&arena, defs, 2);
+    ASSERT_NOT_NULL(reg);
+    ASSERT_NOT_NULL(cbm_registry_lookup_type(reg, "com.acme.Widget"));
+    ASSERT_NOT_NULL(cbm_registry_lookup_func(reg, "com.acme.Factory.make"));
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 void suite_java_lsp(void) {
     /* Strings / java.lang */
     RUN_TEST(jlsp_string_length);
@@ -1923,5 +1967,9 @@ void suite_java_lsp(void) {
     RUN_TEST(jlsp_user_field_chain);
 
     /* Real-corpus 90% parity benchmark (multi-class realistic Java). */
+    /* Tier-2 shared cross registry. */
+    RUN_TEST(jlsp_cross_registry_zero_defs_is_not_oom);
+    RUN_TEST(jlsp_cross_registry_resolves_type_declared_after_use);
+
     RUN_TEST(jlsp_real_corpus_parity_90_percent);
 }

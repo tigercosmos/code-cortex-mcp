@@ -978,7 +978,8 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * Built ONCE here; shared READ-ONLY across all files of that language
      * during resolve. Per-file work is then: parse + AST walk + O(1) lookups
      * — no registry build, no Phase 1b mutations. Languages added so far:
-     * Go, Python. Others (C/C++, TS/JS, PHP, C#) fall back to per-file. */
+     * Go, Python, C/C++, C#, TS/JS, Java. Others (Kotlin, PHP) fall back to
+     * per-file. */
     CBMArena cross_lsp_arena;
     cbm_arena_init(&cross_lsp_arena);
     CBMCrossLspRegistries cross_registries = {0};
@@ -989,6 +990,8 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         cross_registries.c = cbm_c_build_cross_registry(&cross_lsp_arena, all_defs, def_count);
         cross_registries.cs = cbm_cs_build_cross_registry(&cross_lsp_arena, all_defs, def_count);
         cross_registries.ts = cbm_ts_build_cross_registry(&cross_lsp_arena, all_defs, def_count);
+        cross_registries.java =
+            cbm_java_build_cross_registry(&cross_lsp_arena, all_defs, def_count);
         /* Rust: NOT built here. The shared all_defs registry is built LAZILY on the
          * first NULL-filter rust file (the amplifier files) inside cbm_parallel_resolve
          * — repos whose rust files all filter to subsets never pay the build/RSS. */
