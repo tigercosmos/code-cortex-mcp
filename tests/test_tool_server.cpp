@@ -251,8 +251,6 @@ TEST(tool_server_rejects_unsafe_tool_names) {
     PASS();
 }
 
-#endif /* CBM_ENABLE_TEST_SEAMS && !_WIN32 */
-
 /* A worker wedged BEFORE it ever reads: it never drains stdin. The parent's
  * request then fills the pipe buffer (64KB on most systems) and the rest of
  * the write cannot complete until the worker reads, which it never will.
@@ -338,6 +336,8 @@ TEST(tool_server_timeout_covers_the_whole_call_once) {
     ts_fake_close(&f);
     PASS();
 }
+
+#endif /* CBM_ENABLE_TEST_SEAMS && !_WIN32 */
 
 void suite_tool_server(void) {
 #if defined(CBM_ENABLE_TEST_SEAMS) && !defined(_WIN32)

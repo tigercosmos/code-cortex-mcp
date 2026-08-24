@@ -396,22 +396,38 @@ TEST(subprocess_total_timeout_ignores_continuous_progress) {
  * such a child the client saw each call quantized to ~39/145/250/461ms steps.
  * poll_cap_ms lets short-lived children be reaped within milliseconds of their
  * exit. The child here sleeps 150ms; the old cadence cannot return before
- * ~227ms, so an elapsed time under that bound proves the cap is honoured. */
+ * ~227ms, so an elapsed time under that bound proves the cap is honoured.
+ *
+ * Reported as the MINIMUM of several runs. Scheduling noise on a loaded runner
+ * only ever inflates the measurement, so a single sample sitting 65ms from the
+ * threshold is a coin flip in CI (it flaked on macOS). The minimum converges on
+ * the real cost, and stays just as discriminating: under the old cadence EVERY
+ * sample would be >= ~227ms, so the minimum would be too. */
 TEST(subprocess_poll_cap_reaps_short_lived_child_promptly) {
+    enum { POLL_CAP_SAMPLES = 5, CHILD_SLEEP_MS = 150, OLD_CADENCE_FLOOR_MS = 215 };
     const char *argv[] = {"/bin/sh", "-c", "sleep 0.15", NULL};
     cbm_proc_opts_t opts = {0};
     opts.bin = argv[0];
     opts.argv = argv;
     opts.poll_cap_ms = 2;
     opts.total_timeout_ms = 5000;
-    cbm_proc_result_t result;
-    uint64_t t0 = cbm_now_ms();
-    int rc = cbm_subprocess_run(&opts, &result);
-    uint64_t elapsed = cbm_now_ms() - t0;
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(result.outcome, CBM_PROC_CLEAN);
-    ASSERT_TRUE(elapsed >= 150);
-    ASSERT_TRUE(elapsed < 215);
+
+    uint64_t best = UINT64_MAX;
+    for (int i = 0; i < POLL_CAP_SAMPLES; i++) {
+        cbm_proc_result_t result;
+        uint64_t t0 = cbm_now_ms();
+        int rc = cbm_subprocess_run(&opts, &result);
+        uint64_t elapsed = cbm_now_ms() - t0;
+        ASSERT_EQ(rc, 0);
+        ASSERT_EQ(result.outcome, CBM_PROC_CLEAN);
+        /* Never faster than the child itself — a sample below this would mean
+         * the child was not actually waited for. */
+        ASSERT_TRUE(elapsed >= CHILD_SLEEP_MS);
+        if (elapsed < best) {
+            best = elapsed;
+        }
+    }
+    ASSERT_TRUE(best < OLD_CADENCE_FLOOR_MS);
     PASS();
 }
 
