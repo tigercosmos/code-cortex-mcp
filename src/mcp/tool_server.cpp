@@ -127,6 +127,9 @@ int cbm_tool_server_serve(FILE *in, FILE *out) {
     int exit_code = 0;
     cbm_log_info("tool.server.start", "max_requests", max_requests > 0 ? "bounded" : "unbounded");
     for (;;) {
+        /* cppcheck reads only the _WIN32 arm, where the wait is a stub that
+         * cannot fail; the POSIX arm returns false on a broken poll. */
+        // cppcheck-suppress knownConditionTrueFalse
         if (!ts_wait_for_request(in, srv)) {
             break;
         }
