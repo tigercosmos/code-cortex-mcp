@@ -65,6 +65,8 @@ enum {
 #include "foundation/log.h"
 #include "foundation/limits.h"
 #include "mcp/index_supervisor.h"
+#include "mcp/store_meta.h"
+#include "mcp/tool_server.h"
 #include "foundation/str_util.h"
 #include "foundation/dump_verify.h"
 #include "foundation/compat_regex.h"
@@ -990,10 +992,16 @@ struct cbm_mcp_server {
     cbm_integrity_verdict_t store_resolution_state;
     /* Memo for the O(db size) integrity verdict, keyed on a file generation. */
     char verdict_path[CBM_SZ_1K];
-    int64_t verdict_size;
-    int64_t verdict_mtime;
+    cbm_file_gen_t verdict_gen;
     cbm_integrity_verdict_t verdict_result;
     bool verdict_valid;
+    /* Generation of the file the cached store was opened from; see
+     * cbm_mcp_server_revalidate_store. */
+    cbm_file_gen_t store_gen;
+    bool store_gen_valid;
+    /* When set, resolution stops at the direct open + the on-disk memo and
+     * never walks the cache dir. See cbm_mcp_server_set_scan_fallback. */
+    bool no_scan_fallback;
     char update_notice[CBM_SZ_256]; /* one-shot update notice, cleared after first injection */
     bool update_checked;            /* true after background check has been launched */
     cbm_thread_t update_tid;        /* background update check thread */
@@ -1101,8 +1109,46 @@ void cbm_mcp_server_evict_idle(cbm_mcp_server_t *srv, int timeout_s) {
     srv->store_last_used = 0;
 }
 
+static void note_store_generation(cbm_mcp_server_t *srv, const char *path) {
+    srv->store_gen_valid = false;
+    if (!path || !path[0]) {
+        return;
+    }
+    srv->store_gen_valid = cbm_file_generation(path, &srv->store_gen);
+}
+
+void cbm_mcp_server_revalidate_store(cbm_mcp_server_t *srv) {
+    if (!srv || !srv->store || !srv->owns_store || !srv->store_gen_valid) {
+        return;
+    }
+    const char *path = cbm_store_db_path(srv->store);
+    if (!path || !path[0]) {
+        return;
+    }
+    cbm_file_gen_t now;
+    bool exists = cbm_file_generation(path, &now);
+    if (exists && cbm_file_gen_equal(&now, &srv->store_gen)) {
+        return;
+    }
+    cbm_log_info("store.revalidate.reopen", "project",
+                 srv->current_project ? srv->current_project : "", "reason",
+                 exists ? "generation_changed" : "file_gone");
+    cbm_store_close(srv->store);
+    srv->store = NULL;
+    free(srv->current_project);
+    srv->current_project = NULL;
+    srv->store_last_used = 0;
+    srv->store_gen_valid = false;
+}
+
 bool cbm_mcp_server_has_cached_store(cbm_mcp_server_t *srv) {
     return (srv && srv->store != NULL) != 0;
+}
+
+void cbm_mcp_server_set_scan_fallback(cbm_mcp_server_t *srv, bool enabled) {
+    if (srv) {
+        srv->no_scan_fallback = !enabled;
+    }
 }
 
 cbm_pipeline_t *cbm_mcp_server_active_pipeline(cbm_mcp_server_t *srv) {
@@ -1157,7 +1203,8 @@ static db_project_result_t db_internal_project_name(const char *full_path, char 
  * equals `project`, returning an open store handle (caller owns it) or NULL.
  * Used only when <project>.db is absent or its internal name differs from the
  * passed name (drifted filename). Defined after is_project_db_file below. */
-static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incomplete);
+static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incomplete,
+                                                bool memo_only);
 
 /* Integrity verdict for a store, memoized on the file's (path, size, mtime)
  * generation.
@@ -1177,25 +1224,78 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incom
  * the process. */
 static cbm_integrity_verdict_t resolve_store_verdict(cbm_mcp_server_t *srv, cbm_store_t *store,
                                                      const char *path) {
-    int64_t size = cbm_file_size(path);
-    int64_t mtime = cbm_file_mtime(path);
-    bool signable = size >= 0 && mtime >= 0 && strlen(path) < sizeof(srv->verdict_path);
-    if (signable && srv->verdict_valid && srv->verdict_size == size &&
-        srv->verdict_mtime == mtime && strcmp(srv->verdict_path, path) == 0) {
+    cbm_file_gen_t gen;
+    (void)cbm_file_generation(path, &gen);
+    bool signable = gen.size >= 0 && strlen(path) < sizeof(srv->verdict_path);
+    if (signable && srv->verdict_valid && cbm_file_gen_equal(&srv->verdict_gen, &gen) &&
+        strcmp(srv->verdict_path, path) == 0) {
         return srv->verdict_result;
     }
 
-    cbm_integrity_verdict_t verdict = cbm_store_check_integrity_verdict(store);
+    /* Second level: the on-disk memo (store_meta.h). The in-memory memo above
+     * dies with the process, and every tool worker and hook invocation IS a
+     * fresh process, so without this every one of them re-walked the btree.
+     * Only a recorded OK is trusted: a recorded CORRUPT means the file was
+     * quarantined (renamed) at the time, so whatever sits at `path` now is a
+     * different generation and gets checked for real. */
+    cbm_store_meta_db_t *meta = signable ? cbm_store_meta_open() : NULL;
+    cbm_store_meta_row_t row;
+    bool from_disk = false;
+    cbm_integrity_verdict_t verdict = CBM_INTEGRITY_OK;
+    if (meta && cbm_store_meta_get(meta, path, &gen, &row) &&
+        row.verdict == (int)CBM_INTEGRITY_OK) {
+        from_disk = true;
+    } else {
+        verdict = cbm_store_check_integrity_verdict(store);
+    }
     if (signable && verdict != CBM_INTEGRITY_TRANSIENT) {
         snprintf(srv->verdict_path, sizeof(srv->verdict_path), "%s", path);
-        srv->verdict_size = size;
-        srv->verdict_mtime = mtime;
+        srv->verdict_gen = gen;
         srv->verdict_result = verdict;
         srv->verdict_valid = true;
     } else {
         srv->verdict_valid = false;
     }
+    if (meta && !from_disk && verdict != CBM_INTEGRITY_TRANSIENT) {
+        /* Keep whatever else the row already knows (project name, counts). */
+        if (!cbm_store_meta_get(meta, path, &gen, &row)) {
+            cbm_store_meta_row_init(&row, path, &gen);
+        }
+        row.verdict = (int)verdict;
+        (void)cbm_store_meta_put(meta, &row);
+    }
+    cbm_store_meta_close(meta);
     return verdict;
+}
+
+/* Record a store's internal project name and root path in the on-disk memo so
+ * the fallback scan and list_projects can answer "which file is project X" and
+ * "what is in file Y" without opening Y. Skips the write when the row already
+ * says the same thing. Best-effort; never affects the caller's result. */
+static void store_meta_note_project(const char *path, const char *project, const char *root_path) {
+    if (!path || !path[0] || !project || !project[0]) {
+        return;
+    }
+    cbm_file_gen_t gen;
+    if (!cbm_file_generation(path, &gen)) {
+        return;
+    }
+    cbm_store_meta_db_t *meta = cbm_store_meta_open();
+    if (!meta) {
+        return;
+    }
+    cbm_store_meta_row_t row;
+    bool hit = cbm_store_meta_get(meta, path, &gen, &row);
+    const char *root = root_path ? root_path : "";
+    if (!hit || strcmp(row.project, project) != 0 || strcmp(row.root_path, root) != 0) {
+        if (!hit) {
+            cbm_store_meta_row_init(&row, path, &gen);
+        }
+        snprintf(row.project, sizeof(row.project), "%s", project);
+        snprintf(row.root_path, sizeof(row.root_path), "%s", root);
+        (void)cbm_store_meta_put(meta, &row);
+    }
+    cbm_store_meta_close(meta);
 }
 
 /* Open the right project's .db file for query tools.
@@ -1279,6 +1379,11 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
             snprintf(shm_path, sizeof(shm_path), "%s-shm", path);
             cbm_unlink(wal_path);
             cbm_unlink(shm_path);
+            {
+                cbm_store_meta_db_t *meta = cbm_store_meta_open();
+                cbm_store_meta_forget(meta, path);
+                cbm_store_meta_close(meta);
+            }
             srv->store_resolution_state = CBM_INTEGRITY_CORRUPT;
             return NULL;
         }
@@ -1289,10 +1394,12 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
          * store without closing it leaks the SQLite connection. */
         cbm_project_t proj_verify = {0};
         if (cbm_store_get_project(srv->store, project, &proj_verify) == CBM_STORE_OK) {
+            store_meta_note_project(path, project, proj_verify.root_path);
             cbm_project_free_fields(&proj_verify);
             srv->owns_store = true;
             free(srv->current_project);
             srv->current_project = heap_strdup(project);
+            note_store_generation(srv, path);
             return srv->store; /* fast path: filename == internal name */
         }
         /* #704: <project>.db exists but its INTERNAL project name differs from
@@ -1308,7 +1415,8 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
      * cache dir for the db whose sole internal project name equals `project` and
      * adopt it. Runs ONLY on the fallback — the common fast path is unchanged.
      * No match → NULL (a genuine typo stays not-found). */
-    cbm_store_t *scanned = resolve_store_fallback_scan(project, &srv->store_resolution_incomplete);
+    cbm_store_t *scanned = resolve_store_fallback_scan(project, &srv->store_resolution_incomplete,
+                                                       srv->no_scan_fallback);
     if (scanned) {
         /* The scan only proves the `projects` row matches. Without this the
          * #1037 hole simply moves: a drifted-filename database with a torn
@@ -1322,7 +1430,16 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
          * and renaming the wrong file is worse than refusing to answer. The
          * user's route out is delete_project or a re-index, which the
          * "not found or not indexed" hint already names. */
-        cbm_integrity_verdict_t scanned_verdict = cbm_store_check_integrity_verdict(scanned);
+        /* Through the memoized path, not a raw check: this is the SAME
+         * expensive quick_check the direct-open branch above learned to skip.
+         * Left raw, every fresh tool worker and every hook invocation re-walked
+         * the btree for a drifted-name database — 45ms on a 54MB store, ~400ms
+         * on a 100MB one, which on its own blows the hook's 300ms alarm and
+         * silently drops the augmentation it was about to emit. */
+        const char *scanned_path = cbm_store_db_path(scanned);
+        cbm_integrity_verdict_t scanned_verdict =
+            scanned_path && scanned_path[0] ? resolve_store_verdict(srv, scanned, scanned_path)
+                                            : cbm_store_check_integrity_verdict(scanned);
         if (scanned_verdict != CBM_INTEGRITY_OK) {
             cbm_log_error("store.scan_rejected", "project", project, "verdict",
                           scanned_verdict == CBM_INTEGRITY_CORRUPT ? "corrupt" : "inconclusive",
@@ -1339,9 +1456,69 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
         srv->owns_store = true;
         free(srv->current_project);
         srv->current_project = heap_strdup(project);
+        note_store_generation(srv, cbm_store_db_path(scanned));
     }
 
     return srv->store;
+}
+
+/* True for the coverage kinds hook-augment reports as "not indexed at all".
+ * not_indexed_dir / not_indexed_file describe paths outside the index scope
+ * rather than files the indexer tried and failed on, and have never been
+ * surfaced on Read; everything else in this bucket is a real per-file skip
+ * (read / extract / oversized). */
+static bool coverage_kind_is_skip(const char *kind) {
+    return strcmp(kind, "parse_partial") != 0 && strcmp(kind, "not_indexed_dir") != 0 &&
+           strcmp(kind, "not_indexed_file") != 0;
+}
+
+char *cbm_mcp_coverage_note(cbm_mcp_server_t *srv, const char *project, const char *rel_path,
+                            bool *resolved) {
+    if (resolved) {
+        *resolved = false;
+    }
+    if (!srv || !project || !rel_path || !rel_path[0]) {
+        return NULL;
+    }
+    cbm_store_t *store = resolve_store(srv, project);
+    if (!store) {
+        return NULL;
+    }
+    if (resolved) {
+        *resolved = true;
+    }
+
+    cbm_coverage_row_t *rows = NULL;
+    int count = 0;
+    if (cbm_store_coverage_get(store, project, &rows, &count) != CBM_STORE_OK) {
+        return NULL;
+    }
+    char note[CBM_SZ_1K];
+    note[0] = '\0';
+    for (int i = 0; i < count; i++) {
+        if (!rows[i].rel_path || strcmp(rows[i].rel_path, rel_path) != 0) {
+            continue;
+        }
+        const char *kind = rows[i].kind ? rows[i].kind : "";
+        const char *detail = rows[i].detail ? rows[i].detail : "";
+        if (strcmp(kind, "parse_partial") == 0) {
+            snprintf(note, sizeof(note),
+                     "[code-cortex] Coverage note: this file was only PARTIALLY indexed — line "
+                     "range(s) %s could not be parsed, so constructs there may be missing from "
+                     "the knowledge graph. The file content you are reading is ground truth; "
+                     "graph queries may under-report this file. (best-effort signal)",
+                     detail[0] ? detail : "?");
+            break; /* the partial-parse note wins over any skip row */
+        }
+        if (coverage_kind_is_skip(kind) && !note[0]) {
+            snprintf(note, sizeof(note),
+                     "[code-cortex] Coverage note: this file was NOT indexed (%s%s%s) — the "
+                     "knowledge graph has no data for it. (best-effort signal)",
+                     kind[0] ? kind : "skipped", detail[0] ? ": " : "", detail);
+        }
+    }
+    cbm_store_free_coverage(rows, count);
+    return note[0] ? heap_strdup(note) : NULL;
 }
 
 /* Forward decl — definition lives below alongside list_projects. */
@@ -1645,14 +1822,51 @@ static db_project_result_t db_internal_project_name(const char *full_path, char 
 }
 
 /* resolve_store_fallback_scan — see forward declaration above resolve_store. */
-static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incomplete) {
+static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incomplete,
+                                                bool memo_only) {
     char dir_path[CBM_SZ_1K];
     cache_dir(dir_path, sizeof(dir_path));
-    cbm_dir_t *d = cbm_opendir(dir_path);
-    if (!d) {
+    uint64_t deadline_ms = cbm_now_ms() + MCP_FALLBACK_SCAN_TIMEOUT_MS;
+    cbm_store_meta_db_t *meta = cbm_store_meta_open();
+
+    /* Memo shortcut: a previous scan (or list_projects, or a plain open) may
+     * already have recorded which file carries this internal name. Trust it
+     * only while the file is the same generation, and still verify the name by
+     * opening that one file — the memo narrows the search, it never answers
+     * for the database. */
+    cbm_store_meta_row_t hint;
+    if (meta && cbm_store_meta_find_project(meta, project, &hint) && hint.db_name[0]) {
+        char hint_path[CBM_SZ_2K];
+        snprintf(hint_path, sizeof(hint_path), "%s/%s", dir_path, hint.db_name);
+        cbm_file_gen_t hgen;
+        (void)cbm_file_generation(hint_path, &hgen);
+        if (cbm_file_gen_equal(&hgen, &hint.gen) && cbm_is_regular_file(hint_path)) {
+            char iname[CBM_SZ_1K];
+            cbm_store_t *st = NULL;
+            if (db_internal_project_name(hint_path, iname, sizeof(iname), &st, deadline_ms) ==
+                DB_PROJECT_FOUND) {
+                if (strcmp(iname, project) == 0) {
+                    cbm_store_meta_close(meta);
+                    return st; /* caller takes ownership */
+                }
+                cbm_store_close(st);
+            }
+        }
+    }
+
+    if (memo_only) {
+        /* The caller (the hook) runs under a hard deadline and would rather
+         * report nothing than walk a cache dir holding hundreds of databases.
+         * The memo shortcut above is all it gets; a miss is simply not-found. */
+        cbm_store_meta_close(meta);
         return NULL;
     }
-    uint64_t deadline_ms = cbm_now_ms() + MCP_FALLBACK_SCAN_TIMEOUT_MS;
+
+    cbm_dir_t *d = cbm_opendir(dir_path);
+    if (!d) {
+        cbm_store_meta_close(meta);
+        return NULL;
+    }
     cbm_store_t *found = NULL;
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(d)) != NULL) {
@@ -1671,6 +1885,18 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incom
         if (!cbm_is_regular_file(full_path)) {
             continue;
         }
+        /* A file whose internal name is already on record for this generation
+         * does not need opening: it either is not this project (skip) or it is
+         * (open to verify, as before). Unknown files are opened and recorded, so
+         * the NEXT scan opens only files that changed since. This is what turns
+         * a 500-database cache from ~400ms of sqlite opens into a stat loop. */
+        cbm_file_gen_t fgen;
+        (void)cbm_file_generation(full_path, &fgen);
+        cbm_store_meta_row_t row;
+        bool known = meta && cbm_store_meta_get(meta, full_path, &fgen, &row) && row.project[0];
+        if (known && strcmp(row.project, project) != 0) {
+            continue;
+        }
         char iname[CBM_SZ_1K];
         cbm_store_t *st = NULL;
         db_project_result_t db_result =
@@ -1681,6 +1907,11 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incom
                          "reason", db_result == DB_PROJECT_BUSY ? "database_busy" : "deadline");
         }
         if (db_result == DB_PROJECT_FOUND) {
+            if (meta && !known && fgen.size >= 0) {
+                cbm_store_meta_row_init(&row, full_path, &fgen);
+                snprintf(row.project, sizeof(row.project), "%s", iname);
+                (void)cbm_store_meta_put(meta, &row);
+            }
             if (strcmp(iname, project) == 0) {
                 found = st; /* adopt — caller takes ownership */
                 break;
@@ -1689,19 +1920,52 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project, bool *incom
         }
     }
     cbm_closedir(d);
+    cbm_store_meta_close(meta);
     return found;
 }
 
 /* Open a .db file briefly, collect node/edge counts and root_path,
  * then append a JSON entry to arr. */
+/* Append one list_projects entry. `include_details` adds root/git/counts. */
+static void list_projects_emit_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr,
+                                     const char *project_name, const char *root_path, int nodes,
+                                     int edges, int64_t size_bytes, bool include_details) {
+    yyjson_mut_val *p = yyjson_mut_obj(doc);
+    /* The NAME is always present — it is the identifier every other tool takes,
+     * and the reason list_projects exists. The rest is opt-in. */
+    yyjson_mut_obj_add_strcpy(doc, p, "name", project_name);
+    if (include_details) {
+        yyjson_mut_obj_add_strcpy(doc, p, "root_path", root_path);
+        add_git_context_json(doc, p, root_path[0] ? root_path : NULL);
+        yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
+        yyjson_mut_obj_add_int(doc, p, "edges", edges);
+        yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
+    }
+    yyjson_mut_arr_add_val(arr, p);
+}
+
 static db_project_result_t build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr,
                                                     const char *dir_path, const char *name,
                                                     size_t name_len, int64_t size_bytes,
-                                                    uint64_t deadline_ms, bool include_details) {
+                                                    uint64_t deadline_ms, bool include_details,
+                                                    cbm_store_meta_db_t *meta) {
     (void)name_len;
 
     char full_path[CBM_SZ_2K];
     snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
+
+    /* Memo hit for this generation of the file: answer without opening it. The
+     * counts are only required when the caller asked for details; a row that
+     * knows the name but not the counts still saves the open otherwise. */
+    cbm_file_gen_t fgen;
+    (void)cbm_file_generation(full_path, &fgen);
+    cbm_store_meta_row_t memo;
+    bool memo_hit = meta && cbm_store_meta_get(meta, full_path, &fgen, &memo) && memo.project[0];
+    if (memo_hit && (!include_details || (memo.nodes >= 0 && memo.edges >= 0))) {
+        list_projects_emit_entry(doc, arr, memo.project, memo.root_path, memo.nodes, memo.edges,
+                                 size_bytes, include_details);
+        return DB_PROJECT_FOUND;
+    }
 
     /* #704: key on the db's INTERNAL project name, not its filename. Node/edge
      * rows are tagged with the internal name, so a drifted filename (copied or
@@ -1754,18 +2018,19 @@ static db_project_result_t build_project_json_entry(yyjson_mut_doc *doc, yyjson_
         return DB_PROJECT_INVALID;
     }
 
-    yyjson_mut_val *p = yyjson_mut_obj(doc);
-    /* The NAME is always present — it is the identifier every other tool takes,
-     * and the reason list_projects exists. The rest is opt-in. */
-    yyjson_mut_obj_add_strcpy(doc, p, "name", project_name);
-    if (include_details) {
-        yyjson_mut_obj_add_strcpy(doc, p, "root_path", root_path_buf);
-        add_git_context_json(doc, p, root_path_buf[0] ? root_path_buf : NULL);
-        yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
-        yyjson_mut_obj_add_int(doc, p, "edges", edges);
-        yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
+    if (meta && fgen.size >= 0) {
+        if (!memo_hit) {
+            cbm_store_meta_row_init(&memo, full_path, &fgen);
+        }
+        snprintf(memo.project, sizeof(memo.project), "%s", project_name);
+        snprintf(memo.root_path, sizeof(memo.root_path), "%s", root_path_buf);
+        memo.nodes = nodes;
+        memo.edges = edges;
+        (void)cbm_store_meta_put(meta, &memo);
     }
-    yyjson_mut_arr_add_val(arr, p);
+
+    list_projects_emit_entry(doc, arr, project_name, root_path_buf, nodes, edges, size_bytes,
+                             include_details);
     return DB_PROJECT_FOUND;
 }
 
@@ -1894,6 +2159,7 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     if (end > db_count) {
         end = db_count;
     }
+    cbm_store_meta_db_t *meta = cbm_store_meta_open();
     for (size_t i = start; i < end; i++) {
         const char *name = db_names[i];
         size_t len = strlen(name);
@@ -1904,11 +2170,12 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
             continue;
         }
         db_project_result_t entry_result = build_project_json_entry(
-            doc, arr, dir_path, name, len, size_bytes, deadline_ms, include_details);
+            doc, arr, dir_path, name, len, size_bytes, deadline_ms, include_details, meta);
         if (entry_result == DB_PROJECT_BUSY || entry_result == DB_PROJECT_DEADLINE) {
             incomplete = true;
         }
     }
+    cbm_store_meta_close(meta);
     for (size_t i = 0; i < db_count; i++) {
         free(db_names[i]);
     }
@@ -2894,6 +3161,9 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
         (void)cbm_unlink(shm);
         if (rc == 0) {
             status = "deleted";
+            cbm_store_meta_db_t *meta = cbm_store_meta_open();
+            cbm_store_meta_forget(meta, path);
+            cbm_store_meta_close(meta);
         } else {
             status = "delete_failed";
             error_detail = strerror(errno);
@@ -8073,7 +8343,12 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
         }
         if (wrap_tool) {
             cbm_index_worker_result_t worker = {};
-            int spawn_rc = result_json ? -1 : cbm_tool_spawn_worker(tool_name, tool_args, &worker);
+            /* Persistent worker when available (tool_server.h); the one-shot
+             * worker per call remains the fallback (Windows, CBM_TOOL_SERVER=0). */
+            int spawn_rc = result_json ? -1
+                           : cbm_tool_server_enabled()
+                               ? cbm_tool_server_call(tool_name, tool_args, &worker)
+                               : cbm_tool_spawn_worker(tool_name, tool_args, &worker);
             bool response_error = true;
             bool usable_outcome =
                 worker.outcome == CBM_PROC_CLEAN || worker.outcome == CBM_PROC_EXIT_NONZERO;

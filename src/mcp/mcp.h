@@ -142,8 +142,34 @@ char *cbm_mcp_index_run_supervised_path(const char *root_path);
  * Called automatically by the event loop on poll() timeout. */
 void cbm_mcp_server_evict_idle(cbm_mcp_server_t *srv, int timeout_s);
 
+/* Drop the cached store if the file behind it is no longer the generation it
+ * was opened from (re-index deletes and recreates the .db; delete_project
+ * unlinks it). The next resolve reopens whatever is there now. Used by the
+ * persistent tool worker before every dispatch. No-op without a cached store. */
+void cbm_mcp_server_revalidate_store(cbm_mcp_server_t *srv);
+
 /* Check if the server currently has a cached store open. */
 bool cbm_mcp_server_has_cached_store(cbm_mcp_server_t *srv);
+
+/* Allow or forbid the cache-directory scan that resolves a project whose .db
+ * filename drifted from its internal name. Enabled by default. The hook
+ * (hook-augment) disables it: it probes several speculative project names per
+ * invocation under a 300ms deadline, and a scan opens every database in the
+ * cache dir — hundreds of sqlite opens for a name that usually does not exist.
+ * With the scan off, a miss costs one failed open plus a memo lookup. */
+void cbm_mcp_server_set_scan_fallback(cbm_mcp_server_t *srv, bool enabled);
+
+/* Coverage note (#963) for one repo-relative file, read straight from the
+ * project's index_coverage rows.
+ *
+ * index_status carries the same signal, but also shells out to git and counts
+ * the whole graph — ~100ms the hook pays on every Read purely to look up one
+ * path. Returns malloc'd note text when the file is listed, else NULL.
+ * *resolved (optional) reports whether the PROJECT resolved at all, so a
+ * caller walking up parent directories knows whether to climb (false) or stop
+ * (true, the project is indexed and simply has nothing to say about it). */
+char *cbm_mcp_coverage_note(cbm_mcp_server_t *srv, const char *project, const char *rel_path,
+                            bool *resolved);
 
 /* ── Testing helpers ───────────────────────────────────────────── */
 

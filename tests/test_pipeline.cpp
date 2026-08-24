@@ -2754,6 +2754,46 @@ TEST(git_context_linked_worktree) {
     PASS();
 }
 
+/* A freshly `git init`ed repo answers every path query but has no HEAD to
+ * verify. The path queries are batched into one rev-parse for latency, so
+ * this pins that the batch does NOT inherit the HEAD lookup's failure: the
+ * repo must still resolve as git, with the worktree root and dirs filled in
+ * and an empty head_sha. */
+TEST(git_context_unborn_repo_resolves_paths_without_head) {
+    if (!git_available()) {
+        FAIL("git unavailable");
+    }
+    char *tmp = th_mktempdir("cbm_gitctx_unborn");
+    ASSERT_NOT_NULL(tmp);
+
+    char cmd[2048];
+    const char *null_dev = test_null_dev();
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" init >%s 2>&1", tmp, null_dev);
+    ASSERT_EQ(run_cmd(cmd), 0);
+
+    cbm_git_context_t ctx = {0};
+    ASSERT_EQ(cbm_git_context_resolve(tmp, &ctx), 0);
+    ASSERT_TRUE(ctx.is_git);
+    ASSERT_TRUE(ctx.root_exists);
+    ASSERT_FALSE(ctx.is_worktree);
+    ASSERT_NOT_NULL(ctx.worktree_root);
+    ASSERT_TRUE(ctx.worktree_root[0] != '\0');
+    ASSERT_NOT_NULL(ctx.git_dir);
+    ASSERT_TRUE(ctx.git_dir[0] != '\0');
+    ASSERT_NOT_NULL(ctx.git_common_dir);
+    ASSERT_NOT_NULL(ctx.canonical_root);
+    ASSERT_TRUE(ctx.canonical_root[0] != '\0');
+    /* No commit yet: the HEAD sha is empty, not garbage from another query. */
+    ASSERT_NOT_NULL(ctx.head_sha);
+    ASSERT_STR_EQ(ctx.head_sha, "");
+    /* An unborn branch is still a symbolic ref, so it is not "detached". */
+    ASSERT_NOT_NULL(ctx.branch);
+
+    cbm_git_context_free(&ctx);
+    th_rmtree(tmp);
+    PASS();
+}
+
 TEST(project_name_uniqueness) {
     /* Port of TestProjectNameUniqueness */
     char *a = cbm_project_name_from_path("/tmp/bench/zig/lib/std");
@@ -6849,6 +6889,7 @@ SUITE(pipeline) {
     RUN_TEST(project_name_drive_letter_case_insensitive_issue394);
     RUN_TEST(git_context_non_git_path);
     RUN_TEST(git_context_linked_worktree);
+    RUN_TEST(git_context_unborn_repo_resolves_paths_without_head);
     RUN_TEST(project_name_uniqueness);
     /* Git diff helpers */
     RUN_TEST(gitdiff_parse_range_with_count);

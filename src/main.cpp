@@ -13,6 +13,7 @@
 #include "cbm.h" // cbm_alloc_init — bind 3rd-party allocators to mimalloc before any sqlite/git init
 #include "mcp/mcp.h"
 #include "mcp/index_supervisor.h"
+#include "mcp/tool_server.h"
 #include "watcher/watcher.h"
 #include "pipeline/pipeline.h"
 #include "store/store.h"
@@ -349,8 +350,9 @@ static int run_cli(int argc, char **argv) {
      * dispatch below sees only the tool name + its args. */
     bool index_worker = cli_strip_flag(&argc, argv, "--index-worker");
     bool supervised_worker = cli_strip_flag(&argc, argv, "--supervised-worker");
+    bool tool_server = cli_strip_flag(&argc, argv, "--tool-server");
     const char *response_out = cli_strip_flag_value(&argc, argv, "--response-out");
-    cbm_index_set_worker_role(index_worker || supervised_worker, response_out);
+    cbm_index_set_worker_role(index_worker || supervised_worker || tool_server, response_out);
 
 #ifndef _WIN32
     /* #845: a supervised worker must not outlive its supervisor. If the parent
@@ -361,7 +363,7 @@ static int run_cli(int argc, char **argv) {
      * stderr and _exit(0)s — no cleanup dependencies). Detached: the worker
      * exits by returning from run_cli; exit() tears the thread down. Failure
      * to start is non-fatal, same policy as the MCP-server watchdog. */
-    if (index_worker || supervised_worker) {
+    if (index_worker || supervised_worker || tool_server) {
         static pid_t worker_initial_ppid; /* static: outlives run_cli for the thread */
         worker_initial_ppid = getppid();
         cbm_thread_t worker_watchdog_tid;
@@ -374,6 +376,12 @@ static int run_cli(int argc, char **argv) {
         }
     }
 #endif
+
+    if (tool_server) {
+        /* Persistent tool worker: frames on stdin/stdout until the parent
+         * closes the pipe. Nothing else in this process may write to stdout. */
+        return cbm_tool_server_serve(stdin, stdout);
+    }
 
     if (argc < MAIN_MIN_ARGC) {
         (void)fprintf(stderr, CLI_USAGE);
@@ -736,6 +744,7 @@ int main(int argc, char **argv) {
     /* Run MCP event loop (blocks until EOF or signal) */
     int rc = cbm_mcp_server_run(g_server, stdin, stdout);
     atomic_store(&g_shutdown, 1); /* unblock the watchdog poll loop */
+    cbm_tool_server_shutdown();   /* EOF to the persistent tool worker, then reap it */
 
     /* Shutdown */
     cbm_log_info("server.shutdown");

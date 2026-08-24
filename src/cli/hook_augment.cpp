@@ -231,89 +231,6 @@ static char *ha_format_context(const char *envelope, const char *token, bool *is
  * knows the knowledge graph may under-report this file. Best-effort and
  * non-blocking like everything else here — no entry, no output. */
 
-/* Parse an index_status envelope (which carries the coverage report) and
- * return a note when `rel` is listed.
- * *is_error is set for MCP errors (project not indexed) → caller climbs. */
-static char *ha_coverage_context(const char *envelope, const char *rel, bool *is_error) {
-    *is_error = false;
-    yyjson_doc *edoc = yyjson_read(envelope, strlen(envelope), 0);
-    if (!edoc) {
-        return NULL;
-    }
-    yyjson_val *eroot = yyjson_doc_get_root(edoc);
-    yyjson_val *err = yyjson_obj_get(eroot, "isError");
-    if (err && yyjson_is_true(err)) {
-        *is_error = true;
-        yyjson_doc_free(edoc);
-        return NULL;
-    }
-    yyjson_val *content = yyjson_obj_get(eroot, "content");
-    yyjson_val *item0 = (content && yyjson_is_arr(content)) ? yyjson_arr_get(content, 0) : NULL;
-    const char *inner = ha_obj_str(item0, "text");
-    if (!inner) {
-        yyjson_doc_free(edoc);
-        return NULL;
-    }
-    yyjson_doc *idoc = yyjson_read(inner, strlen(inner), 0);
-    if (!idoc) {
-        yyjson_doc_free(edoc);
-        return NULL;
-    }
-    yyjson_val *iroot = yyjson_doc_get_root(idoc);
-    char *text = NULL;
-
-    yyjson_val *pp = yyjson_obj_get(iroot, "parse_partial");
-    yyjson_val *files = pp ? yyjson_obj_get(pp, "files") : NULL;
-    size_t idx;
-    size_t maxn;
-    yyjson_val *fe;
-    if (files && yyjson_is_arr(files)) {
-        yyjson_arr_foreach(files, idx, maxn, fe) {
-            const char *fp = ha_obj_str(fe, "path");
-            if (fp && strcmp(fp, rel) == 0) {
-                const char *ranges = ha_obj_str(fe, "error_ranges");
-                text = (char *)malloc(1024);
-                if (text) {
-                    snprintf(text, 1024,
-                             "[code-cortex] Coverage note: this file was only PARTIALLY "
-                             "indexed — line range(s) %s could not be parsed, so constructs "
-                             "there may be missing from the knowledge graph. The file content "
-                             "you are reading is ground truth; graph queries may under-report "
-                             "this file. (best-effort signal)",
-                             ranges && ranges[0] ? ranges : "?");
-                }
-                break;
-            }
-        }
-    }
-    if (!text) {
-        yyjson_val *sk = yyjson_obj_get(iroot, "skipped");
-        files = sk ? yyjson_obj_get(sk, "files") : NULL;
-        if (files && yyjson_is_arr(files)) {
-            yyjson_arr_foreach(files, idx, maxn, fe) {
-                const char *fp = ha_obj_str(fe, "path");
-                if (fp && strcmp(fp, rel) == 0) {
-                    const char *phase = ha_obj_str(fe, "phase");
-                    const char *reason = ha_obj_str(fe, "reason");
-                    text = (char *)malloc(1024);
-                    if (text) {
-                        snprintf(text, 1024,
-                                 "[code-cortex] Coverage note: this file was NOT indexed "
-                                 "(%s%s%s) — the knowledge graph has no data for it. "
-                                 "(best-effort signal)",
-                                 phase ? phase : "skipped", reason && reason[0] ? ": " : "",
-                                 reason ? reason : "");
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    yyjson_doc_free(idoc);
-    yyjson_doc_free(edoc);
-    return text;
-}
-
 /* Strip the last path component in place. Returns false at a filesystem or
  * drive root (nothing left to strip). */
 static bool ha_strip_last_component(char *dir) {
@@ -342,28 +259,15 @@ static char *ha_resolve_coverage(cbm_mcp_server_t *srv, const char *file_path) {
     for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
         char *project = cbm_project_name_from_path(dir);
         if (project) {
-            yyjson_mut_doc *adoc = yyjson_mut_doc_new(NULL);
-            yyjson_mut_val *aroot = yyjson_mut_obj(adoc);
-            yyjson_mut_doc_set_root(adoc, aroot);
-            yyjson_mut_obj_add_str(adoc, aroot, "project", project);
-            char *args = yyjson_mut_write(adoc, 0, NULL);
-            yyjson_mut_doc_free(adoc);
+            bool resolved = false;
+            const char *rel = file_path + strlen(dir) + 1;
+            char *ctx = cbm_mcp_coverage_note(srv, project, rel, &resolved);
             free(project);
-            if (args) {
-                char *res = cbm_mcp_handle_tool(srv, "index_status", args);
-                free(args);
-                if (res) {
-                    bool is_error = false;
-                    const char *rel = file_path + strlen(dir) + 1;
-                    char *ctx = ha_coverage_context(res, rel, &is_error);
-                    free(res);
-                    if (ctx) {
-                        return ctx; /* listed → note */
-                    }
-                    if (!is_error) {
-                        return NULL; /* indexed project, file not listed → stop */
-                    }
-                }
+            if (ctx) {
+                return ctx; /* listed → note */
+            }
+            if (resolved) {
+                return NULL; /* indexed project, file not listed → stop */
             }
         }
         if (!ha_strip_last_component(dir)) {
@@ -487,6 +391,7 @@ int cbm_cmd_hook_augment(void) {
         if (fp && cbm_hook_path_is_abs(fpbuf)) {
             cbm_mcp_server_t *rsrv = cbm_mcp_server_new(NULL);
             if (rsrv) {
+                cbm_mcp_server_set_scan_fallback(rsrv, false);
                 char *note = ha_resolve_coverage(rsrv, fpbuf);
                 if (note) {
                     ha_emit(note);
@@ -546,6 +451,7 @@ int cbm_cmd_hook_augment(void) {
         free(input);
         return 0;
     }
+    cbm_mcp_server_set_scan_fallback(srv, false);
 
     char *ctx = ha_resolve_and_query(srv, cwd, token);
     if (ctx) {

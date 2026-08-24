@@ -32,6 +32,9 @@ extern void suite_store_edges(void);
 extern void suite_store_search(void);
 extern void suite_cypher(void);
 extern void suite_mcp(void);
+extern void suite_store_meta(void);
+extern void suite_hook_fastpath(void);
+extern void suite_tool_server(void);
 extern void suite_language(void);
 extern void suite_userconfig(void);
 extern void suite_gitignore(void);
@@ -136,6 +139,9 @@ int main(void) {
 
     /* MCP Server (M9) */
     RUN_SUITE(mcp);
+    RUN_SUITE(store_meta);
+    RUN_SUITE(hook_fastpath);
+    RUN_SUITE(tool_server);
 
     /* Discover (M2) */
     RUN_SUITE(language);

@@ -390,6 +390,31 @@ TEST(subprocess_total_timeout_ignores_continuous_progress) {
     PASS();
 }
 
+/* The reap loop sleeps between waitpid probes, doubling from 1ms up to a cap.
+ * With the fixed 100ms cap a child that exited at 150ms was only noticed at
+ * 227ms (cumulative sleeps 1+2+4+...+100), and since every MCP tool call ran in
+ * such a child the client saw each call quantized to ~39/145/250/461ms steps.
+ * poll_cap_ms lets short-lived children be reaped within milliseconds of their
+ * exit. The child here sleeps 150ms; the old cadence cannot return before
+ * ~227ms, so an elapsed time under that bound proves the cap is honoured. */
+TEST(subprocess_poll_cap_reaps_short_lived_child_promptly) {
+    const char *argv[] = {"/bin/sh", "-c", "sleep 0.15", NULL};
+    cbm_proc_opts_t opts = {0};
+    opts.bin = argv[0];
+    opts.argv = argv;
+    opts.poll_cap_ms = 2;
+    opts.total_timeout_ms = 5000;
+    cbm_proc_result_t result;
+    uint64_t t0 = cbm_now_ms();
+    int rc = cbm_subprocess_run(&opts, &result);
+    uint64_t elapsed = cbm_now_ms() - t0;
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(result.outcome, CBM_PROC_CLEAN);
+    ASSERT_TRUE(elapsed >= 150);
+    ASSERT_TRUE(elapsed < 215);
+    PASS();
+}
+
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* The kernel refusing a spawn with EAGAIN means "not right now", not "never" —
  * a momentarily full process table on a busy machine. We used to treat it as a
@@ -522,6 +547,7 @@ SUITE(security) {
     RUN_TEST(exec_no_shell_null_argv_returns_error);
     RUN_TEST(exec_no_shell_captures_exit_code);
     RUN_TEST(subprocess_total_timeout_ignores_continuous_progress);
+    RUN_TEST(subprocess_poll_cap_reaps_short_lived_child_promptly);
 #ifdef CBM_ENABLE_TEST_SEAMS
     /* Transient spawn-refusal retry (test-seam builds only) */
     RUN_TEST(subprocess_retries_transient_spawn_refusal);

@@ -96,6 +96,67 @@ static int git_capture(const char *repo_path, const char *git_args, char **out) 
     return *out ? 0 : CBM_NOT_FOUND;
 }
 
+/* Capture up to `max_lines` output lines instead of just the first.
+ * Returns the number of non-empty lines captured (0 on any failure); the
+ * caller owns each out[i]. Partial output on a nonzero exit is discarded, the
+ * same all-or-nothing contract git_capture has.
+ *
+ * This exists so several `git rev-parse` questions can be asked in ONE
+ * process. Each cbm_popen is a shell plus a git — ~16ms here — and resolving a
+ * context asked seven of them, which was essentially all of index_status's
+ * latency. */
+static int git_capture_lines(const char *repo_path, const char *git_args, char **out,
+                             int max_lines) {
+    for (int i = 0; i < max_lines; i++) {
+        out[i] = NULL;
+    }
+    if (!repo_path || !git_args || max_lines <= 0 || !git_validate_repo_path(repo_path)) {
+        return 0;
+    }
+
+    char cmd[GIT_CMD_MAX];
+#ifdef _WIN32
+    const char *null_dev = "NUL";
+#else
+    const char *null_dev = "/dev/null";
+#endif
+    int n = snprintf(cmd, sizeof(cmd), "git -C \"%s\" %s 2>%s", repo_path, git_args, null_dev);
+    if (n < 0 || n >= (int)sizeof(cmd)) {
+        return 0;
+    }
+
+    FILE *fp = cbm_popen(cmd, "r");
+    if (!fp) {
+        return 0;
+    }
+    char buf[GIT_OUTPUT_MAX];
+    int count = 0;
+    while (count < max_lines && fgets(buf, sizeof(buf), fp)) {
+        trim_newlines(buf);
+        if (!buf[0]) {
+            break;
+        }
+        out[count] = git_strdup(buf);
+        if (!out[count]) {
+            break;
+        }
+        count++;
+    }
+    /* Drain: closing a pipe git is still writing to would hand it SIGPIPE and
+     * turn a healthy run into a nonzero status. */
+    while (fgets(buf, sizeof(buf), fp)) {
+        ;
+    }
+    if (cbm_pclose(fp) != 0) {
+        for (int i = 0; i < count; i++) {
+            free(out[i]);
+            out[i] = NULL;
+        }
+        return 0;
+    }
+    return count;
+}
+
 static bool path_is_absolute(const char *path) {
     if (!path || !path[0]) {
         return false;
@@ -270,18 +331,45 @@ int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
         return 0;
     }
 
-    if (git_capture(path, "rev-parse --show-toplevel", &out->worktree_root) != 0) {
+    /* One rev-parse answers every path question: it prints one line per query,
+     * in argument order. `--path-format=absolute` applies to the options after
+     * it, so the same --git-common-dir asked twice yields the repo-relative
+     * form git reports by default and the absolute form (git 2.31+) used to
+     * derive the canonical root.
+     *
+     * Older git does not know --path-format and fails the WHOLE command, so a
+     * short read falls back to the three universally supported queries and
+     * simply goes without the absolute form — which is what derive_canonical_
+     * root's NULL branch has always handled. A repo with no commits still
+     * answers all of these; only --verify HEAD below fails there, which is why
+     * it stays a separate call. */
+    enum { GIT_PATHS_FULL = 4, GIT_PATHS_MIN = 3 };
+    char *paths[GIT_PATHS_FULL] = {NULL, NULL, NULL, NULL};
+    int path_lines = git_capture_lines(path,
+                                       "rev-parse --show-toplevel --git-dir --git-common-dir "
+                                       "--path-format=absolute --git-common-dir",
+                                       paths, GIT_PATHS_FULL);
+    if (path_lines < GIT_PATHS_FULL) {
+        for (int i = 0; i < path_lines; i++) {
+            free(paths[i]);
+            paths[i] = NULL;
+        }
+        path_lines = git_capture_lines(path, "rev-parse --show-toplevel --git-dir --git-common-dir",
+                                       paths, GIT_PATHS_MIN);
+    }
+    if (path_lines < GIT_PATHS_MIN) {
+        for (int i = 0; i < path_lines; i++) {
+            free(paths[i]);
+        }
         out->is_git = false;
         return 0;
     }
     out->is_git = true;
+    out->worktree_root = paths[0];
+    out->git_dir = paths[1];
+    out->git_common_dir = paths[2];
+    char *abs_common_dir = path_lines >= GIT_PATHS_FULL ? paths[3] : NULL;
 
-    if (git_capture(path, "rev-parse --git-dir", &out->git_dir) != 0) {
-        out->git_dir = git_strdup("");
-    }
-    if (git_capture(path, "rev-parse --git-common-dir", &out->git_common_dir) != 0) {
-        out->git_common_dir = git_strdup("");
-    }
     if (git_capture(path, "rev-parse --verify HEAD", &out->head_sha) != 0) {
         out->head_sha = git_strdup("");
     }
@@ -293,10 +381,6 @@ int cbm_git_context_resolve(const char *path, cbm_git_context_t *out) {
 
     out->is_worktree =
         out->git_dir && out->git_common_dir && strcmp(out->git_dir, out->git_common_dir) != 0;
-    /* git 2.31+ canonical absolute common-dir (best-effort; NULL on older git,
-     * where derive_canonical_root falls back to the relative common-dir). */
-    char *abs_common_dir = NULL;
-    (void)git_capture(path, "rev-parse --path-format=absolute --git-common-dir", &abs_common_dir);
     out->canonical_root =
         derive_canonical_root(path, out->worktree_root, out->git_common_dir, abs_common_dir);
     free(abs_common_dir);
