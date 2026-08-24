@@ -128,7 +128,7 @@ static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec
     int nearest_call = -1; /* tree depth of the nearest enclosing call node */
     int nearest_import = -1;
     int top = 0;
-    frames[top++] = (UsageFrame){root, 0, -1, -1};
+    frames[top++] = UsageFrame{root, 0, -1, -1};
     bool entering = true;
 
     while (top > 0) {
@@ -163,7 +163,7 @@ static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec
                 cap = new_cap;
             }
             /* `f` is deliberately not touched after a growth — it may dangle. */
-            frames[top++] = (UsageFrame){child, 0, -1, -1};
+            frames[top++] = UsageFrame{child, 0, -1, -1};
             entering = true;
         } else {
             nearest_call = f->saved_call;
