@@ -724,7 +724,39 @@ static void cbm_error_regions_push(cbm_error_regions_t *acc, TSNode n) {
     acc->count++;
 }
 
-static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc) {
+/* A file that does not end with a newline leaves the grammar's mandatory line
+ * terminator MISSING. That node is ZERO-WIDTH and sits at EOF.
+ *
+ * It is not a miss. The parser consumed no source for it — start_byte ==
+ * end_byte — so by construction nothing was dropped: no construct can live in a
+ * zero-byte span, and every real instruction above it parsed normally. This is a
+ * property of the grammar's terminator rule, not of the file.
+ *
+ * Flagging it made the verdict arbitrary. Grammars whose terminator token is
+ * VISIBLE (dockerfile, tcl, fish, gomod, hyprlang) reported parse_partial for a
+ * missing final newline; grammars whose terminator is HIDDEN (ini, fsharp,
+ * beancount, requirements, gitignore, sshconfig, kconfig) reported nothing for
+ * exactly the same omission, because a hidden node is invisible to
+ * ts_node_child(). Whether a user was told their file was partially parsed
+ * depended on a grammar-authoring accident.
+ *
+ * The cost is not cosmetic: a phantom parse_partial writes a
+ * "<project>::missed" shadow row into the project's own database.
+ *
+ * Deliberately narrow — ZERO-WIDTH AT EOF ONLY. A MISSING or ERROR node with
+ * WIDTH still counts even at EOF (a Makefile whose last recipe line is
+ * unterminated really does lose the recipe), and anything before EOF is
+ * untouched. */
+static bool cbm_is_eof_terminator_miss(TSNode n, int source_len) {
+    if (!ts_node_is_missing(n) || source_len < 0) {
+        return false;
+    }
+    uint32_t start = ts_node_start_byte(n);
+    uint32_t end = ts_node_end_byte(n);
+    return start == end && end == (uint32_t)source_len;
+}
+
+static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc, int source_len) {
     if (acc->count >= CBM_MAX_ERROR_REGIONS) {
         return;
     }
@@ -732,9 +764,12 @@ static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc) {
     for (uint32_t i = 0; i < k && acc->count < CBM_MAX_ERROR_REGIONS; i++) {
         TSNode c = ts_node_child(n, i);
         if (ts_node_is_missing(c) || strcmp(ts_node_type(c), "ERROR") == 0) {
+            if (cbm_is_eof_terminator_miss(c, source_len)) {
+                continue; /* absent final newline only — nothing was dropped */
+            }
             cbm_error_regions_push(acc, c); /* top-most region; do not descend */
         } else if (ts_node_has_error(c)) {
-            cbm_collect_error_regions(c, acc);
+            cbm_collect_error_regions(c, acc, source_len);
         }
     }
 }
@@ -1306,7 +1341,7 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                      * extract. */
                     if (ts_node_has_error(root)) {
                         cbm_error_regions_t raw_regs = {{0}, {0}, 0};
-                        cbm_collect_error_regions(root, &raw_regs);
+                        cbm_collect_error_regions(root, &raw_regs, source_len);
                         if (raw_regs.count > 0) {
                             int defs_before = result->defs.count;
                             cbm_extract_definitions(&pp_ctx);
@@ -1464,7 +1499,7 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
         if (strcmp(ts_node_type(root), "ERROR") == 0) {
             cbm_error_regions_push(&regs, root); /* whole file unparseable */
         } else {
-            cbm_collect_error_regions(root, &regs);
+            cbm_collect_error_regions(root, &regs, source_len);
         }
         cbm_subtract_recovered_regions(&regs, &result->defs);
         /* #1071: don't flag a benign function-like-macro call (defined in-file)

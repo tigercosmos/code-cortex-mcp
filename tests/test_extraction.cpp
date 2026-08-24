@@ -3191,6 +3191,77 @@ TEST(extract_cpp_preproc_macro_generated_callable_skipped_issue949) {
     PASS();
 }
 
+/* A file that does not end with a newline leaves the grammar's mandatory line
+ * terminator MISSING — a ZERO-WIDTH node at EOF. The parser consumed no source
+ * for it, so nothing was dropped, and flagging it made the verdict depend on a
+ * grammar-authoring accident: grammars whose terminator token is VISIBLE
+ * reported parse_partial, grammars whose terminator is HIDDEN reported nothing
+ * for the identical omission. The cost is not cosmetic — a phantom
+ * parse_partial writes a "<project>::missed" shadow row into the project's own
+ * database. */
+TEST(extract_missing_final_newline_not_flagged_issue1610) {
+    const char *src = "FROM mcr.microsoft.com/dotnet/aspnet:8.0\n"
+                      "ENTRYPOINT [\"dotnet\", \"App.dll\"]"; /* deliberately no \n */
+    CBMFileResult *r = extract(src, CBM_LANG_DOCKERFILE, "t", "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The control: the same file WITH its final newline was already clean, so the
+ * guard above cannot be passing merely because Dockerfiles never flag. */
+TEST(extract_final_newline_present_still_clean_issue1610) {
+    const char *src = "FROM mcr.microsoft.com/dotnet/aspnet:8.0\n"
+                      "ENTRYPOINT [\"dotnet\", \"App.dll\"]\n";
+    CBMFileResult *r = extract(src, CBM_LANG_DOCKERFILE, "t", "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Across the grammars whose terminator token is VISIBLE — the ones that used to
+ * flag. The hidden-terminator grammars never did, which is exactly the
+ * inconsistency being removed. */
+TEST(extract_missing_final_newline_across_grammars_issue1610) {
+    struct NlCase {
+        const char *src;
+        CBMLanguage lang;
+        const char *path;
+    };
+    static const NlCase cases[] = {
+        {"proc foo {} {}\nproc bar {} {}", CBM_LANG_TCL, "a.tcl"},
+        {"function foo\n  echo hi\nend", CBM_LANG_FISH, "a.fish"},
+        {"module example.com/m\n\ngo 1.21", CBM_LANG_GOMOD, "go.mod"},
+        {"general {\n  gaps_in = 5\n}", CBM_LANG_HYPRLANG, "hypr.conf"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CBMFileResult *r = extract(cases[i].src, cases[i].lang, "t", cases[i].path);
+        ASSERT_NOT_NULL(r);
+        if (r->parse_incomplete) {
+            fprintf(stderr, "  %s flagged: ranges=%s\n", cases[i].path,
+                    r->error_ranges ? r->error_ranges : "(none)");
+            cbm_free_result(r);
+            FAIL("an unterminated final line must not be parse_partial in any grammar");
+        }
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
+/* The guard is deliberately narrow. A WIDTH-BEARING failure at EOF really does
+ * lose the construct, so it must still be reported: this Makefile's last recipe
+ * line is genuinely dropped, unlike an absent newline. */
+TEST(extract_width_bearing_error_at_eof_still_flagged_issue1610) {
+    const char *src = "all:\n\techo hi"; /* no trailing newline; recipe is lost */
+    CBMFileResult *r = extract(src, CBM_LANG_MAKEFILE, "t", "Makefile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* #949 follow-up: an included header shifts physical lines in simplecpp's
  * expanded output. The #1050 name-on-same-line guard skipped this recoverable
  * definition; explicit source ownership mapping must restore its original
@@ -3496,6 +3567,10 @@ SUITE(extraction) {
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
     RUN_TEST(extract_ts_template_string_url_issue1006);
+    RUN_TEST(extract_missing_final_newline_not_flagged_issue1610);
+    RUN_TEST(extract_final_newline_present_still_clean_issue1610);
+    RUN_TEST(extract_missing_final_newline_across_grammars_issue1610);
+    RUN_TEST(extract_width_bearing_error_at_eof_still_flagged_issue1610);
     RUN_TEST(extract_go_binary_concat_url_issue1249);
     RUN_TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249);
     RUN_TEST(extract_large_ts_has_functions_issue213);

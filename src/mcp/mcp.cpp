@@ -1593,8 +1593,29 @@ static db_project_result_t db_internal_project_name(const char *full_path, char 
     int n = 0;
     int list_err = cbm_store_list_projects(st, &projs, &n);
     bool ok = false;
-    if (list_err == CBM_STORE_OK && n == 1 && projs[0].name && projs[0].name[0]) {
-        snprintf(name_out, name_sz, "%s", projs[0].name);
+    /* Ignore internal shadow projects ("<name>::missed" miss-graph rows): they
+     * live in the SAME db as the primary project, so ANY project that has ever
+     * recorded a parse miss carries two rows. Requiring n == 1 over ALL rows
+     * therefore made such a project unresolvable — reproduced here: a project
+     * indexed with 8 partially-parsed files disappeared from list_projects
+     * entirely, while a clean project beside it resolved fine.
+     *
+     * The single-primary requirement itself is KEPT: it is what proves this db
+     * belongs to one project rather than being a shared or mislabelled store.
+     * Only the shadow rows stop counting toward it. */
+    int primary_count = 0;
+    const char *primary_name = NULL;
+    if (list_err == CBM_STORE_OK) {
+        for (int i = 0; i < n; i++) {
+            const char *name = projs[i].name;
+            if (name && name[0] && !strstr(name, "::")) {
+                primary_count++;
+                primary_name = name;
+            }
+        }
+    }
+    if (primary_count == 1 && primary_name) {
+        snprintf(name_out, name_sz, "%s", primary_name);
         ok = true;
     }
     if (deadline_ms > 0 && db) {

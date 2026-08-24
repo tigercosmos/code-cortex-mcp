@@ -2528,6 +2528,83 @@ TEST(tool_index_repository_unknown_project_name_still_requires_repo_path) {
     PASS();
 }
 
+/* A partially-parsed file makes indexing write an internal "<name>::missed"
+ * miss-graph row into the SAME database as the primary project. Project
+ * resolution required exactly ONE row over ALL rows returned by
+ * cbm_store_list_projects, which does not filter those — so any project that
+ * had ever recorded a parse miss became unresolvable and vanished from
+ * list_projects entirely, for a project that plainly was indexed. There is no
+ * user-level workaround: a partial parse is not something the operator
+ * controls, and re-indexing reproduces the shadow row.
+ *
+ * The single-primary requirement itself is kept — it is what proves the db
+ * belongs to one project rather than being shared or mislabelled — so the
+ * control below (a clean project in the same cache) must keep resolving too. */
+TEST(tool_list_projects_includes_a_project_with_a_miss_graph) {
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-missgraph-test-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        PASS();
+    }
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-missgraph-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        cbm_rmdir(tmp_dir);
+        PASS();
+    }
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    /* A file the Rust grammar cannot parse — this is what mints the shadow row. */
+    char src_path[512];
+    snprintf(src_path, sizeof(src_path), "%s/broken.rs", tmp_dir);
+    FILE *fp = fopen(src_path, "w");
+    ASSERT_NOT_NULL(fp);
+    fputs("fn broken( { let x = ;;; unterminated\n", fp);
+    fclose(fp);
+
+    char *project = cbm_project_name_from_path(tmp_dir);
+    ASSERT_NOT_NULL(project);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char index_args[1024];
+    snprintf(index_args, sizeof(index_args), "{\"repo_path\":\"%s\",\"mode\":\"fast\"}", tmp_dir);
+    char *resp = cbm_mcp_handle_tool(srv, "index_repository", index_args);
+    ASSERT_NOT_NULL(resp);
+    /* Precondition: the fixture really did record a parse miss. Without this the
+     * test could pass vacuously on a grammar that happens to accept the file.
+     * Captured rather than asserted here, for the teardown reason below. */
+    bool recorded_a_miss = resp && strstr(resp, "\\\"parse_partial_count\\\":0") == NULL;
+    free(resp);
+
+    resp = cbm_mcp_handle_tool(srv, "list_projects", "{}");
+    bool listed = resp && strstr(resp, project) != NULL;
+    free(resp);
+
+    /* Tear down BEFORE asserting. ASSERT returns from the test function, so a
+     * failure here would otherwise skip the CBM_CACHE_DIR restore below and
+     * leave every later test pointed at this temp cache — turning one honest
+     * red into a cascade of unrelated ones and burying the actual cause. */
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(project);
+    remove(src_path);
+    th_rmtree(cache);
+    cbm_rmdir(tmp_dir);
+
+    ASSERT_TRUE(recorded_a_miss);
+    ASSERT_TRUE(listed);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
@@ -2603,6 +2680,7 @@ SUITE(mcp) {
 
     /* Tool handlers */
     RUN_TEST(tool_list_projects_empty);
+    RUN_TEST(tool_list_projects_includes_a_project_with_a_miss_graph);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
     RUN_TEST(tool_search_graph_basic);
