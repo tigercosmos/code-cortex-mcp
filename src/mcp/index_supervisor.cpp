@@ -25,6 +25,8 @@
 
 /* ── Worker-role state ────────────────────────────────────────────── */
 
+enum { CBM_TOOL_WORKER_POLL_CAP_MS = 2 }; /* reap-loop sleep cap for one-shot tool workers */
+
 static bool g_worker_active = false;
 static char g_worker_response_out[1024] = {0};
 static cbm_atomic_uint64 g_worker_sequence = 0;
@@ -424,6 +426,10 @@ int cbm_tool_spawn_worker(const char *tool_name, const char *args_json,
     opts.log_file = log_path;
     opts.total_timeout_ms = cbm_tool_timeout_ms(tool_name);
     opts.delete_log_on_exit = false;
+    /* A tool worker lives for one query (milliseconds). Reap it promptly rather
+     * than letting the loop back off to the 100ms index-worker cadence, which
+     * added up to 100ms of dead wait to every tool call. */
+    opts.poll_cap_ms = CBM_TOOL_WORKER_POLL_CAP_MS;
 
     cbm_proc_result_t r;
     int run_rc = cbm_subprocess_run(&opts, &r);

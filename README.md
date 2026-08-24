@@ -161,6 +161,44 @@ are essentially unchanged. These are not strict before/after deltas — each pro
 at a newer commit than the earlier figures were — but the direction is the corrected graph, not
 drift. The Linux kernel row has not been re-measured on v0.12.0.
 
+### Tool-call latency
+
+Query tools answer from a **persistent worker process**. The MCP server spawns one
+`cli --tool-server` child on the first tool call, reuses it for every later call, and reaps it
+at shutdown. This keeps the crash and hang isolation of the supervised design — a wedged or
+crashing tool still cannot take the server down, and per-tool deadlines still apply — without
+paying a process exec, a database open, and a `PRAGMA quick_check` on every single call. The
+worker drops its cached store when the `.db` file behind it is replaced, so a re-index is
+picked up on the next call.
+
+A **store metadata memo** in the cache directory (`_config.db`) records each database's
+internal project name, root path, counts, and last integrity verdict, keyed on the file's
+`(size, mtime)`. Any process that starts cold — a hook invocation, a fresh worker — reads the
+memo instead of re-verifying. It is also what keeps a large cache directory cheap: resolving an
+unknown project name used to open every `.db` file in the cache, and now only opens files whose
+`(size, mtime)` changed since they were last seen.
+
+Warm medians on an Apple Silicon release build, against a 54 MB graph (13 K nodes / 49 K edges)
+and a 537-database cache directory:
+
+| Call | Time |
+|------|------|
+| `search_graph`, `trace_path` | 0.1–0.5 ms |
+| `get_code_snippet` | ~2 ms |
+| `list_projects` (537 cached databases) | ~2 ms |
+| `index_status` | ~59 ms |
+| `get_architecture`, `get_graph_schema` | 84–91 ms |
+| MCP `initialize` | ~4 ms |
+| PreToolUse hook (`Grep` or `Read`) | ~10 ms |
+
+Environment kill switches, in order of scope:
+
+| Variable | Effect |
+|----------|--------|
+| `CBM_TOOL_SERVER=0` | Fall back to one worker process per tool call (the Windows default; pipe support is not ported yet). |
+| `CBM_TOOL_SUPERVISOR=0` | Run tools in-process — no worker, no isolation. |
+| `CBM_STORE_META=0` | Disable the on-disk memo; every lookup re-verifies. |
+
 ## Language Support (155 Languages)
 
 155 languages via vendored tree-sitter grammars. Strongest call/type resolution (LSP-style

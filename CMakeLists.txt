@@ -344,7 +344,7 @@ cbm_add_cxx_library(cbm_sqlite_writer SOURCES ${CBM_INTERNAL}/sqlite_writer.cpp)
 # ── src/ subsystems (C++23) ────────────────────────────────────
 cbm_add_cxx_library(cbm_store     SOURCES src/store/store.cpp)
 cbm_add_cxx_library(cbm_cypher    SOURCES src/cypher/cypher.cpp)
-cbm_add_cxx_library(cbm_mcp       SOURCES src/mcp/mcp.cpp src/mcp/index_supervisor.cpp)
+cbm_add_cxx_library(cbm_mcp       SOURCES src/mcp/mcp.cpp src/mcp/index_supervisor.cpp src/mcp/store_meta.cpp src/mcp/tool_server.cpp)
 cbm_add_cxx_library(cbm_discover  SOURCES
     src/discover/userconfig.cpp
     src/discover/gitignore.cpp
@@ -415,7 +415,8 @@ set(CBM_TEST_SRCS
     tests/test_store_arch.cpp tests/test_store_bulk.cpp tests/test_store_pragmas.cpp
     tests/test_store_checkpoint.cpp
     # cypher / mcp
-    tests/test_cypher.cpp tests/test_mcp.cpp
+    tests/test_cypher.cpp tests/test_mcp.cpp tests/test_store_meta.cpp
+    tests/test_hook_fastpath.cpp tests/test_tool_server.cpp
     # discover
     tests/test_language.cpp tests/test_userconfig.cpp tests/test_gitignore.cpp
     tests/test_discover.cpp

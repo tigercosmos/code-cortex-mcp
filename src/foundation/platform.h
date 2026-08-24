@@ -163,8 +163,38 @@ int64_t cbm_file_size(const char *path);
 
 /* Last-modification time in seconds. Returns -1 on error. Paired with
  * cbm_file_size it forms a cheap change signature for "is this the same
- * generation of this file I already inspected?". */
+ * generation of this file I already inspected?".
+ *
+ * NOTE: whole seconds. For deciding whether a file was REPLACED — as opposed
+ * to merely inspecting it twice — use cbm_file_generation below: a rewrite
+ * within the same second at the same byte size is entirely possible (SQLite
+ * sizes are page-granular) and this pair cannot see it. */
 int64_t cbm_file_mtime(const char *path);
+
+/* Identity of one generation of a file: what changes when the file is
+ * REPLACED. `size` is -1 when the file cannot be stat'ed.
+ *
+ * (size, mtime-in-seconds) alone is not enough to key a cache on: a database
+ * rebuilt in the same second at the same page count matches it exactly, so
+ * stale facts survive the very rewrite that should have invalidated them.
+ * mtime_ns adds sub-second resolution and `ino` adds file identity — a
+ * re-index unlinks and recreates, so the inode changes even when nothing else
+ * does. Fields that a platform cannot supply are 0, which is safe: they simply
+ * stop contributing. */
+typedef struct {
+    int64_t size;
+    int64_t mtime;    /* whole seconds */
+    int64_t mtime_ns; /* sub-second part, nanoseconds; 0 where unavailable */
+    uint64_t ino;     /* file identity; 0 where unavailable */
+} cbm_file_gen_t;
+
+/* Fill *out for `path`. Returns false (and zeroes *out with size = -1) when the
+ * file cannot be stat'ed. */
+bool cbm_file_generation(const char *path, cbm_file_gen_t *out);
+
+/* True when both describe the same generation. A generation with size < 0
+ * (unstattable) never equals anything, including itself. */
+bool cbm_file_gen_equal(const cbm_file_gen_t *a, const cbm_file_gen_t *b);
 
 /* Normalize path separators to forward slashes (in-place).
  * On Windows, converts backslashes to forward slashes.

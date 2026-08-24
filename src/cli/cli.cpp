@@ -6,6 +6,7 @@
  */
 #include "cli/cli.h"
 #include "foundation/compat.h"
+#include "foundation/subprocess.h" /* cbm_subprocess_run (cbm_warm_binary) */
 #include "foundation/platform.h"
 #include "foundation/constants.h"
 #include "foundation/sha256.h"
@@ -373,6 +374,24 @@ static bool cbm_same_file(const char *a, const char *b) {
 #endif
 }
 
+/* Run a freshly written binary once so the OS pays its first-exec cost now.
+ * macOS validates the ad-hoc code signature of a new file on its first exec —
+ * 2-3s for this 230-290MB binary — and that used to land on the next MCP
+ * session start (or the next hook invocation) right after `install`/`update`.
+ * Output goes to the bit bucket; any failure is ignored because the binary
+ * was already installed correctly and the cost merely moves back to the next
+ * exec. Bounded so a wedged binary cannot hang the installer. */
+enum { CLI_WARM_BINARY_TIMEOUT_MS = 60000 };
+static void cbm_warm_binary(const char *path) {
+    const char *argv[] = {path, "--version", NULL};
+    cbm_proc_opts_t opts = {0};
+    opts.bin = path;
+    opts.argv = argv;
+    opts.total_timeout_ms = CLI_WARM_BINARY_TIMEOUT_MS;
+    cbm_proc_result_t result;
+    (void)cbm_subprocess_run(&opts, &result);
+}
+
 /* Copy the running binary into the canonical install target, preserving the
  * executable bit. When src and dst are the same on-disk file the copy is
  * skipped: cbm_copy_file opens dst "wb" before reading src, so copying a file
@@ -389,6 +408,7 @@ int cbm_copy_binary_to_target(const char *src, const char *dst) {
 #ifndef _WIN32
     (void)chmod(dst, CLI_OCTAL_PERM);
 #endif
+    cbm_warm_binary(dst);
     return 0;
 }
 
@@ -441,7 +461,11 @@ int cbm_replace_binary(const char *path, const unsigned char *data, int len, int
 
     size_t written = fwrite(data, CLI_ELEM_SIZE, (size_t)len, f);
     (void)fclose(f);
-    return written == (size_t)len ? 0 : CLI_ERR;
+    if (written != (size_t)len) {
+        return CLI_ERR;
+    }
+    cbm_warm_binary(path);
+    return 0;
 }
 
 /* ── Skill file content (embedded) ────────────────────────────── */

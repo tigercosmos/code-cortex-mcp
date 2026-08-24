@@ -164,6 +164,40 @@ int64_t cbm_file_mtime(const char *path) {
     return (int64_t)(t.QuadPart / FILETIME_TICKS_PER_SEC);
 }
 
+bool cbm_file_generation(const char *path, cbm_file_gen_t *out) {
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->size = CBM_NOT_FOUND;
+    wchar_t *wpath = path ? cbm_utf8_to_wide(path) : NULL;
+    if (!wpath) {
+        return false;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    BOOL ok = GetFileAttributesExW(wpath, GetFileExInfoStandard, &fad);
+    free(wpath);
+    if (!ok) {
+        return false;
+    }
+    enum { FILETIME_TICKS_PER_SEC = 10000000, FILETIME_NS_PER_TICK = 100 };
+    ULARGE_INTEGER sz;
+    sz.HighPart = fad.nFileSizeHigh; // cppcheck-suppress unreadVariable
+    sz.LowPart = fad.nFileSizeLow;   // cppcheck-suppress unreadVariable
+    out->size = (int64_t)sz.QuadPart;
+    ULARGE_INTEGER t;
+    t.HighPart = fad.ftLastWriteTime.dwHighDateTime; // cppcheck-suppress unreadVariable
+    t.LowPart = fad.ftLastWriteTime.dwLowDateTime;   // cppcheck-suppress unreadVariable
+    out->mtime = (int64_t)(t.QuadPart / FILETIME_TICKS_PER_SEC);
+    /* FILETIME already carries 100ns resolution, which is finer than the
+     * second-granularity trap this field exists to close. No file index here:
+     * it would need the file opened (GetFileInformationByHandle), and the
+     * sub-second stamp alone already distinguishes a rewrite. */
+    out->mtime_ns = (int64_t)((t.QuadPart % FILETIME_TICKS_PER_SEC) * FILETIME_NS_PER_TICK);
+    out->ino = 0;
+    return true;
+}
+
 char *cbm_normalize_path_sep(char *path) {
     if (path) {
         for (char *p = path; *p; p++) {
@@ -298,6 +332,29 @@ int64_t cbm_file_mtime(const char *path) {
         return CBM_NOT_FOUND;
     }
     return (int64_t)st.st_mtime;
+}
+
+bool cbm_file_generation(const char *path, cbm_file_gen_t *out) {
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    out->size = CBM_NOT_FOUND;
+    struct stat st;
+    if (!path || stat(path, &st) != 0) {
+        return false;
+    }
+    out->size = (int64_t)st.st_size;
+    out->mtime = (int64_t)st.st_mtime;
+    out->ino = (uint64_t)st.st_ino;
+#if defined(__APPLE__)
+    out->mtime_ns = (int64_t)st.st_mtimespec.tv_nsec;
+#elif defined(st_mtime) || defined(_POSIX_C_SOURCE)
+    /* POSIX.1-2008 spells the sub-second field st_mtim; the `st_mtime` macro
+     * that aliases st_mtim.tv_sec is what marks its presence. */
+    out->mtime_ns = (int64_t)st.st_mtim.tv_nsec;
+#endif
+    return true;
 }
 
 char *cbm_normalize_path_sep(char *path) {
@@ -500,4 +557,13 @@ bool cbm_resolve_self_exe_path(const char *argv0, char *out, size_t outsz) {
         return out[0] != '\0';
     }
     return false;
+}
+
+/* Platform-independent: both generations were produced by the code above. */
+bool cbm_file_gen_equal(const cbm_file_gen_t *a, const cbm_file_gen_t *b) {
+    if (!a || !b || a->size < 0 || b->size < 0) {
+        return false; /* an unstattable file is never "the same" as anything */
+    }
+    return a->size == b->size && a->mtime == b->mtime && a->mtime_ns == b->mtime_ns &&
+           a->ino == b->ino;
 }

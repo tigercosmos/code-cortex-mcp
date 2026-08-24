@@ -60,13 +60,71 @@ typedef struct {
     int total_timeout_ms;        /* <= 0 => no total cap; else kill+HANG after this many
                                   * ms regardless of log activity */
     bool delete_log_on_exit;     /* unlink log_file after reaping */
+    int poll_cap_ms;             /* upper bound on the reap-loop sleep between waitpid
+                                    probes; <= 0 => CBM_PROC_POLL_CAP_DEFAULT_MS. Short-lived
+                                    children (tool workers) pass a small value so their exit
+                                    is noticed within milliseconds; long-running ones (the
+                                    index worker) keep the default so the parent does not
+                                    spin for minutes. */
 } cbm_proc_opts_t;
+
+/* Default reap-loop sleep cap (see cbm_proc_opts_t.poll_cap_ms). */
+#define CBM_PROC_POLL_CAP_DEFAULT_MS 100
 
 /* Spawn opts->bin, supervise (tail + optional quiet/total timeouts), block until
  * it ends, and classify the result into *out. Returns 0 if a child was spawned
  * and reaped (out filled), or -1 if the spawn itself failed
  * (out->outcome == CBM_PROC_SPAWN_FAILED). */
 int cbm_subprocess_run(const cbm_proc_opts_t *opts, cbm_proc_result_t *out);
+
+/* ── Long-lived child with pipes (POSIX) ─────────────────────────────
+ * cbm_subprocess_run is one-shot: spawn, wait, classify. A persistent worker
+ * (the MCP tool server) needs the child to outlive many requests, so it is
+ * spawned with its stdin/stdout connected to pipes and supervised by the
+ * caller: write a request, wait for the reply with a deadline, and reap or
+ * kill it when it misbehaves. stderr is inherited from the parent.
+ *
+ * Windows: not implemented — cbm_subprocess_spawn_piped returns -1 and the
+ * caller falls back to the one-shot path. */
+typedef struct {
+    int pid;        /* child pid; -1 when not running */
+    int to_child;   /* parent writes the child's stdin here; -1 when closed */
+    int from_child; /* parent reads the child's stdout here; -1 when closed */
+} cbm_proc_pipe_t;
+
+/* Spawn opts->bin / opts->argv with piped stdin/stdout. Uses only bin, argv and
+ * total_timeout_ms (the spawn-retry budget) from opts; log_file is ignored.
+ * Returns 0 and fills *h, or -1 (h zeroed to the not-running state). The
+ * parent-side pipe ends are close-on-exec so other children never inherit them. */
+int cbm_subprocess_spawn_piped(const cbm_proc_opts_t *opts, cbm_proc_pipe_t *h);
+
+/* Block until h->from_child has data or was closed by the child, or until
+ * timeout_ms elapses. Returns 1 readable/closed, 0 timeout, -1 error. */
+int cbm_subprocess_wait_readable(const cbm_proc_pipe_t *h, int timeout_ms);
+
+/* Block until h->to_child can accept more bytes (or the child closed its end),
+ * or until timeout_ms elapses. Returns 1 writable/closed, 0 timeout, -1 error.
+ *
+ * h->to_child is opened NON-BLOCKING, so a caller writing a request larger than
+ * the pipe buffer (64KB on most systems) gets a short write and EAGAIN instead
+ * of blocking forever against a child that has stopped reading. Pair every
+ * partial write with this call and a deadline: a supervisor that can block
+ * indefinitely on the write side has no hard deadline at all, whatever its
+ * read-side timeout says. */
+int cbm_subprocess_wait_writable(const cbm_proc_pipe_t *h, int timeout_ms);
+
+/* Reap the child, sending SIGKILL first when `force` is set (or when it is
+ * still running after `grace_ms` without force). Closes both pipe ends and
+ * classifies the exit into *out (timed_out is reported as HANG when force).
+ * Safe to call on an already not-running handle (out becomes CLEAN/0). */
+int cbm_subprocess_reap(cbm_proc_pipe_t *h, bool force, int grace_ms, cbm_proc_result_t *out);
+
+/* Non-blocking: if the child has already exited, reap + classify it into *out
+ * and return 1 (pipes closed); 0 while it is still running; -1 on error. */
+int cbm_subprocess_poll_exit(cbm_proc_pipe_t *h, cbm_proc_result_t *out);
+
+/* Close both pipe ends without reaping (idempotent). */
+void cbm_subprocess_pipe_close(cbm_proc_pipe_t *h);
 
 /* Pure outcome classifier — exposed so the platform-specific exit-code mapping
  * (notably the Windows NTSTATUS crash codes) is unit-testable on every platform.

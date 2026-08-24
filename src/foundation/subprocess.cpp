@@ -25,6 +25,7 @@
 #include <crt_externs.h> /* _NSGetEnviron — macOS does not declare `environ` */
 #include <spawn.h>
 #endif
+#include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -96,6 +97,16 @@ const char *cbm_proc_outcome_str(cbm_proc_outcome_t o) {
  * A partial (non-newline-terminated) final line is left buffered: *tail_pos is
  * not advanced past it, so it is re-read once completed. Returns true if any
  * complete line was consumed (i.e. there was progress). */
+/* Effective reap-loop sleep cap: the caller's poll_cap_ms, or the default when
+ * unset. Clamped to at least 1ms so a zero-length nanosleep cannot busy-spin. */
+static int cbm_proc_poll_cap_ms(const cbm_proc_opts_t *opts) {
+    int cap = opts ? opts->poll_cap_ms : 0;
+    if (cap <= 0) {
+        cap = CBM_PROC_POLL_CAP_DEFAULT_MS;
+    }
+    return cap;
+}
+
 static bool cbm_tail_log(const char *log_file, long *tail_pos, cbm_proc_log_cb cb, void *ud) {
     if (!log_file) {
         return false;
@@ -294,8 +305,9 @@ static int cbm_run_win(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     uint64_t started_at = cbm_now_ms();
     uint64_t last_activity = started_at;
     bool timed_out = false;
+    const DWORD wait_slice_ms = (DWORD)cbm_proc_poll_cap_ms(opts);
     for (;;) {
-        DWORD w = WaitForSingleObject(pi.hProcess, 200);
+        DWORD w = WaitForSingleObject(pi.hProcess, wait_slice_ms);
         if (cbm_tail_log(opts->log_file, &tail_pos, opts->on_log_line, opts->log_ud)) {
             last_activity = cbm_now_ms();
         }
@@ -701,6 +713,12 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     uint64_t last_activity = cbm_now_ms();
     bool timed_out = false;
     long poll_delay_ns = 1000000L;
+    /* The sleep between waitpid probes doubles from 1ms up to this cap. With the
+     * old fixed 100ms cap a child that finished at 70ms was only reaped at
+     * 127ms, and the client saw every tool call quantized to 39/145/250/461ms
+     * steps (cumulative sleeps 31/127/227/427 + spawn). Callers that expect a
+     * short-lived child pass a small cap so the exit is noticed promptly. */
+    const long poll_cap_ns = (long)cbm_proc_poll_cap_ms(opts) * 1000000L;
     int wstatus = 0;
     for (;;) {
         pid_t wr;
@@ -730,10 +748,10 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         }
         struct timespec ts = {0, poll_delay_ns};
         cbm_nanosleep(&ts, NULL);
-        if (poll_delay_ns < 100000000L) {
+        if (poll_delay_ns < poll_cap_ns) {
             poll_delay_ns *= 2;
-            if (poll_delay_ns > 100000000L) {
-                poll_delay_ns = 100000000L;
+            if (poll_delay_ns > poll_cap_ns) {
+                poll_delay_ns = poll_cap_ns;
             }
         }
     }
@@ -777,3 +795,367 @@ int cbm_subprocess_run(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
     return cbm_run_posix(opts, out);
 #endif
 }
+
+/* ── Piped, long-lived child (see subprocess.h) ───────────────────── */
+#ifdef _WIN32
+
+int cbm_subprocess_spawn_piped(const cbm_proc_opts_t *opts, cbm_proc_pipe_t *h) {
+    (void)opts;
+    if (h) {
+        h->pid = -1;
+        h->to_child = -1;
+        h->from_child = -1;
+    }
+    return -1; /* not implemented on Windows — callers use cbm_subprocess_run */
+}
+
+int cbm_subprocess_wait_readable(const cbm_proc_pipe_t *h, int timeout_ms) {
+    (void)h;
+    (void)timeout_ms;
+    return -1;
+}
+
+int cbm_subprocess_wait_writable(const cbm_proc_pipe_t *h, int timeout_ms) {
+    (void)h;
+    (void)timeout_ms;
+    return -1;
+}
+
+int cbm_subprocess_reap(cbm_proc_pipe_t *h, bool force, int grace_ms, cbm_proc_result_t *out) {
+    (void)h;
+    (void)force;
+    (void)grace_ms;
+    if (out) {
+        out->outcome = CBM_PROC_CLEAN;
+        out->exit_code = 0;
+        out->term_signal = 0;
+    }
+    return 0;
+}
+
+int cbm_subprocess_poll_exit(cbm_proc_pipe_t *h, cbm_proc_result_t *out) {
+    (void)h;
+    (void)out;
+    return -1;
+}
+
+void cbm_subprocess_pipe_close(cbm_proc_pipe_t *h) {
+    (void)h;
+}
+
+#else /* POSIX */
+
+static void cbm_pipe_reset(cbm_proc_pipe_t *h) {
+    h->pid = -1;
+    h->to_child = -1;
+    h->from_child = -1;
+}
+
+void cbm_subprocess_pipe_close(cbm_proc_pipe_t *h) {
+    if (!h) {
+        return;
+    }
+    if (h->to_child >= 0) {
+        (void)close(h->to_child);
+        h->to_child = -1;
+    }
+    if (h->from_child >= 0) {
+        (void)close(h->from_child);
+        h->from_child = -1;
+    }
+}
+
+/* Child side of the fork path: wire the pipe ends to stdin/stdout, drop the
+ * parent's copies, exec. stderr is left alone so the worker's log lines land
+ * next to the parent's. */
+static void cbm_posix_child_exec_piped(const cbm_proc_opts_t *opts, int child_in, int child_out) {
+    const char *bin = opts->bin;
+    const char *const default_argv[] = {bin, NULL};
+    const char *const *argv = opts->argv ? opts->argv : default_argv;
+    if (child_in != STDIN_FILENO) {
+        (void)dup2(child_in, STDIN_FILENO);
+        (void)close(child_in);
+    }
+    if (child_out != STDOUT_FILENO) {
+        (void)dup2(child_out, STDOUT_FILENO);
+        (void)close(child_out);
+    }
+    execv(bin, (char *const *)argv);
+    _exit(127); /* exec failed */
+}
+
+#ifdef __APPLE__
+/* posix_spawn twin of cbm_posix_spawn_apple for the piped case. Same return
+ * contract: 0 spawned, 1 exec-class failure (caller falls back to fork so the
+ * child reports 127 like the one-shot path), CBM_SPAWN_RETRY on EAGAIN/ENOMEM,
+ * -1 otherwise. */
+static int cbm_posix_spawn_piped_apple(const cbm_proc_opts_t *opts, int child_in, int child_out,
+                                       pid_t *pid_out) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (cbm_spawn_eagain_injected()) {
+        return CBM_SPAWN_RETRY;
+    }
+#endif
+    const char *bin = opts->bin;
+    const char *const default_argv[] = {bin, NULL};
+    const char *const *argv = opts->argv ? opts->argv : default_argv;
+
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attr;
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        return -1;
+    }
+    if (posix_spawnattr_init(&attr) != 0) {
+        (void)posix_spawn_file_actions_destroy(&actions);
+        return -1;
+    }
+    sigset_t empty_mask;
+    sigset_t all_signals;
+    (void)sigemptyset(&empty_mask);
+    (void)sigfillset(&all_signals);
+    short flags = (short)(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+    bool configured = posix_spawnattr_setflags(&attr, flags) == 0 &&
+                      posix_spawnattr_setsigmask(&attr, &empty_mask) == 0 &&
+                      posix_spawnattr_setsigdefault(&attr, &all_signals) == 0 &&
+                      posix_spawn_file_actions_adddup2(&actions, child_in, STDIN_FILENO) == 0 &&
+                      posix_spawn_file_actions_adddup2(&actions, child_out, STDOUT_FILENO) == 0 &&
+                      posix_spawn_file_actions_addclose(&actions, child_in) == 0 &&
+                      posix_spawn_file_actions_addclose(&actions, child_out) == 0;
+    pid_t pid = -1;
+    int rc = configured
+                 ? posix_spawn(&pid, bin, &actions, &attr, (char *const *)argv, *_NSGetEnviron())
+                 : -1;
+    (void)posix_spawn_file_actions_destroy(&actions);
+    (void)posix_spawnattr_destroy(&attr);
+    if (configured && rc == 0 && pid > 0) {
+        *pid_out = pid;
+        return 0;
+    }
+    if (configured && (rc == ENOENT || rc == EACCES || rc == ENOEXEC || rc == EISDIR ||
+                       rc == ELOOP || rc == ENAMETOOLONG || rc == ENOTDIR)) {
+        return 1;
+    }
+    if (configured && (rc == EAGAIN || rc == ENOMEM)) {
+        return CBM_SPAWN_RETRY;
+    }
+    return -1;
+}
+#endif
+
+int cbm_subprocess_spawn_piped(const cbm_proc_opts_t *opts, cbm_proc_pipe_t *h) {
+    if (!h) {
+        return -1;
+    }
+    cbm_pipe_reset(h);
+    if (!opts || !opts->bin) {
+        return -1;
+    }
+    int in_pipe[2];  /* parent -> child stdin */
+    int out_pipe[2]; /* child stdout -> parent */
+    if (pipe(in_pipe) != 0) {
+        return -1;
+    }
+    if (pipe(out_pipe) != 0) {
+        (void)close(in_pipe[0]);
+        (void)close(in_pipe[1]);
+        return -1;
+    }
+    /* The parent's ends must not leak into any other child: an index worker
+     * holding a copy of the write end would keep the tool server's stdin open
+     * after the parent died, so it would never see EOF. */
+    (void)fcntl(in_pipe[1], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
+
+    uint64_t started_at = cbm_now_ms();
+    pid_t pid = -1;
+#ifdef __APPLE__
+    int spawn_rc = cbm_posix_spawn_piped_apple(opts, in_pipe[0], out_pipe[1], &pid);
+    for (int attempt = 0; spawn_rc == CBM_SPAWN_RETRY && attempt < CBM_SPAWN_RETRY_ATTEMPTS;
+         attempt++) {
+        if (!cbm_spawn_backoff_within_budget(attempt, opts, started_at)) {
+            break;
+        }
+        spawn_rc = cbm_posix_spawn_piped_apple(opts, in_pipe[0], out_pipe[1], &pid);
+    }
+    if (spawn_rc == CBM_SPAWN_RETRY) {
+        spawn_rc = -1;
+    }
+    if (spawn_rc > 0) { /* exec-class failure: reproduce the fork+exec 127 */
+        pid = cbm_fork_with_retry(opts, started_at);
+        if (pid == 0) {
+            cbm_posix_child_exec_piped(opts, in_pipe[0], out_pipe[1]);
+        }
+    } else if (spawn_rc < 0) {
+        pid = -1;
+    }
+#else
+    pid = cbm_fork_with_retry(opts, started_at);
+    if (pid == 0) {
+        cbm_posix_child_exec_piped(opts, in_pipe[0], out_pipe[1]);
+    }
+#endif
+    (void)close(in_pipe[0]);
+    (void)close(out_pipe[1]);
+    if (pid <= 0) {
+        (void)close(in_pipe[1]);
+        (void)close(out_pipe[0]);
+        return -1;
+    }
+    h->pid = (int)pid;
+    h->to_child = in_pipe[1];
+    h->from_child = out_pipe[0];
+    /* Non-blocking write end: a request bigger than the pipe buffer must not
+     * park the parent in write() when the child has stopped reading. Callers
+     * drive it with cbm_subprocess_wait_writable and their own deadline. The
+     * CHILD's end stays blocking — it was dup2'd before this and is a separate
+     * open file description. */
+    int wflags = fcntl(h->to_child, F_GETFL, 0);
+    if (wflags >= 0) {
+        (void)fcntl(h->to_child, F_SETFL, wflags | O_NONBLOCK);
+    }
+    return 0;
+}
+
+int cbm_subprocess_wait_readable(const cbm_proc_pipe_t *h, int timeout_ms) {
+    if (!h || h->from_child < 0) {
+        return -1;
+    }
+    struct pollfd pfd;
+    pfd.fd = h->from_child;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    for (;;) {
+        int pr = poll(&pfd, 1, timeout_ms < 0 ? -1 : timeout_ms);
+        if (pr < 0 && errno == EINTR) {
+            continue;
+        }
+        if (pr < 0) {
+            return -1;
+        }
+        if (pr == 0) {
+            return 0;
+        }
+        return 1; /* POLLIN, POLLHUP or POLLERR: a read will not block */
+    }
+}
+
+int cbm_subprocess_wait_writable(const cbm_proc_pipe_t *h, int timeout_ms) {
+    if (!h || h->to_child < 0) {
+        return -1;
+    }
+    struct pollfd pfd;
+    pfd.fd = h->to_child;
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+    for (;;) {
+        int pr = poll(&pfd, 1, timeout_ms < 0 ? -1 : timeout_ms);
+        if (pr < 0 && errno == EINTR) {
+            continue;
+        }
+        if (pr < 0) {
+            return -1;
+        }
+        if (pr == 0) {
+            return 0;
+        }
+        return 1; /* POLLOUT, or POLLERR/POLLHUP: the write will not block */
+    }
+}
+
+static void cbm_pipe_classify(int wstatus, bool forced, cbm_proc_result_t *out) {
+    if (WIFEXITED(wstatus)) {
+        out->exit_code = WEXITSTATUS(wstatus);
+        out->term_signal = 0;
+        out->outcome = cbm_proc_classify(true, out->exit_code, 0, forced);
+    } else if (WIFSIGNALED(wstatus)) {
+        out->exit_code = -1;
+        out->term_signal = WTERMSIG(wstatus);
+        out->outcome = cbm_proc_classify(false, -1, out->term_signal, forced);
+    } else {
+        out->exit_code = -1;
+        out->term_signal = 0;
+        out->outcome = forced ? CBM_PROC_HANG : CBM_PROC_KILLED;
+    }
+}
+
+int cbm_subprocess_poll_exit(cbm_proc_pipe_t *h, cbm_proc_result_t *out) {
+    if (!h || h->pid <= 0) {
+        return -1;
+    }
+    int wstatus = 0;
+    pid_t wr;
+    do {
+        wr = waitpid((pid_t)h->pid, &wstatus, WNOHANG);
+    } while (wr < 0 && errno == EINTR);
+    if (wr < 0) {
+        return -1;
+    }
+    if (wr == 0) {
+        return 0;
+    }
+    if (out) {
+        cbm_pipe_classify(wstatus, false, out);
+    }
+    cbm_subprocess_pipe_close(h);
+    h->pid = -1;
+    return 1;
+}
+
+int cbm_subprocess_reap(cbm_proc_pipe_t *h, bool force, int grace_ms, cbm_proc_result_t *out) {
+    cbm_proc_result_t local;
+    if (!out) {
+        out = &local;
+    }
+    out->outcome = CBM_PROC_CLEAN;
+    out->exit_code = 0;
+    out->term_signal = 0;
+    if (!h) {
+        return -1;
+    }
+    /* Closing stdin first gives a healthy child the EOF it exits on. */
+    cbm_subprocess_pipe_close(h);
+    if (h->pid <= 0) {
+        return 0;
+    }
+    pid_t pid = (pid_t)h->pid;
+    int wstatus = 0;
+    bool forced = force;
+    if (force) {
+        (void)kill(pid, SIGKILL);
+    } else {
+        uint64_t deadline = cbm_now_ms() + (uint64_t)(grace_ms > 0 ? grace_ms : 0);
+        for (;;) {
+            pid_t wr;
+            do {
+                wr = waitpid(pid, &wstatus, WNOHANG);
+            } while (wr < 0 && errno == EINTR);
+            if (wr == pid) {
+                cbm_pipe_classify(wstatus, false, out);
+                h->pid = -1;
+                return 0;
+            }
+            if (wr < 0 || cbm_now_ms() >= deadline) {
+                (void)kill(pid, SIGKILL);
+                forced = true;
+                break;
+            }
+            struct timespec ts = {0, 2000000L}; /* 2ms */
+            cbm_nanosleep(&ts, NULL);
+        }
+    }
+    pid_t wr;
+    do {
+        wr = waitpid(pid, &wstatus, 0);
+    } while (wr < 0 && errno == EINTR);
+    h->pid = -1;
+    if (wr != pid) {
+        out->outcome = CBM_PROC_KILLED;
+        out->exit_code = -1;
+        out->term_signal = 0;
+        return -1;
+    }
+    cbm_pipe_classify(wstatus, forced, out);
+    return 0;
+}
+
+#endif /* _WIN32 */
