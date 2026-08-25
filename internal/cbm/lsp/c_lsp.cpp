@@ -22,6 +22,20 @@ static void c_process_namespace(CLSPContext* ctx, TSNode ns_node);
 static void c_process_class(CLSPContext* ctx, TSNode class_node);
 static void c_process_body_child(CLSPContext* ctx, TSNode child);
 static const char* type_to_qn(const CBMType* t);
+
+// Structured-binding decomposition indexes a registered type's field list by
+// position. The list is NULL-terminated and carries no count, so walk it and
+// stop at the terminator. Reading past it returned whatever the arena placed
+// next -- usually the CBMType of the last field, whose leading `kind` word was
+// then bound as a type pointer and crashed the next scope lookup (seen on
+// llvm-project: SIGSEGV at address 0x9 in c_resolve_name_to_type).
+static const CBMType* c_field_type_at(const CBMRegisteredType* rt, int idx) {
+    if (!rt || !rt->field_types || idx < 0) return NULL;
+    for (int i = 0; i < idx; i++) {
+        if (rt->field_names ? !rt->field_names[i] : !rt->field_types[i]) return NULL;
+    }
+    return rt->field_types[idx];
+}
 const CBMType* c_simplify_type(CLSPContext* ctx, const CBMType* t, bool unwrap_pointer);
 const CBMType* c_eval_expr_type(CLSPContext* ctx, TSNode node);
 
@@ -2713,8 +2727,8 @@ void c_process_statement(CLSPContext* ctx, TSNode node) {
                                             if (!rt && rhs_qn && ctx->module_qn)
                                                 rt = cbm_registry_lookup_type(ctx->registry,
                                                     cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, rhs_qn));
-                                            if (rt && rt->field_types && rt->field_types[binding_idx])
-                                                elem_type = rt->field_types[binding_idx];
+                                            const CBMType* ft = c_field_type_at(rt, binding_idx);
+                                            if (ft) elem_type = ft;
                                         }
                                         cbm_scope_bind(ctx->current_scope, bname, elem_type);
                                         binding_idx++;
@@ -2790,9 +2804,8 @@ void c_process_statement(CLSPContext* ctx, TSNode node) {
                                     if (!rt && rhs_qn && ctx->module_qn)
                                         rt = cbm_registry_lookup_type(ctx->registry,
                                             cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, rhs_qn));
-                                    if (rt && rt->field_types && rt->field_types[binding_idx]) {
-                                        elem_type = rt->field_types[binding_idx];
-                                    }
+                                    const CBMType* ft = c_field_type_at(rt, binding_idx);
+                                    if (ft) elem_type = ft;
                                 }
                                 cbm_scope_bind(ctx->current_scope, bname, elem_type);
                                 binding_idx++;
@@ -3166,8 +3179,8 @@ void c_process_statement(CLSPContext* ctx, TSNode node) {
                             if (!rt && eq && ctx->module_qn)
                                 rt = cbm_registry_lookup_type(ctx->registry,
                                     cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, eq));
-                            if (rt && rt->field_types && rt->field_types[binding_idx])
-                                bt = rt->field_types[binding_idx];
+                            const CBMType* ft = c_field_type_at(rt, binding_idx);
+                            if (ft) bt = ft;
                         }
                         cbm_scope_bind(ctx->current_scope, bname, bt);
                         binding_idx++;

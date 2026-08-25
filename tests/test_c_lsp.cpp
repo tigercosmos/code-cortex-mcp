@@ -661,6 +661,28 @@ TEST(clsp_nocrash_lambda) {
     PASS();
 }
 
+/* A structured binding with more names than the registered struct has fields
+ * indexed the NULL-terminated field list past its end. The read landed on the
+ * next arena allocation (the last field's CBMType), whose `kind` word was then
+ * bound as a type pointer; the next lookup of `c` crashed at address 0x9.
+ * Seen on llvm-project. */
+TEST(clsp_nocrash_structured_binding_excess_names) {
+    CBMFileResult *r = extract_cpp("\n"
+                                   "struct P { int x; };\n"
+                                   "struct Q { void run(); };\n"
+                                   "void test(P p, P arr[2]) {\n"
+                                   "    auto [a, b, c] = p;\n"
+                                   "    c.run();\n"
+                                   "    for (auto [k, v, w] : arr) { w.run(); }\n"
+                                   "    auto &[d, e, f] = p;\n"
+                                   "    f.run();\n"
+                                   "}\n"
+                                   "");
+    ASSERT_NOT_NULL(r);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(clsp_nocrash_nested_namespace) {
     CBMFileResult *r = extract_cpp("\n"
                                    "namespace a {\n"
@@ -15342,6 +15364,7 @@ SUITE(c_lsp) {
     RUN_TEST(clsp_nocrash_issue355_xxhash_header);
     RUN_TEST(clsp_nocrash_issue312_default_template_auto_param);
     RUN_TEST(clsp_nocrash_lambda);
+    RUN_TEST(clsp_nocrash_structured_binding_excess_names);
     RUN_TEST(clsp_nocrash_nested_namespace);
     RUN_TEST(clsp_nocrash_empty_source);
     RUN_TEST(clsp_nocrash_complex_class);

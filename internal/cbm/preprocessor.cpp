@@ -169,9 +169,12 @@ CBMPreprocessedSource *cbm_preprocess_with_map(const char *source, int source_le
 
         simplecpp::TokenList rawtokens(istr, files, files[0]);
         simplecpp::TokenList output(files);
-        simplecpp::FileDataCache filedata = simplecpp::load(rawtokens, files, dui);
+        // simplecpp reports a header it cannot open by pushing onto this list;
+        // with no list it dereferences NULL (TokenList::TokenList catch block).
+        simplecpp::OutputList diagnostics;
+        simplecpp::FileDataCache filedata = simplecpp::load(rawtokens, files, dui, &diagnostics);
 
-        simplecpp::preprocess(output, rawtokens, files, filedata, dui);
+        simplecpp::preprocess(output, rawtokens, files, filedata, dui, &diagnostics);
 
         std::string result = output.stringify();
 
