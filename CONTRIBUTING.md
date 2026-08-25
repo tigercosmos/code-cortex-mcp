@@ -62,7 +62,7 @@ src/
   discover/         File discovery with gitignore support
   watcher/          Git-based background auto-sync
   cli/              CLI subcommands (install, update, uninstall, config)
-internal/cbm/       Tree-sitter AST extraction (64 languages, vendored C grammars)
+internal/cbm/       Tree-sitter AST extraction (155 languages, vendored C grammars)
 vendored/           sqlite3, yyjson, mimalloc, xxhash
 scripts/            Build, test, lint, security audit scripts
 tests/              All C test files

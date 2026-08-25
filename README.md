@@ -1,44 +1,36 @@
-# code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Coding Agents (C++23)
+# code-cortex-mcp
 
 [![Latest release](https://img.shields.io/github/v/release/tigercosmos/code-cortex-mcp)](https://github.com/tigercosmos/code-cortex-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)](https://github.com/tigercosmos/code-cortex-mcp)
 [![CI](https://img.shields.io/github/actions/workflow/status/tigercosmos/code-cortex-mcp/dry-run.yml?label=CI)](https://github.com/tigercosmos/code-cortex-mcp/actions)
-[![Languages](https://img.shields.io/badge/languages-155-orange)](#language-support-155-languages)
+[![Languages](https://img.shields.io/badge/languages-155-orange)](#language-support)
 [![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](https://github.com/tigercosmos/code-cortex-mcp/releases/latest)
 
-**code-cortex-mcp** is a fast, local-first **MCP server** ([Model Context
-Protocol](https://modelcontextprotocol.io)) that gives AI coding agents — **Claude Code,
-Codex CLI, Gemini CLI, Zed, OpenCode, Aider, VS Code**, and any other MCP client — a
-persistent **knowledge graph of your codebase**: functions, classes, call graphs, HTTP
-routes, and cross-service links, queryable in well under a millisecond. One structural
-graph query replaces dozens of grep-and-read cycles (**~120× fewer tokens** on typical
-code exploration), and the whole thing ships as a **single static binary** with zero
-runtime dependencies.
+**code-cortex-mcp** is a local [MCP](https://modelcontextprotocol.io) server for AI coding
+agents. It builds a knowledge graph of your codebase: functions, classes, call graphs, HTTP
+routes, and cross-service links. One graph query replaces dozens of grep-and-read cycles.
+It ships as a single static binary with no runtime dependencies.
 
-It full-indexes an average repository in milliseconds and the **Linux kernel (28M LOC,
-75K files) in ~3 minutes**, using [tree-sitter](https://tree-sitter.github.io/tree-sitter/)
-AST parsing across **155 languages** with LSP-style hybrid type resolution for Go, C, C++,
-TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP, and C#.
+It parses 155 languages with [tree-sitter](https://tree-sitter.github.io/tree-sitter/)
+and resolves types for Go, C, C++, TypeScript/JavaScript, Java, Kotlin, Rust, Python, PHP,
+and C#. It indexes the Linux kernel (28M LOC) in about 3 minutes. It indexes a repository
+3.2× to 5.9× faster than [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp),
+the project it forked from. See
+[Compared to codebase-memory-mcp](#compared-to-codebase-memory-mcp).
 
 - [Quick Start](#quick-start)
-- [Why code-cortex-mcp?](#why-code-cortex-mcp)
-- [How It Works](#how-it-works)
 - [MCP Tools](#mcp-tools)
 - [Features](#features)
-- [Performance Benchmarks](#performance-benchmarks)
-- [Language Support](#language-support-155-languages)
-- [Graph Data Model & Cypher Queries](#graph-data-model--cypher-queries)
-- [Team-Shared Graph Artifact](#team-shared-graph-artifact)
+- [Performance](#performance)
+- [Language Support](#language-support)
+- [Graph Data Model](#graph-data-model)
 - [Configuration](#configuration)
 - [Build from Source](#build-from-source)
-- [What This Fork Adds](#what-this-fork-adds)
-- [Credits, Citation & License](#credits-citation--license)
+- [Compared to codebase-memory-mcp](#compared-to-codebase-memory-mcp)
+- [Credits & License](#credits--license)
 
 ## Quick Start
-
-Install the latest release binary and auto-configure every MCP coding agent on your
-machine in one step:
 
 ```bash
 # macOS / Linux
@@ -51,55 +43,32 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/tigercosmos/code-cortex
 .\install.ps1
 ```
 
-The installer detects **Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Aider,
-VS Code**, and more, and wires up MCP server entries, instruction files, and
-non-blocking pre-tool hooks. Restart your agent and say **“Index this project.”**
+The installer configures Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Aider, VS Code,
+and other MCP clients: server entries, instruction files, and pre-tool hooks. Restart your
+agent and say "Index this project."
 
-Useful subcommands: `config set auto_index true` (index on session start), `update`,
-`uninstall`.
+Other subcommands: `config set auto_index true`, `update`, `uninstall`.
 
-## Why code-cortex-mcp?
-
-- **No LLM, no API keys** — it is the structural backend; your MCP agent (Claude Code,
-  etc.) is the language layer. One graph query replaces dozens of grep/read cycles
-  (~120× fewer tokens on typical exploration).
-- **Single static binary** — 155 tree-sitter grammars compiled in. No Docker, no Node,
-  no Python, no runtime dependencies.
-- **Everything local & private** — SQLite-backed, persists to
-  `~/.cache/code-cortex-mcp/`. Your code never leaves the machine.
-- **Plug and play across agents** — `install` auto-detects and configures every
-  supported MCP client in one pass.
-
-## How It Works
-
-```
-You:    "what calls ProcessOrder?"
-Agent:  trace_path(function_name="ProcessOrder", mode="calls")
-Engine: runs the graph traversal, returns structured results
-Agent:  explains the call chain in plain English
-```
-
-The engine indexes in a RAM-first pipeline (LZ4-compressed reads, in-memory SQLite,
-single dump at the end; memory is released afterward), then serves queries from a
-persistent SQLite graph store.
+It needs no LLM and no API key. The server is the structural backend; your agent is the
+language layer. All data stays in `~/.cache/code-cortex-mcp/` as SQLite.
 
 ## MCP Tools
 
 | Tool | Purpose |
 |------|---------|
-| `index_repository` / `index_status` / `list_projects` / `delete_project` | Index and manage projects (auto-sync keeps them fresh) |
-| `search_graph` | Structured search by label, name/file pattern, degree filters |
-| `trace_path` | Call-chain traversal (callers / callees / data flow / cross-service) |
+| `index_repository`, `index_status`, `list_projects`, `delete_project` | Index and manage projects |
+| `search_graph` | Search by label, name pattern, file pattern, or degree |
+| `trace_path` | Callers, callees, data flow, and cross-service chains |
 | `query_graph` | Read-only Cypher-subset queries |
-| `get_code_snippet` | Source for a symbol by qualified name |
-| `get_architecture` | Languages, packages, routes, hotspots, clusters, ADRs in one call; opt-in `cycles` aspect reports circular call dependencies |
-| `get_graph_schema` | Node/edge counts and property shapes (run first) |
+| `get_code_snippet` | Source of a symbol by qualified name |
+| `get_architecture` | Languages, packages, routes, hotspots, clusters, cycles, ADRs |
+| `get_graph_schema` | Node and edge counts, property shapes |
 | `search_code` | Graph-augmented grep over indexed files |
-| `detect_changes` | Map a git diff to its blast radius — one multi-source traversal to the transitive impact set, plus a module rollup |
+| `detect_changes` | Blast radius of a git diff |
 | `manage_adr` | Architecture Decision Records (CRUD) |
-| `ingest_traces` | Accept runtime traces (stub — counts spans; edge creation not yet implemented) |
+| `ingest_traces` | Runtime traces (stub: counts spans only) |
 
-Every tool is also available from the CLI:
+Every tool also runs from the CLI:
 
 ```bash
 code-cortex-mcp cli search_graph '{"name_pattern": ".*Handler.*", "label": "Function"}'
@@ -108,41 +77,26 @@ code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LI
 
 ## Features
 
-- **Call graph & static analysis** — import-aware, type-inferred call graph; dead-code
-  detection; Leiden community clusters; circular-dependency detection (SCC condensation
-  over the call graph); complexity / bottleneck metrics; git-diff blast-radius analysis;
-  Cypher-like queries.
-- **Deterministic indexing** — re-indexing the same tree produces a byte-identical graph
-  (nodes, labels, edges, and edge directions), independent of worker scheduling. Diff two
-  snapshots and only real code changes show up.
-- **Crash-isolated indexing** — an index supervisor contains per-file crashes and hangs so
-  one bad file cannot take down the whole index run.
-- **Preprocessor-aware C/C++** — a second pass over preprocessed source recovers definitions
-  whose braces are split across `#ifdef`/`#else` branches (unparseable in raw form) and
-  remaps them to their original lines, verifying every line belongs to the main file. Headers
-  get their own `File` nodes, `#include` resolves to the header, and benign function-like
-  macro calls are not reported as parse gaps.
-- **Code search** — semantic similarity edges (algorithmic random-indexing embeddings, no
-  API key), BM25 full-text (FTS5, camelCase/snake_case aware), and structural/code search.
-- **Cross-service linking** — HTTP route ↔ call-site matching; gRPC/GraphQL/tRPC detection;
-  channel detection (`EMITS`/`LISTENS_ON`) for Socket.IO, EventEmitter, and pub-sub.
-- **Cross-repo** — `CROSS_*` edges and a combined architecture view across repos in one store.
-- **Infrastructure-as-code** — Dockerfiles, Kubernetes manifests, and Kustomize overlays as
-  first-class graph nodes.
-- **Selected edge types** — `CALLS`, `IMPORTS`, `DEFINES`, `IMPLEMENTS`, `INHERITS`,
-  `OVERRIDE`, `HTTP_CALLS`, `ASYNC_CALLS`, `DATA_FLOWS`, `SIMILAR_TO` (MinHash/LSH),
-  `SEMANTICALLY_RELATED`. `IMPLEMENTS` vs `INHERITS` is decided by the resolved base's label
-  (an `Interface` target means `implements`), and `OVERRIDE` links a method to the base
-  method it redefines — for both explicit `implements`/`extends` languages and Go's implicit
-  interface satisfaction.
-- **Identical graphs from either pipeline** — the sequential and parallel (>50 files) paths
-  resolve calls and base-class relations through the same decision points, so a project's
-  graph does not depend on which path its size selected.
+- **Static analysis** — import-aware, type-inferred call graph; dead code; Leiden clusters;
+  circular dependencies; complexity metrics; git-diff blast radius.
+- **Deterministic indexing** — the same tree always produces a byte-identical graph.
+- **Crash isolation** — a supervisor contains per-file crashes and hangs during indexing,
+  and a persistent worker process answers tool calls with a per-tool deadline.
+- **Preprocessor-aware C/C++** — recovers definitions split across `#ifdef` branches,
+  and gives headers their own `File` nodes with resolved `#include` edges.
+- **Code search** — BM25 full text (FTS5), structural search, and semantic similarity
+  edges from algorithmic embeddings (no API key).
+- **Cross-service links** — HTTP route ↔ call site; gRPC, GraphQL, tRPC; Socket.IO and
+  pub-sub channels (`EMITS` / `LISTENS_ON`); `CROSS_*` edges across repositories.
+- **Infrastructure as code** — Dockerfiles, Kubernetes manifests, and Kustomize overlays
+  as graph nodes.
+- **Team artifact** — commit `.code-cortex/graph.db.zst` (a zstd snapshot, about 10:1)
+  and teammates import it instead of a full reindex. A `.gitattributes` `merge=ours` rule
+  prevents merge conflicts. Gitignore `.code-cortex/` to opt out.
 
-## Performance Benchmarks
+## Performance
 
-Benchmarked on Apple Silicon (M-series), release build. Full-index rows were re-measured on
-v0.12.0 against each project's current `main`:
+Apple Silicon, release build.
 
 | Operation | Time |
 |-----------|------|
@@ -150,93 +104,42 @@ v0.12.0 against each project's current `main`:
 | Django full index (Python, 55K nodes, 371K edges) | ~4 s |
 | Redis full index (C, 38K nodes, 148K edges) | ~2.7 s |
 | etcd full index (Go, 15K nodes, 94K edges) | ~1.4 s |
-| Linux kernel full index (28M LOC, 75K files → 2.1M nodes) | ~3 min |
-| Cypher query / trace path | <1–10 ms |
-| Dead-code detection (full graph) | ~150 ms |
-
-Edge counts rose substantially for the C/C++ projects in v0.12.0 (RocksDB 218K → 346K, Redis
-95K → 148K) as the header `File` nodes, `#include` targets, recovered `#ifdef`-split
-definitions, and restored function-pointer/destructor call resolution all landed. Node counts
-are essentially unchanged. These are not strict before/after deltas — each project is indexed
-at a newer commit than the earlier figures were — but the direction is the corrected graph, not
-drift. The Linux kernel row has not been re-measured on v0.12.0.
-
-### Tool-call latency
-
-Query tools answer from a **persistent worker process**. The MCP server spawns one
-`cli --tool-server` child on the first tool call, reuses it for every later call, and reaps it
-at shutdown. This keeps the crash and hang isolation of the supervised design — a wedged or
-crashing tool still cannot take the server down, and per-tool deadlines still apply — without
-paying a process exec, a database open, and a `PRAGMA quick_check` on every single call. The
-worker drops its cached store when the `.db` file behind it is replaced, so a re-index is
-picked up on the next call.
-
-A **store metadata memo** in the cache directory (`_config.db`) records each database's
-internal project name, root path, counts, and last integrity verdict, keyed on the file's
-`(size, mtime)`. Any process that starts cold — a hook invocation, a fresh worker — reads the
-memo instead of re-verifying. It is also what keeps a large cache directory cheap: resolving an
-unknown project name used to open every `.db` file in the cache, and now only opens files whose
-`(size, mtime)` changed since they were last seen.
-
-Warm medians on an Apple Silicon release build, against a 54 MB graph (13 K nodes / 49 K edges)
-and a 537-database cache directory:
-
-| Call | Time |
-|------|------|
-| `search_graph`, `trace_path` | 0.1–0.5 ms |
-| `get_code_snippet` | ~2 ms |
-| `list_projects` (537 cached databases) | ~2 ms |
-| `index_status` | ~59 ms |
-| `get_architecture`, `get_graph_schema` | 84–91 ms |
-| MCP `initialize` | ~4 ms |
+| Linux kernel full index (28M LOC, 2.1M nodes) | ~3 min |
+| `search_graph`, `trace_path` (warm) | 0.1–0.5 ms |
+| `get_code_snippet` (warm) | ~2 ms |
 | PreToolUse hook (`Grep` or `Read`) | ~10 ms |
 
-Environment kill switches, in order of scope:
+Two mechanisms keep calls fast. A persistent worker process serves tool calls, so each call
+skips a process exec and a database open. A memo in `_config.db` records each database's
+integrity verdict against its `(size, mtime)`, so a cold process such as a hook does not
+verify databases again.
 
 | Variable | Effect |
 |----------|--------|
-| `CBM_TOOL_SERVER=0` | Fall back to one worker process per tool call (the Windows default; pipe support is not ported yet). |
-| `CBM_TOOL_SUPERVISOR=0` | Run tools in-process — no worker, no isolation. |
-| `CBM_STORE_META=0` | Disable the on-disk memo; every lookup re-verifies. |
+| `CBM_TOOL_SERVER=0` | One worker process per tool call (the Windows default) |
+| `CBM_TOOL_SUPERVISOR=0` | Run tools in-process, without isolation |
+| `CBM_STORE_META=0` | Disable the memo; every lookup verifies again |
 
-## Language Support (155 Languages)
+## Language Support
 
-155 languages via vendored tree-sitter grammars. Strongest call/type resolution (LSP-style
-hybrid) for **Go, C, C++, TypeScript/JavaScript/JSX/TSX, Java, Kotlin, Rust, Python, PHP,
-C#**. Benchmarked tiers:
+155 languages via vendored tree-sitter grammars. Benchmarked tiers:
 
 - **Excellent (≥90%)** — C, C++, Lua, Kotlin, Perl, Objective-C, Groovy, Bash, Zig, Swift,
   CSS, YAML, TOML, HTML, SCSS, HCL, Dockerfile
 - **Good (75–89%)** — Python, TypeScript, TSX, Go, Rust, Java, R, Dart, JavaScript, Erlang,
   Elixir, Scala, Ruby, PHP, C#, SQL
 
-Plus ~110 more (config, data, and niche languages) parsed structurally.
+The other 110 languages get structural parsing only.
 
-## Graph Data Model & Cypher Queries
+## Graph Data Model
 
 - **Nodes** — `Project`, `Package`, `Folder`, `File`, `Module`, `Class`, `Function`, `Method`,
   `Interface`, `Enum`, `Type`, `Route`, `Resource`
-- **Qualified names** — `get_code_snippet` uses `<project>.<path_parts>.<name>`; discover them
-  with `search_graph` first.
-- **Cypher subset** — `MATCH` / `OPTIONAL MATCH` (labels, relationship types, variable-length
-  paths), `WHERE` (comparisons / regex / `CONTAINS` / `EXISTS{}`), `WITH` (+ `DISTINCT`),
-  `RETURN` (+ `COUNT`/`COUNT(DISTINCT)` / aggregates), `ORDER BY`, `LIMIT`. Read-only; no
-  mutations. Queries are bounded by a 100k-row ceiling and a 30 s wall-clock deadline, so an
-  unbounded `OPTIONAL MATCH` fails with an actionable error instead of hanging.
-
-## Team-Shared Graph Artifact
-
-Commit `.code-cortex/graph.db.zst` (a zstd-compressed graph snapshot, typically 8–13:1)
-and teammates skip the full reindex: on first run the artifact is imported and incremental
-indexing fills in their local diff. A `.gitattributes` `merge=ours` rule is auto-created so the
-binary artifact never causes merge conflicts. Optional — gitignore `.code-cortex/` to opt out.
-
-Both export quality levels snapshot the store with `VACUUM INTO` before compressing. The store
-runs in WAL mode, so copying its raw bytes could miss committed rows still in the `-wal` or
-capture a mid-checkpoint torn page — an artifact that imported as a corrupt cache. The fast
-path therefore pays a full consistent copy; correctness beats speed for something teammates
-pull. Import additionally runs `PRAGMA quick_check` and refuses a page-corrupted artifact
-outright rather than installing it.
+- **Edges** — `CALLS`, `IMPORTS`, `DEFINES`, `IMPLEMENTS`, `INHERITS`, `OVERRIDE`,
+  `HTTP_CALLS`, `ASYNC_CALLS`, `DATA_FLOWS`, `SIMILAR_TO`, `SEMANTICALLY_RELATED`, and more
+- **Qualified names** — `<project>.<path_parts>.<name>`; find them with `search_graph`.
+- **Cypher subset** — `MATCH` / `OPTIONAL MATCH`, `WHERE`, `WITH`, `RETURN` with aggregates,
+  `ORDER BY`, `LIMIT`. Read-only. Queries stop at 100k rows or 30 s.
 
 ## Configuration
 
@@ -246,68 +149,143 @@ code-cortex-mcp config set auto_index true        # index on MCP session start
 code-cortex-mcp config set auto_index_limit 50000 # max files for auto-index
 ```
 
-- **Index storage** — `~/.cache/code-cortex-mcp/` (override with `CBM_CACHE_DIR`). WAL-mode
-  SQLite, ACID-safe across restarts. Reset with `rm -rf ~/.cache/code-cortex-mcp/`.
-- **Indexing parallelism** — auto-detected (cgroup-aware on Linux); override with `CBM_WORKERS`
-  (range 1–256, invalid values ignored). Useful in containers where the host CPU count differs
-  from the effective quota.
-- **Ignore rules** — hardcoded patterns → `.gitignore` hierarchy → `.cbmignore` (gitignore
-  syntax). Symlinks always skipped.
-- **Custom extensions** — map extra extensions to languages via `.code-cortex.json`
-  (`{"extra_extensions": {".mjs": "javascript"}}`).
+- **Storage** — `~/.cache/code-cortex-mcp/`; override with `CBM_CACHE_DIR`.
+- **Parallelism** — auto-detected (cgroup-aware); override with `CBM_WORKERS` (1–256).
+- **Ignore rules** — `.gitignore`, then `.cbmignore` (gitignore syntax). The indexer skips symlinks.
+- **Custom extensions** — `.code-cortex.json`: `{"extra_extensions": {".mjs": "javascript"}}`.
 
 ## Build from Source
 
-The build system is **CMake** (C++23). You need a C/C++ compiler (gcc or clang) and zlib.
+Requires CMake, a C++23 compiler, and zlib.
 
 ```bash
 git clone https://github.com/tigercosmos/code-cortex-mcp.git
 cd code-cortex-mcp
-scripts/build.sh                 # production binary → build/c/code-cortex-mcp
-./build/c/code-cortex-mcp install   # configure your installed agents
+scripts/build.sh                    # → build/c/code-cortex-mcp
+./build/c/code-cortex-mcp install   # configure your agents
 ```
 
-Or build, place the binary on your `PATH`, and install the skill in one step:
+Or install the binary and the skill in one step:
 
 ```bash
-make install PREFIX=$HOME/.local # no sudo; binary → ~/.local/bin
-sudo make install                # system-wide; binary → /usr/local/bin
+make install PREFIX=$HOME/.local    # binary → ~/.local/bin
+sudo make install                   # binary → /usr/local/bin
 ```
 
-`make install` builds the binary, installs it under `$(PREFIX)/bin`, then runs the binary's own
-`install` to deploy the embedded skill. `/usr/local` needs root, so use `sudo` (the skill step
-runs as `$SUDO_USER`, landing in *your* `~/.claude`, not root's) — or set `PREFIX=$HOME/.local` to
-skip sudo.
+Run tests with `scripts/test.sh` (ASan/UBSan) and linters with `scripts/lint.sh`.
 
-Run the test suite with `scripts/test.sh` (CMake + ASan/UBSan) and the linters with
-`scripts/lint.sh`.
+## Compared to codebase-memory-mcp
 
-## What This Fork Adds
+code-cortex-mcp forked from
+**[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)** and keeps
+its on-disk graph format. It indexes faster and answers most tool calls faster.
+codebase-memory-mcp has features that code-cortex-mcp does not; the feature table names them.
 
-Beyond tracking upstream's indexing, performance, and bug-fix work, this codebase is
-maintained independently with its own direction:
+Test conditions for every number in this section:
 
-- **Modern C++23 codebase, CMake build** — the entire first-party engine is migrated from
-  C11 to C++23 (`std::unordered_map`-backed tables, RAII, standard atomics) and built with
-  CMake, while staying byte-compatible with the upstream on-disk graph format.
-- **Leaner distribution** — every release binary is ~30 MB smaller: the embedded
-  pretrained-embedding blob was removed in favor of pure algorithmic random-indexing
-  embeddings (no model weights, no API keys), and the optional web UI was retired so there
-  is exactly one binary per platform.
-- **Tighter supply chain** — no GPL-licensed vendored code, a machine-independent vendored
-  checksum audit, a stricter "no network calls in vendored code" rule, and an SBOM that
-  matches what actually ships.
-- **Release CI that proves the matrix** — build, full test suite, and end-to-end smoke
-  (install / update / uninstall, MCP handshake, signature checks, malware scans) genuinely
-  run on linux-amd64, linux-arm64, macOS-arm64, macOS-amd64, and Windows for every release.
+- **Date and machine** — 2026-08-25, Apple Silicon, macOS.
+- **Versions** — code-cortex-mcp at `7a3196c4`, codebase-memory-mcp at `010569fa`.
+- **Binaries** — each project's own `scripts/build.sh`, without the codebase-memory-mcp web UI.
+- **Cache** — one empty cache directory per engine.
 
-## Credits, Citation & License
+### Indexing speed
 
-This project was originally forked from
-**[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)** (C11),
-whose engine, design, and research it builds on — see the preprint *Codebase-Memory:
+Median of three full-index runs from an empty cache.
+
+| Repository | Language | code-cortex-mcp | codebase-memory-mcp | Ratio |
+|---|---|---|---|---|
+| Redis | C | **2.46 s** | 9.48 s | 3.9× |
+| etcd | Go | **1.31 s** | 7.74 s | 5.9× |
+| Django | Python | **4.03 s** | 12.95 s | 3.2× |
+| this repository | C++ | **2.46 s** | 9.56 s | 3.9× |
+
+Both engines build graphs of nearly the same size, so the times measure comparable work.
+
+| Repository | code-cortex-mcp (nodes / edges) | codebase-memory-mcp (nodes / edges) |
+|---|---|---|
+| Redis | 38,438 / 146,074 | 38,658 / 135,969 |
+| etcd | 14,836 / 94,615 | 15,475 / 108,103 |
+| Django | 55,458 / 371,363 | 55,461 / 344,047 |
+| this repository | 13,418 / 47,157 | 13,419 / 47,085 |
+
+Embeddings do not explain the gap. In `fast` mode, which writes no similarity or semantic
+edges, Django takes 2.9 s in code-cortex-mcp and 12.0 s in codebase-memory-mcp. The gap is
+in extraction and resolution: codebase-memory-mcp runs the `CALL_REFERENCE` and `USAGE`
+precision passes, and code-cortex-mcp carries its own resolver and pipeline optimizations.
+
+### Tool-call latency
+
+Median of 20 warm calls over MCP stdio against the indexed Django graph (55K nodes, 371K
+edges). The response column is the JSON-RPC response size.
+
+| Tool | code-cortex-mcp | Response | codebase-memory-mcp | Response |
+|---|---|---|---|---|
+| `search_graph` | **5.1 ms** | 20.4 KB | 18.2 ms | 1.8 KB |
+| `query_graph` | **1.6 ms** | 0.4 KB | 15.8 ms | 0.2 KB |
+| `list_projects` | **0.2 ms** | 0.5 KB | 13.7 ms | 1.3 KB |
+| `search_code` | **239.8 ms** | 5.6 KB | 271.3 ms | 1.5 KB |
+| `get_graph_schema` | **406.3 ms** | 10.9 KB | 480.9 ms | 11.0 KB |
+| `index_status` | 60.6 ms | 31.2 KB | **20.0 ms** | 30.1 KB |
+| `get_architecture` | 251.0 ms | 117.1 KB | **54.7 ms** | 1.7 KB |
+
+codebase-memory-mcp returns a compact tree format; code-cortex-mcp returns JSON. The
+`get_architecture` row therefore measures different amounts of output (117 KB against
+1.7 KB). `index_status` returns the same amount on both sides and is slower in
+code-cortex-mcp.
+
+code-cortex-mcp serves each call from a supervised worker process; codebase-memory-mcp
+serves it in-process. The worker adds crash isolation and a per-tool deadline for about half
+a millisecond. `search_graph` measures 4.2 ms with `CBM_TOOL_SUPERVISOR=0` and 4.8 ms
+through the worker.
+
+### Cold call from an agent hook
+
+A hook has no MCP session, so it starts one CLI process per call. Median of five sequential
+`cli search_graph` calls against a cache that holds the 176 MB Django database.
+
+| Path | Time |
+|---|---|
+| code-cortex-mcp, memo hit | **0.02 s** |
+| code-cortex-mcp, first call after the database changes | 0.74 s |
+| codebase-memory-mcp, default | 4.4 s |
+| codebase-memory-mcp, after `daemon start` | 1.6 s |
+
+The `_config.db` memo stores each database's integrity verdict against its `(size, mtime)`,
+so only the first call after a change verifies again. codebase-memory-mcp starts a
+coordination daemon for every CLI command unless `daemon start` keeps one warm.
+
+### Features
+
+| Area | code-cortex-mcp | codebase-memory-mcp |
+|---|---|---|
+| Language and build system | C++23, CMake | C11, Make |
+| Binary size (macOS arm64, no UI) | 218 MB | 283 MB |
+| Semantic embeddings | algorithmic random indexing | 31 MB pretrained vector blob, random indexing as fallback |
+| Tool-call isolation | persistent supervised worker, per-tool deadline | in-process |
+| Integrity memo for cold starts | `_config.db` | none |
+| Languages | 155 | 158 (adds CFML, CFScript, QML, ObjectScript) |
+| Hybrid LSP resolvers | 10 languages | 11 languages (adds Perl) |
+| MCP tools | 14 | 15 (adds `check_index_coverage`) |
+| Reference precision (`CALL_REFERENCE` / `USAGE`) | no | yes |
+| Incremental reindex | yes | yes, plus delta staging (clone, patch, rename) |
+| Session coordination daemon | no | yes |
+| 3D graph web UI | no | yes, on `localhost:9749` |
+| Compact tree output format | no, JSON | yes |
+| Agent surfaces configured by `install` | 13 | 43 |
+
+Both engines share the tree-sitter frontend, graph schema, on-disk format, Cypher subset,
+C/C++ preprocessor pass, crash-isolated index supervisor, infrastructure-as-code nodes,
+cross-service linking, and team artifact export.
+
+code-cortex-mcp also audits vendored checksums and ships an SBOM that matches each release.
+Its release CI runs the build, the tests, and an end-to-end smoke test on linux-amd64,
+linux-arm64, macOS-arm64, macOS-amd64, and Windows.
+
+## Credits & License
+
+Forked from **[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)**
+(C11), whose engine, design, and research it builds on. See the preprint *Codebase-Memory:
 Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*
-([arXiv:2603.27277](https://arxiv.org/abs/2603.27277)). The installed binary keeps the
-upstream-compatible name `code-cortex-mcp`.
+([arXiv:2603.27277](https://arxiv.org/abs/2603.27277)).
 
 MIT — see [LICENSE](LICENSE). Security policy: [SECURITY.md](SECURITY.md).

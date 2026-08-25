@@ -3,21 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>code-cortex-mcp — High-Performance Code Intelligence for AI Agents</title>
-    <meta name="description" content="MCP server that indexes codebases into a persistent knowledge graph. 66 languages, 120x fewer tokens, 3-minute Linux kernel indexing. Single static binary. Works with Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode.">
-    <meta name="keywords" content="MCP server, code analysis, knowledge graph, tree-sitter, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, VS Code, Zed, OpenCode, KiloCode, developer tools, code exploration, token reduction, code intelligence">
+    <title>code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents</title>
+    <meta name="description" content="Local MCP server that indexes a codebase into a knowledge graph for AI coding agents. 155 languages, sub-millisecond queries, 3-minute Linux kernel indexing, single static binary. Works with Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Aider, Cursor, and more.">
+    <meta name="keywords" content="MCP server, code analysis, knowledge graph, tree-sitter, Claude Code, Codex, Cursor, Gemini CLI, VS Code, Zed, OpenCode, developer tools, code exploration, code intelligence, C++23">
 
     <!-- Open Graph -->
-    <meta property="og:title" content="code-cortex-mcp — High-Performance Code Intelligence for AI Agents">
-    <meta property="og:description" content="120x fewer tokens for AI code exploration. 66 languages, sub-ms queries, 3-min Linux kernel indexing. Single static binary.">
+    <meta property="og:title" content="code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents">
+    <meta property="og:description" content="155 languages, sub-millisecond graph queries, 3-minute Linux kernel indexing. Single static binary, no API key.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://tigercosmos.github.io/code-cortex-mcp">
-    
+
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary">
-    <meta name="twitter:title" content="code-cortex-mcp — High-Performance Code Intelligence for AI Agents">
-    <meta name="twitter:description" content="120x fewer tokens for AI code exploration. 66 languages, sub-ms queries, 3-min Linux kernel indexing.">
-    
+    <meta name="twitter:title" content="code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents">
+    <meta name="twitter:description" content="155 languages, sub-millisecond graph queries, 3-minute Linux kernel indexing. Single static binary, no API key.">
+
     <link rel="canonical" href="https://tigercosmos.github.io/code-cortex-mcp">
 
     <style>
@@ -30,7 +30,6 @@
             --accent: #58a6ff;
             --accent-hover: #79c0ff;
             --green: #3fb950;
-            --red: #f85149;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -40,24 +39,23 @@
             line-height: 1.6;
         }
         .container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+        a { color: var(--accent); }
+        code {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.9em;
+            background: var(--surface);
+            padding: 1px 5px;
+            border-radius: 4px;
+        }
 
         /* Hero */
-        .hero {
-            padding: 80px 0 40px;
-            text-align: center;
-        }
-        .hero h1 {
-            font-size: 2.5rem;
-            font-weight: 700;
-            margin-bottom: 16px;
-        }
+        .hero { padding: 80px 0 40px; text-align: center; }
+        .hero h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 16px; }
         .hero .tagline {
             font-size: 1.25rem;
             color: var(--text-secondary);
-            margin-bottom: 32px;
+            margin: 0 auto 32px;
             max-width: 700px;
-            margin-left: auto;
-            margin-right: auto;
         }
         .hero .stat {
             display: inline-block;
@@ -67,18 +65,9 @@
             padding: 16px 24px;
             margin: 8px;
         }
-        .hero .stat .number {
-            font-size: 2rem;
-            font-weight: 700;
-            color: var(--accent);
-        }
-        .hero .stat .label {
-            font-size: 0.875rem;
-            color: var(--text-secondary);
-        }
-        .cta-buttons {
-            margin-top: 32px;
-        }
+        .hero .stat .number { font-size: 2rem; font-weight: 700; color: var(--accent); }
+        .hero .stat .label { font-size: 0.875rem; color: var(--text-secondary); }
+        .cta-buttons { margin-top: 32px; }
         .cta-buttons a {
             display: inline-block;
             padding: 12px 24px;
@@ -87,42 +76,19 @@
             font-weight: 600;
             margin: 4px;
         }
-        .cta-primary {
-            background: var(--accent);
-            color: #0d1117;
-        }
+        .cta-primary { background: var(--accent); color: #0d1117; }
         .cta-primary:hover { background: var(--accent-hover); }
-        .cta-secondary {
-            border: 1px solid var(--border);
-            color: var(--text);
-        }
+        .cta-secondary { border: 1px solid var(--border); color: var(--text); }
         .cta-secondary:hover { border-color: var(--text-secondary); }
 
-        /* Screenshot */
-        .screenshot {
-            margin: 40px 0;
-            text-align: center;
-        }
-        .screenshot img {
-            max-width: 100%;
-            border-radius: 12px;
-            border: 1px solid var(--border);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-        }
-        .screenshot .caption {
-            margin-top: 12px;
-            font-size: 0.875rem;
-            color: var(--text-secondary);
-        }
-
         /* Sections */
-        section { padding: 60px 0; }
-        section h2 {
-            font-size: 1.75rem;
-            margin-bottom: 24px;
-        }
+        section { padding: 48px 0; }
+        section h2 { font-size: 1.75rem; margin-bottom: 20px; }
+        section h3 { font-size: 1.1rem; margin: 28px 0 12px; }
+        section p { margin-bottom: 16px; }
+        .muted { color: var(--text-secondary); font-size: 0.9rem; }
 
-        /* Install */
+        /* Code blocks */
         .install-block {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -136,17 +102,10 @@
         .install-block .comment { color: var(--text-secondary); }
         .install-block .cmd { color: var(--green); }
 
-        /* Comparison table */
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 16px 0;
-        }
-        th, td {
-            padding: 10px 16px;
-            text-align: left;
-            border-bottom: 1px solid var(--border);
-        }
+        /* Tables */
+        .table-wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
         th {
             background: var(--surface);
             font-weight: 600;
@@ -157,7 +116,11 @@
         }
         td { font-size: 0.9rem; }
         .win { color: var(--green); font-weight: 600; }
-        .lose { color: var(--text-secondary); }
+        .num td:nth-child(n+2), .num th:nth-child(n+2) {
+            text-align: right;
+            font-family: 'SF Mono', monospace;
+            font-size: 0.85rem;
+        }
 
         /* Features grid */
         .features {
@@ -172,28 +135,8 @@
             border-radius: 8px;
             padding: 24px;
         }
-        .feature h3 {
-            font-size: 1rem;
-            margin-bottom: 8px;
-        }
-        .feature p {
-            font-size: 0.875rem;
-            color: var(--text-secondary);
-        }
-
-        /* Benchmark */
-        .benchmark-table td:nth-child(2),
-        .benchmark-table td:nth-child(3),
-        .benchmark-table td:nth-child(4) {
-            text-align: right;
-            font-family: 'SF Mono', monospace;
-            font-size: 0.85rem;
-        }
-        .benchmark-table th:nth-child(2),
-        .benchmark-table th:nth-child(3),
-        .benchmark-table th:nth-child(4) {
-            text-align: right;
-        }
+        .feature h3 { font-size: 1rem; margin: 0 0 8px; }
+        .feature p { font-size: 0.875rem; color: var(--text-secondary); margin: 0; }
 
         /* Footer */
         footer {
@@ -203,9 +146,8 @@
             font-size: 0.875rem;
             border-top: 1px solid var(--border);
         }
-        footer a { color: var(--accent); text-decoration: none; }
+        footer a { text-decoration: none; }
 
-        /* Responsive */
         @media (max-width: 640px) {
             .hero h1 { font-size: 1.75rem; }
             .hero .stat { display: block; margin: 8px 0; }
@@ -218,16 +160,13 @@
     <section class="hero">
         <h1>code-cortex-mcp</h1>
         <p class="tagline">
-            The fastest and most efficient code intelligence engine for AI coding agents. Full-indexes an average repo in seconds,
-            the Linux kernel in 3 minutes. Tree-sitter + LSP hybrid parsing (Go, C, C++ — more coming). Single static binary — download, install, done.
+            A local MCP server that gives AI coding agents a knowledge graph of your codebase:
+            functions, classes, call graphs, HTTP routes, and cross-service links.
+            One graph query replaces dozens of grep-and-read cycles.
         </p>
         <div>
             <div class="stat">
-                <div class="number">120x</div>
-                <div class="label">fewer tokens</div>
-            </div>
-            <div class="stat">
-                <div class="number">66</div>
+                <div class="number">155</div>
                 <div class="label">languages</div>
             </div>
             <div class="stat">
@@ -235,8 +174,12 @@
                 <div class="label">Linux kernel index</div>
             </div>
             <div class="stat">
-                <div class="number">8</div>
-                <div class="label">agents supported</div>
+                <div class="number">3.2–5.9×</div>
+                <div class="label">faster than upstream</div>
+            </div>
+            <div class="stat">
+                <div class="number">13</div>
+                <div class="label">agents configured</div>
             </div>
         </div>
         <div class="cta-buttons">
@@ -246,166 +189,193 @@
     </section>
 
     <section>
-        <h2>Install in 3 steps</h2>
+        <h2>Install</h2>
         <div class="install-block">
-            <span class="comment"># 1. Download for your platform</span><br>
-            <span class="cmd">tar xzf code-cortex-mcp-*.tar.gz</span><br>
-            <span class="cmd">mv code-cortex-mcp ~/.local/bin/</span><br><br>
-            <span class="comment"># 2. Auto-configure all detected agents</span><br>
-            <span class="cmd">code-cortex-mcp install</span><br><br>
-            <span class="comment"># 3. Restart your agent, then say:</span><br>
+            <span class="comment"># macOS / Linux</span><br>
+            <span class="cmd">curl -fsSL https://raw.githubusercontent.com/tigercosmos/code-cortex-mcp/main/install.sh | bash</span><br><br>
+            <span class="comment"># Windows (PowerShell)</span><br>
+            <span class="cmd">Invoke-WebRequest -Uri https://raw.githubusercontent.com/tigercosmos/code-cortex-mcp/main/install.ps1 -OutFile install.ps1</span><br>
+            <span class="cmd">.\install.ps1</span><br><br>
+            <span class="comment"># Restart your agent, then say:</span><br>
             <span class="cmd">"Index this project"</span>
         </div>
-        <p style="color: var(--text-secondary); font-size: 0.9rem;">
-            Static binary for macOS, Linux, and Windows — no Docker, no runtime dependencies. One install command
-            configures all 8 agents: Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode.
+        <p class="muted">
+            The installer configures Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity,
+            Aider, KiloCode, VS Code, Cursor, OpenClaw, Kiro, and Junie: MCP server entries,
+            instruction files, and pre-tool hooks.
+            One static binary for macOS, Linux, and Windows. No Docker, no Node, no Python, no API key.
+            All data stays on your machine in <code>~/.cache/code-cortex-mcp/</code>.
         </p>
     </section>
 
     <section>
-        <h2>The problem</h2>
-        <p style="margin-bottom: 16px;">
-            AI coding agents explore codebases by reading files one at a time. Every structural question
-            triggers a cascade of grep &rarr; read file &rarr; grep again &rarr; read more files.
-        </p>
-        <p style="margin-bottom: 16px;">
-            Five structural questions about a real codebase:
-            <strong style="color: var(--red);">~412,000 tokens</strong> via file-by-file search.
-            <strong style="color: var(--green);">~3,400 tokens</strong> via knowledge graph queries.
-        </p>
-        <p style="color: var(--text-secondary);">
-            The 120x reduction isn't about fitting in the context window. It's about cost ($3-15/M tokens adds up),
-            latency (&lt;1ms vs seconds), and accuracy (less noise = better answers, no "lost in the middle" problem).
+        <h2>How it works</h2>
+        <div class="install-block">
+            <span class="comment">You:    "what calls ProcessOrder?"</span><br>
+            <span class="cmd">Agent:  trace_path(function_name="ProcessOrder", mode="calls")</span><br>
+            <span class="comment">Engine: runs the graph traversal, returns structured results</span><br>
+            <span class="comment">Agent:  explains the call chain in plain English</span>
+        </div>
+        <p>
+            The engine parses every file with <a href="https://tree-sitter.github.io/tree-sitter/">tree-sitter</a>,
+            resolves calls and types (LSP-style hybrid resolution for Go, C, C++, TypeScript/JavaScript,
+            Java, Kotlin, Rust, Python, PHP, and C#), and stores the graph in SQLite.
+            A persistent worker process then answers tool calls in well under a millisecond.
         </p>
     </section>
 
     <section>
-        <h2>Benchmark results</h2>
-        <table class="benchmark-table">
-            <thead>
-                <tr>
-                    <th>Question Type</th>
-                    <th>Graph</th>
-                    <th>File-by-file</th>
-                    <th>Savings</th>
-                </tr>
-            </thead>
+        <h2>MCP tools</h2>
+        <div class="table-wrap">
+        <table>
+            <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
             <tbody>
-                <tr>
-                    <td>Find function by pattern</td>
-                    <td>~200</td>
-                    <td>~45,000</td>
-                    <td class="win">225x</td>
-                </tr>
-                <tr>
-                    <td>Trace call chain (depth 3)</td>
-                    <td>~800</td>
-                    <td>~120,000</td>
-                    <td class="win">150x</td>
-                </tr>
-                <tr>
-                    <td>Dead code detection</td>
-                    <td>~500</td>
-                    <td>~85,000</td>
-                    <td class="win">170x</td>
-                </tr>
-                <tr>
-                    <td>List all routes</td>
-                    <td>~400</td>
-                    <td>~62,000</td>
-                    <td class="win">155x</td>
-                </tr>
-                <tr>
-                    <td>Architecture overview</td>
-                    <td>~1,500</td>
-                    <td>~100,000</td>
-                    <td class="win">67x</td>
-                </tr>
-                <tr style="font-weight: 700;">
-                    <td>Total</td>
-                    <td>~3,400</td>
-                    <td>~412,000</td>
-                    <td class="win">121x</td>
-                </tr>
+                <tr><td><code>index_repository</code>, <code>index_status</code>, <code>list_projects</code>, <code>delete_project</code></td><td>Index and manage projects</td></tr>
+                <tr><td><code>search_graph</code></td><td>Search by label, name pattern, file pattern, or degree</td></tr>
+                <tr><td><code>trace_path</code></td><td>Callers, callees, data flow, and cross-service chains</td></tr>
+                <tr><td><code>query_graph</code></td><td>Read-only Cypher-subset queries</td></tr>
+                <tr><td><code>get_code_snippet</code></td><td>Source of a symbol by qualified name</td></tr>
+                <tr><td><code>get_architecture</code></td><td>Languages, packages, routes, hotspots, clusters, cycles, ADRs</td></tr>
+                <tr><td><code>get_graph_schema</code></td><td>Node and edge counts, property shapes</td></tr>
+                <tr><td><code>search_code</code></td><td>Graph-augmented grep over indexed files</td></tr>
+                <tr><td><code>detect_changes</code></td><td>Blast radius of a git diff</td></tr>
+                <tr><td><code>manage_adr</code></td><td>Architecture Decision Records</td></tr>
             </tbody>
         </table>
-        <p style="color: var(--text-secondary); font-size: 0.875rem; margin-top: 8px;">
-            Tested across 31 languages with agent-vs-agent methodology (372 questions).
-            <a href="https://github.com/tigercosmos/code-cortex-mcp/blob/main/BENCHMARK_REPORT.md">Full benchmark report &rarr;</a>
-        </p>
+        </div>
+    </section>
+
+    <section>
+        <h2>Performance</h2>
+        <p class="muted">Apple Silicon, release build.</p>
+        <div class="table-wrap">
+        <table class="num">
+            <thead><tr><th>Operation</th><th>Time</th></tr></thead>
+            <tbody>
+                <tr><td>RocksDB full index (C++, 62K nodes, 346K edges)</td><td>~7 s</td></tr>
+                <tr><td>Django full index (Python, 55K nodes, 371K edges)</td><td>~4 s</td></tr>
+                <tr><td>Redis full index (C, 38K nodes, 148K edges)</td><td>~2.7 s</td></tr>
+                <tr><td>etcd full index (Go, 15K nodes, 94K edges)</td><td>~1.4 s</td></tr>
+                <tr><td>Linux kernel full index (28M LOC, 2.1M nodes)</td><td>~3 min</td></tr>
+                <tr><td><code>search_graph</code>, <code>trace_path</code> (warm)</td><td>0.1–0.5 ms</td></tr>
+                <tr><td>PreToolUse hook (<code>Grep</code> or <code>Read</code>)</td><td>~10 ms</td></tr>
+            </tbody>
+        </table>
+        </div>
     </section>
 
     <section>
         <h2>Features</h2>
         <div class="features">
             <div class="feature">
-                <h3>64 Languages</h3>
-                <p>Python, Go, JS, TS, TSX, Rust, Java, C++, C#, C, PHP, Ruby, Kotlin, Scala, Zig, Elixir, Haskell, OCaml, Swift, Dart, MATLAB, Lean 4, Wolfram, and 41 more via vendored tree-sitter grammars.</p>
+                <h3>155 languages</h3>
+                <p>Vendored tree-sitter grammars compiled into the binary. Type-resolved call graphs for 10 languages; structural parsing for the rest.</p>
             </div>
             <div class="feature">
-                <h3>Extreme Performance</h3>
-                <p>RAM-first pipeline: LZ4 compression, in-memory SQLite, fused Aho-Corasick pattern matching. Linux kernel (28M LOC) indexed in 3 minutes.</p>
+                <h3>Static analysis</h3>
+                <p>Import-aware, type-inferred call graph. Dead code, Leiden clusters, circular dependencies, complexity metrics, git-diff blast radius.</p>
             </div>
             <div class="feature">
-                <h3>Call Graph Tracing</h3>
-                <p>Trace callers and callees across files and packages. Import-aware, type-inferred resolution. BFS traversal up to depth 5.</p>
+                <h3>Deterministic indexing</h3>
+                <p>The same tree always produces a byte-identical graph, independent of worker scheduling. Diff two snapshots and only real code changes show up.</p>
             </div>
             <div class="feature">
-                <h3>8-Agent Install</h3>
-                <p>One command configures Claude Code, Codex, Gemini CLI, Zed, OpenCode, Antigravity, Aider, and KiloCode with MCP configs, instructions, and hooks.</p>
+                <h3>Crash isolation</h3>
+                <p>A supervisor contains per-file crashes and hangs during indexing. A persistent worker answers tool calls with a per-tool deadline.</p>
             </div>
             <div class="feature">
-                <h3>Dead Code Detection</h3>
-                <p>Find functions with zero callers, with smart filtering that excludes entry points (route handlers, main(), framework decorators).</p>
+                <h3>Preprocessor-aware C/C++</h3>
+                <p>Recovers definitions split across <code>#ifdef</code> branches. Headers get their own <code>File</code> nodes with resolved <code>#include</code> edges.</p>
             </div>
             <div class="feature">
-                <h3>Cross-Service HTTP Linking</h3>
-                <p>Discovers REST routes and matches them to HTTP call sites across services with confidence scoring.</p>
+                <h3>Code search</h3>
+                <p>BM25 full text (FTS5), structural search, and semantic similarity edges from algorithmic embeddings. No API key.</p>
             </div>
             <div class="feature">
-                <h3>Auto-Sync + Auto-Index</h3>
-                <p>Background watcher detects git changes. Optional auto-indexing on session start. No manual reindex needed.</p>
+                <h3>Cross-service links</h3>
+                <p>HTTP route ↔ call site; gRPC, GraphQL, tRPC; Socket.IO and pub-sub channels; <code>CROSS_*</code> edges across repositories.</p>
             </div>
             <div class="feature">
-                <h3>14 MCP Tools</h3>
-                <p>search_graph, trace_call_path, detect_changes, query_graph, get_architecture, manage_adr, get_code_snippet, and 7 more.</p>
+                <h3>Team artifact</h3>
+                <p>Commit <code>.code-cortex/graph.db.zst</code> and teammates import the graph instead of a full reindex. A <code>merge=ours</code> rule prevents conflicts.</p>
             </div>
         </div>
     </section>
 
     <section>
-        <h2>How it compares</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Feature</th>
-                    <th>code-cortex-mcp</th>
-                    <th>GitNexus</th>
-                </tr>
-            </thead>
+        <h2>Compared to codebase-memory-mcp</h2>
+        <p>
+            code-cortex-mcp forked from
+            <a href="https://github.com/DeusData/codebase-memory-mcp">DeusData/codebase-memory-mcp</a>
+            and keeps its on-disk graph format. It indexes faster and answers most tool calls faster.
+            codebase-memory-mcp has features that code-cortex-mcp does not; the feature table names them.
+        </p>
+        <p class="muted">
+            Measured 2026-08-25 on Apple Silicon: code-cortex-mcp at <code>7a3196c4</code>,
+            codebase-memory-mcp at <code>010569fa</code>, each built with its own
+            <code>scripts/build.sh</code>, from an empty cache.
+        </p>
+
+        <h3>Indexing speed (median of 3 full runs)</h3>
+        <div class="table-wrap">
+        <table class="num">
+            <thead><tr><th>Repository</th><th>code-cortex-mcp</th><th>codebase-memory-mcp</th><th>Ratio</th></tr></thead>
             <tbody>
-                <tr><td>Languages</td><td class="win">64</td><td>8-11</td></tr>
-                <tr><td>Runtime</td><td class="win">Single static binary</td><td>Node.js (npx)</td></tr>
-                <tr><td>Runtime dependency</td><td class="win">None</td><td>Node.js</td></tr>
-                <tr><td>Stress test</td><td class="win">Linux kernel (2.1M nodes, 3 min)</td><td>Not published</td></tr>
-                <tr><td>Embedded LLM</td><td class="win">No (uses your MCP client)</td><td>Yes (extra API key + cost)</td></tr>
-                <tr><td>Published benchmarks</td><td class="win">Yes (31 langs, 372 questions)</td><td>No</td></tr>
-                <tr><td>Auto-sync</td><td class="win">Yes</td><td>No</td></tr>
-                <tr><td>MCP tools</td><td class="win">14</td><td>7</td></tr>
-                <tr><td>Agents supported</td><td class="win">8</td><td>1-2</td></tr>
-                <tr><td>Cross-service HTTP linking</td><td class="win">Yes</td><td>No</td></tr>
-                <tr><td>Cypher queries</td><td class="win">Yes</td><td>No</td></tr>
-                <tr><td>Incremental reindex</td><td class="win">Yes (&lt;1ms no-op)</td><td>No</td></tr>
-                <tr><td>Pre-tool hooks</td><td class="win">Yes (agents prefer graph tools)</td><td>No</td></tr>
-                <tr><td>Visual web UI</td><td class="win">Yes (3D graph)</td><td class="win">Yes</td></tr>
-                <tr><td>Graph RAG / embeddings</td><td>Not needed*</td><td>Yes</td></tr>
+                <tr><td>Redis (C)</td><td class="win">2.46 s</td><td>9.48 s</td><td>3.9×</td></tr>
+                <tr><td>etcd (Go)</td><td class="win">1.31 s</td><td>7.74 s</td><td>5.9×</td></tr>
+                <tr><td>Django (Python)</td><td class="win">4.03 s</td><td>12.95 s</td><td>3.2×</td></tr>
+                <tr><td>this repository (C++)</td><td class="win">2.46 s</td><td>9.56 s</td><td>3.9×</td></tr>
             </tbody>
         </table>
-        <p style="color: var(--text-secondary); font-size: 0.875rem; margin-top: 12px;">
-            *Graph RAG and semantic embeddings solve a human problem &mdash; fuzzy "find something similar" queries.
-            MCP agents don't need this: they make precise structural queries via tool calls and synthesize results themselves.
-            code-cortex-mcp is purpose-built for agents &mdash; exact patterns, call chain tracing, and structural search
-            at machine speed.
+        </div>
+        <p class="muted">Both engines build graphs of nearly the same size (for example Django: 55,458 / 371,363 nodes / edges against 55,461 / 344,047).</p>
+
+        <h3>Tool-call latency (median of 20 warm calls, Django graph)</h3>
+        <div class="table-wrap">
+        <table class="num">
+            <thead><tr><th>Tool</th><th>code-cortex-mcp</th><th>codebase-memory-mcp</th></tr></thead>
+            <tbody>
+                <tr><td><code>search_graph</code></td><td class="win">5.1 ms</td><td>18.2 ms</td></tr>
+                <tr><td><code>query_graph</code></td><td class="win">1.6 ms</td><td>15.8 ms</td></tr>
+                <tr><td><code>list_projects</code></td><td class="win">0.2 ms</td><td>13.7 ms</td></tr>
+                <tr><td><code>search_code</code></td><td class="win">239.8 ms</td><td>271.3 ms</td></tr>
+                <tr><td><code>get_graph_schema</code></td><td class="win">406.3 ms</td><td>480.9 ms</td></tr>
+                <tr><td><code>index_status</code></td><td>60.6 ms</td><td class="win">20.0 ms</td></tr>
+                <tr><td><code>get_architecture</code> *</td><td>251.0 ms</td><td class="win">54.7 ms</td></tr>
+                <tr><td>Cold CLI call from a hook</td><td class="win">0.02 s</td><td>4.4 s</td></tr>
+            </tbody>
+        </table>
+        </div>
+        <p class="muted">
+            * <code>get_architecture</code> returns 117 KB of JSON in code-cortex-mcp and 1.7 KB of compact
+            tree output in codebase-memory-mcp, so the two times measure different amounts of output.
+            The cold hook row is a memo hit; the first call after the database changes takes 0.74 s.
+        </p>
+
+        <h3>Features</h3>
+        <div class="table-wrap">
+        <table>
+            <thead><tr><th>Area</th><th>code-cortex-mcp</th><th>codebase-memory-mcp</th></tr></thead>
+            <tbody>
+                <tr><td>Language and build system</td><td>C++23, CMake</td><td>C11, Make</td></tr>
+                <tr><td>Binary size (macOS arm64, no UI)</td><td class="win">218 MB</td><td>283 MB</td></tr>
+                <tr><td>Semantic embeddings</td><td>algorithmic random indexing</td><td>31 MB pretrained vector blob</td></tr>
+                <tr><td>Tool-call isolation</td><td class="win">supervised worker, per-tool deadline</td><td>in-process</td></tr>
+                <tr><td>Integrity memo for cold starts</td><td class="win"><code>_config.db</code></td><td>none</td></tr>
+                <tr><td>Languages</td><td>155</td><td class="win">158</td></tr>
+                <tr><td>Hybrid LSP resolvers</td><td>10</td><td class="win">11 (adds Perl)</td></tr>
+                <tr><td>MCP tools</td><td>14</td><td class="win">15 (adds <code>check_index_coverage</code>)</td></tr>
+                <tr><td>Reference precision (<code>CALL_REFERENCE</code> / <code>USAGE</code>)</td><td>no</td><td class="win">yes</td></tr>
+                <tr><td>Session coordination daemon</td><td>no</td><td class="win">yes</td></tr>
+                <tr><td>3D graph web UI</td><td>no</td><td class="win">yes</td></tr>
+                <tr><td>Compact tree output format</td><td>no, JSON</td><td class="win">yes</td></tr>
+                <tr><td>Agent surfaces configured by <code>install</code></td><td>13</td><td class="win">43</td></tr>
+            </tbody>
+        </table>
+        </div>
+        <p class="muted">
+            Full test conditions and graph sizes:
+            <a href="https://github.com/tigercosmos/code-cortex-mcp#compared-to-codebase-memory-mcp">README &rarr;</a>
         </p>
     </section>
 </div>
@@ -413,10 +383,12 @@
 <footer>
     <div class="container">
         <p>
-            Open source, MIT licensed.
+            Open source, MIT licensed. Forked from
+            <a href="https://github.com/DeusData/codebase-memory-mcp">DeusData/codebase-memory-mcp</a>
+            (<a href="https://arxiv.org/abs/2603.27277">arXiv:2603.27277</a>).<br>
             <a href="https://github.com/tigercosmos/code-cortex-mcp">GitHub</a> &middot;
             <a href="https://github.com/tigercosmos/code-cortex-mcp/releases/latest">Releases</a> &middot;
-            <a href="https://github.com/tigercosmos/code-cortex-mcp/blob/main/BENCHMARK_REPORT.md">Benchmarks</a>
+            <a href="https://github.com/tigercosmos/code-cortex-mcp/blob/main/README.md">README</a>
         </p>
     </div>
 </footer>
