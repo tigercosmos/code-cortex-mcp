@@ -174,8 +174,8 @@
                 <div class="label">Linux kernel index</div>
             </div>
             <div class="stat">
-                <div class="number">3.2–5.9×</div>
-                <div class="label">faster than upstream</div>
+                <div class="number">2.4×</div>
+                <div class="label">median indexing speedup vs upstream</div>
             </div>
             <div class="stat">
                 <div class="number">13</div>
@@ -247,21 +247,26 @@
 
     <section>
         <h2>Performance</h2>
-        <p class="muted">Apple Silicon, release build.</p>
+        <p class="muted">Full index from an empty cache, median of three runs. Apple M3 Max (14 cores, 36 GB) and a 32-core Linux machine (62 GB), release builds.</p>
         <div class="table-wrap">
         <table class="num">
-            <thead><tr><th>Operation</th><th>Time</th></tr></thead>
+            <thead><tr><th>Repository</th><th>Lines</th><th>Nodes / edges</th><th>M3 Max</th><th>32-core Linux</th></tr></thead>
             <tbody>
-                <tr><td>RocksDB full index (C++, 62K nodes, 346K edges)</td><td>~7 s</td></tr>
-                <tr><td>Django full index (Python, 55K nodes, 371K edges)</td><td>~4 s</td></tr>
-                <tr><td>Redis full index (C, 38K nodes, 148K edges)</td><td>~2.7 s</td></tr>
-                <tr><td>etcd full index (Go, 15K nodes, 94K edges)</td><td>~1.4 s</td></tr>
-                <tr><td>Linux kernel full index (28M LOC, 2.1M nodes)</td><td>~3 min</td></tr>
-                <tr><td><code>search_graph</code>, <code>trace_path</code> (warm)</td><td>0.1–0.5 ms</td></tr>
-                <tr><td>PreToolUse hook (<code>Grep</code> or <code>Read</code>)</td><td>~10 ms</td></tr>
+                <tr><td>etcd (Go)</td><td>0.3M</td><td>15K / 95K</td><td>1.4 s</td><td>1.2 s</td></tr>
+                <tr><td>Redis (C)</td><td>0.6M</td><td>38K / 146K</td><td>2.8 s</td><td>2.8 s</td></tr>
+                <tr><td>Django (Python)</td><td>1.1M</td><td>55K / 372K</td><td>4.8 s</td><td>3.8 s</td></tr>
+                <tr><td>CPython (C, Python)</td><td>3.3M</td><td>137K / 1.0M</td><td>14 s</td><td>12 s</td></tr>
+                <tr><td>PyTorch (C++, Python)</td><td>5.1M</td><td>235K / 2.1M</td><td>32 s</td><td>26 s</td></tr>
+                <tr><td>Kubernetes (Go)</td><td>7.3M</td><td>288K / 3.3M</td><td>56 s</td><td>57 s</td></tr>
+                <tr><td>Elasticsearch (Java)</td><td>8.8M</td><td>692K / 5.2M</td><td>94 s</td><td>63 s</td></tr>
+                <tr><td>llvm-project (C++)</td><td>46.8M</td><td>2.2M / 7.8M</td><td>487 s</td><td>382 s</td></tr>
+                <tr><td>Linux kernel (C)</td><td>43.8M</td><td>4.7M / 11.6M</td><td>368 s</td><td>264 s</td></tr>
+                <tr><td><code>search_graph</code>, <code>trace_path</code> (warm query)</td><td></td><td></td><td>0.1–0.5 ms</td><td></td></tr>
+                <tr><td>PreToolUse hook (<code>Grep</code> or <code>Read</code>)</td><td></td><td></td><td>~10 ms</td><td></td></tr>
             </tbody>
         </table>
         </div>
+        <p class="muted">The kernel index peaks at 61 GB resident; the 36 GB Mac finishes it with 20 GB of swap in use.</p>
     </section>
 
     <section>
@@ -311,24 +316,29 @@
             codebase-memory-mcp has features that code-cortex-mcp does not; the feature table names them.
         </p>
         <p class="muted">
-            Measured 2026-08-25 on Apple Silicon: code-cortex-mcp at <code>7a3196c4</code>,
-            codebase-memory-mcp at <code>010569fa</code>, each built with its own
-            <code>scripts/build.sh</code>, from an empty cache.
+            Measured 2026-08-25 on an Apple M3 Max (14 cores, 36 GB) and a 32-core Linux machine (62 GB):
+            code-cortex-mcp at <code>af4579de</code> plus the llvm-project crash fix, codebase-memory-mcp
+            at <code>010569fa</code>, each built with its own <code>scripts/build.sh</code>, from an empty cache.
         </p>
 
-        <h3>Indexing speed (median of 3 full runs)</h3>
+        <h3>Indexing speed (13 repositories, median of 3 full runs)</h3>
         <div class="table-wrap">
-        <table class="num">
-            <thead><tr><th>Repository</th><th>code-cortex-mcp</th><th>codebase-memory-mcp</th><th>Ratio</th></tr></thead>
+        <table>
+            <thead><tr><th></th><th>Apple M3 Max (14 cores, 36 GB)</th><th>32-core Linux (62 GB)</th></tr></thead>
             <tbody>
-                <tr><td>Redis (C)</td><td class="win">2.46 s</td><td>9.48 s</td><td>3.9×</td></tr>
-                <tr><td>etcd (Go)</td><td class="win">1.31 s</td><td>7.74 s</td><td>5.9×</td></tr>
-                <tr><td>Django (Python)</td><td class="win">4.03 s</td><td>12.95 s</td><td>3.2×</td></tr>
-                <tr><td>this repository (C++)</td><td class="win">2.46 s</td><td>9.56 s</td><td>3.9×</td></tr>
+                <tr><td>Repositories both engines complete</td><td>11 of 13</td><td>11 of 13</td></tr>
+                <tr><td>Speedup, median</td><td class="win">2.4×</td><td class="win">2.4×</td></tr>
+                <tr><td>Speedup, range</td><td>1.1× (Kubernetes) – 5.7× (etcd)</td><td>1.1× (Kubernetes) – 4.4× (etcd)</td></tr>
+                <tr><td>etcd (Go, 0.3M lines)</td><td><span class="win">1.42 s</span> vs 8.11 s</td><td><span class="win">1.15 s</span> vs 5.08 s</td></tr>
+                <tr><td>CPython (C, Python, 3.3M lines)</td><td><span class="win">14.4 s</span> vs 47.6 s</td><td><span class="win">11.9 s</span> vs 28.2 s</td></tr>
+                <tr><td>PyTorch (C++, Python, 5.1M lines)</td><td><span class="win">31.9 s</span> vs 77.8 s</td><td><span class="win">25.8 s</span> vs 70.3 s</td></tr>
+                <tr><td>Elasticsearch (Java, 8.8M lines)</td><td><span class="win">94.0 s</span> vs 112.8 s</td><td><span class="win">63.1 s</span> vs 116.2 s</td></tr>
+                <tr><td>llvm-project (C++, 46.8M lines)</td><td><span class="win">487 s</span> vs crash</td><td><span class="win">382 s</span> vs crash</td></tr>
+                <tr><td>Linux kernel (C, 43.8M lines)</td><td><span class="win">368 s</span> vs stopped</td><td><span class="win">264 s</span> vs out of memory</td></tr>
             </tbody>
         </table>
         </div>
-        <p class="muted">Both engines build graphs of nearly the same size (for example Django: 55,458 / 371,363 nodes / edges against 55,461 / 344,047).</p>
+        <p class="muted">Node counts match closely except on Rails (100,649 against 64,354); edge counts differ on Kubernetes (3.3M against 2.0M) and Elasticsearch (5.2M against 5.7M). Both engines crashed on llvm-project with the same inherited bug, fixed in code-cortex-mcp; codebase-memory-mcp's kernel index exceeded 57 GB and was killed. Per-repository tables and raw data: <a href="https://github.com/tigercosmos/code-cortex-mcp/blob/main/docs/benchmarks/2026-08-25/README.md">docs/benchmarks/2026-08-25</a>.</p>
 
         <h3>Tool-call latency (median of 20 warm calls, Django graph)</h3>
         <div class="table-wrap">

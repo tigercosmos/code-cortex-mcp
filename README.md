@@ -14,8 +14,9 @@ It ships as a single static binary with no runtime dependencies.
 
 It parses 155 languages with [tree-sitter](https://tree-sitter.github.io/tree-sitter/)
 and resolves types for Go, C, C++, TypeScript/JavaScript, Java, Kotlin, Rust, Python, PHP,
-and C#. It indexes the Linux kernel (28M LOC) in about 3 minutes. It indexes a repository
-3.2× to 5.9× faster than [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp),
+and C#. It indexes llvm-project (47M lines) in 6.4 minutes and the Linux kernel (44M lines)
+in 4.4 minutes on a 32-core machine. On 11 other repositories it indexes 1.1× to 5.7× faster
+(median 2.4×) than [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp),
 the project it forked from. See
 [Compared to codebase-memory-mcp](#compared-to-codebase-memory-mcp).
 
@@ -79,7 +80,6 @@ code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LI
 
 - **Static analysis** — import-aware, type-inferred call graph; dead code; Leiden clusters;
   circular dependencies; complexity metrics; git-diff blast radius.
-- **Deterministic indexing** — the same tree always produces a byte-identical graph.
 - **Crash isolation** — a supervisor contains per-file crashes and hangs during indexing,
   and a persistent worker process answers tool calls with a per-tool deadline.
 - **Preprocessor-aware C/C++** — recovers definitions split across `#ifdef` branches,
@@ -96,15 +96,25 @@ code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LI
 
 ## Performance
 
-Apple Silicon, release build.
+Full-index wall clock, median of three runs from an empty cache, on an Apple M3 Max (14 cores,
+36 GB) and a 32-core Linux machine (62 GB). The full 13-repository comparison with
+codebase-memory-mcp is in [docs/benchmarks/2026-08-25](docs/benchmarks/2026-08-25/README.md).
+
+| Repository | Lines | Nodes / edges | M3 Max | 32-core Linux |
+|-----------|------:|---|------:|------:|
+| etcd (Go) | 0.3M | 15K / 95K | 1.4 s | 1.2 s |
+| Django (Python) | 1.1M | 55K / 372K | 4.8 s | 3.8 s |
+| CPython (C, Python) | 3.3M | 137K / 1.0M | 14 s | 12 s |
+| Kubernetes (Go) | 7.3M | 288K / 3.3M | 56 s | 57 s |
+| Elasticsearch (Java) | 8.8M | 692K / 5.2M | 94 s | 63 s |
+| llvm-project (C++) | 46.8M | 2.2M / 7.8M | 487 s | 382 s |
+| Linux kernel (C) | 43.8M | 4.7M / 11.6M | 368 s | 264 s |
+
+The kernel index peaks at 61 GB resident on Linux at any worker count, and the 36 GB Mac
+completes it with 20 GB of swap in use. Query latency:
 
 | Operation | Time |
 |-----------|------|
-| RocksDB full index (C++, 62K nodes, 346K edges) | ~7 s |
-| Django full index (Python, 55K nodes, 371K edges) | ~4 s |
-| Redis full index (C, 38K nodes, 148K edges) | ~2.7 s |
-| etcd full index (Go, 15K nodes, 94K edges) | ~1.4 s |
-| Linux kernel full index (28M LOC, 2.1M nodes) | ~3 min |
 | `search_graph`, `trace_path` (warm) | 0.1–0.5 ms |
 | `get_code_snippet` (warm) | ~2 ms |
 | PreToolUse hook (`Grep` or `Read`) | ~10 ms |
@@ -183,35 +193,48 @@ codebase-memory-mcp has features that code-cortex-mcp does not; the feature tabl
 
 Test conditions for every number in this section:
 
-- **Date and machine** — 2026-08-25, Apple Silicon, macOS.
-- **Versions** — code-cortex-mcp at `7a3196c4`, codebase-memory-mcp at `010569fa`.
+- **Date and machines** — 2026-08-25; an Apple M3 Max (14 cores, 36 GB, macOS) and a
+  32-core x86-64 Linux machine (62 GB, Ubuntu 24.04, gcc 13.3). The tool-call and hook
+  latency rows come from the Mac only.
+- **Versions** — code-cortex-mcp at `af4579de` plus the llvm-project crash fix committed with
+  these results; codebase-memory-mcp at `010569fa`.
 - **Binaries** — each project's own `scripts/build.sh`, without the codebase-memory-mcp web UI.
-- **Cache** — one empty cache directory per engine.
+- **Cache** — one empty cache directory per run.
 
 ### Indexing speed
 
-Median of three full-index runs from an empty cache.
+Median of three full-index runs from an empty cache on 13 repositories, from Redis (0.6M lines)
+to llvm-project (46.8M lines). The per-repository tables, graph sizes, repository commits, and
+raw per-run data are in [docs/benchmarks/2026-08-25](docs/benchmarks/2026-08-25/README.md).
 
-| Repository | Language | code-cortex-mcp | codebase-memory-mcp | Ratio |
-|---|---|---|---|---|
-| Redis | C | **2.46 s** | 9.48 s | 3.9× |
-| etcd | Go | **1.31 s** | 7.74 s | 5.9× |
-| Django | Python | **4.03 s** | 12.95 s | 3.2× |
-| this repository | C++ | **2.46 s** | 9.56 s | 3.9× |
-
-Both engines build graphs of nearly the same size, so the times measure comparable work.
-
-| Repository | code-cortex-mcp (nodes / edges) | codebase-memory-mcp (nodes / edges) |
+| | Apple M3 Max (14 cores, 36 GB) | 32-core Linux (62 GB) |
 |---|---|---|
-| Redis | 38,438 / 146,074 | 38,658 / 135,969 |
-| etcd | 14,836 / 94,615 | 15,475 / 108,103 |
-| Django | 55,458 / 371,363 | 55,461 / 344,047 |
-| this repository | 13,418 / 47,157 | 13,419 / 47,085 |
+| Repositories both engines complete | 11 of 13 | 11 of 13 |
+| Speedup, median | **2.4×** | **2.4×** |
+| Speedup, range | 1.1× (Kubernetes) – 5.7× (etcd) | 1.1× (Kubernetes) – 4.4× (etcd) |
+| etcd (Go, 0.3M lines) | **1.42 s** vs 8.11 s | **1.15 s** vs 5.08 s |
+| CPython (C, Python, 3.3M lines) | **14.4 s** vs 47.6 s | **11.9 s** vs 28.2 s |
+| PyTorch (C++, Python, 5.1M lines) | **31.9 s** vs 77.8 s | **25.8 s** vs 70.3 s |
+| Elasticsearch (Java, 8.8M lines) | **94.0 s** vs 112.8 s | **63.1 s** vs 116.2 s |
+| llvm-project (C++, 46.8M lines) | **487 s** vs crash | **382 s** vs crash |
+| Linux kernel (C, 43.8M lines) | **368 s** vs stopped | **264 s** vs out of memory |
+
+Both engines build graphs of nearly the same node count on every repository except Rails
+(100,649 nodes against 64,354). Edge counts differ more on Kubernetes (3.3M against 2.0M) and
+Elasticsearch (5.2M against 5.7M), so read those ratios with that in mind.
+
+Both engines crashed on llvm-project with SIGSEGV in the index worker. The cause is an
+out-of-bounds read in structured-binding decomposition in the C/C++ resolver, inherited from
+the common code. A NULL dereference in the preprocessor wrapper crashes the same run. This
+release fixes both in code-cortex-mcp. On the Linux kernel, codebase-memory-mcp's worker grew
+to 57 GB resident in 90 s, and the 62 GB machine killed it. On the Mac, we stopped the run
+after 10 minutes with 19 GB of swap in use.
 
 Embeddings do not explain the gap. In `fast` mode, which writes no similarity or semantic
-edges, Django takes 2.9 s in code-cortex-mcp and 12.0 s in codebase-memory-mcp. The gap is
-in extraction and resolution: codebase-memory-mcp runs the `CALL_REFERENCE` and `USAGE`
-precision passes, and code-cortex-mcp carries its own resolver and pipeline optimizations.
+edges, Django takes 2.9 s in code-cortex-mcp and 12.0 s in codebase-memory-mcp (Mac, measured
+at `7a3196c4`). The gap is in extraction and resolution: codebase-memory-mcp runs the
+`CALL_REFERENCE` and `USAGE` precision passes, and code-cortex-mcp carries its own resolver
+and pipeline optimizations.
 
 ### Tool-call latency
 
