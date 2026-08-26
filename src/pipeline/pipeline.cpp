@@ -151,6 +151,136 @@ static const char *itoa_buf(int val) {
     return bufs[i];
 }
 
+/* ── Memory profile (CBM_MEM_PROFILE=1) ──────────────────────────── */
+
+/* Long → string. The shared itoa_buf ring holds 4 entries; a profile line
+ * passes more than that at once, so it needs its own. */
+static const char *n_buf(long val) {
+    enum { MP_NRING = 16, MP_NMASK = 15 };
+    static CBM_TLS char bufs[MP_NRING][CBM_SZ_32];
+    static CBM_TLS int idx = 0;
+    int i = idx;
+    idx = (idx + 1) & MP_NMASK;
+    snprintf(bufs[i], sizeof(bufs[i]), "%ld", val);
+    return bufs[i];
+}
+
+/* Bytes → whole MB, for log lines that only need the magnitude. */
+static const char *mb_buf(size_t bytes) {
+    enum { MP_RING = 12, MP_MASK = 11, MP_BYTES_PER_MB = 1024 * 1024 };
+    static CBM_TLS char bufs[MP_RING][CBM_SZ_32];
+    static CBM_TLS int idx = 0;
+    int i = idx;
+    idx = (idx + 1) % MP_RING;
+    snprintf(bufs[i], sizeof(bufs[i]), "%llu", (unsigned long long)(bytes / MP_BYTES_PER_MB));
+    return bufs[i];
+}
+
+/* Resident bytes of one extraction arena: every block, including the unused
+ * tail each geometric grow abandons. Read off the struct rather than through
+ * foundation/arena.h — internal/cbm/arena.h declares the same CBMArena under
+ * the same include guard and cbm.h pulls it in first, so only the subset API
+ * it declares is visible in this translation unit. */
+static size_t result_arena_resident(const CBMArena *a) {
+    size_t total = 0;
+    for (int i = 0; i < a->nblocks; i++) {
+        total += a->block_sizes[i];
+    }
+    return total;
+}
+
+static bool mem_profile_enabled(void) {
+    char buf[CBM_SZ_16];
+    return cbm_safe_getenv("CBM_MEM_PROFILE", buf, sizeof(buf), NULL) != NULL && buf[0] == '1';
+}
+
+void cbm_pipeline_mem_profile(const char *phase, const cbm_gbuf_t *gbuf,
+                              CBMFileResult *const *cache, int file_count) {
+    if (!mem_profile_enabled()) {
+        return;
+    }
+
+    cbm_gbuf_mem_t g;
+    cbm_gbuf_mem_stats(gbuf, &g);
+    size_t gbuf_total = g.node_structs + g.node_strings + g.edge_structs + g.edge_strings +
+                        g.intern_pool + g.indexes + g.vectors;
+    cbm_log_info("mem.profile.gbuf", "phase", phase, "nodes", n_buf(g.nodes), "edges",
+                 n_buf(g.edges), "total_mb", mb_buf(gbuf_total), "node_structs_mb",
+                 mb_buf(g.node_structs), "node_strings_mb", mb_buf(g.node_strings),
+                 "edge_structs_mb", mb_buf(g.edge_structs), "edge_strings_mb",
+                 mb_buf(g.edge_strings), "intern_mb", mb_buf(g.intern_pool), "indexes_mb",
+                 mb_buf(g.indexes), "vectors_mb", mb_buf(g.vectors));
+
+    if (cache && file_count > 0) {
+        size_t arena_cap = 0;
+        size_t arena_used = 0;
+        size_t sources = 0;
+        size_t structs = 0;
+        size_t records = 0; /* the fixed-size records; the rest of the arena is strings */
+        long live = 0;
+        long trees = 0;
+        long n_defs = 0;
+        long n_calls = 0;
+        long n_usages = 0;
+        long n_typerefs = 0;
+        for (int i = 0; i < file_count; i++) {
+            const CBMFileResult *r = cache[i];
+            if (!r) {
+                continue;
+            }
+            live++;
+            arena_cap += result_arena_resident(&r->arena);
+            arena_used += r->arena.total_alloc;
+            sources += (size_t)r->source_len;
+            structs += sizeof(*r);
+            if (r->cached_tree) {
+                trees++;
+            }
+            n_defs += r->defs.count;
+            n_calls += r->calls.count;
+            n_usages += r->usages.count;
+            n_typerefs += r->type_refs.count;
+            records += ((size_t)r->defs.cap * sizeof(*r->defs.items)) +
+                       ((size_t)r->calls.cap * sizeof(*r->calls.items)) +
+                       ((size_t)r->usages.cap * sizeof(*r->usages.items)) +
+                       ((size_t)r->type_refs.cap * sizeof(*r->type_refs.items)) +
+                       ((size_t)r->imports.cap * sizeof(*r->imports.items)) +
+                       ((size_t)r->throws.cap * sizeof(*r->throws.items)) +
+                       ((size_t)r->rw.cap * sizeof(*r->rw.items)) +
+                       ((size_t)r->env_accesses.cap * sizeof(*r->env_accesses.items)) +
+                       ((size_t)r->type_assigns.cap * sizeof(*r->type_assigns.items)) +
+                       ((size_t)r->impl_traits.cap * sizeof(*r->impl_traits.items)) +
+                       ((size_t)r->resolved_calls.cap * sizeof(*r->resolved_calls.items)) +
+                       ((size_t)r->string_refs.cap * sizeof(*r->string_refs.items)) +
+                       ((size_t)r->infra_bindings.cap * sizeof(*r->infra_bindings.items)) +
+                       ((size_t)r->channels.cap * sizeof(*r->channels.items));
+        }
+        size_t strings = arena_used > (records + sources) ? arena_used - records - sources : 0;
+        cbm_log_info("mem.profile.results", "phase", phase, "files", n_buf(live),
+                     "arena_resident_mb", mb_buf(arena_cap), "arena_used_mb", mb_buf(arena_used),
+                     "arena_untouched_mb", mb_buf(arena_cap - arena_used), "records_mb",
+                     mb_buf(records), "strings_mb", mb_buf(strings), "retained_src_mb",
+                     mb_buf(sources), "result_structs_mb", mb_buf(structs), "trees_live",
+                     n_buf(trees));
+        uint64_t a_parse = 0;
+        uint64_t a_extract = 0;
+        uint64_t a_lsp = 0;
+        uint64_t a_pp = 0;
+        cbm_get_arena_stage_bytes(&a_parse, &a_extract, &a_lsp, &a_pp);
+        cbm_log_info("mem.profile.stages", "phase", phase, "parse_mb", mb_buf(a_parse),
+                     "extract_mb", mb_buf(a_extract), "per_file_lsp_mb", mb_buf(a_lsp),
+                     "preprocessed_mb", mb_buf(a_pp));
+        cbm_log_info("mem.profile.records", "phase", phase, "defs", n_buf(n_defs), "calls",
+                     n_buf(n_calls), "usages", n_buf(n_usages), "type_refs", n_buf(n_typerefs),
+                     "def_bytes", n_buf((long)sizeof(CBMDefinition)), "call_bytes",
+                     n_buf((long)sizeof(CBMCall)), "usage_bytes", n_buf((long)sizeof(CBMUsage)),
+                     "typeref_bytes", n_buf((long)sizeof(CBMTypeRef)));
+    }
+
+    cbm_log_info("mem.profile.rss", "phase", phase, "rss_mb", mb_buf(cbm_mem_rss()), "peak_mb",
+                 mb_buf(cbm_mem_peak_rss()));
+}
+
 /* Canonical order for the per-file skip list: path, then phase, then reason. */
 static int file_error_cmp(const void *a, const void *b) {
     const cbm_file_error_t *ea = (const cbm_file_error_t *)a;
@@ -935,6 +1065,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     cbm_mem_collect();
     cbm_log_info("mem.collect", "phase", "post_extract", "rss_mb",
                  itoa_buf((int)(cbm_mem_rss() / (1024 * 1024))));
+    cbm_pipeline_mem_profile("post_extract", p->gbuf, cache, file_count);
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
     rc = cbm_build_registry_from_cache(ctx, files, file_count, cache);
     cbm_log_info("pass.timing", "pass", "registry_build", "elapsed_ms",
@@ -947,6 +1078,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * whichever node won the temp→final mapping. */
     atomic_store(&shared_ids, cbm_gbuf_next_id(p->gbuf));
     log_phase_mem("registry_build");
+    cbm_pipeline_mem_profile("post_registry", p->gbuf, cache, file_count);
     if (rc != 0 || check_cancel(p)) {
         for (int i = 0; i < file_count; i++) {
             if (cache[i]) {
@@ -1021,12 +1153,14 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     cbm_log_info("pass.timing", "pass", "lsp_cross_prepare", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)));
     log_phase_mem("lsp_cross_prepare");
+    cbm_pipeline_mem_profile("lsp_cross_prepare", p->gbuf, cache, file_count);
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
     rc = cbm_parallel_resolve(ctx, files, file_count, cache, &shared_ids, worker_count, all_defs,
                               def_count, def_modules, module_def_index, &cross_registries);
     cbm_log_info("pass.timing", "pass", "parallel_resolve", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)));
     log_phase_mem("parallel_resolve");
+    cbm_pipeline_mem_profile("post_resolve", p->gbuf, cache, file_count);
     cbm_pxc_free_module_def_index(module_def_index);
     cbm_arena_destroy(&cross_lsp_arena); /* releases all per-lang registries */
     free(all_defs);
@@ -1045,6 +1179,12 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         }
     }
     free(cache);
+    /* The extraction results are the bulk of the process (rocksdb: 2.5 GB of a
+     * 3.0 GB peak). Freeing them only returns the pages to the allocator, so
+     * without this collect the dump's transient arrays are allocated on top of
+     * the whole retained-result footprint rather than in place of it. */
+    cbm_mem_collect();
+    cbm_pipeline_mem_profile("post_free_results", p->gbuf, NULL, 0);
     if (rc != 0) {
         return rc;
     }
@@ -1154,6 +1294,7 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
      * committed_nodes at 0, so the #334 plausibility gate never fired. */
     p->committed_nodes = cbm_gbuf_node_count(p->gbuf);
     p->committed_edges = cbm_gbuf_edge_count(p->gbuf);
+    cbm_pipeline_mem_profile("pre_dump", p->gbuf, NULL, 0);
     int rc = cbm_gbuf_dump_to_sqlite(p->gbuf, db_path);
     if (rc != 0) {
         cbm_log_error("pipeline.err", "phase", "dump");

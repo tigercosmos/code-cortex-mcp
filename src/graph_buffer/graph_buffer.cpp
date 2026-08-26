@@ -1087,6 +1087,104 @@ int cbm_gbuf_load_from_db(cbm_gbuf_t *gb, const char *db_path, const char *proje
     return 0;
 }
 
+/* ── Memory accounting (diagnostics) ─────────────────────────────── */
+
+/* malloc bookkeeping per allocation, so a table of 4.7M short strings does not
+ * report as if only its bytes were resident. mimalloc rounds small requests up
+ * to a size class; 16 bytes is a deliberate under-estimate of that. */
+enum { GB_MALLOC_OVERHEAD = 16 };
+
+static size_t gb_str_bytes(const char *s) {
+    return s ? strlen(s) + 1 + GB_MALLOC_OVERHEAD : 0;
+}
+
+static void mem_count_node_array(const char *key, void *value, void *ud) {
+    (void)key;
+    size_t *acc = (size_t *)ud;
+    const node_ptr_array_t *arr = (const node_ptr_array_t *)value;
+    if (arr) {
+        *acc += (size_t)arr->cap * sizeof(*arr->items) + GB_MALLOC_OVERHEAD;
+    }
+}
+
+static void mem_count_edge_array(const char *key, void *value, void *ud) {
+    (void)key;
+    size_t *acc = (size_t *)ud;
+    const edge_ptr_array_t *arr = (const edge_ptr_array_t *)value;
+    if (arr) {
+        /* + the strdup'd composite key the table borrows. */
+        *acc +=
+            (size_t)arr->cap * sizeof(*arr->items) + gb_str_bytes(key) + (2 * GB_MALLOC_OVERHEAD);
+    }
+}
+
+static void mem_count_intern(const char *key, void *value, void *ud) {
+    (void)value;
+    size_t *acc = (size_t *)ud;
+    *acc += gb_str_bytes(key);
+}
+
+void cbm_gbuf_mem_stats(const cbm_gbuf_t *gb, cbm_gbuf_mem_t *out) {
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!gb) {
+        return;
+    }
+
+    out->nodes = (long)cbm_ht_count(gb->node_by_qn);
+    out->edges = gb->edges.count;
+
+    out->node_structs = ((size_t)gb->nodes.count * (sizeof(cbm_gbuf_node_t) + GB_MALLOC_OVERHEAD)) +
+                        ((size_t)gb->nodes.cap * sizeof(*gb->nodes.items));
+    for (int i = 0; i < gb->nodes.count; i++) {
+        const cbm_gbuf_node_t *n = gb->nodes.items[i];
+        /* label and file_path point into the intern pool — counted there. */
+        out->node_strings += gb_str_bytes(n->name) + gb_str_bytes(n->qualified_name) +
+                             gb_str_bytes(n->properties_json);
+    }
+
+    out->edge_structs = ((size_t)gb->edges.count * (sizeof(cbm_gbuf_edge_t) + GB_MALLOC_OVERHEAD)) +
+                        ((size_t)gb->edges.cap * sizeof(*gb->edges.items));
+    for (int i = 0; i < gb->edges.count; i++) {
+        out->edge_strings += gb_str_bytes(gb->edges.items[i]->properties_json);
+    }
+
+    cbm_ht_foreach(gb->intern_pool, mem_count_intern, &out->intern_pool);
+    out->intern_pool += cbm_ht_memory_bytes(gb->intern_pool);
+
+    size_t idx = cbm_ht_memory_bytes(gb->node_by_qn) + cbm_ht_memory_bytes(gb->nodes_by_label) +
+                 cbm_ht_memory_bytes(gb->nodes_by_name) + cbm_ht_memory_bytes(gb->edge_by_key) +
+                 cbm_ht_memory_bytes(gb->edges_by_source_type) +
+                 cbm_ht_memory_bytes(gb->edges_by_target_type) +
+                 cbm_ht_memory_bytes(gb->edges_by_type);
+    idx += (size_t)gb->by_id_cap * sizeof(*gb->by_id);
+    cbm_ht_foreach(gb->nodes_by_label, mem_count_node_array, &idx);
+    cbm_ht_foreach(gb->nodes_by_name, mem_count_node_array, &idx);
+    cbm_ht_foreach(gb->edges_by_source_type, mem_count_edge_array, &idx);
+    cbm_ht_foreach(gb->edges_by_target_type, mem_count_edge_array, &idx);
+    cbm_ht_foreach(gb->edges_by_type, mem_count_edge_array, &idx);
+    /* edge_by_key borrows one strdup'd "src:tgt:type" key per edge. */
+    for (int i = 0; i < gb->edges.count; i++) {
+        char key[EDGE_KEY_BUF];
+        const cbm_gbuf_edge_t *e = gb->edges.items[i];
+        make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->properties_json);
+        idx += gb_str_bytes(key);
+    }
+    out->indexes = idx;
+
+    out->vectors = ((size_t)gb->dump_vector_cap * sizeof(*gb->dump_vectors)) +
+                   ((size_t)gb->dump_token_vec_cap * sizeof(*gb->dump_token_vecs));
+    for (int i = 0; i < gb->dump_vector_count; i++) {
+        out->vectors += (size_t)gb->dump_vectors[i].vector_len + GB_MALLOC_OVERHEAD;
+    }
+    for (int i = 0; i < gb->dump_token_vec_count; i++) {
+        out->vectors += (size_t)gb->dump_token_vecs[i].vector_len + GB_MALLOC_OVERHEAD +
+                        gb_str_bytes(gb->dump_token_vecs[i].token);
+    }
+}
+
 /* ── Canonical ordering ──────────────────────────────────────────── */
 
 /* Total order over nodes that reads only node CONTENT. qualified_name is the

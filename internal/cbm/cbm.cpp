@@ -36,6 +36,30 @@ static std::atomic<uint64_t> total_extract_ns = 0;
 static std::atomic<uint64_t> total_lsp_ns = 0;
 static std::atomic<uint64_t> total_preprocess_ns = 0;
 static std::atomic<uint64_t> total_files_preprocessed = 0;
+
+/* Arena bytes attributed to each stage of cbm_extract_file, so the pipeline's
+ * memory profile can say WHICH stage fills the per-file result arena that the
+ * whole run then holds. Read via cbm_get_arena_stage_bytes. */
+static std::atomic<uint64_t> arena_bytes_parse = 0;   /* module QN, error strings */
+static std::atomic<uint64_t> arena_bytes_extract = 0; /* defs/imports/unified walk */
+static std::atomic<uint64_t> arena_bytes_lsp = 0;     /* per-file LSP type resolution */
+static std::atomic<uint64_t> arena_bytes_pp = 0;      /* C/C++ preprocessed second pass */
+
+void cbm_get_arena_stage_bytes(uint64_t *parse, uint64_t *extract, uint64_t *lsp, uint64_t *pp) {
+    if (parse) {
+        *parse = atomic_load(&arena_bytes_parse);
+    }
+    if (extract) {
+        *extract = atomic_load(&arena_bytes_extract);
+    }
+    if (lsp) {
+        *lsp = atomic_load(&arena_bytes_lsp);
+    }
+    if (pp) {
+        *pp = atomic_load(&arena_bytes_pp);
+    }
+}
+
 static std::atomic<uint64_t> total_files = 0;
 
 // C/C++ preprocessor #define macros are extracted as Macro nodes (#375). On a
@@ -1210,6 +1234,8 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
     // then a single unified cursor walk handles the remaining 7 extractors.
     cbm_extract_definitions(&ctx);
     cbm_extract_imports(&ctx);
+    uint64_t arena_mark = a->total_alloc;
+    atomic_fetch_add(&arena_bytes_parse, arena_mark);
     cbm_extract_unified(&ctx);
 
     // Channel detection (Socket.IO / EventEmitter) — JS/TS only.
@@ -1229,6 +1255,8 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
 
     // LSP type-aware call/usage resolution (per-file). Runs in every mode;
     // refines the tree-sitter + textual-resolution graph with type info.
+    atomic_fetch_add(&arena_bytes_extract, a->total_alloc - arena_mark);
+    arena_mark = a->total_alloc;
     uint64_t lsp_start = now_ns();
     {
         if (language == CBM_LANG_GO) {
@@ -1276,6 +1304,8 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
         cbm_run_rust_lsp(a, result, source, source_len, root);
     }
     atomic_fetch_add(&total_lsp_ns, now_ns() - lsp_start);
+    atomic_fetch_add(&arena_bytes_lsp, a->total_alloc - arena_mark);
+    arena_mark = a->total_alloc;
 
     // Calls extracted so far all carry ORIGINAL-source line numbers; the C/C++
     // preprocessor second pass below appends calls with EXPANDED-source lines,
@@ -1397,6 +1427,7 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
             cbm_preprocessed_source_free(preprocessed);
         }
         atomic_fetch_add(&total_preprocess_ns, now_ns() - pp_start);
+        atomic_fetch_add(&arena_bytes_pp, a->total_alloc - arena_mark);
     }
 
     // Bottleneck call-context metrics. Each call is attributed to the INNERMOST

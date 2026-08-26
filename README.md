@@ -114,7 +114,10 @@ codebase-memory-mcp is in [docs/benchmarks/2026-08-25](docs/benchmarks/2026-08-2
 | Linux kernel (C) | 43.8M | 4.7M / 11.6M | 368 s | 264 s |
 
 The kernel index peaks at 61 GB resident on Linux at any worker count, and the 36 GB Mac
-completes it with 20 GB of swap in use. Query latency:
+completes it with 20 GB of swap in use. Almost all of that is the per-file extraction
+results the pipeline holds from extraction until the end of call resolution, not the graph
+itself: on llvm-project those results are 47 GB against a 2.5 GB graph buffer. Run with
+`CBM_MEM_PROFILE=1` for the breakdown. Query latency:
 
 | Operation | Time |
 |-----------|------|
@@ -166,6 +169,9 @@ code-cortex-mcp config set auto_index_limit 50000 # max files for auto-index
 - **Parallelism** — auto-detected (cgroup-aware); override with `CBM_WORKERS` (1–256).
 - **Ignore rules** — `.gitignore`, then `.cbmignore` (gitignore syntax). The indexer skips symlinks.
 - **Custom extensions** — `.code-cortex.json`: `{"extra_extensions": {".mjs": "javascript"}}`.
+- **Memory profile** — `CBM_MEM_PROFILE=1` logs a byte-level breakdown of the index at each
+  phase boundary: the graph buffer split by what holds it, and the retained per-file
+  extraction results.
 
 ## Build from Source
 

@@ -134,3 +134,13 @@ void cbm_ht_clear(CBMHashTable *ht) {
     }
     ht->map.clear();
 }
+
+size_t cbm_ht_memory_bytes(const CBMHashTable *ht) {
+    if (!ht) {
+        return 0;
+    }
+    /* libstdc++/libc++ both allocate one node per element (key, value, next)
+     * and a bucket array of pointers. */
+    const size_t node_bytes = sizeof(const char *) + sizeof(void *) + sizeof(void *);
+    return (ht->map.bucket_count() * sizeof(void *)) + (ht->map.size() * node_bytes);
+}

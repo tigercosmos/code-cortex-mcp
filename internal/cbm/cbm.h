@@ -556,6 +556,12 @@ void cbm_index_mark_done(const char *rel_path);
 
 // Extract all data from one file. Caller must call cbm_free_result().
 // source must remain valid for the duration of the call.
+// Arena bytes cbm_extract_file attributed to each of its stages, summed over
+// every file extracted in this process. The per-file result arena is what a
+// full index holds until the resolve phase ends, so this says which stage
+// fills it. Any out param may be NULL. Diagnostics only.
+void cbm_get_arena_stage_bytes(uint64_t *parse, uint64_t *extract, uint64_t *lsp, uint64_t *pp);
+
 // timeout_micros: per-file parse timeout in microseconds (0 = no timeout).
 CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage language,
                                 const char *project, const char *rel_path, int64_t timeout_micros,
