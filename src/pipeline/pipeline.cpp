@@ -290,7 +290,15 @@ static int file_error_cmp(const void *a, const void *b) {
     if (c != 0) {
         return c;
     }
+    /* cppcheck explores the path where every path/phase/reason pointer is NULL,
+     * where all three strcmp("", "") calls do return 0 — and then reports the
+     * second compare as redundant. It only reaches that path when its
+     * valueflow budget allows, so the finding comes and goes between runs on
+     * identical source. Suppressed rather than restructured: the comparator is
+     * correct, and the members really are distinct. */
+    // cppcheck-suppress redundantAssignment
     c = strcmp(ea->phase ? ea->phase : "", eb->phase ? eb->phase : "");
+    // cppcheck-suppress knownConditionTrueFalse
     if (c != 0) {
         return c;
     }
