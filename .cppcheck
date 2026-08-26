@@ -13,3 +13,9 @@ unusedFunction:tests/*
 constVariablePointer
 constParameterPointer
 constVariable
+
+# Hash-table iteration callbacks must match cbm_ht_iter_fn exactly
+# (void (*)(const char *, void *, void *)). Constifying `value` or
+# `userdata` changes the function type, so every cbm_ht_foreach call
+# site would need a cast — see src/foundation/hash_table.h.
+constParameterCallback
