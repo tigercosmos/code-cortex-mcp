@@ -113,11 +113,11 @@ codebase-memory-mcp is in [docs/benchmarks/2026-08-25](docs/benchmarks/2026-08-2
 | llvm-project (C++) | 46.8M | 2.2M / 7.8M | 487 s | 382 s |
 | Linux kernel (C) | 43.8M | 4.7M / 11.6M | 368 s | 264 s |
 
-The kernel index peaks at 61 GB resident on Linux at any worker count, and the 36 GB Mac
-completes it with 20 GB of swap in use. Almost all of that is the per-file extraction
-results the pipeline holds from extraction until the end of call resolution, not the graph
-itself: on llvm-project those results are 47 GB against a 2.5 GB graph buffer. Run with
-`CBM_MEM_PROFILE=1` for the breakdown. Query latency:
+Almost all of an index's memory is the per-file extraction results the pipeline holds from
+extraction until the end of call resolution, not the graph itself. Those results shrank by
+39–78% when the per-file type resolvers moved to a scratch arena, measured on Go, Python, C
+and C++ repositories; the kernel figure of 61 GB resident on the Linux machine above is from
+before that change. Run with `CBM_MEM_PROFILE=1` for the breakdown. Query latency:
 
 | Operation | Time |
 |-----------|------|

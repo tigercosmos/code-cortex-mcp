@@ -265,11 +265,12 @@ void cbm_pipeline_mem_profile(const char *phase, const cbm_gbuf_t *gbuf,
         uint64_t a_parse = 0;
         uint64_t a_extract = 0;
         uint64_t a_lsp = 0;
+        uint64_t a_lsp_kept = 0;
         uint64_t a_pp = 0;
-        cbm_get_arena_stage_bytes(&a_parse, &a_extract, &a_lsp, &a_pp);
+        cbm_get_arena_stage_bytes(&a_parse, &a_extract, &a_lsp, &a_lsp_kept, &a_pp);
         cbm_log_info("mem.profile.stages", "phase", phase, "parse_mb", mb_buf(a_parse),
-                     "extract_mb", mb_buf(a_extract), "per_file_lsp_mb", mb_buf(a_lsp),
-                     "preprocessed_mb", mb_buf(a_pp));
+                     "extract_mb", mb_buf(a_extract), "lsp_scratch_mb", mb_buf(a_lsp),
+                     "lsp_kept_mb", mb_buf(a_lsp_kept), "preprocessed_mb", mb_buf(a_pp));
         cbm_log_info("mem.profile.records", "phase", phase, "defs", n_buf(n_defs), "calls",
                      n_buf(n_calls), "usages", n_buf(n_usages), "type_refs", n_buf(n_typerefs),
                      "def_bytes", n_buf((long)sizeof(CBMDefinition)), "call_bytes",

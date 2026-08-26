@@ -40,12 +40,14 @@ static std::atomic<uint64_t> total_files_preprocessed = 0;
 /* Arena bytes attributed to each stage of cbm_extract_file, so the pipeline's
  * memory profile can say WHICH stage fills the per-file result arena that the
  * whole run then holds. Read via cbm_get_arena_stage_bytes. */
-static std::atomic<uint64_t> arena_bytes_parse = 0;   /* module QN, error strings */
-static std::atomic<uint64_t> arena_bytes_extract = 0; /* defs/imports/unified walk */
-static std::atomic<uint64_t> arena_bytes_lsp = 0;     /* per-file LSP type resolution */
-static std::atomic<uint64_t> arena_bytes_pp = 0;      /* C/C++ preprocessed second pass */
+static std::atomic<uint64_t> arena_bytes_parse = 0;    /* module QN, error strings */
+static std::atomic<uint64_t> arena_bytes_extract = 0;  /* defs/imports/unified walk */
+static std::atomic<uint64_t> arena_bytes_lsp = 0;      /* per-file LSP scratch (freed per file) */
+static std::atomic<uint64_t> arena_bytes_lsp_kept = 0; /* what the LSP leaves on the result */
+static std::atomic<uint64_t> arena_bytes_pp = 0;       /* C/C++ preprocessed second pass */
 
-void cbm_get_arena_stage_bytes(uint64_t *parse, uint64_t *extract, uint64_t *lsp, uint64_t *pp) {
+void cbm_get_arena_stage_bytes(uint64_t *parse, uint64_t *extract, uint64_t *lsp,
+                               uint64_t *lsp_kept, uint64_t *pp) {
     if (parse) {
         *parse = atomic_load(&arena_bytes_parse);
     }
@@ -54,6 +56,9 @@ void cbm_get_arena_stage_bytes(uint64_t *parse, uint64_t *extract, uint64_t *lsp
     }
     if (lsp) {
         *lsp = atomic_load(&arena_bytes_lsp);
+    }
+    if (lsp_kept) {
+        *lsp_kept = atomic_load(&arena_bytes_lsp_kept);
     }
     if (pp) {
         *pp = atomic_load(&arena_bytes_pp);
@@ -1122,6 +1127,162 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
     return r;
 }
 
+/* ── Per-file LSP scratch arena ──────────────────────────────────── */
+
+/* The per-file LSP resolvers build a whole type registry for the file — the
+ * single largest thing in a full index's memory (etcd 891 MB of 1127, django
+ * 1584 of 2531, rocksdb 762 of 2143, measured with CBM_MEM_PROFILE=1). All of
+ * it used to land in result->arena, which the pipeline holds until the end of
+ * the resolve phase, even though the only things the resolvers leave behind
+ * are entries appended to result->resolved_calls, result->calls (Python and
+ * Rust synthetic calls) and result->defs (the Python and Kotlin builtin
+ * injections). Give them a scratch arena instead, copy those entries onto the
+ * durable arena, and throw the registry away with the file.
+ *
+ * The copy is driven by pointer ownership rather than by knowing which
+ * resolver wrote what: anything that points inside the scratch arena is
+ * duplicated, anything else (durable-arena strings, source slices, string
+ * literals) is left exactly as it is. */
+
+static bool arena_owns(const CBMArena *a, const void *p) {
+    if (!a || !p) {
+        return false;
+    }
+    const char *c = (const char *)p;
+    for (int i = 0; i < a->nblocks; i++) {
+        if (a->blocks[i] && c >= a->blocks[i] && c < a->blocks[i] + a->block_sizes[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Never returns the scratch pointer and never returns NULL for a non-NULL
+ * input: on allocation failure it degrades to the empty string, which loses a
+ * property rather than leaving a dangling read behind. */
+static const char *reloc_str(CBMArena *dst, const CBMArena *scratch, const char *s) {
+    if (!s || !arena_owns(scratch, s)) {
+        return s;
+    }
+    const char *copy = cbm_arena_strdup(dst, s);
+    return copy ? copy : "";
+}
+
+/* NULL-terminated arrays of strings (CBMDefinition::decorators and friends).
+ * Both the array block and its elements can live in the scratch. */
+static const char **reloc_str_array(CBMArena *dst, const CBMArena *scratch, const char **arr) {
+    if (!arr) {
+        return NULL;
+    }
+    int n = 0;
+    while (arr[n]) {
+        n++;
+    }
+    const char **out = arr;
+    if (arena_owns(scratch, arr)) {
+        out = (const char **)cbm_arena_alloc(dst, (size_t)(n + 1) * sizeof(*out));
+        if (!out) {
+            return NULL;
+        }
+        out[n] = NULL;
+    }
+    for (int i = 0; i < n; i++) {
+        out[i] = reloc_str(dst, scratch, arr[i]);
+    }
+    return out;
+}
+
+static void reloc_definition(CBMArena *dst, const CBMArena *scratch, CBMDefinition *d) {
+    d->name = reloc_str(dst, scratch, d->name);
+    d->qualified_name = reloc_str(dst, scratch, d->qualified_name);
+    d->label = reloc_str(dst, scratch, d->label);
+    d->file_path = reloc_str(dst, scratch, d->file_path);
+    d->signature = reloc_str(dst, scratch, d->signature);
+    d->return_type = reloc_str(dst, scratch, d->return_type);
+    d->receiver = reloc_str(dst, scratch, d->receiver);
+    d->docstring = reloc_str(dst, scratch, d->docstring);
+    d->parent_class = reloc_str(dst, scratch, d->parent_class);
+    d->route_path = reloc_str(dst, scratch, d->route_path);
+    d->route_method = reloc_str(dst, scratch, d->route_method);
+    d->structural_profile = reloc_str(dst, scratch, d->structural_profile);
+    d->body_tokens = reloc_str(dst, scratch, d->body_tokens);
+    d->decorators = reloc_str_array(dst, scratch, d->decorators);
+    d->base_classes = reloc_str_array(dst, scratch, d->base_classes);
+    d->param_names = reloc_str_array(dst, scratch, d->param_names);
+    d->param_types = reloc_str_array(dst, scratch, d->param_types);
+    d->return_types = reloc_str_array(dst, scratch, d->return_types);
+    if (d->fingerprint && d->fingerprint_k > 0 && arena_owns(scratch, d->fingerprint)) {
+        size_t bytes = (size_t)d->fingerprint_k * sizeof(*d->fingerprint);
+        uint32_t *copy = (uint32_t *)cbm_arena_alloc(dst, bytes);
+        if (copy) {
+            memcpy(copy, d->fingerprint, bytes);
+            d->fingerprint = copy;
+        } else {
+            d->fingerprint = NULL;
+            d->fingerprint_k = 0;
+        }
+    }
+}
+
+static void reloc_call(CBMArena *dst, const CBMArena *scratch, CBMCall *c) {
+    c->callee_name = reloc_str(dst, scratch, c->callee_name);
+    c->enclosing_func_qn = reloc_str(dst, scratch, c->enclosing_func_qn);
+    c->first_string_arg = reloc_str(dst, scratch, c->first_string_arg);
+    c->second_arg_name = reloc_str(dst, scratch, c->second_arg_name);
+    for (int i = 0; i < CBM_MAX_CALL_ARGS; i++) {
+        c->args[i].expr = reloc_str(dst, scratch, c->args[i].expr);
+        c->args[i].value = reloc_str(dst, scratch, c->args[i].value);
+        c->args[i].keyword = reloc_str(dst, scratch, c->args[i].keyword);
+    }
+}
+
+static void reloc_resolved_call(CBMArena *dst, const CBMArena *scratch, CBMResolvedCall *rc) {
+    rc->caller_qn = reloc_str(dst, scratch, rc->caller_qn);
+    rc->callee_qn = reloc_str(dst, scratch, rc->callee_qn);
+    rc->strategy = reloc_str(dst, scratch, rc->strategy);
+    rc->reason = reloc_str(dst, scratch, rc->reason);
+}
+
+/* A push that overflows the array reallocates the whole block from whichever
+ * arena it was handed, so an array the LSP grew now lives in the scratch —
+ * including the entries that were already there. Move the block first, then
+ * fix up the entries the LSP added. */
+#define RELOC_ARRAY_BLOCK(arr, dst, scratch)                                                  \
+    do {                                                                                      \
+        if ((arr)->items && (arr)->cap > 0 && arena_owns((scratch), (arr)->items)) {          \
+            void *moved = cbm_arena_alloc((dst), (size_t)(arr)->cap * sizeof(*(arr)->items)); \
+            if (moved) {                                                                      \
+                memcpy(moved, (arr)->items, (size_t)(arr)->count * sizeof(*(arr)->items));    \
+                (arr)->items = (__typeof__((arr)->items))moved;                               \
+            } else {                                                                          \
+                (arr)->count = 0; /* never leave the array pointing into the scratch */       \
+                (arr)->cap = 0;                                                               \
+                (arr)->items = NULL;                                                          \
+            }                                                                                 \
+        }                                                                                     \
+    } while (0)
+
+/* Move everything the per-file LSP left in `result` off `scratch` and onto
+ * `dst`, so `scratch` can be destroyed. The *_before counts mark where each
+ * array stood when the LSP started: entries below them were built by the
+ * extractors on `dst` and need no field fix-up. */
+static void lsp_scratch_reclaim(CBMFileResult *result, CBMArena *dst, const CBMArena *scratch,
+                                int defs_before, int calls_before, int resolved_before) {
+    RELOC_ARRAY_BLOCK(&result->defs, dst, scratch);
+    RELOC_ARRAY_BLOCK(&result->calls, dst, scratch);
+    RELOC_ARRAY_BLOCK(&result->resolved_calls, dst, scratch);
+
+    for (int i = defs_before; i < result->defs.count; i++) {
+        reloc_definition(dst, scratch, &result->defs.items[i]);
+    }
+    for (int i = calls_before; i < result->calls.count; i++) {
+        reloc_call(dst, scratch, &result->calls.items[i]);
+    }
+    for (int i = resolved_before; i < result->resolved_calls.count; i++) {
+        reloc_resolved_call(dst, scratch, &result->resolved_calls.items[i]);
+    }
+}
+
 static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                                             CBMLanguage language, const char *project,
                                             const char *rel_path, int64_t timeout_micros,
@@ -1258,18 +1419,25 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
     atomic_fetch_add(&arena_bytes_extract, a->total_alloc - arena_mark);
     arena_mark = a->total_alloc;
     uint64_t lsp_start = now_ns();
+    /* Scratch for the resolvers' type registries — see lsp_scratch_reclaim. */
+    CBMArena lsp_scratch;
+    cbm_arena_init(&lsp_scratch);
+    CBMArena *la = &lsp_scratch;
+    const int lsp_defs_before = result->defs.count;
+    const int lsp_calls_before = result->calls.count;
+    const int lsp_resolved_before = result->resolved_calls.count;
     {
         if (language == CBM_LANG_GO) {
-            cbm_run_go_lsp(a, result, source, source_len, root);
+            cbm_run_go_lsp(la, result, source, source_len, root);
         }
         if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
-            cbm_run_c_lsp(a, result, source, source_len, root, language != CBM_LANG_C);
+            cbm_run_c_lsp(la, result, source, source_len, root, language != CBM_LANG_C);
         }
         if (language == CBM_LANG_PHP) {
-            cbm_run_php_lsp(a, result, source, source_len, root);
+            cbm_run_php_lsp(la, result, source, source_len, root);
         }
         if (language == CBM_LANG_PYTHON) {
-            cbm_run_py_lsp(a, result, source, source_len, root);
+            cbm_run_py_lsp(la, result, source, source_len, root);
         }
         if (language == CBM_LANG_JAVASCRIPT || language == CBM_LANG_TYPESCRIPT ||
             language == CBM_LANG_TSX) {
@@ -1288,23 +1456,28 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                 if (rl >= 5 && strcmp(rel_path + rl - 5, ".d.ts") == 0)
                     dts_mode = true;
             }
-            cbm_run_ts_lsp(a, result, source, source_len, root, js_mode, jsx_mode, dts_mode);
+            cbm_run_ts_lsp(la, result, source, source_len, root, js_mode, jsx_mode, dts_mode);
         }
         if (language == CBM_LANG_CSHARP) {
-            cbm_run_cs_lsp(a, result, source, source_len, root);
+            cbm_run_cs_lsp(la, result, source, source_len, root);
         }
     }
     if (language == CBM_LANG_JAVA) {
-        cbm_run_java_lsp(a, result, source, source_len, root);
+        cbm_run_java_lsp(la, result, source, source_len, root);
     }
     if (language == CBM_LANG_KOTLIN) {
-        cbm_run_kotlin_lsp(a, result, source, source_len, root);
+        cbm_run_kotlin_lsp(la, result, source, source_len, root);
     }
     if (language == CBM_LANG_RUST) {
-        cbm_run_rust_lsp(a, result, source, source_len, root);
+        cbm_run_rust_lsp(la, result, source, source_len, root);
     }
+    lsp_scratch_reclaim(result, a, &lsp_scratch, lsp_defs_before, lsp_calls_before,
+                        lsp_resolved_before);
+    atomic_fetch_add(&arena_bytes_lsp, lsp_scratch.total_alloc);
+    cbm_arena_destroy(&lsp_scratch);
     atomic_fetch_add(&total_lsp_ns, now_ns() - lsp_start);
-    atomic_fetch_add(&arena_bytes_lsp, a->total_alloc - arena_mark);
+    /* Only what survived the reclaim counts against the durable arena. */
+    atomic_fetch_add(&arena_bytes_lsp_kept, a->total_alloc - arena_mark);
     arena_mark = a->total_alloc;
 
     // Calls extracted so far all carry ORIGINAL-source line numbers; the C/C++
@@ -1362,8 +1535,29 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                     // Also run LSP on expanded source for additional type-resolved
                     // calls (language is already C/C++/CUDA — checked in enclosing
                     // block). Runs in every mode.
-                    cbm_run_c_lsp(a, result, expanded, expanded_len, pp_root,
-                                  language != CBM_LANG_C);
+                    {
+                        /* Same deal as the raw-source resolvers: the registry
+                         * this builds over a fully expanded translation unit
+                         * is the largest of the lot, and none of it outlives
+                         * the file. */
+                        CBMArena pp_lsp_scratch;
+                        cbm_arena_init(&pp_lsp_scratch);
+                        const int pp_defs_before = result->defs.count;
+                        const int pp_calls_before = result->calls.count;
+                        const int pp_resolved_before = result->resolved_calls.count;
+                        uint64_t pp_kept_before = a->total_alloc;
+                        cbm_run_c_lsp(&pp_lsp_scratch, result, expanded, expanded_len, pp_root,
+                                      language != CBM_LANG_C);
+                        lsp_scratch_reclaim(result, a, &pp_lsp_scratch, pp_defs_before,
+                                            pp_calls_before, pp_resolved_before);
+                        atomic_fetch_add(&arena_bytes_lsp, pp_lsp_scratch.total_alloc);
+                        uint64_t pp_kept = a->total_alloc - pp_kept_before;
+                        atomic_fetch_add(&arena_bytes_lsp_kept, pp_kept);
+                        /* Charged to the LSP, so keep it out of the
+                         * preprocessed-extraction total measured below. */
+                        arena_mark += pp_kept;
+                        cbm_arena_destroy(&pp_lsp_scratch);
+                    }
 
                     /* #961: a def whose body braces are split across
                      * #ifdef/#else branches parses as an ERROR region on the
