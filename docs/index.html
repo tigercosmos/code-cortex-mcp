@@ -250,23 +250,23 @@
         <p class="muted">Full index from an empty cache, median of three runs. Apple M3 Max (14 cores, 36 GB) and a 32-core Linux machine (62 GB), release builds.</p>
         <div class="table-wrap">
         <table class="num">
-            <thead><tr><th>Repository</th><th>Lines</th><th>Nodes / edges</th><th>M3 Max</th><th>32-core Linux</th></tr></thead>
+            <thead><tr><th>Repository</th><th>Lines</th><th>Nodes / edges</th><th>M3 Max</th><th>32-core Linux</th><th>Peak RAM</th></tr></thead>
             <tbody>
-                <tr><td>etcd (Go)</td><td>0.3M</td><td>15K / 95K</td><td>1.4 s</td><td>1.2 s</td></tr>
-                <tr><td>Redis (C)</td><td>0.6M</td><td>38K / 146K</td><td>2.8 s</td><td>2.8 s</td></tr>
-                <tr><td>Django (Python)</td><td>1.1M</td><td>55K / 372K</td><td>4.8 s</td><td>3.8 s</td></tr>
-                <tr><td>CPython (C, Python)</td><td>3.3M</td><td>137K / 1.0M</td><td>14 s</td><td>12 s</td></tr>
-                <tr><td>PyTorch (C++, Python)</td><td>5.1M</td><td>235K / 2.1M</td><td>32 s</td><td>26 s</td></tr>
-                <tr><td>Kubernetes (Go)</td><td>7.3M</td><td>288K / 3.3M</td><td>56 s</td><td>57 s</td></tr>
-                <tr><td>Elasticsearch (Java)</td><td>8.8M</td><td>692K / 5.2M</td><td>94 s</td><td>63 s</td></tr>
-                <tr><td>llvm-project (C++)</td><td>46.8M</td><td>2.2M / 7.8M</td><td>487 s</td><td>382 s</td></tr>
-                <tr><td>Linux kernel (C)</td><td>43.8M</td><td>4.7M / 11.6M</td><td>368 s</td><td>264 s</td></tr>
-                <tr><td><code>search_graph</code>, <code>trace_path</code> (warm query)</td><td></td><td></td><td>0.1–0.5 ms</td><td></td></tr>
-                <tr><td>PreToolUse hook (<code>Grep</code> or <code>Read</code>)</td><td></td><td></td><td>~10 ms</td><td></td></tr>
+                <tr><td>etcd (Go)</td><td>0.3M</td><td>15K / 95K</td><td>1.4 s</td><td>1.2 s</td><td>0.7 GB</td></tr>
+                <tr><td>Redis (C)</td><td>0.6M</td><td>38K / 146K</td><td>2.8 s</td><td>2.8 s</td><td>1.0 GB</td></tr>
+                <tr><td>Django (Python)</td><td>1.1M</td><td>55K / 372K</td><td>4.8 s</td><td>3.8 s</td><td>1.9 GB</td></tr>
+                <tr><td>CPython (C, Python)</td><td>3.3M</td><td>137K / 1.0M</td><td>14 s</td><td>12 s</td><td>4.3 GB</td></tr>
+                <tr><td>PyTorch (C++, Python)</td><td>5.1M</td><td>235K / 2.1M</td><td>32 s</td><td>26 s</td><td>8.7 GB</td></tr>
+                <tr><td>Kubernetes (Go)</td><td>7.3M</td><td>288K / 3.3M</td><td>56 s</td><td>57 s</td><td>4.9 GB</td></tr>
+                <tr><td>Elasticsearch (Java)</td><td>8.8M</td><td>692K / 5.2M</td><td>94 s</td><td>63 s</td><td>7.9 GB</td></tr>
+                <tr><td>llvm-project (C++)</td><td>46.8M</td><td>2.2M / 7.8M</td><td>487 s</td><td>382 s</td><td>12 GB</td></tr>
+                <tr><td>Linux kernel (C)</td><td>43.8M</td><td>4.7M / 11.6M</td><td>368 s</td><td>264 s</td><td>13.4 GB</td></tr>
+                <tr><td><code>search_graph</code>, <code>trace_path</code> (warm query)</td><td></td><td></td><td>0.1–0.5 ms</td><td></td><td></td></tr>
+                <tr><td>PreToolUse hook (<code>Grep</code> or <code>Read</code>)</td><td></td><td></td><td>~10 ms</td><td></td><td></td></tr>
             </tbody>
         </table>
         </div>
-        <p class="muted">The kernel index peaks at 61 GB resident; the 36 GB Mac finishes it with 20 GB of swap in use.</p>
+        <p class="muted">Peak RAM is the peak resident set size on the M3 Max at 14 workers. It follows how much the extractors produce rather than repository size, and indexing is where it goes &mdash; answering queries afterwards reads the SQLite file and needs almost none of it. The indexer throttles its own workers against a budget derived from total RAM, so a smaller machine still finishes, more slowly.</p>
     </section>
 
     <section>
