@@ -90,6 +90,9 @@ code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LI
   pub-sub channels (`EMITS` / `LISTENS_ON`); `CROSS_*` edges across repositories.
 - **Infrastructure as code** — Dockerfiles, Kubernetes manifests, and Kustomize overlays
   as graph nodes.
+- **Reproducible index** — two full runs over the same tree produce the same graph: same
+  nodes, edges, IDs and properties, byte for byte. Verified on 11 of the benchmark
+  repositories.
 - **Team artifact** — commit `.code-cortex/graph.db.zst` (a zstd snapshot, about 10:1)
   and teammates import it instead of a full reindex. A `.gitattributes` `merge=ours` rule
   prevents merge conflicts. Gitignore `.code-cortex/` to opt out.

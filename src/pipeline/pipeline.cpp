@@ -151,6 +151,21 @@ static const char *itoa_buf(int val) {
     return bufs[i];
 }
 
+/* Canonical order for the per-file skip list: path, then phase, then reason. */
+static int file_error_cmp(const void *a, const void *b) {
+    const cbm_file_error_t *ea = (const cbm_file_error_t *)a;
+    const cbm_file_error_t *eb = (const cbm_file_error_t *)b;
+    int c = strcmp(ea->path ? ea->path : "", eb->path ? eb->path : "");
+    if (c != 0) {
+        return c;
+    }
+    c = strcmp(ea->phase ? ea->phase : "", eb->phase ? eb->phase : "");
+    if (c != 0) {
+        return c;
+    }
+    return strcmp(ea->reason ? ea->reason : "", eb->reason ? eb->reason : "");
+}
+
 /* Log current + peak RSS at a pipeline phase boundary (memory profiling). */
 static void log_phase_mem(const char *phase) {
     enum { PL_BYTES_PER_MB = 1024 * 1024 };
@@ -924,6 +939,13 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     rc = cbm_build_registry_from_cache(ctx, files, file_count, cache);
     cbm_log_info("pass.timing", "pass", "registry_build", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)));
+    /* The registry build allocated node and edge IDs from the MAIN buffer's own
+     * counter while the shared atomic stood still. Resolve workers draw from
+     * that atomic, so without this store they hand out IDs the registry phase
+     * already used: two different nodes end up with one temp ID, and at dump
+     * time every edge that pointed at the first is silently retargeted to
+     * whichever node won the temp→final mapping. */
+    atomic_store(&shared_ids, cbm_gbuf_next_id(p->gbuf));
     log_phase_mem("registry_build");
     if (rc != 0 || check_cancel(p)) {
         for (int i = 0; i < file_count; i++) {
@@ -1204,6 +1226,14 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
          * something to record (AFTER hashes, so the deleted-file prune inside
          * replace sees the live file set; not_indexed_* kinds are exempt from
          * that prune — deliberately-unindexed paths have no hash rows). */
+        /* Per-file skips arrive from the parallel extract merge in worker
+         * order, which varies run to run; sort them so the coverage rows (and
+         * the MCP skipped[] list built from the same array) do not. */
+        if (p->file_errors_count > 1) {
+            qsort(p->file_errors, (size_t)p->file_errors_count, sizeof(*p->file_errors),
+                  file_error_cmp);
+        }
+
         int cov_total = p->file_errors_count + p->excluded_count + p->ignored_count;
         if (cov_total > 0) {
             cbm_coverage_row_t *cov =

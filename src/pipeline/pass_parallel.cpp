@@ -1170,6 +1170,11 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
     }
     CBM_PROF_END_N("parallel_extract", "4_merge_gbufs_seq", t_merge, total_nodes);
 
+    /* Workers finish in whatever order the scheduler gives them, so the merge
+     * above leaves the node/edge arrays in a run-dependent order. Restore a
+     * canonical one before any consumer sees it. */
+    cbm_gbuf_canonicalize(ctx->gbuf);
+
     /* Merge per-worker skip lists into the pipeline (SEQUENTIAL — no lock).
      * Runs unconditionally (not gated on local_gbuf) so a worker whose files all
      * failed still surfaces its skips. */
@@ -3138,6 +3143,11 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     }
     CBM_PROF_END_N("parallel_resolve", "2_merge_edge_bufs_seq", t_resolve_merge,
                    total_calls + total_usages);
+
+    /* Same as the extract merge: resolve workers contribute nodes (service
+     * Routes) and edges in scheduling order — re-canonicalize before the
+     * serial full-graph tail below and the post-passes after it. */
+    cbm_gbuf_canonicalize(ctx->gbuf);
 
     cbm_aligned_free(workers);
 

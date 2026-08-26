@@ -17,6 +17,13 @@ Pre-generated parser sources are vendored in `internal/cbm/vendored/grammars/<la
 Each grammar is the work of its upstream authors; we vendor only the generated
 `parser.c` (and `scanner.c` where applicable) for static compilation.
 
+Local modifications, each marked `LOCAL PATCH` in the source:
+
+- `jsonnet/scanner.c` — the external scanner's state is made `static
+  _Thread_local`. Upstream keeps it in plain globals and returns NULL from
+  `external_scanner_create`, which is a data race when the indexer parses files
+  on several threads at once.
+
 | Grammar | Upstream Repository | License | Copyright |
 |---------|-------------------|---------|-----------|
 | go | [tree-sitter/tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) | MIT | (c) 2014 Max Brunsfeld |

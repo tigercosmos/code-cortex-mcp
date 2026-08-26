@@ -112,6 +112,16 @@ int cbm_gbuf_delete_by_file(cbm_gbuf_t *gb, const char *file_path);
  * into this graph buffer. Returns 0 on success. */
 int cbm_gbuf_load_from_db(cbm_gbuf_t *gb, const char *db_path, const char *project);
 
+/* Impose a canonical, scheduling-independent order on every ordered view of
+ * the buffer: the node array (and so the final IDs the dump assigns), the
+ * per-label and per-name node lists, the edge array, and the per-key edge
+ * lists. Parallel extraction merges worker buffers in whatever order the
+ * workers finished, so those views otherwise differ between identical runs,
+ * and every downstream pass that truncates at a cap, breaks a tie, or takes
+ * the first match inherits the difference. Idempotent; call after each
+ * parallel merge. The dump calls it itself. */
+void cbm_gbuf_canonicalize(cbm_gbuf_t *gb);
+
 /* Iterate all live nodes (not deleted from QN index). */
 typedef void (*cbm_gbuf_node_visitor_fn)(const cbm_gbuf_node_t *node, void *userdata);
 void cbm_gbuf_foreach_node(const cbm_gbuf_t *gb, cbm_gbuf_node_visitor_fn fn, void *userdata);
