@@ -90,6 +90,9 @@ code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LI
   pub-sub channels (`EMITS` / `LISTENS_ON`); `CROSS_*` edges across repositories.
 - **Infrastructure as code** — Dockerfiles, Kubernetes manifests, and Kustomize overlays
   as graph nodes.
+- **Reproducible index** — two full runs over the same tree produce the same graph: same
+  nodes, edges, IDs and properties, byte for byte. Verified on 11 of the benchmark
+  repositories.
 - **Team artifact** — commit `.code-cortex/graph.db.zst` (a zstd snapshot, about 10:1)
   and teammates import it instead of a full reindex. A `.gitattributes` `merge=ours` rule
   prevents merge conflicts. Gitignore `.code-cortex/` to opt out.
@@ -100,18 +103,34 @@ Full-index wall clock, median of three runs from an empty cache, on an Apple M3 
 36 GB) and a 32-core Linux machine (62 GB). The full 13-repository comparison with
 codebase-memory-mcp is in [docs/benchmarks/2026-08-25](docs/benchmarks/2026-08-25/README.md).
 
-| Repository | Lines | Nodes / edges | M3 Max | 32-core Linux |
-|-----------|------:|---|------:|------:|
-| etcd (Go) | 0.3M | 15K / 95K | 1.4 s | 1.2 s |
-| Django (Python) | 1.1M | 55K / 372K | 4.8 s | 3.8 s |
-| CPython (C, Python) | 3.3M | 137K / 1.0M | 14 s | 12 s |
-| Kubernetes (Go) | 7.3M | 288K / 3.3M | 56 s | 57 s |
-| Elasticsearch (Java) | 8.8M | 692K / 5.2M | 94 s | 63 s |
-| llvm-project (C++) | 46.8M | 2.2M / 7.8M | 487 s | 382 s |
-| Linux kernel (C) | 43.8M | 4.7M / 11.6M | 368 s | 264 s |
+| Repository | Lines | Nodes / edges | M3 Max | 32-core Linux | Peak RAM |
+|-----------|------:|---|------:|------:|------:|
+| etcd (Go) | 0.3M | 15K / 95K | 1.4 s | 1.2 s | 0.7 GB |
+| Django (Python) | 1.1M | 55K / 372K | 4.8 s | 3.8 s | 1.9 GB |
+| CPython (C, Python) | 3.3M | 137K / 1.0M | 14 s | 12 s | 4.3 GB |
+| Kubernetes (Go) | 7.3M | 288K / 3.3M | 56 s | 57 s | 4.9 GB |
+| Elasticsearch (Java) | 8.8M | 692K / 5.2M | 94 s | 63 s | 7.9 GB |
+| llvm-project (C++) | 46.8M | 2.2M / 7.8M | 487 s | 382 s | 12 GB |
+| Linux kernel (C) | 43.8M | 4.7M / 11.6M | 368 s | 264 s | 13.4 GB |
 
-The kernel index peaks at 61 GB resident on Linux at any worker count, and the 36 GB Mac
-completes it with 20 GB of swap in use. Query latency:
+### Memory
+
+Peak RAM is the peak resident set size on the M3 Max at 14 workers, median of three runs
+(llvm-project two, the kernel one). It follows how much the extractors produce rather than
+repository size — CPython needs 4.3 GB against Kubernetes' 4.9 GB with less than half the
+lines — and stays between 0.7 and 13.4 GB across every repository measured. Indexing is the expensive
+phase; answering queries afterwards reads the SQLite file and needs almost none of it.
+
+The peak is not the graph. It is the definitions, calls and usages the pipeline keeps for every
+file, from extraction until call resolution ends: about six times the graph buffer on
+Elasticsearch. On top of that sits the parse working set of the files being read at that
+moment, which is what `CBM_WORKERS` moves. The indexer also throttles workers by
+itself whenever its resident size passes a budget derived from total RAM (25–50%, a larger
+share on larger machines; `CBM_MEM_BUDGET_MB` overrides it in MiB), so a machine smaller than
+the figures above still finishes, more slowly. `CBM_MEM_PROFILE=1` logs a byte-level breakdown
+at every phase boundary.
+
+Query latency:
 
 | Operation | Time |
 |-----------|------|
@@ -163,6 +182,9 @@ code-cortex-mcp config set auto_index_limit 50000 # max files for auto-index
 - **Parallelism** — auto-detected (cgroup-aware); override with `CBM_WORKERS` (1–256).
 - **Ignore rules** — `.gitignore`, then `.cbmignore` (gitignore syntax). The indexer skips symlinks.
 - **Custom extensions** — `.code-cortex.json`: `{"extra_extensions": {".mjs": "javascript"}}`.
+- **Memory** — indexing is the memory-hungry phase; see [Memory](#memory). `CBM_MEM_BUDGET_MB`
+  caps the budget the indexer throttles against, and `CBM_MEM_PROFILE=1` logs a byte-level
+  breakdown at each phase boundary.
 
 ## Build from Source
 

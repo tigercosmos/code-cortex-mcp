@@ -317,6 +317,13 @@ bool cbm_is_env_var_name(const char *s);
 int cbm_normalize_config_key(const char *key, char *norm_out, size_t norm_sz);
 
 /* Check if a file path has a config file extension (.toml, .yaml, .env, etc.) */
+/* Log a byte-level memory breakdown for `phase`: the graph buffer split by
+ * what holds it, plus the retained per-file extraction results. Off unless
+ * CBM_MEM_PROFILE is set to 1 — the walk is O(nodes + edges + files). `cache`
+ * may be NULL when no extraction results are live. */
+void cbm_pipeline_mem_profile(const char *phase, const cbm_gbuf_t *gbuf,
+                              CBMFileResult *const *cache, int file_count);
+
 bool cbm_has_config_extension(const char *path);
 
 /* ── Enrichment helpers (pass_enrichment.c) ──────────────────────── */

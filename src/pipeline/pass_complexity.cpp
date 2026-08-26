@@ -153,7 +153,8 @@ static int tld_dfs(const cbm_gbuf_t *gb, int64_t id, const int *loop_depth, int 
  * extraction) feeds the final recursive flag; tld_dfs additionally ORs in
  * mutual recursion discovered as a call-graph cycle. */
 static void seed_loop_depths(const cbm_gbuf_t *gb, const char *label, int *loop_depth,
-                             bool *recursive, cbm_gbuf_node_t **nptr, int64_t maxid) {
+                             bool *recursive, cbm_gbuf_node_t **nptr, int64_t maxid, int64_t *roots,
+                             int *root_count) {
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
     if (cbm_gbuf_find_by_label(gb, label, &nodes, &count) != 0) {
@@ -165,6 +166,7 @@ static void seed_loop_depths(const cbm_gbuf_t *gb, const char *label, int *loop_
             loop_depth[n->id] = json_get_int(n->properties_json, "loop_depth", 0);
             recursive[n->id] = json_get_bool(n->properties_json, "self_recursive");
             nptr[n->id] = (cbm_gbuf_node_t *)n;
+            roots[(*root_count)++] = n->id;
         }
     }
 }
@@ -193,21 +195,40 @@ void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
         return;
     }
 
-    seed_loop_depths(gb, "Function", loop_depth, recursive, nptr, maxid);
-    seed_loop_depths(gb, "Method", loop_depth, recursive, nptr, maxid);
+    /* DFS roots, in the graph buffer's canonical node order. The memoised DFS
+     * truncates a branch at the first back edge, so which member of a call
+     * cycle is memoised first decides the depth every other member reads —
+     * walking roots by node id instead made the answer depend on the id the
+     * shared counter happened to hand each node during parallel extraction
+     * (etcd: executeTxn scored 8 or 20 across identical runs). */
+    int64_t *roots = (int64_t *)malloc(sz * sizeof(int64_t));
+    if (!roots) {
+        free(loop_depth);
+        free(tld);
+        free(state);
+        free(recursive);
+        free(nptr);
+        return;
+    }
+    int root_count = 0;
+    seed_loop_depths(gb, "Function", loop_depth, recursive, nptr, maxid, roots, &root_count);
+    seed_loop_depths(gb, "Method", loop_depth, recursive, nptr, maxid, roots, &root_count);
 
     int updated = 0;
     int64_t path[CBM_TLD_MAX_DEPTH + 1]; /* DFS path stack for cycle attribution */
-    for (int64_t id = 1; id <= maxid; id++) {
+    for (int r = 0; r < root_count; r++) {
+        int64_t id = roots[r];
         if (!nptr[id]) {
-            continue; /* only Function/Method nodes */
+            continue; /* already written (same node listed twice) */
         }
         if (state[id] != 2) {
             tld_dfs(gb, id, loop_depth, tld, state, recursive, maxid, 0, path);
         }
         append_complexity_props(nptr[id], tld[id], recursive[id]);
+        nptr[id] = NULL;
         updated++;
     }
+    free(roots);
 
     cbm_log_info("pass.complexity", "functions", itoa_cx(updated));
 

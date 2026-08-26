@@ -8,6 +8,8 @@
 #include "graph_buffer/graph_buffer.h"
 #include "store/store.h"
 
+#include <string>
+
 /* ── Node operations ───────────────────────────────────────────── */
 
 TEST(gbuf_create_free) {
@@ -1011,6 +1013,100 @@ TEST(gbuf_flush_skips_orphan_edges) {
     PASS();
 }
 
+/* ── Canonical ordering ────────────────────────────────────────── */
+
+/* Record the order of every ordered view of a buffer into one string, so two
+ * buffers built from the same data can be compared with one assertion. */
+static void canon_collect_node(const cbm_gbuf_node_t *n, void *ud) {
+    std::string *out = (std::string *)ud;
+    *out += n->qualified_name;
+    *out += ";";
+}
+
+static void canon_collect_edge(const cbm_gbuf_edge_t *e, void *ud) {
+    std::string *out = (std::string *)ud;
+    *out += e->type;
+    *out += ":";
+    *out += e->properties_json;
+    *out += ";";
+}
+
+static std::string canon_order_signature(const cbm_gbuf_t *gb) {
+    std::string sig;
+    cbm_gbuf_foreach_node(gb, canon_collect_node, &sig);
+    sig += "|";
+    const cbm_gbuf_node_t **byl = NULL;
+    int n = 0;
+    cbm_gbuf_find_by_label(gb, "Function", &byl, &n);
+    for (int i = 0; i < n; i++) {
+        sig += byl[i]->qualified_name;
+        sig += ",";
+    }
+    sig += "|";
+    cbm_gbuf_foreach_edge(gb, canon_collect_edge, &sig);
+    return sig;
+}
+
+/* Insert the same graph in one of two orders. `flip` reverses the node order
+ * and interleaves the edges differently — the stand-in for two runs whose
+ * extract workers finished in a different order. */
+static cbm_gbuf_t *canon_build(bool flip) {
+    static const char *const qns[] = {"p.zeta", "p.alpha", "p.mid", "p.beta"};
+    static const char *const files[] = {"z.go", "a.go", "m.go", "b.go"};
+    cbm_gbuf_t *gb = cbm_gbuf_new("p", "/tmp");
+    int64_t ids[4];
+    for (int k = 0; k < 4; k++) {
+        int i = flip ? 3 - k : k;
+        ids[i] =
+            cbm_gbuf_upsert_node(gb, "Function", qns[i] + 2, qns[i], files[i], i + 1, i + 2, "{}");
+    }
+    if (flip) {
+        cbm_gbuf_insert_edge(gb, ids[3], ids[0], "CALLS", "{\"n\":3}");
+        cbm_gbuf_insert_edge(gb, ids[0], ids[2], "CALLS", "{\"n\":1}");
+        cbm_gbuf_insert_edge(gb, ids[2], ids[1], "CALLS", "{\"n\":2}");
+    } else {
+        cbm_gbuf_insert_edge(gb, ids[0], ids[2], "CALLS", "{\"n\":1}");
+        cbm_gbuf_insert_edge(gb, ids[2], ids[1], "CALLS", "{\"n\":2}");
+        cbm_gbuf_insert_edge(gb, ids[3], ids[0], "CALLS", "{\"n\":3}");
+    }
+    return gb;
+}
+
+TEST(gbuf_canonicalize_erases_insertion_order) {
+    cbm_gbuf_t *a = canon_build(false);
+    cbm_gbuf_t *b = canon_build(true);
+
+    /* Precondition: the two orders really do differ before canonicalizing —
+     * otherwise the assertion below would pass for the wrong reason. */
+    ASSERT_TRUE(canon_order_signature(a) != canon_order_signature(b));
+
+    cbm_gbuf_canonicalize(a);
+    cbm_gbuf_canonicalize(b);
+    ASSERT_TRUE(canon_order_signature(a) == canon_order_signature(b));
+
+    /* Nodes come out in qualified-name order, which is what makes the final
+     * IDs the dump assigns a function of content alone. */
+    std::string sig = canon_order_signature(a);
+    ASSERT_TRUE(sig.rfind("p.alpha;p.beta;p.mid;p.zeta;", 0) == 0);
+
+    /* Idempotent: a second pass must not move anything. */
+    cbm_gbuf_canonicalize(a);
+    ASSERT_TRUE(canon_order_signature(a) == sig);
+
+    cbm_gbuf_free(a);
+    cbm_gbuf_free(b);
+    PASS();
+}
+
+TEST(gbuf_canonicalize_null_safe) {
+    cbm_gbuf_canonicalize(NULL); /* should not crash */
+    cbm_gbuf_t *gb = cbm_gbuf_new("p", "/tmp");
+    cbm_gbuf_canonicalize(gb); /* empty buffer */
+    ASSERT_EQ(cbm_gbuf_node_count(gb), 0);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(graph_buffer) {
@@ -1072,6 +1168,10 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_edge_props_merge_is_order_independent);
     RUN_TEST(gbuf_edge_props_merge_prefers_higher_confidence);
     RUN_TEST(gbuf_edge_props_merge_keeps_existing_on_empty);
+
+    /* Canonical ordering */
+    RUN_TEST(gbuf_canonicalize_erases_insertion_order);
+    RUN_TEST(gbuf_canonicalize_null_safe);
 
     /* Shared ID tests */
     RUN_TEST(gbuf_shared_ids_unique);

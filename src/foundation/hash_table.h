@@ -58,6 +58,11 @@ void cbm_ht_foreach(const CBMHashTable *ht, cbm_ht_iter_fn fn, void *userdata);
 /* Clear all entries (keeps allocated memory). */
 void cbm_ht_clear(CBMHashTable *ht);
 
+/* Approximate heap bytes held by the table itself: the bucket array plus one
+ * node per entry. Excludes the keys (borrowed) and the values. Diagnostics
+ * only — the index overhead of a large graph is otherwise invisible. */
+size_t cbm_ht_memory_bytes(const CBMHashTable *ht);
+
 #ifdef __cplusplus
 }
 #endif

@@ -696,6 +696,48 @@ void cbm_gbuf_set_next_id(cbm_gbuf_t *gb, int64_t next_id) {
 
 /* ── Node operations ─────────────────────────────────────────────── */
 
+/* Canonical winner for a qualified-name collision, as a pure function of the
+ * two candidates: > 0 keeps `existing`, <= 0 lets the arrival through.
+ *
+ * Distinct source entities can share a QN (C: a struct, a function and a macro
+ * with one name), and the same entity can be re-upserted with fresh content.
+ * Letting the LAST arrival win made the survivor depend on worker merge order,
+ * so the node set flickered run to run and every order-sensitive consumer
+ * inherited it. The order here is smallest file_path, then LARGEST start_line,
+ * then largest name, then largest label, then the RICHER property blob
+ * (longer, ties broken lexicographically). A mixed-direction composite is
+ * still a total order, so the pick is commutative and scheduling-free.
+ * Line-descending within a file keeps the classic upsert contract — a later
+ * definition in the same file (macro redefinition, a refresh of the same
+ * entity with new content) replaces the earlier one, deterministically,
+ * because intra-file arrival order is fixed. The property tie-break settles
+ * the case where two passes reach the same synthetic node from different
+ * angles (a Route found both as a handler registration and as a URL argument):
+ * everything else about them is identical, so without it the merge order chose
+ * the blob. A full tie is the same entity re-upserted → refresh in place.
+ * Kind-disambiguated QNs (the real cure) remain a follow-up. */
+static int node_collision_cmp(const cbm_gbuf_node_t *existing, const char *label, const char *name,
+                              const char *file_path, int start_line, const char *properties_json) {
+    int c = strcmp(file_path ? file_path : "", existing->file_path ? existing->file_path : "");
+    if (c == 0) {
+        c = existing->start_line - start_line;
+    }
+    if (c == 0) {
+        c = strcmp(existing->name ? existing->name : "", name ? name : "");
+    }
+    if (c == 0) {
+        c = strcmp(existing->label ? existing->label : "", label ? label : "");
+    }
+    if (c == 0) {
+        const char *ep = existing->properties_json ? existing->properties_json : "";
+        const char *np = properties_json ? properties_json : "";
+        size_t el = strlen(ep);
+        size_t np_len = strlen(np);
+        c = (el != np_len) ? (el > np_len ? 1 : -1) : strcmp(ep, np);
+    }
+    return c;
+}
+
 int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name,
                              const char *qualified_name, const char *file_path, int start_line,
                              int end_line, const char *properties_json) {
@@ -723,33 +765,8 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
             (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0)) {
             return existing->id;
         }
-        /* Same-QN arrival: distinct source entities can share a QN (C: a
-         * struct, a function and a macro with one name), and the same entity
-         * can be re-upserted with fresh content. The old code let the LAST
-         * arrival overwrite — under parallel extraction the merge order
-         * varies run to run, so WHICH entity survived flickered (xfs:
-         * Function-node count 4998 vs 5015 across two runs) and every
-         * order-sensitive consumer downstream inherited it. Pick the
-         * survivor by a canonical CONTENT rule instead, a pure function of
-         * the two candidates: smallest file_path, then LARGEST start_line,
-         * then largest name/label (a mixed-direction composite is still a
-         * total order, so the pick is commutative and scheduling-free).
-         * Line-descending within a file keeps the classic upsert contract —
-         * a later definition in the same file (macro redefinition, refresh
-         * of the same entity with new content) replaces the earlier one,
-         * deterministically, because intra-file arrival order is fixed. A
-         * full tie is the same entity re-upserted → refresh in place.
-         * Kind-disambiguated QNs (the real cure) remain a follow-up. */
-        int c = strcmp(file_path ? file_path : "", existing->file_path ? existing->file_path : "");
-        if (c == 0) {
-            c = existing->start_line - start_line;
-        }
-        if (c == 0) {
-            c = strcmp(existing->name ? existing->name : "", name ? name : "");
-        }
-        if (c == 0) {
-            c = strcmp(existing->label ? existing->label : "", label ? label : "");
-        }
+        /* Same-QN arrival: see node_collision_cmp for the canonical rule. */
+        int c = node_collision_cmp(existing, label, name, file_path, start_line, properties_json);
         if (c > 0) {
             return existing->id; /* existing entity is the canonical winner */
         }
@@ -1070,6 +1087,267 @@ int cbm_gbuf_load_from_db(cbm_gbuf_t *gb, const char *db_path, const char *proje
     return 0;
 }
 
+/* ── Memory accounting (diagnostics) ─────────────────────────────── */
+
+/* malloc bookkeeping per allocation, so a table of 4.7M short strings does not
+ * report as if only its bytes were resident. mimalloc rounds small requests up
+ * to a size class; 16 bytes is a deliberate under-estimate of that. */
+enum { GB_MALLOC_OVERHEAD = 16 };
+
+static size_t gb_str_bytes(const char *s) {
+    return s ? strlen(s) + 1 + GB_MALLOC_OVERHEAD : 0;
+}
+
+static void mem_count_node_array(const char *key, void *value, void *ud) {
+    (void)key;
+    size_t *acc = (size_t *)ud;
+    const node_ptr_array_t *arr = (const node_ptr_array_t *)value;
+    if (arr) {
+        *acc += (size_t)arr->cap * sizeof(*arr->items) + GB_MALLOC_OVERHEAD;
+    }
+}
+
+static void mem_count_edge_array(const char *key, void *value, void *ud) {
+    (void)key;
+    size_t *acc = (size_t *)ud;
+    const edge_ptr_array_t *arr = (const edge_ptr_array_t *)value;
+    if (arr) {
+        /* + the strdup'd composite key the table borrows. */
+        *acc +=
+            (size_t)arr->cap * sizeof(*arr->items) + gb_str_bytes(key) + (2 * GB_MALLOC_OVERHEAD);
+    }
+}
+
+static void mem_count_intern(const char *key, void *value, void *ud) {
+    (void)value;
+    size_t *acc = (size_t *)ud;
+    *acc += gb_str_bytes(key);
+}
+
+void cbm_gbuf_mem_stats(const cbm_gbuf_t *gb, cbm_gbuf_mem_t *out) {
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!gb) {
+        return;
+    }
+
+    out->nodes = (long)cbm_ht_count(gb->node_by_qn);
+    out->edges = gb->edges.count;
+
+    out->node_structs = ((size_t)gb->nodes.count * (sizeof(cbm_gbuf_node_t) + GB_MALLOC_OVERHEAD)) +
+                        ((size_t)gb->nodes.cap * sizeof(*gb->nodes.items));
+    for (int i = 0; i < gb->nodes.count; i++) {
+        const cbm_gbuf_node_t *n = gb->nodes.items[i];
+        /* label and file_path point into the intern pool — counted there. */
+        out->node_strings += gb_str_bytes(n->name) + gb_str_bytes(n->qualified_name) +
+                             gb_str_bytes(n->properties_json);
+    }
+
+    out->edge_structs = ((size_t)gb->edges.count * (sizeof(cbm_gbuf_edge_t) + GB_MALLOC_OVERHEAD)) +
+                        ((size_t)gb->edges.cap * sizeof(*gb->edges.items));
+    for (int i = 0; i < gb->edges.count; i++) {
+        out->edge_strings += gb_str_bytes(gb->edges.items[i]->properties_json);
+    }
+
+    cbm_ht_foreach(gb->intern_pool, mem_count_intern, &out->intern_pool);
+    out->intern_pool += cbm_ht_memory_bytes(gb->intern_pool);
+
+    size_t idx = cbm_ht_memory_bytes(gb->node_by_qn) + cbm_ht_memory_bytes(gb->nodes_by_label) +
+                 cbm_ht_memory_bytes(gb->nodes_by_name) + cbm_ht_memory_bytes(gb->edge_by_key) +
+                 cbm_ht_memory_bytes(gb->edges_by_source_type) +
+                 cbm_ht_memory_bytes(gb->edges_by_target_type) +
+                 cbm_ht_memory_bytes(gb->edges_by_type);
+    idx += (size_t)gb->by_id_cap * sizeof(*gb->by_id);
+    cbm_ht_foreach(gb->nodes_by_label, mem_count_node_array, &idx);
+    cbm_ht_foreach(gb->nodes_by_name, mem_count_node_array, &idx);
+    cbm_ht_foreach(gb->edges_by_source_type, mem_count_edge_array, &idx);
+    cbm_ht_foreach(gb->edges_by_target_type, mem_count_edge_array, &idx);
+    cbm_ht_foreach(gb->edges_by_type, mem_count_edge_array, &idx);
+    /* edge_by_key borrows one strdup'd "src:tgt:type" key per edge. */
+    for (int i = 0; i < gb->edges.count; i++) {
+        char key[EDGE_KEY_BUF];
+        const cbm_gbuf_edge_t *e = gb->edges.items[i];
+        make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->properties_json);
+        idx += gb_str_bytes(key);
+    }
+    out->indexes = idx;
+
+    out->vectors = ((size_t)gb->dump_vector_cap * sizeof(*gb->dump_vectors)) +
+                   ((size_t)gb->dump_token_vec_cap * sizeof(*gb->dump_token_vecs));
+    for (int i = 0; i < gb->dump_vector_count; i++) {
+        out->vectors += (size_t)gb->dump_vectors[i].vector_len + GB_MALLOC_OVERHEAD;
+    }
+    for (int i = 0; i < gb->dump_token_vec_count; i++) {
+        out->vectors += (size_t)gb->dump_token_vecs[i].vector_len + GB_MALLOC_OVERHEAD +
+                        gb_str_bytes(gb->dump_token_vecs[i].token);
+    }
+}
+
+/* ── Canonical ordering ──────────────────────────────────────────── */
+
+/* Total order over nodes that reads only node CONTENT. qualified_name is the
+ * primary key (unique among live nodes), so the remaining fields only break
+ * ties between a live node and a stale same-QN entry left in the array by a
+ * delete. */
+static int node_canon_cmp(const cbm_gbuf_node_t *a, const cbm_gbuf_node_t *b) {
+    int c = strcmp(a->qualified_name ? a->qualified_name : "",
+                   b->qualified_name ? b->qualified_name : "");
+    if (c != 0) {
+        return c;
+    }
+    c = strcmp(a->file_path ? a->file_path : "", b->file_path ? b->file_path : "");
+    if (c != 0) {
+        return c;
+    }
+    if (a->start_line != b->start_line) {
+        return a->start_line < b->start_line ? -1 : 1;
+    }
+    c = strcmp(a->label ? a->label : "", b->label ? b->label : "");
+    if (c != 0) {
+        return c;
+    }
+    return strcmp(a->name ? a->name : "", b->name ? b->name : "");
+}
+
+/* Node rank table: temp node id → position in the canonically sorted node
+ * array. Lets the edge comparator order endpoints by node CONTENT at the cost
+ * of one array index, instead of two strcmps on the endpoint QNs. */
+typedef struct {
+    const int32_t *rank;
+    int64_t cap;
+} canon_rank_t;
+
+enum { GB_RANK_UNKNOWN = INT32_MAX };
+
+static int32_t canon_rank_of(const canon_rank_t *r, int64_t id) {
+    return (id >= 0 && id < r->cap) ? r->rank[id] : (int32_t)GB_RANK_UNKNOWN;
+}
+
+/* Total order over edges: endpoints by canonical node rank, then type, then
+ * the property blob. Edges whose endpoints are not live nodes (dropped at
+ * dump time) fall back to their temp ids, which is enough to keep the sort a
+ * strict weak ordering. */
+static int edge_canon_cmp(const canon_rank_t *r, const cbm_gbuf_edge_t *a,
+                          const cbm_gbuf_edge_t *b) {
+    int32_t sa = canon_rank_of(r, a->source_id);
+    int32_t sb = canon_rank_of(r, b->source_id);
+    if (sa != sb) {
+        return sa < sb ? -1 : 1;
+    }
+    int32_t ta = canon_rank_of(r, a->target_id);
+    int32_t tb = canon_rank_of(r, b->target_id);
+    if (ta != tb) {
+        return ta < tb ? -1 : 1;
+    }
+    int c = strcmp(a->type ? a->type : "", b->type ? b->type : "");
+    if (c != 0) {
+        return c;
+    }
+    c = strcmp(a->properties_json ? a->properties_json : "",
+               b->properties_json ? b->properties_json : "");
+    if (c != 0) {
+        return c;
+    }
+    if (a->source_id != b->source_id) {
+        return a->source_id < b->source_id ? -1 : 1;
+    }
+    if (a->target_id != b->target_id) {
+        return a->target_id < b->target_id ? -1 : 1;
+    }
+    return 0;
+}
+
+static void canon_sort_node_array(const char *key, void *value, void *ud) {
+    (void)key;
+    (void)ud;
+    node_ptr_array_t *arr = (node_ptr_array_t *)value;
+    if (arr && arr->count > 1) {
+        std::sort(arr->items, arr->items + arr->count,
+                  [](const cbm_gbuf_node_t *a, const cbm_gbuf_node_t *b) {
+                      return node_canon_cmp(a, b) < 0;
+                  });
+    }
+}
+
+static void canon_sort_edge_array(const char *key, void *value, void *ud) {
+    (void)key;
+    const canon_rank_t *r = (const canon_rank_t *)ud;
+    edge_ptr_array_t *arr = (edge_ptr_array_t *)value;
+    if (arr && arr->count > 1) {
+        std::sort(arr->items, arr->items + arr->count,
+                  [r](const cbm_gbuf_edge_t *a, const cbm_gbuf_edge_t *b) {
+                      return edge_canon_cmp(r, a, b) < 0;
+                  });
+    }
+}
+
+/* `include_indexes` sorts the per-label / per-name / per-key lookup lists as
+ * well as the node and edge arrays. The dump passes false: it reads only the
+ * two arrays and releases every index a moment later, and at kernel scale
+ * sorting the index lists costs more than the arrays themselves. */
+static void gbuf_canonicalize_ex(cbm_gbuf_t *gb, bool include_indexes) {
+    if (!gb) {
+        return;
+    }
+    CBM_PROF_START(t_canon);
+
+    if (gb->nodes.count > 1) {
+        std::sort(gb->nodes.items, gb->nodes.items + gb->nodes.count,
+                  [](const cbm_gbuf_node_t *a, const cbm_gbuf_node_t *b) {
+                      return node_canon_cmp(a, b) < 0;
+                  });
+    }
+
+    /* Rank table over the freshly sorted node array. Sized by the id space
+     * (ids are shared with edges, so it is sparse); freed before returning. */
+    canon_rank_t ranks = {NULL, 0};
+    int64_t cap = gb->next_id > 0 ? gb->next_id : 0;
+    int32_t *rank = NULL;
+    if (cap > 0 && cap <= INT32_MAX) {
+        rank = (int32_t *)malloc((size_t)cap * sizeof(*rank));
+    }
+    if (rank) {
+        for (int64_t i = 0; i < cap; i++) {
+            rank[i] = (int32_t)GB_RANK_UNKNOWN;
+        }
+        for (int i = 0; i < gb->nodes.count; i++) {
+            int64_t id = gb->nodes.items[i]->id;
+            if (id >= 0 && id < cap) {
+                rank[id] = i;
+            }
+        }
+        ranks.rank = rank;
+        ranks.cap = cap;
+    }
+
+    if (include_indexes) {
+        cbm_ht_foreach(gb->nodes_by_label, canon_sort_node_array, NULL);
+        cbm_ht_foreach(gb->nodes_by_name, canon_sort_node_array, NULL);
+    }
+
+    if (gb->edges.count > 1) {
+        std::sort(gb->edges.items, gb->edges.items + gb->edges.count,
+                  [&ranks](const cbm_gbuf_edge_t *a, const cbm_gbuf_edge_t *b) {
+                      return edge_canon_cmp(&ranks, a, b) < 0;
+                  });
+    }
+    if (include_indexes) {
+        cbm_ht_foreach(gb->edges_by_source_type, canon_sort_edge_array, &ranks);
+        cbm_ht_foreach(gb->edges_by_target_type, canon_sort_edge_array, &ranks);
+        cbm_ht_foreach(gb->edges_by_type, canon_sort_edge_array, &ranks);
+    }
+
+    free(rank);
+    CBM_PROF_END_N("gbuf", include_indexes ? "canonicalize" : "canonicalize_arrays", t_canon,
+                   gb->nodes.count + gb->edges.count);
+}
+
+void cbm_gbuf_canonicalize(cbm_gbuf_t *gb) {
+    gbuf_canonicalize_ex(gb, true);
+}
+
 void cbm_gbuf_foreach_node(const cbm_gbuf_t *gb, cbm_gbuf_node_visitor_fn fn, void *userdata) {
     if (!gb || !fn) {
         return;
@@ -1311,25 +1589,10 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
         existing->label && sn->label && strcmp(sn->label, "Module") == 0 &&
         (strcmp(existing->label, "Project") == 0 || strcmp(existing->label, "Folder") == 0);
     if (!module_on_container) {
-        /* Canonical collision winner (determinism) — mirrors
-         * cbm_gbuf_upsert_node exactly. Distinct source entities can share a
-         * QN (C: struct/function/macro with one name); unconditional "src
-         * wins" made the survivor depend on worker merge order, flickering
-         * the node set (and every downstream consumer) run to run. Winner =
-         * smallest file_path, then LARGEST start_line, then largest
-         * name/label — one total order, commutative, scheduling-free; a full
-         * tie is the same entity → refresh from src. */
-        int c = strcmp(sn->file_path ? sn->file_path : "",
-                       existing->file_path ? existing->file_path : "");
-        if (c == 0) {
-            c = existing->start_line - sn->start_line;
-        }
-        if (c == 0) {
-            c = strcmp(existing->name ? existing->name : "", sn->name ? sn->name : "");
-        }
-        if (c == 0) {
-            c = strcmp(existing->label ? existing->label : "", sn->label ? sn->label : "");
-        }
+        /* Canonical collision winner (determinism) — the same rule the upsert
+         * path applies, so the two venues agree on the survivor. */
+        int c = node_collision_cmp(existing, sn->label, sn->name, sn->file_path, sn->start_line,
+                                   sn->properties_json);
         bool sn_wins = c <= 0;
         if (sn_wins) {
             /* Keep the secondary indexes consistent when the surviving
@@ -1728,6 +1991,11 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
     if (!gb || !path) {
         return CBM_NOT_FOUND;
     }
+
+    /* Final IDs are positions in gb->nodes and edge row IDs are positions in
+     * gb->edges, so the dump must run over a canonical order for two runs of
+     * the same tree to produce the same database. */
+    gbuf_canonicalize_ex(gb, false);
 
     CBM_PROF_START(t_count);
     int live_count = count_live_nodes(gb);

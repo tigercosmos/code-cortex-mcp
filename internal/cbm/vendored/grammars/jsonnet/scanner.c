@@ -44,9 +44,28 @@ void tree_sitter_jsonnet_external_scanner_destroy(void *payload) {}
 
 enum InsideNode { INSIDE_NONE,  INSIDE_STRING };
 
-uint8_t inside_node = INSIDE_NONE;
-char ending_char = 0;
-uint8_t level_count = 0;
+/* LOCAL PATCH (code-cortex-mcp): this scanner keeps its state in globals and
+ * returns NULL from external_scanner_create, so it has no per-parser payload
+ * to hold it. Indexing parses files on many threads at once, and two threads
+ * in a .libsonnet file then raced on inside_node/ending_char: about one run in
+ * twenty misread a string boundary and reported a spurious parse error, which
+ * also made the graph differ between identical runs. _Thread_local gives each
+ * worker its own copy (one parse runs at a time per thread, and tree-sitter
+ * serializes/deserializes across resumptions). `static` also stops these very
+ * generic names from merging with another vendored scanner's globals at link
+ * time. Upstream fix would be to allocate the state in
+ * external_scanner_create and thread `payload` through. */
+#if defined(__cplusplus)
+#define JSONNET_SCANNER_TLS thread_local
+#elif defined(_MSC_VER)
+#define JSONNET_SCANNER_TLS __declspec(thread)
+#else
+#define JSONNET_SCANNER_TLS _Thread_local
+#endif
+
+static JSONNET_SCANNER_TLS uint8_t inside_node = INSIDE_NONE;
+static JSONNET_SCANNER_TLS char ending_char = 0;
+static JSONNET_SCANNER_TLS uint8_t level_count = 0;
 
 static inline void reset_state() {
   inside_node = INSIDE_NONE;
