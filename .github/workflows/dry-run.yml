@@ -56,8 +56,12 @@ jobs:
 
   # ── Build all platforms ────────────────────────────────────────
   build:
-    if: ${{ inputs.skip_builds != true && !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
-    needs: [test]
+    # `needs.test.result == 'skipped'` is true both when skip_tests is set and
+    # when an upstream failure skipped the test job, so build must also confirm
+    # lint did not fail. Without that check a red lint still produced green
+    # builds, a full smoke run, and uploaded artifacts (run 32939224192).
+    if: ${{ inputs.skip_builds != true && !cancelled() && needs.lint.result != 'failure' && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    needs: [lint, test]
     uses: ./.github/workflows/_build.yml
 
   # ── Smoke test every binary ────────────────────────────────────
