@@ -390,44 +390,64 @@ TEST(subprocess_total_timeout_ignores_continuous_progress) {
     PASS();
 }
 
+/* Fastest of `samples` runs of the same 150ms child at a given reap-loop cap.
+ * The minimum is the useful statistic: scheduling noise only ever inflates a
+ * sample, so the minimum converges on the real cost. Returns 0 if any run
+ * misbehaved (bad rc, wrong outcome, or an impossibly fast return that would
+ * mean the child was never waited for), which the caller turns into a
+ * failure — the helper cannot assert for itself. */
+static uint64_t poll_cap_best_elapsed_ms(int poll_cap_ms, int samples, int child_sleep_ms) {
+    const char *argv[] = {"/bin/sh", "-c", "sleep 0.15", NULL};
+    cbm_proc_opts_t opts = {0};
+    opts.bin = argv[0];
+    opts.argv = argv;
+    opts.poll_cap_ms = poll_cap_ms;
+    opts.total_timeout_ms = 5000;
+
+    uint64_t best = UINT64_MAX;
+    for (int i = 0; i < samples; i++) {
+        cbm_proc_result_t result;
+        uint64_t t0 = cbm_now_ms();
+        int rc = cbm_subprocess_run(&opts, &result);
+        uint64_t elapsed = cbm_now_ms() - t0;
+        if (rc != 0 || result.outcome != CBM_PROC_CLEAN || elapsed < (uint64_t)child_sleep_ms) {
+            return 0;
+        }
+        if (elapsed < best) {
+            best = elapsed;
+        }
+    }
+    return best;
+}
+
 /* The reap loop sleeps between waitpid probes, doubling from 1ms up to a cap.
  * With the fixed 100ms cap a child that exited at 150ms was only noticed at
  * 227ms (cumulative sleeps 1+2+4+...+100), and since every MCP tool call ran in
  * such a child the client saw each call quantized to ~39/145/250/461ms steps.
  * poll_cap_ms lets short-lived children be reaped within milliseconds of their
- * exit. The child here sleeps 150ms; the old cadence cannot return before
- * ~227ms, so an elapsed time under that bound proves the cap is honoured.
+ * exit.
  *
- * Reported as the MINIMUM of several runs. Scheduling noise on a loaded runner
- * only ever inflates the measurement, so a single sample sitting 65ms from the
- * threshold is a coin flip in CI (it flaked on macOS). The minimum converges on
- * the real cost, and stays just as discriminating: under the old cadence EVERY
- * sample would be >= ~227ms, so the minimum would be too. */
+ * Measured as a comparison against the default cap rather than against a fixed
+ * wall-clock bound. Both legs spawn the same child under the same sanitizers on
+ * the same machine and differ only in poll_cap_ms, so runner speed cancels out.
+ * The previous absolute form (best-of-5 under 215ms) left just 65ms of headroom
+ * over the 150ms child and failed on both macOS runners once they got slow
+ * enough that even the minimum sample cleared the bound, though the cap was
+ * being honoured exactly as intended. The theoretical gap here is ~75ms
+ * (~152ms capped vs ~227ms uncapped); requiring 30ms keeps the test
+ * discriminating without pinning it to absolute machine speed. */
 TEST(subprocess_poll_cap_reaps_short_lived_child_promptly) {
-    enum { POLL_CAP_SAMPLES = 5, CHILD_SLEEP_MS = 150, OLD_CADENCE_FLOOR_MS = 215 };
-    const char *argv[] = {"/bin/sh", "-c", "sleep 0.15", NULL};
-    cbm_proc_opts_t opts = {0};
-    opts.bin = argv[0];
-    opts.argv = argv;
-    opts.poll_cap_ms = 2;
-    opts.total_timeout_ms = 5000;
+    enum { POLL_CAP_SAMPLES = 5, CHILD_SLEEP_MS = 150, MIN_CADENCE_GAP_MS = 30 };
 
-    uint64_t best = UINT64_MAX;
-    for (int i = 0; i < POLL_CAP_SAMPLES; i++) {
-        cbm_proc_result_t result;
-        uint64_t t0 = cbm_now_ms();
-        int rc = cbm_subprocess_run(&opts, &result);
-        uint64_t elapsed = cbm_now_ms() - t0;
-        ASSERT_EQ(rc, 0);
-        ASSERT_EQ(result.outcome, CBM_PROC_CLEAN);
-        /* Never faster than the child itself — a sample below this would mean
-         * the child was not actually waited for. */
-        ASSERT_TRUE(elapsed >= CHILD_SLEEP_MS);
-        if (elapsed < best) {
-            best = elapsed;
-        }
-    }
-    ASSERT_TRUE(best < OLD_CADENCE_FLOOR_MS);
+    uint64_t capped = poll_cap_best_elapsed_ms(2, POLL_CAP_SAMPLES, CHILD_SLEEP_MS);
+    uint64_t uncapped =
+        poll_cap_best_elapsed_ms(CBM_PROC_POLL_CAP_DEFAULT_MS, POLL_CAP_SAMPLES, CHILD_SLEEP_MS);
+
+    /* 0 => some run returned a bad rc/outcome, or came back faster than the
+     * child could possibly have finished. */
+    ASSERT_TRUE(capped > 0);
+    ASSERT_TRUE(uncapped > 0);
+    ASSERT_TRUE(capped + MIN_CADENCE_GAP_MS < uncapped);
     PASS();
 }
 
