@@ -107,6 +107,16 @@ static int cbm_proc_poll_cap_ms(const cbm_proc_opts_t *opts) {
     return cap;
 }
 
+/* One step of the reap ladder — see the header. The reap loop below is the only
+ * caller, so a test walking this walks the real cadence. */
+long cbm_proc_next_poll_delay_ns(long cur_ns, long cap_ns) {
+    if (cur_ns >= cap_ns) {
+        return cur_ns;
+    }
+    long next = cur_ns * 2;
+    return next > cap_ns ? cap_ns : next;
+}
+
 static bool cbm_tail_log(const char *log_file, long *tail_pos, cbm_proc_log_cb cb, void *ud) {
     if (!log_file) {
         return false;
@@ -450,14 +460,6 @@ static bool cbm_spawn_eagain_injected(void) {
     return false;
 }
 
-/* Reap-loop probe counter: see the header. thread_local for the same reason as
- * the EAGAIN counter — a spawn on a worker thread must not overwrite the count a
- * test is about to read, and per-thread state needs no lock. */
-static thread_local int g_last_reap_polls = 0;
-
-int cbm_subprocess_last_reap_polls_for_testing(void) {
-    return g_last_reap_polls;
-}
 #endif
 
 static long cbm_spawn_backoff_ms(int attempt) {
@@ -715,9 +717,6 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 #endif
 
     long tail_pos = 0;
-#ifdef CBM_ENABLE_TEST_SEAMS
-    g_last_reap_polls = 0;
-#endif
     /* started_at was taken BEFORE the spawn, so the caller's total budget covers
      * the retry ladder too. last_activity is sampled fresh: time spent waiting
      * for the kernel to hand us a process is not idleness on the child's part
@@ -738,9 +737,6 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
             wr = waitpid(pid, &wstatus, WNOHANG);
         } while (wr < 0 && errno == EINTR);
         bool done = (wr == pid);
-#ifdef CBM_ENABLE_TEST_SEAMS
-        g_last_reap_polls++;
-#endif
 
         if (cbm_tail_log(opts->log_file, &tail_pos, opts->on_log_line, opts->log_ud)) {
             last_activity = cbm_now_ms();
@@ -763,12 +759,7 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
         }
         struct timespec ts = {0, poll_delay_ns};
         cbm_nanosleep(&ts, NULL);
-        if (poll_delay_ns < poll_cap_ns) {
-            poll_delay_ns *= 2;
-            if (poll_delay_ns > poll_cap_ns) {
-                poll_delay_ns = poll_cap_ns;
-            }
-        }
+        poll_delay_ns = cbm_proc_next_poll_delay_ns(poll_delay_ns, poll_cap_ns);
     }
 
     if (opts->log_file && opts->delete_log_on_exit) {

@@ -390,61 +390,60 @@ TEST(subprocess_total_timeout_ignores_continuous_progress) {
     PASS();
 }
 
-#ifdef CBM_ENABLE_TEST_SEAMS
-/* Reap-loop probes for one run of the same short-lived child at a given cap.
- * Returns -1 if the run itself misbehaved (bad rc or outcome), which the caller
- * turns into a failure — the helper cannot assert for itself. */
-static int poll_cap_reap_probes(int poll_cap_ms) {
-    const char *argv[] = {"/bin/sh", "-c", "sleep 0.15", NULL};
-    cbm_proc_opts_t opts = {0};
-    opts.bin = argv[0];
-    opts.argv = argv;
-    opts.poll_cap_ms = poll_cap_ms;
-    opts.total_timeout_ms = 5000;
-
-    cbm_proc_result_t result;
-    if (cbm_subprocess_run(&opts, &result) != 0 || result.outcome != CBM_PROC_CLEAN) {
-        return -1;
+/* When the reap ladder first notices a child that exits after child_ms, in ms
+ * from the start of the reap loop. Walks cbm_proc_next_poll_delay_ns — the same
+ * and only source of cadence the loop itself uses — so this is the real
+ * schedule, computed rather than raced against. */
+static long poll_ladder_notice_ms(int cap_ms, int child_ms) {
+    const long cap_ns = (long)cap_ms * 1000000L;
+    long delay_ns = 1000000L; /* the loop starts at 1ms */
+    long elapsed_ns = 0;
+    while (elapsed_ns < (long)child_ms * 1000000L) {
+        elapsed_ns += delay_ns;
+        delay_ns = cbm_proc_next_poll_delay_ns(delay_ns, cap_ns);
     }
-    return cbm_subprocess_last_reap_polls_for_testing();
+    return elapsed_ns / 1000000L;
 }
 
 /* The reap loop sleeps between waitpid probes, doubling from 1ms up to a cap.
- * With the fixed 100ms cap a child that exited at 150ms was only noticed at
- * 227ms (cumulative sleeps 1+2+4+...+100), and since every MCP tool call ran in
- * such a child the client saw each call quantized to ~39/145/250/461ms steps.
- * poll_cap_ms lets short-lived children be reaped within milliseconds of their
- * exit.
+ * With the fixed 100ms cap the wakes land at 1/3/7/15/31/63/127/227ms, so a
+ * child that exited at 150ms was not noticed until 227ms; every MCP tool call
+ * ran in such a child, and the client saw each call quantized to ~39/145/250/
+ * 461ms steps. poll_cap_ms lets short-lived children be reaped promptly.
  *
- * Counted in probes, not milliseconds. poll_cap_ms IS the probe cadence, so the
- * count observes it directly, while elapsed time only shows it through spawn
- * overhead, the child's own startup, and rounding up onto the sleep ladder.
- * Two wall-clock forms of this test flaked on macOS for exactly that reason:
- * best-of-5 under 215ms (7a3196c4) and then a 30ms margin over the default
- * cadence (75bb55fc), both of which a slow enough runner defeats while the cap
- * is honoured exactly as intended. The second form was the worse trade: a
- * child that takes ~215ms to spawn and exit is rounded up to the ladder's
- * 227ms step, leaving a 12ms gap where the theory predicted 75ms.
+ * This asserts the cadence itself, arithmetically. Three previous forms spawned
+ * a real child and timed it — best-of-5 under 215ms (7a3196c4), a 30ms margin
+ * over the default cadence (75bb55fc), then a ratio of reap probes — and all
+ * three flaked on macOS CI while the cap was honoured exactly as intended.
+ * Elapsed time and probe counts both measure the ladder plus three things that
+ * have nothing to do with it: spawn cost, the child's own startup, and the
+ * slack the host adds to a 2ms sleep. On a virtualized runner those terms
+ * dominate. The ladder is deterministic, so there is nothing to sample.
  *
- * The probe ratio moves the other way. For this child the default cap probes
- * about 9 times (the ladder reaches 227ms in 8 sleeps) and a 2ms cap probes
- * about 75, a ratio near 8. A slower runner stretches the child, which adds
- * probes to the 2ms leg every 2ms and to the default leg only every 100ms, so
- * the ratio can only grow. Requiring 4 keeps two-fold margin at the fastest the
- * child can possibly be. */
+ * cbm_subprocess_run tests either side of this cover the spawn path end to end;
+ * what was never covered deterministically is the schedule, which is the part
+ * poll_cap_ms actually changes. */
 TEST(subprocess_poll_cap_reaps_short_lived_child_promptly) {
-    enum { MIN_PROBE_RATIO = 4 };
+    enum { CHILD_MS = 150, DEFAULT_CADENCE_NOTICE_MS = 227, TIGHT_CAP_MS = 2 };
 
-    int capped = poll_cap_reap_probes(2);
-    int uncapped = poll_cap_reap_probes(CBM_PROC_POLL_CAP_DEFAULT_MS);
+    /* 1+2+4+...+100: the default cap cannot see a 150ms child before 227ms. */
+    ASSERT_EQ(poll_ladder_notice_ms(CBM_PROC_POLL_CAP_DEFAULT_MS, CHILD_MS),
+              DEFAULT_CADENCE_NOTICE_MS);
 
-    /* -1 => the run returned a bad rc or outcome, so the counts mean nothing. */
-    ASSERT_TRUE(capped > 0);
-    ASSERT_TRUE(uncapped > 0);
-    ASSERT_TRUE(capped > uncapped * MIN_PROBE_RATIO);
+    /* A 2ms cap notices the same child within one sleep of its exit. */
+    long tight = poll_ladder_notice_ms(TIGHT_CAP_MS, CHILD_MS);
+    ASSERT_TRUE(tight >= CHILD_MS);
+    ASSERT_TRUE(tight <= CHILD_MS + TIGHT_CAP_MS);
+
+    /* The ladder climbs and then holds at the cap, never past it. */
+    ASSERT_EQ(cbm_proc_next_poll_delay_ns(1000000L, 100000000L), 2000000L);
+    ASSERT_EQ(cbm_proc_next_poll_delay_ns(64000000L, 100000000L), 100000000L);
+    ASSERT_EQ(cbm_proc_next_poll_delay_ns(100000000L, 100000000L), 100000000L);
+    ASSERT_EQ(cbm_proc_next_poll_delay_ns(2000000L, 2000000L), 2000000L);
     PASS();
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
 /* The kernel refusing a spawn with EAGAIN means "not right now", not "never" —
  * a momentarily full process table on a busy machine. We used to treat it as a
  * permanent failure, so a git probe or LSP server refused to start for a reason
@@ -576,9 +575,9 @@ SUITE(security) {
     RUN_TEST(exec_no_shell_null_argv_returns_error);
     RUN_TEST(exec_no_shell_captures_exit_code);
     RUN_TEST(subprocess_total_timeout_ignores_continuous_progress);
-#ifdef CBM_ENABLE_TEST_SEAMS
-    /* Reap cadence and transient spawn-refusal retry (test-seam builds only) */
     RUN_TEST(subprocess_poll_cap_reaps_short_lived_child_promptly);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    /* Transient spawn-refusal retry (test-seam builds only) */
     RUN_TEST(subprocess_retries_transient_spawn_refusal);
     RUN_TEST(subprocess_gives_up_after_the_retry_budget);
     RUN_TEST(subprocess_spawn_retry_respects_the_caller_deadline);

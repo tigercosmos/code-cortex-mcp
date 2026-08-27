@@ -153,6 +153,21 @@ const char *cbm_proc_outcome_str(cbm_proc_outcome_t o);
  * shared, tested implementation. */
 bool cbm_build_win_cmdline(char *buf, size_t cap, const char *const *argv);
 
+/* One step of the reap-loop sleep ladder: double cur_ns, clamped to cap_ns (and
+ * left alone once it has reached the cap). The reap loop's only source of
+ * cadence, so walking this from 1ms reproduces exactly when a child's exit is
+ * noticed: with the 100ms default the wakes fall at 1/3/7/15/31/63/127/227ms,
+ * so a child exiting at 150ms is not seen until 227ms — the quantization
+ * poll_cap_ms exists to avoid.
+ *
+ * Exposed (and compiled on every platform — it is pure arithmetic) so that
+ * cadence is unit-tested directly. Three wall-clock forms of that test measured
+ * it by spawning a child and timing the result, and all three flaked on macOS
+ * runners: the reap ladder is only one term in the elapsed time, alongside
+ * spawn cost, the child's own startup, and whatever slack the host adds to a
+ * 2ms sleep. None of those confound the ladder itself. */
+long cbm_proc_next_poll_delay_ns(long cur_ns, long cap_ns);
+
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* Force the next N spawn attempts to behave as if the kernel returned EAGAIN
  * ("try again"), so the retry path can be exercised deterministically instead
@@ -162,13 +177,6 @@ bool cbm_build_win_cmdline(char *buf, size_t cap, const char *const *argv);
 void cbm_subprocess_force_spawn_eagain_for_testing(int attempts);
 int cbm_subprocess_pending_spawn_eagain_for_testing(void);
 
-/* How many waitpid probes the reap loop of the last cbm_subprocess_run on this
- * thread performed. poll_cap_ms controls that probe cadence, so counting probes
- * observes the cap directly; wall-clock elapsed only shows it indirectly, mixed
- * with spawn and child-startup time and rounded up onto the sleep ladder — a
- * measurement a slow machine can defeat while the cap is honoured exactly as
- * intended. Reset at the start of every run. POSIX test builds only. */
-int cbm_subprocess_last_reap_polls_for_testing(void);
 #endif
 
 #ifdef __cplusplus
