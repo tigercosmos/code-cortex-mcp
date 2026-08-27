@@ -47,7 +47,12 @@ jobs:
             cc: cc
             cxx: c++
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Derived from the requested soak, never fixed: a constant ceiling silently
+    # truncates the very thing the job measures. The weekly 4h soak asked for 240
+    # minutes against a hard 30, so every scheduled Nightly Soak since the
+    # workflow was added (13 of 13) was cancelled mid-soak and never once
+    # reported a result. 30 minutes of headroom covers checkout and the build.
+    timeout-minutes: ${{ inputs.duration_minutes + 30 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install deps (Linux)
@@ -67,7 +72,9 @@ jobs:
 
   soak-quick-windows:
     runs-on: windows-latest
-    timeout-minutes: 30
+    # See soak-quick: sized from the requested soak, not a constant.
+    # msys2 setup and the build need more headroom than the Unix legs.
+    timeout-minutes: ${{ inputs.duration_minutes + 40 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
