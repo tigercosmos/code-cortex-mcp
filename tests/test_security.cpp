@@ -390,13 +390,11 @@ TEST(subprocess_total_timeout_ignores_continuous_progress) {
     PASS();
 }
 
-/* Fastest of `samples` runs of the same 150ms child at a given reap-loop cap.
- * The minimum is the useful statistic: scheduling noise only ever inflates a
- * sample, so the minimum converges on the real cost. Returns 0 if any run
- * misbehaved (bad rc, wrong outcome, or an impossibly fast return that would
- * mean the child was never waited for), which the caller turns into a
- * failure — the helper cannot assert for itself. */
-static uint64_t poll_cap_best_elapsed_ms(int poll_cap_ms, int samples, int child_sleep_ms) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Reap-loop probes for one run of the same short-lived child at a given cap.
+ * Returns -1 if the run itself misbehaved (bad rc or outcome), which the caller
+ * turns into a failure — the helper cannot assert for itself. */
+static int poll_cap_reap_probes(int poll_cap_ms) {
     const char *argv[] = {"/bin/sh", "-c", "sleep 0.15", NULL};
     cbm_proc_opts_t opts = {0};
     opts.bin = argv[0];
@@ -404,20 +402,11 @@ static uint64_t poll_cap_best_elapsed_ms(int poll_cap_ms, int samples, int child
     opts.poll_cap_ms = poll_cap_ms;
     opts.total_timeout_ms = 5000;
 
-    uint64_t best = UINT64_MAX;
-    for (int i = 0; i < samples; i++) {
-        cbm_proc_result_t result;
-        uint64_t t0 = cbm_now_ms();
-        int rc = cbm_subprocess_run(&opts, &result);
-        uint64_t elapsed = cbm_now_ms() - t0;
-        if (rc != 0 || result.outcome != CBM_PROC_CLEAN || elapsed < (uint64_t)child_sleep_ms) {
-            return 0;
-        }
-        if (elapsed < best) {
-            best = elapsed;
-        }
+    cbm_proc_result_t result;
+    if (cbm_subprocess_run(&opts, &result) != 0 || result.outcome != CBM_PROC_CLEAN) {
+        return -1;
     }
-    return best;
+    return cbm_subprocess_last_reap_polls_for_testing();
 }
 
 /* The reap loop sleeps between waitpid probes, doubling from 1ms up to a cap.
@@ -427,31 +416,35 @@ static uint64_t poll_cap_best_elapsed_ms(int poll_cap_ms, int samples, int child
  * poll_cap_ms lets short-lived children be reaped within milliseconds of their
  * exit.
  *
- * Measured as a comparison against the default cap rather than against a fixed
- * wall-clock bound. Both legs spawn the same child under the same sanitizers on
- * the same machine and differ only in poll_cap_ms, so runner speed cancels out.
- * The previous absolute form (best-of-5 under 215ms) left just 65ms of headroom
- * over the 150ms child and failed on both macOS runners once they got slow
- * enough that even the minimum sample cleared the bound, though the cap was
- * being honoured exactly as intended. The theoretical gap here is ~75ms
- * (~152ms capped vs ~227ms uncapped); requiring 30ms keeps the test
- * discriminating without pinning it to absolute machine speed. */
+ * Counted in probes, not milliseconds. poll_cap_ms IS the probe cadence, so the
+ * count observes it directly, while elapsed time only shows it through spawn
+ * overhead, the child's own startup, and rounding up onto the sleep ladder.
+ * Two wall-clock forms of this test flaked on macOS for exactly that reason:
+ * best-of-5 under 215ms (7a3196c4) and then a 30ms margin over the default
+ * cadence (75bb55fc), both of which a slow enough runner defeats while the cap
+ * is honoured exactly as intended. The second form was the worse trade: a
+ * child that takes ~215ms to spawn and exit is rounded up to the ladder's
+ * 227ms step, leaving a 12ms gap where the theory predicted 75ms.
+ *
+ * The probe ratio moves the other way. For this child the default cap probes
+ * about 9 times (the ladder reaches 227ms in 8 sleeps) and a 2ms cap probes
+ * about 75, a ratio near 8. A slower runner stretches the child, which adds
+ * probes to the 2ms leg every 2ms and to the default leg only every 100ms, so
+ * the ratio can only grow. Requiring 4 keeps two-fold margin at the fastest the
+ * child can possibly be. */
 TEST(subprocess_poll_cap_reaps_short_lived_child_promptly) {
-    enum { POLL_CAP_SAMPLES = 5, CHILD_SLEEP_MS = 150, MIN_CADENCE_GAP_MS = 30 };
+    enum { MIN_PROBE_RATIO = 4 };
 
-    uint64_t capped = poll_cap_best_elapsed_ms(2, POLL_CAP_SAMPLES, CHILD_SLEEP_MS);
-    uint64_t uncapped =
-        poll_cap_best_elapsed_ms(CBM_PROC_POLL_CAP_DEFAULT_MS, POLL_CAP_SAMPLES, CHILD_SLEEP_MS);
+    int capped = poll_cap_reap_probes(2);
+    int uncapped = poll_cap_reap_probes(CBM_PROC_POLL_CAP_DEFAULT_MS);
 
-    /* 0 => some run returned a bad rc/outcome, or came back faster than the
-     * child could possibly have finished. */
+    /* -1 => the run returned a bad rc or outcome, so the counts mean nothing. */
     ASSERT_TRUE(capped > 0);
     ASSERT_TRUE(uncapped > 0);
-    ASSERT_TRUE(capped + MIN_CADENCE_GAP_MS < uncapped);
+    ASSERT_TRUE(capped > uncapped * MIN_PROBE_RATIO);
     PASS();
 }
 
-#ifdef CBM_ENABLE_TEST_SEAMS
 /* The kernel refusing a spawn with EAGAIN means "not right now", not "never" —
  * a momentarily full process table on a busy machine. We used to treat it as a
  * permanent failure, so a git probe or LSP server refused to start for a reason
@@ -583,9 +576,9 @@ SUITE(security) {
     RUN_TEST(exec_no_shell_null_argv_returns_error);
     RUN_TEST(exec_no_shell_captures_exit_code);
     RUN_TEST(subprocess_total_timeout_ignores_continuous_progress);
-    RUN_TEST(subprocess_poll_cap_reaps_short_lived_child_promptly);
 #ifdef CBM_ENABLE_TEST_SEAMS
-    /* Transient spawn-refusal retry (test-seam builds only) */
+    /* Reap cadence and transient spawn-refusal retry (test-seam builds only) */
+    RUN_TEST(subprocess_poll_cap_reaps_short_lived_child_promptly);
     RUN_TEST(subprocess_retries_transient_spawn_refusal);
     RUN_TEST(subprocess_gives_up_after_the_retry_budget);
     RUN_TEST(subprocess_spawn_retry_respects_the_caller_deadline);

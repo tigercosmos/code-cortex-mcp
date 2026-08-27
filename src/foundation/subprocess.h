@@ -161,6 +161,14 @@ bool cbm_build_win_cmdline(char *buf, size_t cap, const char *const *argv);
  * POSIX test builds only — compiled out entirely otherwise. */
 void cbm_subprocess_force_spawn_eagain_for_testing(int attempts);
 int cbm_subprocess_pending_spawn_eagain_for_testing(void);
+
+/* How many waitpid probes the reap loop of the last cbm_subprocess_run on this
+ * thread performed. poll_cap_ms controls that probe cadence, so counting probes
+ * observes the cap directly; wall-clock elapsed only shows it indirectly, mixed
+ * with spawn and child-startup time and rounded up onto the sleep ladder — a
+ * measurement a slow machine can defeat while the cap is honoured exactly as
+ * intended. Reset at the start of every run. POSIX test builds only. */
+int cbm_subprocess_last_reap_polls_for_testing(void);
 #endif
 
 #ifdef __cplusplus

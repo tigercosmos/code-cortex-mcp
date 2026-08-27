@@ -449,6 +449,15 @@ static bool cbm_spawn_eagain_injected(void) {
     }
     return false;
 }
+
+/* Reap-loop probe counter: see the header. thread_local for the same reason as
+ * the EAGAIN counter — a spawn on a worker thread must not overwrite the count a
+ * test is about to read, and per-thread state needs no lock. */
+static thread_local int g_last_reap_polls = 0;
+
+int cbm_subprocess_last_reap_polls_for_testing(void) {
+    return g_last_reap_polls;
+}
 #endif
 
 static long cbm_spawn_backoff_ms(int attempt) {
@@ -706,6 +715,9 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
 #endif
 
     long tail_pos = 0;
+#ifdef CBM_ENABLE_TEST_SEAMS
+    g_last_reap_polls = 0;
+#endif
     /* started_at was taken BEFORE the spawn, so the caller's total budget covers
      * the retry ladder too. last_activity is sampled fresh: time spent waiting
      * for the kernel to hand us a process is not idleness on the child's part
@@ -726,6 +738,9 @@ static int cbm_run_posix(const cbm_proc_opts_t *opts, cbm_proc_result_t *out) {
             wr = waitpid(pid, &wstatus, WNOHANG);
         } while (wr < 0 && errno == EINTR);
         bool done = (wr == pid);
+#ifdef CBM_ENABLE_TEST_SEAMS
+        g_last_reap_polls++;
+#endif
 
         if (cbm_tail_log(opts->log_file, &tail_pos, opts->on_log_line, opts->log_ud)) {
             last_activity = cbm_now_ms();
