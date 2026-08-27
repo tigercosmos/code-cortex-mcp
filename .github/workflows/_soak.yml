@@ -8,6 +8,12 @@ on:
         description: 'Soak duration in minutes'
         type: number
         default: 10
+      quick_timeout_minutes:
+        description: 'Job ceiling for the quick-soak legs. MUST exceed duration_minutes
+          by enough to cover checkout, msys2 setup and the build — the jobs check this
+          and fail fast if it does not.'
+        type: number
+        default: 40
       run_asan:
         description: 'Run ASan soak in addition to quick soak'
         type: boolean
@@ -47,13 +53,25 @@ jobs:
             cc: cc
             cxx: c++
     runs-on: ${{ matrix.os }}
-    # Derived from the requested soak, never fixed: a constant ceiling silently
-    # truncates the very thing the job measures. The weekly 4h soak asked for 240
-    # minutes against a hard 30, so every scheduled Nightly Soak since the
-    # workflow was added (13 of 13) was cancelled mid-soak and never once
-    # reported a result. 30 minutes of headroom covers checkout and the build.
-    timeout-minutes: ${{ inputs.duration_minutes + 30 }}
+    # Comes from the caller alongside the duration, and the two are checked
+    # against each other below. A constant here can only truncate the thing the
+    # job exists to measure: this was `timeout-minutes: 30` while nightly-soak
+    # asked for a 240-minute soak, so all 13 scheduled Nightly Soak runs were
+    # cancelled mid-soak and none ever reported a result. Expressions cannot do
+    # arithmetic, so the ceiling cannot be derived from duration_minutes here.
+    timeout-minutes: ${{ inputs.quick_timeout_minutes }}
     steps:
+      - name: Check the job ceiling clears the soak
+        shell: bash
+        run: |
+          soak=${{ inputs.duration_minutes }}
+          ceiling=${{ inputs.quick_timeout_minutes }}
+          if [ "$ceiling" -le "$soak" ]; then
+            echo "::error::quick_timeout_minutes ($ceiling) must exceed duration_minutes ($soak)." \
+                 "The runner would cancel this job mid-soak and report nothing."
+            exit 1
+          fi
+          echo "soak ${soak}m under a ${ceiling}m ceiling"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install deps (Linux)
         if: startsWith(matrix.os, 'ubuntu')
@@ -72,10 +90,21 @@ jobs:
 
   soak-quick-windows:
     runs-on: windows-latest
-    # See soak-quick: sized from the requested soak, not a constant.
-    # msys2 setup and the build need more headroom than the Unix legs.
-    timeout-minutes: ${{ inputs.duration_minutes + 40 }}
+    # Same ceiling as soak-quick — see the note there. This leg spends the most
+    # of it before the soak starts, on msys2 setup plus the build.
+    timeout-minutes: ${{ inputs.quick_timeout_minutes }}
     steps:
+      - name: Check the job ceiling clears the soak
+        shell: bash
+        run: |
+          soak=${{ inputs.duration_minutes }}
+          ceiling=${{ inputs.quick_timeout_minutes }}
+          if [ "$ceiling" -le "$soak" ]; then
+            echo "::error::quick_timeout_minutes ($ceiling) must exceed duration_minutes ($soak)." \
+                 "The runner would cancel this job mid-soak and report nothing."
+            exit 1
+          fi
+          echo "soak ${soak}m under a ${ceiling}m ceiling"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
