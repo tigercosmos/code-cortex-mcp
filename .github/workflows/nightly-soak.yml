@@ -18,7 +18,12 @@ jobs:
   soak:
     uses: ./.github/workflows/_soak.yml
     with:
-      duration_minutes: ${{ inputs.duration_minutes || 240 }}
+      # workflow_dispatch delivers every input as a STRING, whatever `type:`
+      # says, and _soak.yml declares duration_minutes as a number — so passing
+      # it straight through failed the run before a single job was created.
+      # format() then fromJSON() makes it a number on both paths: on a schedule
+      # there is no inputs context and the literal 240 is used.
+      duration_minutes: ${{ fromJSON(format('{0}', inputs.duration_minutes || 240)) }}
       # Must clear the soak above with room for checkout, msys2 setup and the
       # build. _soak.yml's default (40) is sized for the 10-minute dry-run soak
       # and would cancel this one part-way through, as it did for all 13
