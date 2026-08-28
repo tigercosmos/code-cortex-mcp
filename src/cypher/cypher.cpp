@@ -2994,6 +2994,7 @@ static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count,
  * during the CURRENT execution; cbm_cypher_execute turns it into
  * result->warning so callers can tell "clamped" from "no such path" (#797). */
 static thread_local int g_cypher_depth_clamped = 0;
+static thread_local int g_cypher_trail_truncated = 0;
 
 static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                               cbm_node_pattern_t *target_node, binding_t *b, cbm_node_t *src,
@@ -3015,7 +3016,11 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
     }
     cbm_traverse_result_t tr = {0};
     const char *dir = rel->direction ? rel->direction : "outbound";
-    cbm_store_bfs(store, src->id, dir, rel->types, rel->type_count, max_depth, CBM_PERCENT, &tr);
+    cbm_store_bfs_trail(store, src->id, dir, rel->types, rel->type_count, max_depth, CBM_PERCENT,
+                        &tr);
+    if (tr.truncated) {
+        g_cypher_trail_truncated = 1;
+    }
     const cbm_node_t *pre = binding_get(b, to_var);
     for (int v = 0; v < tr.visited_count; v++) {
         cbm_node_hop_t *hop = &tr.visited[v];
@@ -4612,6 +4617,7 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
                        cbm_cypher_result_t *out) {
     memset(out, 0, sizeof(*out));
     g_cypher_depth_clamped = 0;
+    g_cypher_trail_truncated = 0;
     cypher_deadline_arm(); /* #601: start the wall-clock budget for this query */
     if (max_rows <= 0) {
         max_rows = CYPHER_RESULT_CEILING;
@@ -4680,12 +4686,22 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
     out->col_count = rb.col_count;
     out->rows = rb.rows;
     out->row_count = rb.row_count;
-    if (g_cypher_depth_clamped > 0) {
+    if (g_cypher_depth_clamped > 0 || g_cypher_trail_truncated) {
         char wbuf[CBM_SZ_256];
-        snprintf(wbuf, sizeof(wbuf),
-                 "variable-length hop range clamped to the engine ceiling (%d) — an empty "
-                 "result may mean \"clamped\", not \"no such path\"",
-                 g_cypher_depth_clamped);
+        if (g_cypher_depth_clamped > 0 && g_cypher_trail_truncated) {
+            snprintf(wbuf, sizeof(wbuf),
+                     "variable-length hop range clamped to the engine ceiling (%d) and "
+                     "traversal budget was exhausted — results may be partial",
+                     g_cypher_depth_clamped);
+        } else if (g_cypher_depth_clamped > 0) {
+            snprintf(wbuf, sizeof(wbuf),
+                     "variable-length hop range clamped to the engine ceiling (%d) — an empty "
+                     "result may mean \"clamped\", not \"no such path\"",
+                     g_cypher_depth_clamped);
+        } else {
+            snprintf(wbuf, sizeof(wbuf),
+                     "variable-length traversal budget was exhausted — results may be partial");
+        }
         out->warning = heap_strdup(wbuf);
     }
 
