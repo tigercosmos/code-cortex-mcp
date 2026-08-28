@@ -5,6 +5,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h" /* cbm_unlink / cbm_rmdir */
+#include "../src/foundation/log.h"     /* cbm_log_set_sink — routing capture */
 #include "test_framework.h"
 #include "test_helpers.h" /* th_write_file / th_rmtree / th_mktempdir */
 #include <mcp/mcp.h>
@@ -3029,6 +3030,143 @@ TEST(search_code_windows_prefilter_precedes_content_scan) {
  * ══════════════════════════════════════════════════════════════════ */
 
 /* ══════════════════════════════════════════════════════════════════
+ *  INDEX-FORMAT BOUNDARY  (#769)
+ *
+ *  File-node QNs keep the file extension, so an index written before that
+ *  holds COLLIDED File identities (badge.component.{ts,html,scss} all stripped
+ *  to one stem, only one node surviving). Refreshing such an index
+ *  incrementally would mint new-format QNs for the changed files only and
+ *  leave the old collided node behind — a mixed graph with duplicate nodes
+ *  and stale edges.
+ *
+ *  CBM_INDEX_FORMAT_VERSION is stamped into PRAGMA user_version on every
+ *  rebuild. A DB carrying a different value is routed through the full
+ *  reindex exactly once (ADR preserved, per #516), and the rebuilt index must
+ *  not force a second rebuild on the next unchanged run.
+ * ══════════════════════════════════════════════════════════════════ */
+
+enum { IFMT_LOG_BUF = 8192 };
+static char g_ifmt_log[IFMT_LOG_BUF];
+static size_t g_ifmt_log_len;
+
+static void ifmt_capture_sink(const char *line) {
+    size_t n = strlen(line);
+    if (g_ifmt_log_len + n + 2 < sizeof(g_ifmt_log)) {
+        memcpy(g_ifmt_log + g_ifmt_log_len, line, n);
+        g_ifmt_log_len += n;
+        g_ifmt_log[g_ifmt_log_len++] = '\n';
+        g_ifmt_log[g_ifmt_log_len] = '\0';
+    }
+}
+
+/* index_repository through the production MCP flow, capturing the routing log
+ * (pipeline.route is the only place the decision is visible). */
+static char *ifmt_index_capture(cbm_mcp_server_t *srv, const char *repo) {
+    char args[512];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", repo);
+    g_ifmt_log_len = 0;
+    g_ifmt_log[0] = '\0';
+    cbm_log_set_sink(ifmt_capture_sink);
+    char *resp = cbm_mcp_handle_tool(srv, "index_repository", args);
+    cbm_log_set_sink(NULL);
+    return resp;
+}
+
+TEST(index_format_stale_db_rebuilds_once_issue769) {
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-index-format-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        FAIL("mkdtemp failed");
+    }
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-index-format-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        cbm_rmdir(tmp_dir);
+        FAIL("mkdtemp cache failed");
+    }
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    /* Component siblings: the exact shape the extension-stripping QN collided. */
+    char p_ts[512];
+    char p_html[512];
+    char p_scss[512];
+    snprintf(p_ts, sizeof(p_ts), "%s/badge.component.ts", tmp_dir);
+    snprintf(p_html, sizeof(p_html), "%s/badge.component.html", tmp_dir);
+    snprintf(p_scss, sizeof(p_scss), "%s/badge.component.scss", tmp_dir);
+    th_write_file(p_ts, "export class BadgeComponent {\n  hi() { return 1; }\n}\n");
+    th_write_file(p_html, "<div class=\"badge\">hi</div>\n");
+    th_write_file(p_scss, ".badge { color: red; }\n");
+
+    char *project = cbm_project_name_from_path(tmp_dir);
+    ASSERT_NOT_NULL(project);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/%s.db", cache, project);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    /* Run 1: a fresh index stamps the current format. */
+    char *resp = ifmt_index_capture(srv, tmp_dir);
+    ASSERT_NOT_NULL(resp);
+    free(resp);
+
+    cbm_store_t *w = cbm_store_open_path(dbpath);
+    ASSERT_NOT_NULL(w);
+    int fmt = -1;
+    ASSERT_EQ(cbm_store_get_format_version(w, &fmt), CBM_STORE_OK);
+    ASSERT_EQ(fmt, CBM_INDEX_FORMAT_VERSION);
+
+    /* Age it back to a pre-mechanism index and give it an ADR to preserve. */
+    ASSERT_EQ(cbm_store_adr_store(w, project, "index-format-adr"), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_set_format_version(w, 0), CBM_STORE_OK);
+    cbm_store_close(w);
+
+    /* Run 2: stale format forces the full rebuild and surfaces the migration. */
+    resp = ifmt_index_capture(srv, tmp_dir);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(g_ifmt_log, "format_change_reindex"));
+    ASSERT_NOT_NULL(strstr(resp, "format_migration"));
+    free(resp);
+
+    cbm_store_t *r1 = cbm_store_open_path(dbpath);
+    ASSERT_NOT_NULL(r1);
+    fmt = -1;
+    ASSERT_EQ(cbm_store_get_format_version(r1, &fmt), CBM_STORE_OK);
+    ASSERT_EQ(fmt, CBM_INDEX_FORMAT_VERSION);
+    /* #516: the forced rebuild deletes the DB, so the ADR must be carried. */
+    cbm_adr_t adr = {0};
+    ASSERT_EQ(cbm_store_adr_get(r1, project, &adr), CBM_STORE_OK);
+    ASSERT_NOT_NULL(adr.content);
+    ASSERT_NOT_NULL(strstr(adr.content, "index-format-adr"));
+    cbm_store_adr_free(&adr);
+    cbm_store_close(r1);
+
+    /* Run 3: unchanged and current — no second rebuild, no migration flag. */
+    resp = ifmt_index_capture(srv, tmp_dir);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(g_ifmt_log, "format_change_reindex"));
+    ASSERT_NULL(strstr(resp, "format_migration"));
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(project);
+    remove(p_ts);
+    remove(p_html);
+    remove(p_scss);
+    th_rmtree(cache);
+    cbm_rmdir(tmp_dir);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  EXIT_NONZERO QUARANTINE  (upstream #1438)
  *
  *  A worker that exits nonzero (an internal parse-limit abort on a
@@ -3453,6 +3591,7 @@ SUITE(mcp) {
     RUN_TEST(tool_unknown_project_skips_nonregular_cache_db);
 #endif
     RUN_TEST(tool_index_repository_resolves_root_path_from_project_name_issue1211);
+    RUN_TEST(index_format_stale_db_rebuilds_once_issue769);
     RUN_TEST(index_recovery_quarantines_exit_nonzero);
     RUN_TEST(index_recovery_systemic_exit_nonzero_gives_up);
     RUN_TEST(tool_index_repository_unknown_project_name_still_requires_repo_path);

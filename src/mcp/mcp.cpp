@@ -5697,6 +5697,9 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
             srv, doc, root, project_name, repo_path, persistence, p, excluded_dirs, excluded_count,
             file_errors, file_error_count, has_logfile ? logfile_path : NULL);
         yyjson_mut_obj_add_str(doc, root, "status", degraded ? "degraded" : "indexed");
+        if (cbm_pipeline_had_format_migration(p)) {
+            yyjson_mut_obj_add_bool(doc, root, "format_migration", true);
+        }
     } else {
         yyjson_mut_obj_add_str(doc, root, "status", "error");
         yyjson_mut_obj_add_str(doc, root, "hint",

@@ -649,6 +649,14 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
 
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
     if (hash_store) {
+        /* #769: this path DELETES and re-dumps the DB, so the format stamp has
+         * to be re-applied here as well as on the full-index dump. Without it
+         * every run after an incremental reads user_version 0 and is forced
+         * through a needless full rebuild. */
+        if (cbm_store_set_format_version(hash_store, CBM_INDEX_FORMAT_VERSION) != CBM_STORE_OK) {
+            cbm_log_error("incremental.err", "msg", "format_version", "project", project);
+        }
+
         persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
 
         /* Coverage rows (#963): re-write the merged set into the rebuilt DB

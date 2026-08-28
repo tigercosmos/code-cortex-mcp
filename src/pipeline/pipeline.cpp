@@ -115,6 +115,10 @@ struct cbm_pipeline {
     int committed_nodes;
     int committed_edges;
 
+    /* #769: set when a stale-format index was routed through the one-time
+     * full rebuild, so the MCP response can surface the migration. */
+    bool format_migration;
+
     /* ADR (project_summaries) captured before a full-reindex DB delete, so it
      * can be restored after the rebuild. NULL when no ADR existed. Issue #516. */
     char *saved_adr;
@@ -126,6 +130,10 @@ static CBMHashTable *g_pkgmap = NULL;
 
 CBMHashTable *cbm_pipeline_get_pkgmap(void) {
     return g_pkgmap;
+}
+
+bool cbm_pipeline_had_format_migration(const cbm_pipeline_t *p) {
+    return p && p->format_migration;
 }
 
 void cbm_pipeline_set_pkgmap(CBMHashTable *map) {
@@ -1217,19 +1225,28 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     }
     cbm_store_t *check_store = cbm_store_open_path(db_path);
     if (check_store && cbm_store_check_integrity(check_store)) {
+        /* #769: an index written under an older format identity encodes a
+         * different QN/node-identity scheme. Patching it incrementally would
+         * leave a MIXED graph, so route it through the one-time full rebuild
+         * below. A DB written before this mechanism existed reads back 0. */
+        int stored_format = 0;
+        cbm_store_get_format_version(check_store, &stored_format);
         cbm_file_hash_t *hashes = NULL;
         int hash_count = 0;
         cbm_store_get_file_hashes(check_store, p->project_name, &hashes, &hash_count);
         cbm_store_free_file_hashes(hashes, hash_count);
         cbm_store_close(check_store);
-        if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
+        if (stored_format != CBM_INDEX_FORMAT_VERSION) {
+            cbm_log_info("pipeline.route", "path", "format_change_reindex", "stored_format",
+                         itoa_buf(stored_format));
+            p->format_migration = true;
+        } else if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
             cbm_log_info("pipeline.route", "path", "incremental", "stored_hashes",
                          itoa_buf(hash_count));
             int rc = cbm_pipeline_run_incremental(p, db_path, files, file_count);
             free(db_path);
             return rc;
-        }
-        if (hash_count > 0) {
+        } else if (hash_count > 0) {
             cbm_log_info("pipeline.route", "path", "mode_change_reindex", "stored_hashes",
                          itoa_buf(hash_count), "discovered", itoa_buf(file_count));
         }
@@ -1316,6 +1333,12 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
     CBM_PROF_END("persist", "1_reopen", t_reopen);
     if (hash_store) {
+        /* #769: stamp the format identity the graph we just dumped was written
+         * under, so a later run can tell a compatible index from a stale one. */
+        if (cbm_store_set_format_version(hash_store, CBM_INDEX_FORMAT_VERSION) != CBM_STORE_OK) {
+            cbm_log_error("pipeline.err", "phase", "format_version", "project", p->project_name);
+        }
+
         CBM_PROF_START(t_delhash);
         cbm_store_delete_file_hashes(hash_store, p->project_name);
         CBM_PROF_END("persist", "2_delete_file_hashes", t_delhash);

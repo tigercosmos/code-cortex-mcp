@@ -84,6 +84,10 @@ void cbm_pipeline_get_excluded(const cbm_pipeline_t *p, char ***out, int *count)
 
 /* Committed node/edge counts captured at dump time (-1 when dump did not run).
  * Nodes are the #334 plausibility-gate axis; edges are informational only. */
+/* True when this run rebuilt the index because the stored format identity did
+ * not match CBM_INDEX_FORMAT_VERSION (#769). Surfaced by index_repository. */
+bool cbm_pipeline_had_format_migration(const cbm_pipeline_t *p);
+
 void cbm_pipeline_get_committed_counts(const cbm_pipeline_t *p, int *nodes, int *edges);
 
 /* ── Per-file indexing failures (Stage 2 / Track B) ─────────────── */
