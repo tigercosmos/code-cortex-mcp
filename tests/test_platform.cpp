@@ -7,6 +7,16 @@
 #include "../src/foundation/system_info_internal.h"
 #include <stdlib.h>
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h> /* _NSGetExecutablePath — deleted-self driver */
+#endif
 
 #ifdef __linux__
 /* Linux-only cgroup tests need stdio for FILE*, stdlib for mkdtemp,
@@ -310,8 +320,125 @@ TEST(cgroup_no_mem_files) {
 
 #endif /* __linux__ */
 
+#if defined(__linux__) || defined(__APPLE__)
+/* Byte copy — the driver needs an independent on-disk image of this binary it
+ * can rename over without touching the build tree's artifact. */
+static int ds_copy_file(const char *src, const char *dst) {
+    int in = open(src, O_RDONLY);
+    if (in < 0) {
+        return -1;
+    }
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (out < 0) {
+        close(in);
+        return -1;
+    }
+    char buf[65536];
+    ssize_t n;
+    int rc = 0;
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        if (write(out, buf, (size_t)n) != n) {
+            rc = -1;
+            break;
+        }
+    }
+    if (n < 0) {
+        rc = -1;
+    }
+    close(in);
+    close(out);
+    return rc;
+}
+#endif
+
+/* #1204: an installer's atomic rename-over deletes the running image out from
+ * under us. cbm_resolve_self_exe_path used to hand back the now-dead path,
+ * which index_supervisor turned straight into a doomed worker spawn (ENOENT).
+ * Drive the real state: exec a COPY of this binary as a probe, replace/remove
+ * that copy while it runs, and check what the resolver answers. */
+TEST(platform_resolve_self_exe_survives_deleted_image_issue1204) {
+#if defined(__linux__) || defined(__APPLE__)
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_deleted_self_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+
+    char current[1024];
+#if defined(__linux__)
+    ssize_t current_len = readlink("/proc/self/exe", current, sizeof(current) - 1);
+    ASSERT_GT(current_len, 0);
+    current[current_len] = '\0';
+#else
+    uint32_t current_sz = sizeof(current);
+    ASSERT_EQ(_NSGetExecutablePath(current, &current_sz), 0);
+#endif
+
+    char launch_path[512];
+    char replacement_path[512];
+    snprintf(launch_path, sizeof(launch_path), "%s/test-runner", tmpdir);
+    snprintf(replacement_path, sizeof(replacement_path), "%s/test-runner.new", tmpdir);
+    ASSERT_EQ(ds_copy_file(current, launch_path), 0);
+    ASSERT_EQ(chmod(launch_path, 0755), 0);
+
+    int ready_pipe[2];
+    int continue_pipe[2];
+    ASSERT_EQ(pipe(ready_pipe), 0);
+    ASSERT_EQ(pipe(continue_pipe), 0);
+
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0) {
+        close(ready_pipe[0]);
+        close(continue_pipe[1]);
+        char ready_fd[32];
+        char continue_fd[32];
+        snprintf(ready_fd, sizeof(ready_fd), "%d", ready_pipe[1]);
+        snprintf(continue_fd, sizeof(continue_fd), "%d", continue_pipe[0]);
+        execl(launch_path, launch_path, "__cbm_deleted_self_probe", ready_fd, continue_fd,
+              (char *)NULL);
+        _exit(127);
+    }
+    ASSERT_GT(child, 0);
+
+    close(ready_pipe[1]);
+    close(continue_pipe[0]);
+    char ready = '\0';
+    ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
+    ASSERT_EQ(ready, 'R');
+
+#if defined(__linux__)
+    /* Atomic rename-over: the installer's real move. /proc/self/exe now reads
+     * "(deleted)" in the child, which is the state the magic-link branch
+     * covers. */
+    ASSERT_EQ(ds_copy_file(current, replacement_path), 0);
+    ASSERT_EQ(chmod(replacement_path, 0755), 0);
+    ASSERT_EQ(rename(replacement_path, launch_path), 0);
+#else
+    /* macOS: a rename-over leaves a VALID executable at the launch path, which
+     * the resolver is right to return (the worker's build-fingerprint gate is
+     * the layer that refuses a mismatched build). The fail-closed branch
+     * guards the image-GONE case, so remove the image. */
+    (void)replacement_path;
+    ASSERT_EQ(unlink(launch_path), 0);
+#endif
+    ASSERT_EQ(write(continue_pipe[1], "G", 1), 1);
+    close(ready_pipe[0]);
+    close(continue_pipe[1]);
+
+    int status = 0;
+    ASSERT_EQ(waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+    unlink(launch_path);
+    rmdir(tmpdir);
+    PASS();
+#else
+    SKIP_PLATFORM("deleted-self image probe needs POSIX fork/exec");
+#endif
+}
+
 SUITE(platform) {
     RUN_TEST(platform_now_ns);
+    RUN_TEST(platform_resolve_self_exe_survives_deleted_image_issue1204);
     RUN_TEST(platform_now_ms);
     RUN_TEST(platform_nprocs);
     RUN_TEST(platform_file_exists);

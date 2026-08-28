@@ -511,6 +511,18 @@ const char *cbm_resolve_cache_dir(void) {
 #include <mach-o/dyld.h>
 #endif
 
+#ifndef _WIN32
+/* #1204: an OS-reported self path is only usable if it still names a runnable
+ * image. After an installer's atomic rename-over it does not. */
+static bool self_path_is_executable(const char *path) {
+    struct stat st;
+    if (!path || !path[0] || stat(path, &st) != 0) {
+        return false;
+    }
+    return S_ISREG(st.st_mode) && access(path, X_OK) == 0;
+}
+#endif
+
 bool cbm_resolve_self_exe_path(const char *argv0, char *out, size_t outsz) {
     if (!out || outsz == 0) {
         return false;
@@ -540,13 +552,33 @@ bool cbm_resolve_self_exe_path(const char *argv0, char *out, size_t outsz) {
     }
 #elif defined(__APPLE__)
     uint32_t sz = (uint32_t)outsz;
-    if (_NSGetExecutablePath(out, &sz) == 0) {
-        return out[0] != '\0';
+    if (_NSGetExecutablePath(out, &sz) == 0 && out[0] != '\0') {
+        if (self_path_is_executable(out)) {
+            return true;
+        }
+        /* #1204: the image was replaced under us (an install/upgrade renames
+         * over the running binary), so this path no longer exists and handing
+         * it back turns into a doomed worker spawn (ENOENT). macOS has no
+         * /proc magic link to fall back to, so fail CLOSED: the supervisor
+         * logs index.supervisor.no_self_path and degrades in-process instead
+         * of exec'ing a missing binary. Deliberately NOT argv0 either — after
+         * a replacement that path holds a DIFFERENT build, which only swaps
+         * the ENOENT for a build-fingerprint refusal. */
+        out[0] = '\0';
+        return false;
     }
 #else
     ssize_t len = readlink("/proc/self/exe", out, outsz - 1);
     if (len > 0) {
         out[len] = '\0';
+        if (self_path_is_executable(out)) {
+            return true;
+        }
+        /* #1204: deleted image — readlink reports "<path> (deleted)". The magic
+         * link itself still executes the in-memory OLD build, which is the only
+         * spawn the worker's build-fingerprint gate accepts, so hand back the
+         * link rather than the stale path. */
+        snprintf(out, outsz, "/proc/self/exe");
         return true;
     }
 #endif
