@@ -17,7 +17,9 @@
 #include <stdlib.h>
 #ifndef _WIN32
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 #endif
 
 TEST(mcp_tool_result_validation_rejects_partial_response) {
@@ -3026,6 +3028,272 @@ TEST(search_code_windows_prefilter_precedes_content_scan) {
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
 
+/* ══════════════════════════════════════════════════════════════════
+ *  EXIT_NONZERO QUARANTINE  (upstream #1438)
+ *
+ *  A worker that exits nonzero (an internal parse-limit abort on a
+ *  pathological file) used to abort the WHOLE chunk, discarding every file
+ *  indexed for that directory. It is now attributed through the same
+ *  marker-journal suspect mechanism as a crash: the offender is quarantined
+ *  under phase "error" and the rest of the chunk still indexes.
+ *
+ *  The two-consecutive-strikes intersection is what keeps this honest — a
+ *  SYSTEMIC nonzero exit produces no recurring suspect, so the intersection
+ *  is empty and the supervisor gives up instead of quarantining innocents.
+ *  Both halves are pinned below.
+ * ══════════════════════════════════════════════════════════════════ */
+
+enum {
+    IDXPAR_OK = 0,
+    IDXPAR_ST_SPAWN = 61,       /* single-threaded recovery spawn happened (RED) */
+    IDXPAR_NULL_RESP = 62,      /* supervised entry degraded to NULL */
+    IDXPAR_NOT_INDEXED = 63,    /* response lacks status indexed */
+    IDXPAR_NO_QUARANTINE = 64,  /* offender missing from skipped[] */
+    IDXPAR_INNOCENT_HIT = 65,   /* a good file was quarantined/skipped */
+    IDXPAR_GOOD_MISSING = 66,   /* good file's Function absent from the store */
+    IDXPAR_NOT_ERROR = 67,      /* systemic failure did not report status error */
+    IDXPAR_OUTCOME_WRONG = 68,  /* systemic failure outcome is not exit_nonzero */
+};
+
+#ifndef _WIN32
+/* The supervised entry point returns the worker's MCP payload, in which the
+ * JSON is carried as an ESCAPED string. Accept either form so the assertion
+ * does not depend on which layer answered. */
+static bool idxpar_response_has(const char *resp, const char *key, const char *value) {
+    char plain[128];
+    char escaped[256];
+    snprintf(plain, sizeof(plain), "\"%s\":\"%s\"", key, value);
+    snprintf(escaped, sizeof(escaped), "\\\"%s\\\":\\\"%s\\\"", key, value);
+    return strstr(resp, plain) != NULL || strstr(resp, escaped) != NULL;
+}
+
+static int idxpar_exit_nonzero_recovery_check(const char *repo_dir) {
+    cbm_index_supervisor_mark_host();
+    cbm_unsetenv("CBM_INDEX_SUPERVISOR");
+    /* Rounds needed: fail+record, fail+quarantine, clean. Generous cap. */
+    cbm_setenv("CBM_INDEX_MAX_RESTARTS", "5", 1);
+    cbm_setenv("CBM_INDEX_WORKER_TIMEOUT_S", "30", 1);
+    cbm_setenv("CBM_TEST_EXIT_ON", "idxpar_exit_nonzero", 1);
+
+    int st_before = cbm_index_supervisor_spawn_st_count();
+    char *resp = cbm_mcp_index_run_supervised_path(repo_dir);
+    int st_after = cbm_index_supervisor_spawn_st_count();
+    cbm_unsetenv("CBM_TEST_EXIT_ON");
+
+    if (st_after != st_before) {
+        free(resp);
+        return IDXPAR_ST_SPAWN;
+    }
+    if (!resp) {
+        return IDXPAR_NULL_RESP;
+    }
+    bool indexed = idxpar_response_has(resp, "status", "indexed");
+    bool offender_skipped = strstr(resp, "idxpar_exit_nonzero.py") != NULL;
+    bool innocent_hit =
+        strstr(resp, "idxpar_good_a.py") != NULL || strstr(resp, "idxpar_good_b.py") != NULL;
+    bool phase_error =
+        idxpar_response_has(resp, "phase", "error") || strstr(resp, "quarantined after error");
+    free(resp);
+    if (!indexed) {
+        return IDXPAR_NOT_INDEXED;
+    }
+    if (!offender_skipped || !phase_error) {
+        return IDXPAR_NO_QUARANTINE;
+    }
+    if (innocent_hit) {
+        return IDXPAR_INNOCENT_HIT;
+    }
+
+    /* Store proof: an innocent's Function node exists. */
+    char *project = cbm_project_name_from_path(repo_dir);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    int code = IDXPAR_OK;
+    if (srv && project) {
+        char q[512];
+        snprintf(q, sizeof(q),
+                 "{\"project\":\"%s\",\"name_pattern\":\"idxpar_good_fn\",\"label\":\"Function\"}",
+                 project);
+        char *sr = cbm_mcp_handle_tool(srv, "search_graph", q);
+        if (!sr || !strstr(sr, "idxpar_good_fn")) {
+            code = IDXPAR_GOOD_MISSING;
+        }
+        free(sr);
+    }
+    if (srv) {
+        cbm_mcp_server_free(srv);
+    }
+    free(project);
+    return code;
+}
+
+static int idxpar_systemic_exit_nonzero_give_up_check(const char *repo_dir) {
+    cbm_index_supervisor_mark_host();
+    cbm_unsetenv("CBM_INDEX_SUPERVISOR");
+    cbm_setenv("CBM_INDEX_MAX_RESTARTS", "5", 1);
+    cbm_setenv("CBM_INDEX_WORKER_TIMEOUT_S", "30", 1);
+    cbm_setenv("CBM_TEST_EXIT_ON", "idxpar_", 1); /* EVERY file exits nonzero */
+
+    char *resp = cbm_mcp_index_run_supervised_path(repo_dir);
+    cbm_unsetenv("CBM_TEST_EXIT_ON");
+
+    if (!resp) {
+        return IDXPAR_NULL_RESP;
+    }
+    bool is_error = idxpar_response_has(resp, "status", "error");
+    bool is_exit_nonzero = idxpar_response_has(resp, "outcome", "exit_nonzero");
+    bool innocent_hit =
+        strstr(resp, "idxpar_good_a.py") != NULL || strstr(resp, "idxpar_good_b.py") != NULL;
+    free(resp);
+
+    if (!is_error) {
+        return IDXPAR_NOT_ERROR;
+    }
+    if (!is_exit_nonzero) {
+        return IDXPAR_OUTCOME_WRONG;
+    }
+    if (innocent_hit) {
+        return IDXPAR_INNOCENT_HIT;
+    }
+    return IDXPAR_OK;
+}
+
+/* Run one check in a forked child: it mutates process-global supervisor state
+ * and env, and a fault-injected exit must not take the test runner with it. */
+static int idxpar_run_child(int (*check)(const char *), const char *repo_dir, bool *signalled,
+                            int *sig) {
+    *signalled = false;
+    *sig = 0;
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(120);
+        _exit(check(repo_dir));
+    }
+    if (pid < 0) {
+        return -1;
+    }
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        *signalled = true;
+        *sig = WTERMSIG(status);
+    }
+    return -1;
+}
+#endif /* !_WIN32 */
+
+TEST(index_recovery_quarantines_exit_nonzero) {
+#ifdef _WIN32
+    SKIP_PLATFORM("supervised-recovery guard needs fork isolation (POSIX-only)");
+#else
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-idxpar-exit-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        FAIL("mkdtemp failed");
+    }
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-idxpar-exit-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        cbm_rmdir(tmp_dir);
+        FAIL("mkdtemp cache failed");
+    }
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char p1[512];
+    char p2[512];
+    char pc[512];
+    snprintf(p1, sizeof(p1), "%s/idxpar_good_a.py", tmp_dir);
+    snprintf(p2, sizeof(p2), "%s/idxpar_good_b.py", tmp_dir);
+    snprintf(pc, sizeof(pc), "%s/idxpar_exit_nonzero.py", tmp_dir);
+    th_write_file(p1, "def idxpar_good_fn():\n    return 'ok'\n");
+    th_write_file(p2, "def idxpar_good_fn_b():\n    return 'ok'\n");
+    th_write_file(pc, "def idxpar_bad_fn():\n    return 'exit'\n");
+
+    bool signalled = false;
+    int sig = 0;
+    int code = idxpar_run_child(idxpar_exit_nonzero_recovery_check, tmp_dir, &signalled, &sig);
+
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+        free(saved_cache_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    remove(p1);
+    remove(p2);
+    remove(pc);
+    th_rmtree(cache);
+    cbm_rmdir(tmp_dir);
+
+    if (signalled) {
+        printf("    child killed by signal %d\n", sig);
+    } else if (code != IDXPAR_OK) {
+        printf("    child exit code %d\n", code);
+    }
+    ASSERT_FALSE(signalled);
+    ASSERT_EQ(code, IDXPAR_OK);
+    PASS();
+#endif
+}
+
+TEST(index_recovery_systemic_exit_nonzero_gives_up) {
+#ifdef _WIN32
+    SKIP_PLATFORM("supervised-recovery guard needs fork isolation (POSIX-only)");
+#else
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-idxpar-sys-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        FAIL("mkdtemp failed");
+    }
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-idxpar-sys-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        cbm_rmdir(tmp_dir);
+        FAIL("mkdtemp cache failed");
+    }
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char p1[512];
+    char p2[512];
+    snprintf(p1, sizeof(p1), "%s/idxpar_good_a.py", tmp_dir);
+    snprintf(p2, sizeof(p2), "%s/idxpar_good_b.py", tmp_dir);
+    th_write_file(p1, "def idxpar_good_fn():\n    return 'ok'\n");
+    th_write_file(p2, "def idxpar_good_fn_b():\n    return 'ok'\n");
+
+    bool signalled = false;
+    int sig = 0;
+    int code =
+        idxpar_run_child(idxpar_systemic_exit_nonzero_give_up_check, tmp_dir, &signalled, &sig);
+
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+        free(saved_cache_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    remove(p1);
+    remove(p2);
+    th_rmtree(cache);
+    cbm_rmdir(tmp_dir);
+
+    if (signalled) {
+        printf("    child killed by signal %d\n", sig);
+    } else if (code != IDXPAR_OK) {
+        printf("    child exit code %d\n", code);
+    }
+    ASSERT_FALSE(signalled);
+    ASSERT_EQ(code, IDXPAR_OK);
+    PASS();
+#endif
+}
+
 SUITE(mcp) {
     /* JSON-RPC parsing */
     RUN_TEST(jsonrpc_parse_request);
@@ -3185,5 +3453,7 @@ SUITE(mcp) {
     RUN_TEST(tool_unknown_project_skips_nonregular_cache_db);
 #endif
     RUN_TEST(tool_index_repository_resolves_root_path_from_project_name_issue1211);
+    RUN_TEST(index_recovery_quarantines_exit_nonzero);
+    RUN_TEST(index_recovery_systemic_exit_nonzero_gives_up);
     RUN_TEST(tool_index_repository_unknown_project_name_still_requires_repo_path);
 }

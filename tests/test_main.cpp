@@ -11,11 +11,59 @@ int tf_skip_count = 0;
 #include "test_framework.h"
 #include <sqlite3.h>
 #include <string.h>
+#include "mcp/index_supervisor.h" /* cbm_index_set_worker_role */
+#include "mcp/mcp.h"               /* cbm_mcp_handle_tool — act as a real worker */
+#include <stdio.h>
 #include <stdlib.h>
 #if !defined(_WIN32)
 #include "foundation/platform.h" /* cbm_resolve_self_exe_path — deleted-self probe */
 #include <unistd.h>
 #endif
+
+/* When the index supervisor spawns THIS binary as a supervised index worker,
+ * act as a faithful in-process worker instead of re-running every suite. The
+ * grammar is the one cbm_index_worker_start() produces:
+ *
+ *   <self> cli --index-worker index_repository <args_json> --response-out <p>
+ *
+ * The recovery knobs (marker/quarantine/single-thread) travel as inherited
+ * env, so nothing else needs plumbing. This is what lets the EXIT_NONZERO
+ * quarantine guards in test_mcp drive a REAL supervised run through public
+ * APIs. Returns an exit code (>=0) when it handled a worker invocation,
+ * else -1. */
+static int tf_maybe_run_index_worker(int argc, char **argv) {
+    if (argc < 7 || strcmp(argv[1], "cli") != 0 || strcmp(argv[2], "--index-worker") != 0 ||
+        strcmp(argv[3], "index_repository") != 0 || strcmp(argv[5], "--response-out") != 0) {
+        return -1;
+    }
+    const char *args_json = argv[4];
+    const char *response_out = argv[6];
+
+    cbm_index_set_worker_role(true, response_out);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    if (!srv) {
+        return 1;
+    }
+    char *result = cbm_mcp_handle_tool(srv, "index_repository", args_json);
+    int rc = 0;
+    if (result) {
+        FILE *rf = fopen(response_out, "wb");
+        if (rf) {
+            (void)fputs(result, rf);
+            (void)fclose(rf);
+        } else {
+            rc = 1;
+        }
+        free(result);
+    } else {
+        rc = 1;
+    }
+    /* Mirror the production worker's fast exit: skip the multi-GB teardown the
+     * OS is about to reclaim anyway, and keep LeakSanitizer out of a path that
+     * deliberately does not free. */
+    fflush(NULL);
+    _Exit(rc);
+}
 
 /* #1204 deleted-self probe. Re-exec'd by the platform suite's driver from a
  * COPY of this binary, so the driver can rename over / unlink that copy while
@@ -163,6 +211,12 @@ extern void suite_stack_overflow(void);
 extern "C" void cbm_kind_in_set_free_cache(void);
 
 int main(int argc, char **argv) {
+    /* Both dispatches must precede every suite: this process may have been
+     * spawned as a supervised worker or as the deleted-self probe. */
+    int worker_rc = tf_maybe_run_index_worker(argc, argv);
+    if (worker_rc >= 0) {
+        return worker_rc;
+    }
     int deleted_self_rc = tf_maybe_run_deleted_self_probe(argc, argv);
     if (deleted_self_rc >= 0) {
         return deleted_self_rc;
