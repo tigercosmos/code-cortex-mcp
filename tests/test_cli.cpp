@@ -2430,7 +2430,7 @@ TEST(cli_upsert_claude_hook_fresh) {
     /* Matcher includes Read for the coverage note (#963). Safe against the
      * issue-#362 gate hazard: the augmenter is structurally non-blocking
      * (always exit 0, additionalContext only). */
-    ASSERT(strstr(data, "\"Grep|Glob|Read\"") != NULL);
+    ASSERT(strstr(data, "\"Grep|Glob|Bash|Read\"") != NULL);
     ASSERT(strstr(data, "cbm-code-discovery-gate") != NULL);
 
     test_rmdir_r(tmpdir);
@@ -2481,7 +2481,7 @@ TEST(cli_upsert_claude_hook_existing) {
     const char *data = read_test_file(settingspath);
     ASSERT_NOT_NULL(data);
     /* Our hook added with the current matcher (Read included for #963). */
-    ASSERT(strstr(data, "\"Grep|Glob|Read\"") != NULL);
+    ASSERT(strstr(data, "\"Grep|Glob|Bash|Read\"") != NULL);
     /* Existing hook preserved */
     ASSERT(strstr(data, "Bash") != NULL);
     ASSERT(strstr(data, "firewall") != NULL);
@@ -2544,6 +2544,75 @@ TEST(cli_upsert_claude_hook_preserves_others) {
     PASS();
 }
 
+/* #1082: agents run far more searches through `rg`/`grep`/`git grep` than
+ * through the Grep tool, so the PreToolUse matcher covers Bash too. The
+ * extractor must read one unambiguous pattern out of the command line and
+ * FAIL CLOSED on anything else — a wrong pattern would augment with symbols
+ * the agent never asked about. It never executes or rewrites the command. */
+TEST(cli_hook_augment_bash_pattern_extractor) {
+    char out[256];
+
+    /* common forms */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("rg -n CreateStripeCheckout .", out,
+                                                                sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -rn CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -e CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("ag CreateStripeCheckout src/", out,
+                                                                sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("git grep CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* value-taking flags are skipped correctly */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -A 5 CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("rg -t py CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* env-var prefix and wrappers */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "FOO=bar rg CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rtk grep -n CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "tokf run rg CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "env FOO=bar rg CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* rtk -l <N> shadows grep's valueless -l with a value-taking form, so the
+     * pattern position is ambiguous — bail out rather than guess. */
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rtk grep -l 80 CreateStripeCheckout .", out, sizeof(out)));
+
+    /* bail-out cases */
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -f /path/patterns .", out,
+                                                                 sizeof(out)));
+    ASSERT_FALSE(
+        cbm_hook_augment_parse_bash_pattern_for_testing("grep -e FOO -e BAR .", out, sizeof(out)));
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing("ls -la", out, sizeof(out)));
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing("", out, sizeof(out)));
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing(NULL, out, sizeof(out)));
+
+    /* -- end-of-flags separator */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -- CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    PASS();
+}
+
 TEST(cli_remove_claude_hooks) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-hook-XXXXXX");
@@ -2560,7 +2629,7 @@ TEST(cli_remove_claude_hooks) {
 
     const char *data = read_test_file(settingspath);
     ASSERT_NOT_NULL(data);
-    ASSERT(strstr(data, "Grep|Glob|Read") == NULL);
+    ASSERT(strstr(data, "Grep|Glob|Bash|Read") == NULL);
 
     test_rmdir_r(tmpdir);
     PASS();
@@ -3039,6 +3108,7 @@ SUITE(cli) {
     RUN_TEST(cli_upsert_claude_hook_existing);
     RUN_TEST(cli_upsert_claude_hook_replace);
     RUN_TEST(cli_upsert_claude_hook_preserves_others);
+    RUN_TEST(cli_hook_augment_bash_pattern_extractor);
     RUN_TEST(cli_remove_claude_hooks);
 
     /* Gemini CLI hooks (4 tests — group D) */

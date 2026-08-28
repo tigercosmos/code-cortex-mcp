@@ -1965,11 +1965,16 @@ int cbm_remove_junie_mcp(const char *config_path) {
 
 /* Matcher includes Read for the indexing-coverage note (#963): when the agent
  * reads a file the indexer could not fully cover, the hook injects a warning
- * as additionalContext. The issue-#362 hazard (a GATING hook denying Read and
+ * as additionalContext. Bash is included because agents run far more searches
+ * through `rg`/`grep`/`git grep` than through the Grep tool (#1082); the
+ * augmenter reads the pattern out of the command and stays pass-through for
+ * every Bash call that is not an unambiguous search.
+ *
+ * The issue-#362 hazard (a GATING hook denying Read and
  * breaking the read-before-edit invariant) cannot recur: the augmenter is
  * structurally non-blocking — it always exits 0 and only ever ADDS context —
  * mirroring the Gemini matcher, which already includes read_file. */
-#define CMM_HOOK_MATCHER "Grep|Glob|Read"
+#define CMM_HOOK_MATCHER "Grep|Glob|Bash|Read"
 /* Basename only; the full command path is resolved at install time via
  * cbm_resolve_hook_command so $CLAUDE_CONFIG_DIR is honored. */
 #define CMM_HOOK_GATE_SCRIPT "cbm-code-discovery-gate"
@@ -1982,7 +1987,8 @@ int cbm_remove_junie_mcp(const char *config_path) {
  * Per-agent lists (no shared global): each caller passes its own. */
 static const char *const cmm_claude_old_matchers[] = {
     "Grep|Glob|Read|Search",
-    "Grep|Glob", /* pre-#963 matcher — Read re-added for the coverage note */
+    "Grep|Glob|Read", /* pre-Bash matcher — Bash added for command searches */
+    "Grep|Glob",      /* pre-#963 matcher — Read re-added for the coverage note */
     NULL,
 };
 static const char *const cmm_gemini_old_matchers[] = {
@@ -2216,7 +2222,8 @@ int cbm_remove_claude_hooks(const char *settings_path) {
 
 /* Install the search-augmenter shim to ~/.claude/hooks/.
  * The shim is a thin wrapper that delegates to `<binary> hook-augment`,
- * which adds graph context to Grep/Glob calls. It NEVER blocks a tool call:
+ * which adds graph context to Grep/Glob/Bash search calls. It NEVER blocks a
+ * tool call:
  * a missing/old/hung binary results in a silent exit 0 (issue #362/#288).
  * The legacy filename `cbm-code-discovery-gate` is retained so existing
  * settings.json entries and uninstall keep working with zero migration. */
@@ -3475,7 +3482,7 @@ static void install_claude_code_config(const char *home, const char *binary_path
         cbm_install_subagent_reminder_script(home);
         cbm_upsert_claude_subagent_hooks(settings_path);
     }
-    printf("  hooks: PreToolUse (Grep/Glob search-graph augmenter, non-blocking)\n");
+    printf("  hooks: PreToolUse (Grep/Glob/Bash search-graph augmenter, non-blocking)\n");
     printf("  hooks: SessionStart (MCP usage reminder on startup/resume/clear/compact)\n");
     printf("  hooks: SubagentStart (MCP usage reminder for subagents)\n");
 

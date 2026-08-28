@@ -10,6 +10,7 @@
 #define CBM_CLI_H
 
 #include <stdbool.h>
+#include <stddef.h> /* size_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -340,6 +341,12 @@ int cbm_cmd_config(int argc, char **argv);
  * with search_graph hits for Grep/Glob calls. NEVER blocks: every failure
  * path returns 0 with no stdout output. */
 int cbm_cmd_hook_augment(void);
+
+/* Extract a search pattern from a Bash tool command (rg/grep/ag/ack/ugrep/
+ * git grep, through env/nice/time/command/rtk/tokf-run wrappers). Returns
+ * false whenever the command is not an unambiguous single-pattern search.
+ * Exported for the hook tests; never executes or rewrites the command. */
+bool cbm_hook_augment_parse_bash_pattern_for_testing(const char *cmd, char *out, size_t out_sz);
 
 /* True for an absolute path the augmenter can walk up: POSIX "/..." or a
  * Windows drive root — "X:/..." or a bare "X:" (callers normalize '\\' to '/'
