@@ -59,6 +59,28 @@ static int count_defs_with_label(CBMFileResult *r, const char *label) {
     return count;
 }
 
+static int __attribute__((unused))
+count_defs_named(CBMFileResult *r, const char *label, const char *name) {
+    int count = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, label) == 0 &&
+            strcmp(r->defs.items[i].name, name) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int __attribute__((unused)) count_calls_named(CBMFileResult *r, const char *callee) {
+    int count = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && strcmp(r->calls.items[i].callee_name, callee) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
 /* Convenience: extract, assert no error, return result. Caller frees. */
 static CBMFileResult *extract(const char *src, CBMLanguage lang, const char *proj,
                               const char *path) {
@@ -2349,6 +2371,108 @@ TEST(vue_imports_basic) {
     PASS();
 }
 
+TEST(vue_embedded_structure_issue1410) {
+    const char *src = "<template><div>caf\xC3\xA9</div></template>\r\n"
+                      "<script>\r\n"
+                      "import { external } from './dep.js';\r\n"
+                      "function normalFn() { return callee(); }\r\n"
+                      "</script>\r\n"
+                      "<script setup lang=\"ts\">class Widget {}\r\n"
+                      "function setupFn(): void { callee(); }</script>\r\n";
+    CBMFileResult *r = extract(src, CBM_LANG_VUE, "t", "App.vue");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Module"), 1);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 2);
+    ASSERT_EQ(count_defs_with_label(r, "Class"), 1);
+    ASSERT_EQ(count_defs_named(r, "Function", "normalFn"), 1);
+    ASSERT_EQ(count_defs_named(r, "Function", "setupFn"), 1);
+    ASSERT_EQ(count_defs_named(r, "Class", "Widget"), 1);
+    ASSERT_EQ(count_calls_named(r, "callee"), 2);
+    ASSERT_EQ(r->imports.count, 1);
+    ASSERT(has_import(r, "dep.js"));
+
+    /* Parsing the FULL original buffer through an absolute included range is
+     * what keeps these line numbers right across the CRLFs and the UTF-8 é. */
+    const CBMDefinition *normal = NULL;
+    const CBMDefinition *widget = NULL;
+    const CBMDefinition *setup = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, "normalFn") == 0) {
+            normal = &r->defs.items[i];
+        } else if (strcmp(r->defs.items[i].name, "Widget") == 0) {
+            widget = &r->defs.items[i];
+        } else if (strcmp(r->defs.items[i].name, "setupFn") == 0) {
+            setup = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(normal);
+    ASSERT_NOT_NULL(widget);
+    ASSERT_NOT_NULL(setup);
+    ASSERT_EQ(normal->start_line, 4);
+    ASSERT_EQ(widget->start_line, 6);
+    ASSERT_EQ(setup->start_line, 7);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(vue_embedded_structure_negative_controls_issue1410) {
+    static const char *sources[] = {
+        "<script lang=\"coffee\">function hidden() { forbidden(); }</script>\n",
+        "<script src=\"./external.js\">function hidden() { forbidden(); }</script>\n",
+        "<template><p>scriptless</p></template>\n",
+    };
+    for (int i = 0; i < 3; i++) {
+        CBMFileResult *r = extract(sources[i], CBM_LANG_VUE, "t", "Negative.vue");
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(r->has_error);
+        ASSERT_EQ(count_defs_with_label(r, "Module"), 1);
+        ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+        ASSERT_EQ(count_defs_with_label(r, "Class"), 0);
+        ASSERT_EQ(r->calls.count, 0);
+        ASSERT_EQ(r->imports.count, 0);
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
+/* Deliberate scoping, not an oversight: Svelte, HTML and Astro still extract
+ * imports and nothing else. Pinning that documents the remaining gap (#1807)
+ * and proves the Vue fix does not leak into sibling hosts. */
+TEST(vue_embedded_structure_host_controls_issue1410) {
+    CBMFileResult *plain = extract("function plainTs(): void { target(); }\n", CBM_LANG_TYPESCRIPT,
+                                   "t", "plain.ts");
+    ASSERT_NOT_NULL(plain);
+    ASSERT_FALSE(plain->has_error);
+    ASSERT_EQ(count_defs_named(plain, "Function", "plainTs"), 1);
+    ASSERT_EQ(count_calls_named(plain, "target"), 1);
+    cbm_free_result(plain);
+
+    static const struct {
+        CBMLanguage language;
+        const char *path;
+        const char *source;
+    } hosts[] = {
+        {CBM_LANG_SVELTE, "Control.svelte",
+         "<script>import value from './svelte.js'; function hidden() { target(); }</script>\n"},
+        {CBM_LANG_HTML, "control.html",
+         "<script>import value from './html.js'; function hidden() { target(); }</script>\n"},
+        {CBM_LANG_ASTRO, "Control.astro",
+         "---\nimport value from './astro.js'; function hidden() { target(); }\n---\n"},
+    };
+    for (int i = 0; i < 3; i++) {
+        CBMFileResult *r = extract(hosts[i].source, hosts[i].language, "t", hosts[i].path);
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(r->has_error);
+        ASSERT_EQ(count_defs_with_label(r, "Module"), 1);
+        ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+        ASSERT_EQ(r->calls.count, 0);
+        ASSERT_EQ(r->imports.count, 1);
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
 TEST(html_imports_basic) {
     /* Plain HTML with inline ES module imports — same generic walker. */
     CBMFileResult *r = extract("<!DOCTYPE html><html><head>\n"
@@ -4011,6 +4135,9 @@ SUITE(extraction) {
     RUN_TEST(svelte_imports_basic);
     RUN_TEST(svelte_imports_no_script);
     RUN_TEST(vue_imports_basic);
+    RUN_TEST(vue_embedded_structure_issue1410);
+    RUN_TEST(vue_embedded_structure_negative_controls_issue1410);
+    RUN_TEST(vue_embedded_structure_host_controls_issue1410);
     RUN_TEST(html_imports_basic);
 
     /* config_extraction_test.go ports */

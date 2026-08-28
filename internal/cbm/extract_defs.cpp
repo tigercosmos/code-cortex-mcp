@@ -6137,6 +6137,19 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
     }
 }
 
+void cbm_extract_definitions_without_module(CBMExtractCtx *ctx) {
+    const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
+    if (!spec) {
+        return;
+    }
+
+    // Walk AST for function/class definitions
+    walk_defs(ctx, ctx->root, spec, 0);
+
+    // Extract module-level variables
+    extract_variables(ctx, ctx->root, spec);
+}
+
 void cbm_extract_definitions(CBMExtractCtx *ctx) {
     const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
     if (!spec) {
@@ -6158,9 +6171,5 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     mod.is_test = ctx->result->is_test_file;
     cbm_defs_push(&ctx->result->defs, a, mod);
 
-    // Walk AST for function/class definitions
-    walk_defs(ctx, ctx->root, spec, 0);
-
-    // Extract module-level variables
-    extract_variables(ctx, ctx->root, spec);
+    cbm_extract_definitions_without_module(ctx);
 }
