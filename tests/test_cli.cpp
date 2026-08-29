@@ -2610,6 +2610,39 @@ TEST(cli_hook_augment_bash_pattern_extractor) {
                                                                 out, sizeof(out)));
     ASSERT_STR_EQ(out, "CreateStripeCheckout");
 
+    /* A long option whose value is a SEPARATE token must consume that value.
+     * Skipping the option alone handed the value to the pattern slot, so
+     * `rg --glob '*.cpp' Symbol .` searched the graph for "*.cpp" and injected
+     * context for a symbol the agent never asked about. */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rg --glob *.cpp CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rg --type py CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "grep --include *.c -rn CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* --opt=value carries its own value, so the next token is still the pattern. */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rg --glob=*.cpp CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* Valueless long options stay transparent. */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rg --ignore-case --line-number CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* An unrecognised long option could take a value or not, so the pattern
+     * position is undecidable — decline rather than guess. */
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rg --some-future-flag CreateStripeCheckout .", out, sizeof(out)));
+
+    /* A value-taking long option with nothing after it is equally undecidable. */
+    ASSERT_FALSE(
+        cbm_hook_augment_parse_bash_pattern_for_testing("rg --glob", out, sizeof(out)));
+
     PASS();
 }
 

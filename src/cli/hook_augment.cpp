@@ -446,6 +446,117 @@ static const char *ha_search_bin_val_flags(ha_bin_t bin) {
     }
 }
 
+/* Long options whose value is a SEPARATE token (`--glob '*.cpp'`). Skipping one
+ * without consuming its value hands the value to the pattern slot, so
+ * `rg --glob '*.cpp' Symbol .` would search the graph for "*.cpp". Anything not
+ * listed here and not a known pattern option is treated as unknown and declines
+ * the whole command — the extractor's contract is to fail closed rather than
+ * guess which token is the pattern. */
+static bool ha_long_opt_takes_value(const char *name, size_t nlen) {
+    static const char *const kValued[] = {
+        "glob",
+        "iglob",
+        "type",
+        "type-not",
+        "type-add",
+        "type-clear",
+        "max-count",
+        "after-context",
+        "before-context",
+        "context",
+        "max-depth",
+        "maxdepth",
+        "threads",
+        "encoding",
+        "engine",
+        "pre",
+        "sort",
+        "sortr",
+        "colors",
+        "color",
+        "replace",
+        "ignore-file",
+        "path-separator",
+        "field-context-separator",
+        "field-match-separator",
+        "include",
+        "exclude",
+        "exclude-dir",
+        "include-dir",
+        "binary-files",
+        "devices",
+        "directories",
+        "label",
+        "group-separator",
+        "ignore-case-fallback",
+        NULL,
+    };
+    for (int i = 0; kValued[i]; i++) {
+        if (strlen(kValued[i]) == nlen && strncmp(kValued[i], name, nlen) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Long options that are pure booleans — safe to skip without consuming a value.
+ * Everything outside both lists is unknown, and unknown declines. */
+static bool ha_long_opt_is_boolean(const char *name, size_t nlen) {
+    static const char *const kBoolean[] = {
+        "ignore-case",
+        "smart-case",
+        "case-sensitive",
+        "word-regexp",
+        "line-regexp",
+        "fixed-strings",
+        "invert-match",
+        "line-number",
+        "no-line-number",
+        "with-filename",
+        "no-filename",
+        "files-with-matches",
+        "files-without-match",
+        "count",
+        "count-matches",
+        "hidden",
+        "no-ignore",
+        "follow",
+        "multiline",
+        "null",
+        "no-heading",
+        "heading",
+        "vimgrep",
+        "json",
+        "quiet",
+        "text",
+        "recursive",
+        "extended-regexp",
+        "basic-regexp",
+        "perl-regexp",
+        "only-matching",
+        "no-messages",
+        "binary",
+        "crlf",
+        "debug",
+        "stats",
+        "trim",
+        "one-file-system",
+        "no-config",
+        "column",
+        "byte-offset",
+        "untracked",
+        "cached",
+        "no-index",
+        NULL,
+    };
+    for (int i = 0; kBoolean[i]; i++) {
+        if (strlen(kBoolean[i]) == nlen && strncmp(kBoolean[i], name, nlen) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool ha_parse_bash_search_pattern(const char *cmd, char *out, size_t out_sz) {
     if (!cmd || !out || out_sz == 0) {
         return false;
@@ -541,6 +652,15 @@ static bool ha_parse_bash_search_pattern(const char *cmd, char *out, size_t out_
                 e_count++;
             } else if (nlen == 4 && strncmp(name, "file", 4) == 0) {
                 return false; /* pattern file: the patterns are not in the command */
+            } else if (eq) {
+                continue; /* --opt=value carries its own value */
+            } else if (ha_long_opt_takes_value(name, nlen)) {
+                if (i + 1 >= n) {
+                    return false;
+                }
+                i++; /* the value is a separate token — never the pattern */
+            } else if (!ha_long_opt_is_boolean(name, nlen)) {
+                return false; /* unknown long option: cannot tell where the pattern is */
             }
             continue;
         }
