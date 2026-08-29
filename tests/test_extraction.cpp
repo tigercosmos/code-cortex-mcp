@@ -3079,6 +3079,47 @@ TEST(extract_ts_url_builder_reference_issue1009) {
     PASS();
 }
 
+/* Route identity excludes the query string. The template path already truncated
+ * at '?'; a PLAIN quoted literal did not, so `/api/users?active=1` became the
+ * Route's identity and could never join the server's `/api/users` — nothing
+ * downstream strips it either. */
+TEST(extract_ts_url_builder_strips_query_issue1009) {
+    CBMFileResult *r = extract("function usersPath(): string {\n"
+                               "  return '/api/users?active=1';\n"
+                               "}\n"
+                               "export function load() {\n"
+                               "  return apiGet(usersPath());\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "query.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c = find_call_by_callee(r, "apiGet");
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(c->first_string_arg);
+    ASSERT_STR_EQ(c->first_string_arg, "/api/users");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A literal that is nothing BUT a query string has no route identity left once
+ * it is stripped, so it must not be recorded as a builder at all. */
+TEST(extract_ts_url_builder_query_only_declined_issue1009) {
+    CBMFileResult *r = extract("function q(): string {\n"
+                               "  return '?active=1';\n"
+                               "}\n"
+                               "export function load() {\n"
+                               "  return apiGet(q());\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "queryonly.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c = find_call_by_callee(r, "apiGet");
+    ASSERT_NOT_NULL(c);
+    ASSERT_NULL(c->first_string_arg);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* A helper returning an ordinary string is not a URL builder, so its call site
  * gets no resolved string argument. */
 TEST(extract_ts_url_builder_non_url_issue1009) {
@@ -4199,6 +4240,8 @@ SUITE(extraction) {
     RUN_TEST(extract_ts_url_builder_mixed_returns_issue1009);
     RUN_TEST(extract_ts_url_builder_ambiguous_issue1009);
     RUN_TEST(extract_ts_url_builder_reference_issue1009);
+    RUN_TEST(extract_ts_url_builder_strips_query_issue1009);
+    RUN_TEST(extract_ts_url_builder_query_only_declined_issue1009);
     RUN_TEST(extract_ts_url_builder_non_url_issue1009);
     RUN_TEST(extract_large_ts_has_functions_issue213);
 

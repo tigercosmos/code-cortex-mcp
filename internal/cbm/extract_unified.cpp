@@ -679,6 +679,17 @@ static const char *url_builder_literal_text(CBMExtractCtx *ctx, TSNode value_nod
     if (len >= CBM_QUOTE_PAIR && (text[0] == '"' || text[0] == '\'')) {
         text = cbm_arena_strndup(ctx->arena, text + SKIP_ONE, (size_t)(len - PAIR_LEN));
     }
+    /* Route identity excludes the query string, exactly as the template path
+     * does. Keeping it here would mint `/api/users?active=1` as a Route, which
+     * cbm_route_canon_path does not strip either, so the call site could never
+     * join the server's `/api/users`. */
+    const char *q = strchr(text, '?');
+    if (q) {
+        if (q == text) {
+            return NULL;
+        }
+        text = cbm_arena_strndup(ctx->arena, text, (size_t)(q - text));
+    }
     return text;
 }
 
