@@ -21,6 +21,33 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 >
 > Proven **INERT here** and never to be re-triaged: `09c66241` (no-op Bash
 > gate — guards an executable-identity hash this fork does not perform).
+>
+> **Three DELIBERATE DIVERGENCES from upstream came out of the post-sync code
+> review (2026-08-30).** All three are defects in upstream's own code, ported
+> faithfully and then fixed here; a future sync that re-applies upstream's
+> version of these hunks would REINTRODUCE them, so check against this list:
+>
+> 1. **`cbm_store_bfs_trail` takes `min_depth` and filters in SQL.** Upstream
+>    filters `min_hops` only in `expand_var_length`, AFTER the outer
+>    `LIMIT %d`. Trail rows are `DISTINCT (node, hop)`, so a node reachable at
+>    several depths takes several slots and a wide shallow layer spends the
+>    whole budget on rows the caller then discards — `*2..2` over a 60-wide hub
+>    returned NOTHING, with no truncation warning. (The underlying
+>    LIMIT-before-min-hops flaw predates the trail change; the trail change
+>    roughly halved the graph size at which it bites.)
+> 2. **The Bash search extractor consumes long-option values and declines
+>    unknown long options.** Upstream skips any long option that is not
+>    `--regexp`/`--pattern`/`--file` without consuming a separate value, so
+>    `rg --glob '*.cpp' Symbol .` takes `*.cpp` as the pattern and augments
+>    with unrelated symbols — contradicting the extractor's fail-closed
+>    contract.
+> 3. **Plain URL-builder literals truncate at `?`, as template literals already
+>    did.** Upstream strips the query only on the template path, so
+>    `return '/api/users?active=1'` minted a Route identity carrying the query;
+>    `cbm_route_canon_path` does not strip it either, so that Route could never
+>    join the server's `/api/users`.
+>
+> Each carries a regression guard. Worth reporting upstream.
 
 > **Range `a6afd156..010569fa` is now EXHAUSTED for everything portable.** It was
 > taken in two passes on 2026-08-24. Pass 1 was curated by theme (Python / C++ /
