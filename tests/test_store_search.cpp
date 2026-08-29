@@ -838,7 +838,7 @@ TEST(store_bfs_trail_warns_when_path_rows_are_truncated) {
     cbm_log_set_sink(capture_trail_log);
     const char *types[] = {"CALLS"};
     cbm_traverse_result_t result = {0};
-    int rc = cbm_store_bfs_trail(s, ids[0], "outbound", types, 1, 10, 5000, &result);
+    int rc = cbm_store_bfs_trail(s, ids[0], "outbound", types, 1, 1, 10, 5000, &result);
     cbm_log_set_sink(NULL);
 
     ASSERT_EQ(rc, CBM_STORE_OK);
@@ -896,7 +896,7 @@ TEST(store_bfs_trail_preserves_deeper_match_under_hub_budget) {
 
     const char *types[] = {"CALLS"};
     cbm_traverse_result_t result = {0};
-    int rc = cbm_store_bfs_trail(s, root_id, "outbound", types, 1, 2, 5000, &result);
+    int rc = cbm_store_bfs_trail(s, root_id, "outbound", types, 1, 1, 2, 5000, &result);
     ASSERT_EQ(rc, CBM_STORE_OK);
     ASSERT_TRUE(result.truncated);
 
@@ -908,6 +908,72 @@ TEST(store_bfs_trail_preserves_deeper_match_under_hub_budget) {
         }
     }
     ASSERT_TRUE(saw_target);
+
+    cbm_store_traverse_free(&result);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* A wide shallow layer must not spend the result budget on rows the caller is
+ * about to discard. Trail rows are DISTINCT (node, hop), so a node reachable at
+ * several depths takes several of the max_results slots; with min_depth applied
+ * only by the caller, `*2..2` over a hub silently returned NOTHING — and set no
+ * truncation flag, so the empty answer looked authoritative. */
+TEST(store_bfs_trail_min_depth_survives_a_wide_shallow_layer) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t hub = {
+        .project = "test", .label = "Function", .name = "hub", .qualified_name = "test.hub"};
+    cbm_node_t deep = {
+        .project = "test", .label = "Function", .name = "deep", .qualified_name = "test.deep"};
+    int64_t hub_id = cbm_store_upsert_node(s, &hub);
+
+    /* 60 one-hop neighbours, each ALSO reachable at hop 2 through leaf 0. The
+     * hop-2 rows alone (60) fit the 100-row budget comfortably; it is only the
+     * hop-1 rows sharing that budget that push the deepest row out. */
+    enum { WIDE = 60 };
+    int64_t first_leaf = 0;
+    for (int i = 0; i < WIDE; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "leaf%d", i);
+        cbm_node_t leaf = {
+            .project = "test", .label = "Function", .name = name, .qualified_name = name};
+        int64_t leaf_id = cbm_store_upsert_node(s, &leaf);
+        if (i == 0) {
+            first_leaf = leaf_id;
+        }
+        cbm_edge_t e = {
+            .project = "test", .source_id = hub_id, .target_id = leaf_id, .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+        if (i > 0) {
+            cbm_edge_t e2 = {
+                .project = "test", .source_id = first_leaf, .target_id = leaf_id, .type = "CALLS"};
+            cbm_store_insert_edge(s, &e2);
+        }
+    }
+    /* The one endpoint that exists ONLY at depth 2. Inserted last, so its id
+     * sorts after every leaf: it is the first casualty once hop-1 rows are
+     * allowed to share the budget, and safe once they are not. */
+    int64_t deep_id = cbm_store_upsert_node(s, &deep);
+    cbm_edge_t to_deep = {
+        .project = "test", .source_id = first_leaf, .target_id = deep_id, .type = "CALLS"};
+    cbm_store_insert_edge(s, &to_deep);
+
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs_trail(s, hub_id, "outbound", types, 1, 2, 2, 100, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+
+    bool saw_deep = false;
+    for (int i = 0; i < result.visited_count; i++) {
+        /* min_depth is enforced in SQL: nothing below hop 2 may come back. */
+        ASSERT_GTE(result.visited[i].hop, 2);
+        if (result.visited[i].node.id == deep_id) {
+            saw_deep = true;
+        }
+    }
+    ASSERT_TRUE(saw_deep);
 
     cbm_store_traverse_free(&result);
     cbm_store_close(s);
@@ -1408,6 +1474,7 @@ SUITE(store_search) {
     RUN_TEST(store_bfs_reachability_is_not_trail_capped);
     RUN_TEST(store_bfs_trail_warns_when_path_rows_are_truncated);
     RUN_TEST(store_bfs_trail_preserves_deeper_match_under_hub_budget);
+    RUN_TEST(store_bfs_trail_min_depth_survives_a_wide_shallow_layer);
     RUN_TEST(store_bfs_cross_service_summary);
     RUN_TEST(store_glob_to_like);
     RUN_TEST(store_extract_like_hints);

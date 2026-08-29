@@ -3560,8 +3560,8 @@ static int bfs_cte_row_limit_for_depth(int max_results, int max_depth) {
 }
 
 static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
-                     const char **edge_types, int edge_type_count, int max_depth, int max_results,
-                     bool trail, cbm_traverse_result_t *out) {
+                     const char **edge_types, int edge_type_count, int min_depth, int max_depth,
+                     int max_results, bool trail, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
 
     cbm_node_t root = {0};
@@ -3619,9 +3619,15 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
                  "n.file_path, n.start_line, n.end_line, n.properties, bfs.hop, "
                  "(SELECT count(*) FROM bfs) "
                  "FROM bfs JOIN nodes n ON n.id = bfs.node_id "
-                 "WHERE bfs.hop > 0 ORDER BY bfs.hop, n.id LIMIT %d;",
+                 /* min_depth is applied HERE, not by the caller. Trail rows are
+                  * DISTINCT (node, hop), so a node reachable at several depths
+                  * takes several rows; with the ascending order below, a wide
+                  * shallow layer would spend the whole result budget on rows the
+                  * caller is about to discard for being below min_hops, silently
+                  * dropping the deep matches that were actually asked for. */
+                 "WHERE bfs.hop >= %d ORDER BY bfs.hop, n.id LIMIT %d;",
                  (long long)start_id, next_id, join_cond, types_clause, max_depth,
-                 cte_row_limit + SKIP_ONE, max_results);
+                 cte_row_limit + SKIP_ONE, min_depth > 0 ? min_depth : SKIP_ONE, max_results);
     } else {
         snprintf(sql, sizeof(sql),
                  /* SHORTEST-PATH semantics: the UNION dedupes (node, hop) pairs.
@@ -3717,15 +3723,15 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
 
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out) {
-    return store_bfs(s, start_id, direction, edge_types, edge_type_count, max_depth, max_results,
-                     false, out);
+    return store_bfs(s, start_id, direction, edge_types, edge_type_count, SKIP_ONE, max_depth,
+                     max_results, false, out);
 }
 
 int cbm_store_bfs_trail(cbm_store_t *s, int64_t start_id, const char *direction,
-                        const char **edge_types, int edge_type_count, int max_depth,
+                        const char **edge_types, int edge_type_count, int min_depth, int max_depth,
                         int max_results, cbm_traverse_result_t *out) {
-    return store_bfs(s, start_id, direction, edge_types, edge_type_count, max_depth, max_results,
-                     true, out);
+    return store_bfs(s, start_id, direction, edge_types, edge_type_count, min_depth, max_depth,
+                     max_results, true, out);
 }
 
 /* Multi-source BFS: one recursive CTE anchored on ALL seeds (via a temp

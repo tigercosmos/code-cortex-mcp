@@ -3016,8 +3016,8 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
     }
     cbm_traverse_result_t tr = {0};
     const char *dir = rel->direction ? rel->direction : "outbound";
-    cbm_store_bfs_trail(store, src->id, dir, rel->types, rel->type_count, max_depth, CBM_PERCENT,
-                        &tr);
+    cbm_store_bfs_trail(store, src->id, dir, rel->types, rel->type_count, rel->min_hops, max_depth,
+                        CBM_PERCENT, &tr);
     if (tr.truncated) {
         g_cypher_trail_truncated = 1;
     }

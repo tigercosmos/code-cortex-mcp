@@ -502,9 +502,13 @@ int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const
 /* Variable-length Cypher traversal with relationship-trail semantics: a path
  * may not reuse the same edge id, so a self-loop cannot pad a walk out to an
  * arbitrary length. Bounds the recursive CTE and sets out->truncated when that
- * budget was hit. Shared BFS (above) keeps plain node-reachability semantics. */
+ * budget was hit. Shared BFS (above) keeps plain node-reachability semantics.
+ *
+ * min_depth is enforced in SQL, not by the caller: rows are DISTINCT
+ * (node, hop), so filtering afterwards would let a wide shallow layer spend the
+ * whole max_results budget on rows the caller then discards. */
 int cbm_store_bfs_trail(cbm_store_t *s, int64_t start_id, const char *direction,
-                        const char **edge_types, int edge_type_count, int max_depth,
+                        const char **edge_types, int edge_type_count, int min_depth, int max_depth,
                         int max_results, cbm_traverse_result_t *out);
 
 /* Multi-source BFS from ALL seed ids at once (one CTE, temp-table anchored).
