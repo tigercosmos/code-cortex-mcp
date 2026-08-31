@@ -7,11 +7,11 @@
     "url": "https://github.com/tigercosmos/code-cortex-mcp",
     "source": "github"
   },
-  "version": "0.17.0",
+  "version": "0.20.0",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.17.0/code-cortex-mcp-darwin-arm64.tar.gz",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.20.0/code-cortex-mcp-darwin-arm64.tar.gz",
       "fileSha256": "cc1c6e6a6e13c5dc1ad183c59cf7f9893c08b35ff7023fa64f97b7e2e177c225",
       "transport": {
         "type": "stdio"
@@ -19,7 +19,7 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.17.0/code-cortex-mcp-darwin-amd64.tar.gz",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.20.0/code-cortex-mcp-darwin-amd64.tar.gz",
       "fileSha256": "c1da2b114f1d7ba079da91cfbbbcf5d26dcdd15e640ea31d18e5b318b5c3ccc4",
       "transport": {
         "type": "stdio"
@@ -27,7 +27,7 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.17.0/code-cortex-mcp-linux-amd64-portable.tar.gz",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.20.0/code-cortex-mcp-linux-amd64-portable.tar.gz",
       "fileSha256": "c5a95ab3877bc1db5e75dc853f565a201143058c76e311ec912e23594f5d8732",
       "transport": {
         "type": "stdio"
@@ -35,7 +35,7 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.17.0/code-cortex-mcp-linux-arm64-portable.tar.gz",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.20.0/code-cortex-mcp-linux-arm64-portable.tar.gz",
       "fileSha256": "ebabb57f501190908f57a3a578fddc4ca1c9e71e9a26ea3afc46c952e0cd3615",
       "transport": {
         "type": "stdio"
@@ -43,7 +43,7 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.17.0/code-cortex-mcp-windows-amd64.zip",
+      "identifier": "https://github.com/tigercosmos/code-cortex-mcp/releases/download/v0.20.0/code-cortex-mcp-windows-amd64.zip",
       "fileSha256": "da6212f7cd7ef18684cca12c763d755e296c856735e26692548bccf82d81bfb7",
       "transport": {
         "type": "stdio"
