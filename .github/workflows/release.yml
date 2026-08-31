@@ -43,13 +43,29 @@ jobs:
     uses: ./.github/workflows/_security.yml
     secrets: inherit
 
+  # ── 0. Manifest gate (seconds, blocks the expensive legs) ───────
+  # server.json is the MCP Registry manifest and nothing else in the tree reads
+  # it, so a forgotten bump is invisible until a user follows a stale asset URL.
+  # It went two releases out of date exactly that way. Gate the release on it
+  # here rather than in release-draft: this runs in under a minute, where
+  # release-draft is an hour of test/build/smoke later.
+  manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: server.json must carry the version being released
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: scripts/check-server-json-version.sh "$VERSION"
+
   # ── 1. Lint (cppcheck + clang-format) ───────────────────────────
   lint:
     uses: ./.github/workflows/_lint.yml
 
   # ── 2. Tests (all platforms, full suite for release) ────────────
   test:
-    needs: [lint]
+    needs: [lint, manifest]
     uses: ./.github/workflows/_test.yml
     with:
       skip_perf: false

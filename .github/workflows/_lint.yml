@@ -15,6 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Cheap and dependency-free, so it runs before the toolchain install:
+      # a partial server.json bump is caught on the commit that made it.
+      - name: server.json version is self-consistent
+        run: scripts/check-server-json-version.sh
+
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev cmake
 
