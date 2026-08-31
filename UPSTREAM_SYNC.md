@@ -47,7 +47,26 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 >    `cbm_route_canon_path` does not strip it either, so that Route could never
 >    join the server's `/api/users`.
 >
-> Each carries a regression guard. Worth reporting upstream.
+> Each carries a regression guard.
+>
+> **NOT reported upstream — a standing decision (2026-08-31), not an
+> oversight.** These stay fork-local divergences indefinitely, so the cost
+> lands on every future sync rather than being retired once: if upstream ever
+> touches these hunks, re-applying their version REINTRODUCES the defect.
+> That is why the three entries above spell out the symptom, not just the
+> file — a mechanical port of an upstream diff here has to be checked against
+> them by hand. Revisit only if the maintainer decides to send them upstream.
+>
+> **One inherited defect was reviewed and deliberately LEFT UNFIXED**: the
+> trail traversal's `truncated` flag reports only the CTE budget, never the
+> outer `LIMIT max_results`, so a result trimmed purely by that limit claims
+> to be complete (200 real depth-2 endpoints with a budget of 100 return 100
+> rows and no warning). Upstream shares it. Every returned row is still
+> correct — only the disclosure is missing — and honest detection needs
+> `LIMIT max_results + 1` plus a trim, which touches the shared
+> `cbm_store_bfs` path and its pagination ordering. The full reasoning is a
+> comment at the check itself in `src/store/store.cpp`; do not "discover" it
+> again next sync.
 
 > **Range `a6afd156..010569fa` is now EXHAUSTED for everything portable.** It was
 > taken in two passes on 2026-08-24. Pass 1 was curated by theme (Python / C++ /

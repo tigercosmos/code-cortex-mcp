@@ -3699,6 +3699,23 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
 
     sqlite3_finalize(stmt);
 
+    /* KNOWN GAP (inherited from upstream, deliberately not fixed): this reports
+     * only the CTE budget, never the outer `LIMIT max_results`. cte_rows counts
+     * rows the RECURSION produced; a result trimmed purely by the outer limit
+     * leaves cte_rows under the cap, so truncated stays false and the caller
+     * emits no warning. A query with 200 genuine depth-2 endpoints and a budget
+     * of 100 returns 100 rows and reports itself complete.
+     *
+     * Distinct from the min_depth defect fixed in ac7187bc: there the budget
+     * was SPENT ON ROWS THAT COULD NEVER MATCH, so correct answers were lost.
+     * Here every returned row is correct and the truncation is legitimate —
+     * only the disclosure is missing.
+     *
+     * Not a one-line fix: n == max_results cannot distinguish "exactly
+     * max_results existed" from "more existed", so honest detection needs
+     * LIMIT max_results + 1 and a trim, which touches the shared
+     * cbm_store_bfs path and its pagination-watermark ordering. Wants its own
+     * commit and guard. */
     if (trail && cte_rows > cte_row_limit) {
         out->truncated = true;
         char limit_buf[ST_BUF_16];
