@@ -179,6 +179,28 @@ bool cbm_store_meta_get(cbm_store_meta_db_t *h, const char *db_path, const cbm_f
     return hit;
 }
 
+bool cbm_store_meta_find_root(cbm_store_meta_db_t *h, const char *root_path,
+                              cbm_store_meta_row_t *row) {
+    if (!h || !h->db || !root_path || !root_path[0] || !row) {
+        return false;
+    }
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT " SM_SELECT_COLS " FROM store_meta_v2 "
+                      "WHERE root_path = ?1 AND project NOT LIKE '%::%' "
+                      "ORDER BY updated_at DESC LIMIT 1;";
+    if (sqlite3_prepare_v2(h->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, root_path, -1, SQLITE_TRANSIENT);
+    bool hit = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        sm_load_row(stmt, row);
+        hit = true;
+    }
+    sqlite3_finalize(stmt);
+    return hit;
+}
+
 bool cbm_store_meta_find_project(cbm_store_meta_db_t *h, const char *project,
                                  cbm_store_meta_row_t *row) {
     if (!h || !h->db || !project || !project[0] || !row) {

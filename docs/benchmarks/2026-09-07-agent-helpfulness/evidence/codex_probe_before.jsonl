@@ -1,0 +1,16 @@
+{"cfg": "optional", "rep": 1, "wall_s": 12.75, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "required", "rep": 1, "wall_s": 16.44, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "grace0", "rep": 1, "wall_s": 12.36, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "required_grace0", "rep": 1, "wall_s": 17.84, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "optional", "rep": 2, "wall_s": 14.93, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "required", "rep": 2, "wall_s": 32.57, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "grace0", "rep": 2, "wall_s": 14.83, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "required_grace0", "rep": 2, "wall_s": 14.04, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "optional", "rep": 3, "wall_s": 13.8, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "required", "rep": 3, "wall_s": 16.23, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "grace0", "rep": 3, "wall_s": 14.67, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "required_grace0", "rep": 3, "wall_s": 23.54, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "optional", "rep": 4, "wall_s": 15.34, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "required", "rep": 4, "wall_s": 10.98, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "grace0", "rep": 4, "wall_s": 10.99, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
+{"cfg": "required_grace0", "rep": 4, "wall_s": 12.51, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}

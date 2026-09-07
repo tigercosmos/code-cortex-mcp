@@ -215,6 +215,9 @@ const char *cbm_get_agent_instructions(void);
  * Adds a Grep|Glob matcher that reminds to use MCP tools.
  * Returns 0 on success. */
 int cbm_upsert_claude_hooks(const char *settings_path);
+/* PostToolUse(Edit|Write|MultiEdit) blast-radius hook; same shim script. */
+int cbm_upsert_claude_post_hooks(const char *settings_path);
+int cbm_remove_claude_post_hooks(const char *settings_path);
 
 /* Remove our PreToolUse hook from Claude Code settings.json.
  * Returns 0 on success. */
@@ -341,6 +344,10 @@ int cbm_cmd_config(int argc, char **argv);
  * with search_graph hits for Grep/Glob calls. NEVER blocks: every failure
  * path returns 0 with no stdout output. */
 int cbm_cmd_hook_augment(void);
+
+/* `code-cortex-mcp doctor`: version, tool catalog, cwd → project, hook and
+ * MCP registration checks. Returns non-zero on a hard failure. */
+int cbm_cmd_doctor(const char *version);
 
 /* Extract a search pattern from a Bash tool command (rg/grep/ag/ack/ugrep/
  * git grep, through env/nice/time/command/rtk/tokf-run wrappers). Returns

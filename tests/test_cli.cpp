@@ -568,7 +568,11 @@ TEST(cli_skill_files_content) {
     /* Reference capabilities */
     ASSERT(strstr(sk[0].content, "query_graph") != NULL);
     ASSERT(strstr(sk[0].content, "Cypher") != NULL);
-    ASSERT(strstr(sk[0].content, "14 MCP Tools") != NULL);
+    ASSERT(strstr(sk[0].content, "## Tools") != NULL);
+    ASSERT(strstr(sk[0].content, "inspect_symbol") != NULL);
+    /* No unsupported efficiency claim and no blanket directive. */
+    ASSERT(strstr(sk[0].content, "~500 tokens") == NULL);
+    ASSERT(strstr(sk[0].content, "ALWAYS") == NULL);
 
     /* Gotchas section */
     ASSERT(strstr(sk[0].content, "Gotchas") != NULL);
@@ -1789,7 +1793,7 @@ TEST(cli_codex_session_hook_issue330) {
     ASSERT_NOT_NULL(d);
     ASSERT(strstr(d, "[[hooks.SessionStart]]") != NULL);
     ASSERT(strstr(d, "[[hooks.SessionStart.hooks]]") != NULL);
-    ASSERT(strstr(d, "search_graph") != NULL);
+    ASSERT(strstr(d, "inspect_symbol") != NULL);
     ASSERT(strstr(d, "[mcp_servers.other]") != NULL); /* pre-existing content preserved */
     /* Idempotent: a second upsert leaves exactly ONE hook block. */
     ASSERT_EQ(cbm_upsert_codex_hooks(cfg), 0);
@@ -1911,7 +1915,7 @@ TEST(cli_gemini_session_hook_parity) {
     const char *d = read_test_file(cfg);
     ASSERT_NOT_NULL(d);
     ASSERT(strstr(d, "SessionStart") != NULL);
-    ASSERT(strstr(d, "search_graph") != NULL);
+    ASSERT(strstr(d, "inspect_symbol") != NULL);
 
     ASSERT_EQ(cbm_remove_gemini_session_hooks(cfg), 0);
     d = read_test_file(cfg);
@@ -2402,9 +2406,14 @@ TEST(cli_remove_instructions) {
 TEST(cli_agent_instructions_content) {
     const char *instr = cbm_get_agent_instructions();
     ASSERT_NOT_NULL(instr);
-    ASSERT(strstr(instr, "search_graph") != NULL);
+    /* Guidance is scoped to what the graph does better than grep — callers
+     * with evidence, call chains, blast radius — and names grep's territory
+     * explicitly. No blanket "ALWAYS prefer" directive. */
+    ASSERT(strstr(instr, "inspect_symbol") != NULL);
     ASSERT(strstr(instr, "trace_path") != NULL);
-    ASSERT(strstr(instr, "get_code_snippet") != NULL);
+    ASSERT(strstr(instr, "detect_changes") != NULL);
+    ASSERT(strstr(instr, "grep") != NULL);
+    ASSERT(strstr(instr, "ALWAYS") == NULL);
     PASS();
 }
 
@@ -2576,6 +2585,16 @@ TEST(cli_hook_augment_bash_pattern_extractor) {
     ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("rg -t py CreateStripeCheckout .",
                                                                 out, sizeof(out)));
     ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* "cd <dir>; ..." and "cd <dir> && ..." prefixes, the way agents write
+     * most searches; a cd with no following command is not a search. */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "cd /repo; grep -n CreateStripeCheckout src/", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "cd /repo && rg CreateStripeCheckout", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing("cd /repo", out, sizeof(out)));
 
     /* env-var prefix and wrappers */
     ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(

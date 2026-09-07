@@ -1122,6 +1122,187 @@ static const char *cbm_error_ranges_str(CBMArena *a, const cbm_error_regions_t *
  * every ordinary return (including error/timeout results) tells the crash
  * supervisor this file did NOT kill the worker — only a file whose S has no
  * D is a crash/hang suspect. */
+/* ── Statement-macro blanking (C/C++) ─────────────────────────────
+ *
+ * A macro invocation whose arguments are statements —
+ *     SC_DECL_SERIALIZABLE(register_member("id", m_id); register_member(...);)
+ * — is not parseable by tree-sitter-cpp, and its error recovery then swallows
+ * every declaration that follows in the file. Measured on modmesh: class
+ * recall 91.7%, with headers keeping only their FIRST class (World.hpp lost
+ * WorldState and World), and nothing but a parse_partial range to show for it.
+ *
+ * Before parsing, blank such invocations in a copy: IDENT(...) where IDENT
+ * looks like a macro (letters/digits/underscore only, at least 3 chars,
+ * contains an upper-case letter, no lower-case), the parentheses balance,
+ * and the argument text contains ';'. Every byte is replaced by a space
+ * except newlines, so byte offsets and line numbers of everything else stay
+ * identical and node text can still be read from the ORIGINAL source.
+ * String and character literals and comments are skipped so a ';' or '('
+ * inside them cannot mislead the scan. Returns NULL when nothing changed. */
+static bool blank_macro_ident_ok(const char *s, int n) {
+    if (n < 3) {
+        return false;
+    }
+    bool upper = false;
+    for (int i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 'A' && c <= 'Z') {
+            upper = true;
+        } else if (c >= 'a' && c <= 'z') {
+            return false;
+        } else if (!(c == '_' || (c >= '0' && c <= '9'))) {
+            return false;
+        }
+    }
+    return upper;
+}
+
+/* Advance past a literal or comment starting at src[i]; returns the index of
+ * the first byte after it, or i when src[i] starts none. */
+static int blank_skip_literal(const char *src, int len, int i) {
+    /* C++ raw string: R"delim( ... )delim" (optionally u8R/uR/UR/LR). A '"'
+     * or ';' inside it must not end the literal or count as a separator. */
+    {
+        int r = i;
+        if ((src[r] == 'u' && r + 1 < len && src[r + 1] == '8') ) {
+            r += 2;
+        } else if (src[r] == 'u' || src[r] == 'U' || src[r] == 'L') {
+            r += 1;
+        }
+        if (r < len && src[r] == 'R' && r + 1 < len && src[r + 1] == '"' &&
+            (i == 0 || !(isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_'))) {
+            int d0 = r + 2;
+            int d1 = d0;
+            while (d1 < len && src[d1] != '(' && d1 - d0 < 16 && src[d1] != '"' &&
+                   src[d1] != '\\' && src[d1] != '\n') {
+                d1++;
+            }
+            if (d1 < len && src[d1] == '(') {
+                int dlen = d1 - d0;
+                for (int k = d1 + 1; k + dlen + 1 < len; k++) {
+                    if (src[k] == ')' && memcmp(src + k + 1, src + d0, (size_t)dlen) == 0 &&
+                        src[k + 1 + dlen] == '"') {
+                        return k + dlen + 2;
+                    }
+                }
+                return len; /* unterminated: nothing after it is safe to touch */
+            }
+        }
+    }
+    if (src[i] == '"' || src[i] == '\'') {
+        char q = src[i];
+        int j = i + 1;
+        while (j < len && src[j] != q && src[j] != '\n') {
+            if (src[j] == '\\') {
+                j++;
+            }
+            j++;
+        }
+        return j < len ? j + 1 : len;
+    }
+    if (src[i] == '/' && i + 1 < len && src[i + 1] == '/') {
+        int j = i + 2;
+        while (j < len && src[j] != '\n') {
+            j++;
+        }
+        return j;
+    }
+    if (src[i] == '/' && i + 1 < len && src[i + 1] == '*') {
+        int j = i + 2;
+        while (j + 1 < len && !(src[j] == '*' && src[j + 1] == '/')) {
+            j++;
+        }
+        return j + 1 < len ? j + 2 : len;
+    }
+    return i;
+}
+
+static char *cbm_blank_statement_macros(CBMArena *a, const char *src, int len) {
+    char *out = NULL;
+    int i = 0;
+    while (i < len) {
+        int skipped = blank_skip_literal(src, len, i);
+        if (skipped != i) {
+            i = skipped;
+            continue;
+        }
+        unsigned char c = (unsigned char)src[i];
+        bool ident_start = (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+        bool prev_ident = i > 0 && ((unsigned char)src[i - 1] == '_' ||
+                                    isalnum((unsigned char)src[i - 1]));
+        if (!ident_start || prev_ident) {
+            i++;
+            continue;
+        }
+        int start = i;
+        while (i < len && (src[i] == '_' || isalnum((unsigned char)src[i]))) {
+            i++;
+        }
+        if (!blank_macro_ident_ok(src + start, i - start)) {
+            continue;
+        }
+        int j = i;
+        while (j < len && (src[j] == ' ' || src[j] == '\t')) {
+            j++;
+        }
+        if (j >= len || src[j] != '(') {
+            continue;
+        }
+        /* Balanced scan of the argument list. */
+        int depth = 0;
+        bool has_semicolon = false;
+        int k = j;
+        int close = -1;
+        while (k < len) {
+            int sk = blank_skip_literal(src, len, k);
+            if (sk != k) {
+                k = sk;
+                continue;
+            }
+            if (src[k] == '(') {
+                depth++;
+            } else if (src[k] == ')') {
+                depth--;
+                if (depth == 0) {
+                    close = k;
+                    break;
+                }
+            } else if (src[k] == ';') {
+                has_semicolon = true;
+            } else if (src[k] == '{' || src[k] == '}') {
+                /* A brace inside macro args is a lambda or a block-in-args
+                 * macro; leave those to the parser. */
+                break;
+            } else if (src[k] == '#' && (k == 0 || src[k - 1] == '\n')) {
+                /* A preprocessor line inside the argument list means the
+                 * parentheses may balance differently per #if branch; do not
+                 * blank across it. */
+                break;
+            }
+            k++;
+        }
+        if (close < 0 || !has_semicolon) {
+            i = close > 0 ? close + 1 : i;
+            continue;
+        }
+        if (!out) {
+            out = (char *)cbm_arena_alloc(a, (size_t)len + 1);
+            if (!out) {
+                return NULL;
+            }
+            memcpy(out, src, (size_t)len);
+            out[len] = '\0';
+        }
+        for (int b = start; b <= close; b++) {
+            if (out[b] != '\n') {
+                out[b] = ' ';
+            }
+        }
+        i = close + 1;
+    }
+    return out;
+}
+
 CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage language,
                                 const char *project, const char *rel_path, int64_t timeout_micros,
                                 const char **extra_defines, const char **include_paths) {
@@ -1345,8 +1526,19 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
 
     uint64_t t0 = now_ns();
 
+    // C/C++: parse a copy with statement-bearing macro invocations blanked
+    // (same byte offsets), so one unparseable macro does not swallow every
+    // declaration after it. See cbm_blank_statement_macros.
+    const char *parse_source = source;
+    if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
+        char *blanked = cbm_blank_statement_macros(a, source, source_len);
+        if (blanked) {
+            parse_source = blanked;
+        }
+    }
+
     // Build string input + timeout options for parse_with_options
-    CBMStringInput str_input = {source, (uint32_t)source_len};
+    CBMStringInput str_input = {parse_source, (uint32_t)source_len};
     TSInput ts_input = {
         &str_input,
         cbm_string_read,

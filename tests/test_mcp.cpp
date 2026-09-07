@@ -11,6 +11,7 @@
 #include <mcp/mcp.h>
 #include <mcp/mcp_internal.h> /* cbm_detect_node_in_hunks (#1363) */
 #include <mcp/index_supervisor.h>
+#include <mcp/store_meta.h> /* custom-name cwd resolution test */
 #include <pipeline/pipeline.h>
 #include <store/store.h>
 #include <yyjson/yyjson.h>
@@ -3432,6 +3433,404 @@ TEST(index_recovery_systemic_exit_nonzero_gives_up) {
 #endif
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ *  Agent-helpfulness changes: single-page catalog, evidence-carrying
+ *  trace/inspect replies, byte budgets, cwd project resolution, hooks.
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Codex CLI never follows tools/list nextCursor; a page of 8 hid six tools. */
+TEST(tools_list_is_one_page) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "nextCursor"));
+    ASSERT_NOT_NULL(strstr(resp, "\"list_projects\""));
+    ASSERT_NOT_NULL(strstr(resp, "\"detect_changes\""));
+    ASSERT_NOT_NULL(strstr(resp, "\"inspect_symbol\""));
+    ASSERT_NOT_NULL(strstr(resp, "\"ingest_traces\""));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Add a caller of ProcessOrder with the properties pass_calls writes. */
+static void add_scored_call_edge(cbm_store_t *st, const char *caller_name, const char *caller_file,
+                                 int caller_line, const char *props) {
+    cbm_node_t *po = NULL;
+    int po_n = 0;
+    cbm_store_find_nodes_by_name(st, "test-project", "ProcessOrder", &po, &po_n);
+    cbm_node_t n = {0};
+    n.project = "test-project";
+    n.label = "Function";
+    n.name = caller_name;
+    char qn[256];
+    snprintf(qn, sizeof(qn), "test-project.x.%s", caller_name);
+    n.qualified_name = qn;
+    n.file_path = caller_file;
+    n.start_line = caller_line;
+    n.end_line = caller_line + 3;
+    int64_t caller_id = cbm_store_upsert_node(st, &n);
+    if (po_n > 0) {
+        cbm_edge_t e = {.project = "test-project",
+                        .source_id = caller_id,
+                        .target_id = po[0].id,
+                        .type = "CALLS",
+                        .properties_json = props};
+        cbm_store_insert_edge(st, &e);
+    }
+    cbm_store_free_nodes(po, po_n);
+}
+
+TEST(tool_trace_path_carries_location_and_call_site) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    add_scored_call_edge(cbm_mcp_server_store(srv), "Dispatch", "svc/dispatch.go", 40,
+                         "{\"callee\":\"ProcessOrder\",\"confidence\":0.42,"
+                         "\"strategy\":\"unique_name\",\"line\":42}");
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
+             "\"function_name\":\"ProcessOrder\",\"direction\":\"inbound\",\"depth\":1}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    free(resp);
+    ASSERT_NOT_NULL(inner);
+    /* Caller nodes carry their definition location... */
+    ASSERT_NOT_NULL(strstr(inner, "\"file\":\"svc/dispatch.go\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"start_line\":40"));
+    /* ...and edges carry the call site plus the resolver's real confidence
+     * (the store used to hardcode 1.0). */
+    ASSERT_NOT_NULL(strstr(inner, "\"from_file\":\"svc/dispatch.go\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"line\":42"));
+    ASSERT_NOT_NULL(strstr(inner, "\"strategy\":\"unique_name\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"confidence\":0.42"));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_trace_path_test_filter_is_case_insensitive) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    /* "Tests/" (capital T, as in PcapPlusPlus) must count as a test path. */
+    add_scored_call_edge(cbm_mcp_server_store(srv), "SuiteCaller", "Tests/Orders/Suite.go", 10,
+                         "{\"confidence\":0.9,\"strategy\":\"lsp_direct\",\"line\":11}");
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
+             "\"function_name\":\"ProcessOrder\",\"direction\":\"inbound\",\"depth\":1}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "SuiteCaller")); /* filtered from callers AND caller_edges */
+    free(resp);
+
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
+             "\"function_name\":\"ProcessOrder\",\"direction\":\"inbound\",\"depth\":1,"
+             "\"include_tests\":true}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "SuiteCaller"));
+    ASSERT_NOT_NULL(strstr(resp, "\"is_test\":true"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_inspect_symbol_one_call) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    add_scored_call_edge(cbm_mcp_server_store(srv), "Dispatch", "svc/dispatch.go", 40,
+                         "{\"confidence\":0.42,\"strategy\":\"unique_name\",\"line\":42}");
+    add_scored_call_edge(cbm_mcp_server_store(srv), "SuiteCaller", "tests/suite_test.go", 10,
+                         "{\"confidence\":0.9,\"strategy\":\"lsp_direct\",\"line\":11}");
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"inspect_symbol\",\"arguments\":{\"project\":\"test-project\","
+             "\"symbol\":\"ProcessOrder\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    char *inner = extract_text_content(resp);
+    free(resp);
+    ASSERT_NOT_NULL(inner);
+    /* Definition + source head from the fixture file. */
+    ASSERT_NOT_NULL(strstr(inner, "\"label\":\"Function\""));
+    ASSERT_NOT_NULL(strstr(inner, "func ProcessOrder(id int)"));
+    /* Production callers (HandleRequest, Dispatch) vs the test caller. */
+    ASSERT_NOT_NULL(strstr(inner, "\"callers_total\":2"));
+    ASSERT_NOT_NULL(strstr(inner, "\"related_tests_total\":1"));
+    ASSERT_NOT_NULL(strstr(inner, "\"call_lines\":[42]"));
+    ASSERT_NOT_NULL(strstr(inner, "\"strategy\":\"unique_name\""));
+    /* The complete file rollup names every file, tests flagged. */
+    ASSERT_NOT_NULL(strstr(inner, "\"caller_files\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"file\":\"tests/suite_test.go\",\"call_sites\":1,\"test\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"callees_total\":0"));
+    ASSERT_NOT_NULL(strstr(inner, "\"file_modified_after_index\""));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_inspect_symbol_accepts_scoped_name) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    cbm_node_t m = {0};
+    m.project = "test-project";
+    m.label = "Method";
+    m.name = "Save";
+    m.qualified_name = "test-project.pkg.order.Order.Save";
+    m.file_path = "main.go";
+    m.start_line = 11;
+    m.end_line = 13;
+    cbm_store_upsert_node(st, &m);
+
+    /* C++-style scoping with more namespace than the graph keeps. */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"inspect_symbol\",\"arguments\":{\"project\":\"test-project\","
+             "\"symbol\":\"pkg::order::Order::Save\",\"source_lines\":0}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "test-project.pkg.order.Order.Save"));
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    free(resp);
+
+    /* trace_path takes the same path. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
+             "\"function_name\":\"Order::Save\",\"direction\":\"both\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "function not found"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_inspect_symbol_ambiguous_returns_suggestions) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    /* Two same-tier "Run" definitions with equal span: a genuine tie. */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"inspect_symbol\",\"arguments\":{\"project\":\"test-project\","
+             "\"symbol\":\"Run\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "ambiguous"));
+    ASSERT_NOT_NULL(strstr(resp, "test-project.cmd.worker.Run"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_search_code_max_bytes_truncates_with_continuation) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"search_code\",\"arguments\":{\"project\":\"test-project\","
+             "\"pattern\":\"func\",\"mode\":\"full\",\"limit\":10,\"max_bytes\":300}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    free(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"truncated\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"continuation\""));
+    /* Totals stay exact even when the list is cut. */
+    ASSERT_NOT_NULL(strstr(inner, "\"total_results\":"));
+    free(inner);
+
+    /* Budget off: nothing is cut. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"search_code\",\"arguments\":{\"project\":\"test-project\","
+             "\"pattern\":\"func\",\"mode\":\"full\",\"max_bytes\":0}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"truncated\":true"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+/* A missing project resolves from cwd; an unknown one is answered for the
+ * cwd project with a project_note (10-12% of graph calls failed on guessed
+ * names in two agent studies). */
+TEST(tool_project_resolves_from_cwd) {
+#ifdef _WIN32
+    /* chdir/realpath-driven; the resolution code is exercised on POSIX CI. */
+    PASS();
+#else
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm_cwd_cache_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    char repo[256];
+    snprintf(repo, sizeof(repo), "/tmp/cbm_cwd_repo_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char *pname = cbm_project_name_from_path(repo);
+    ASSERT_NOT_NULL(pname);
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, pname);
+    cbm_store_t *st = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(st);
+    cbm_store_upsert_project(st, pname, repo);
+    cbm_node_t n = {0};
+    n.project = pname;
+    n.label = "Function";
+    n.name = "CwdProbe";
+    n.qualified_name = "x.CwdProbe";
+    n.file_path = "a.go";
+    n.start_line = 1;
+    n.end_line = 2;
+    cbm_store_upsert_node(st, &n);
+    cbm_store_close(st);
+
+    char old_cwd[1024];
+    ASSERT_NOT_NULL(getcwd(old_cwd, sizeof(old_cwd)));
+    ASSERT_EQ(chdir(repo), 0);
+    cbm_mcp_reset_cwd_project_cache();
+    ASSERT_NOT_NULL(cbm_mcp_cwd_project());
+    ASSERT_STR_EQ(cbm_mcp_cwd_project(), pname);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    /* 1. No project argument at all. */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"search_graph\",\"arguments\":{\"name_pattern\":\"^CwdProbe$\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\"CwdProbe\""));
+    ASSERT_NULL(strstr(resp, "project_note"));
+    free(resp);
+    /* 2. A guessed name that exists nowhere: answered, and it says so. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"search_graph\",\"arguments\":{\"project\":\"totally-wrong\","
+             "\"name_pattern\":\"^CwdProbe$\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\"CwdProbe\""));
+    ASSERT_NOT_NULL(strstr(resp, "project_note"));
+    ASSERT_NOT_NULL(strstr(resp, "totally-wrong"));
+    free(resp);
+    /* 3. Destructive tools never substitute. */
+    resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"delete_project\",\"arguments\":{\"project\":\"totally-wrong\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "project_note"));
+    free(resp);
+    /* 4. An explicit path is never second-guessed either. */
+    char path_req[700];
+    snprintf(path_req, sizeof(path_req),
+             "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"search_graph\",\"arguments\":{\"project\":\"%s/nowhere\","
+             "\"name_pattern\":\"^CwdProbe$\"}}}",
+             repo);
+    resp = cbm_mcp_server_handle(srv, path_req);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "project_note"));
+    ASSERT_NOT_NULL(strstr(resp, "not found"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+
+    /* 5. A project indexed under a CUSTOM name resolves through the memo's
+     * root_path (the path-derived name matches no file). */
+    char repo2[256];
+    snprintf(repo2, sizeof(repo2), "/tmp/cbm_cwd_custom_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo2));
+    char db2[512];
+    snprintf(db2, sizeof(db2), "%s/custom-proj.db", cache);
+    cbm_store_t *st2 = cbm_store_open_path(db2);
+    ASSERT_NOT_NULL(st2);
+    cbm_store_upsert_project(st2, "custom-proj", repo2);
+    cbm_store_close(st2);
+    cbm_store_meta_db_t *meta = cbm_store_meta_open();
+    ASSERT_NOT_NULL(meta);
+    cbm_file_gen_t gen2;
+    ASSERT_TRUE(cbm_file_generation(db2, &gen2));
+    cbm_store_meta_row_t mrow;
+    cbm_store_meta_row_init(&mrow, db2, &gen2);
+    snprintf(mrow.project, sizeof(mrow.project), "custom-proj");
+    /* index_repository records the CANONICAL root (realpath); getcwd returns
+     * the same form (/tmp is a symlink to /private/tmp on macOS). */
+    char repo2_real[1024];
+    ASSERT_NOT_NULL(realpath(repo2, repo2_real));
+    snprintf(mrow.root_path, sizeof(mrow.root_path), "%s", repo2_real);
+    ASSERT_TRUE(cbm_store_meta_put(meta, &mrow));
+    cbm_store_meta_close(meta);
+    ASSERT_EQ(chdir(repo2), 0);
+    cbm_mcp_reset_cwd_project_cache();
+    ASSERT_NOT_NULL(cbm_mcp_cwd_project());
+    ASSERT_STR_EQ(cbm_mcp_cwd_project(), "custom-proj");
+    cbm_unlink(db2);
+    cbm_rmdir(repo2);
+
+    ASSERT_EQ(chdir(old_cwd), 0);
+    cbm_mcp_reset_cwd_project_cache();
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    cbm_unlink(db_path);
+    char config_db[512];
+    snprintf(config_db, sizeof(config_db), "%s/_config.db", cache);
+    cbm_unlink(config_db);
+    cbm_rmdir(cache);
+    cbm_rmdir(repo);
+    free(pname);
+    PASS();
+#endif
+}
+
+TEST(hook_edit_impact_note) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    add_scored_call_edge(cbm_mcp_server_store(srv), "Dispatch", "svc/dispatch.go", 40,
+                         "{\"confidence\":0.42,\"strategy\":\"unique_name\",\"line\":42}");
+    add_scored_call_edge(cbm_mcp_server_store(srv), "SuiteCaller", "tests/suite_test.go", 10,
+                         "{\"line\":11}");
+
+    bool resolved = false;
+    char *note = cbm_mcp_edit_impact_note(srv, "test-project", "main.go", &resolved);
+    ASSERT_TRUE(resolved);
+    ASSERT_NOT_NULL(note);
+    /* Callers inside the edited file (HandleRequest -> ProcessOrder) are not
+     * impact; the two external callers are, one of them a test. */
+    ASSERT_NOT_NULL(strstr(note, "main.go defines"));
+    ASSERT_NOT_NULL(strstr(note, "Direct callers outside this file: 2 in 2 file(s), 1 in tests"));
+    ASSERT_NOT_NULL(strstr(note, "ProcessOrder <- 2"));
+    free(note);
+
+    /* Unknown project: not resolved, no note. */
+    resolved = true;
+    note = cbm_mcp_edit_impact_note(srv, "no-such-project", "main.go", &resolved);
+    ASSERT_NULL(note);
+    ASSERT_FALSE(resolved);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
 SUITE(mcp) {
     /* JSON-RPC parsing */
     RUN_TEST(jsonrpc_parse_request);
@@ -3595,4 +3994,13 @@ SUITE(mcp) {
     RUN_TEST(index_recovery_quarantines_exit_nonzero);
     RUN_TEST(index_recovery_systemic_exit_nonzero_gives_up);
     RUN_TEST(tool_index_repository_unknown_project_name_still_requires_repo_path);
+    RUN_TEST(tools_list_is_one_page);
+    RUN_TEST(tool_trace_path_carries_location_and_call_site);
+    RUN_TEST(tool_trace_path_test_filter_is_case_insensitive);
+    RUN_TEST(tool_inspect_symbol_one_call);
+    RUN_TEST(tool_inspect_symbol_accepts_scoped_name);
+    RUN_TEST(tool_inspect_symbol_ambiguous_returns_suggestions);
+    RUN_TEST(tool_search_code_max_bytes_truncates_with_continuation);
+    RUN_TEST(tool_project_resolves_from_cwd);
+    RUN_TEST(hook_edit_impact_note);
 }

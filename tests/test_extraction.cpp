@@ -92,6 +92,72 @@ static CBMFileResult *extract(const char *src, CBMLanguage lang, const char *pro
  * Group A: OOP Languages
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* --- C++: a macro invocation carrying statements as arguments must not
+ * swallow the classes declared after it. Reproduces modmesh's World.hpp
+ * (SC_DECL_SERIALIZABLE), where only the FIRST class of the header survived
+ * and nothing but a parse_partial range said so. --- */
+TEST(extract_cpp_statement_macro_does_not_hide_later_classes) {
+    CBMFileResult *r = extract("class First {\n"
+                               "public:\n"
+                               "    int id() const { return m_id; }\n"
+                               "    SC_DECL_SERIALIZABLE(\n"
+                               "        register_member(\"id\", m_id);\n"
+                               "        register_member(\"name\", m_name);)\n"
+                               "private:\n"
+                               "    int m_id = 0;\n"
+                               "};\n"
+                               "class Second : public Base {\n"
+                               "public:\n"
+                               "    void run();\n"
+                               "};\n"
+                               "struct Third { int x; };\n"
+                               "int helper(int v) { return v + 1; }\n",
+                               CBM_LANG_CPP, "t", "World.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Class", "First"));
+    ASSERT(has_def(r, "Class", "Second"));
+    ASSERT(has_def_any(r, "Third"));
+    ASSERT(has_def(r, "Function", "helper"));
+    /* Blanking keeps byte offsets: the later definitions keep their lines. */
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, "Second") == 0) {
+            ASSERT_EQ(r->defs.items[i].start_line, 10);
+        }
+        if (strcmp(r->defs.items[i].name, "helper") == 0) {
+            ASSERT_EQ(r->defs.items[i].start_line, 15);
+        }
+    }
+    cbm_free_result(r);
+
+    /* A raw string literal containing '"' and ';' inside macro arguments is
+     * one token: the blanking must neither end the literal early nor treat
+     * the ';' as a statement separator, and code after it must survive. */
+    r = extract("static const char *K = R\"(a\"; )\";\n"
+                "int before(void) { return 1; }\n"
+                "FOO(R\"(x\"; y)\", 1);\n"
+                "int after(void) { return 2; }\n"
+                "class Tail {};\n",
+                CBM_LANG_CPP, "t", "raw.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_def(r, "Function", "before"));
+    ASSERT(has_def(r, "Function", "after"));
+    ASSERT(has_def(r, "Class", "Tail"));
+    cbm_free_result(r);
+
+    /* Control: a macro whose arguments are plain expressions is left to the
+     * parser (no ';' inside), and a call inside it still counts. */
+    r = extract("class Plain {\n"
+                "    CHECK_EQ(compute(1), 2);\n"
+                "};\n"
+                "class After {};\n",
+                CBM_LANG_CPP, "t", "plain.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_def(r, "Class", "After"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- R: box::use imports (#218) + module$fn calls (#219) --- */
 TEST(extract_r_box_use_imports_issue218) {
     CBMFileResult *r = extract("box::use(\n"
@@ -4253,6 +4319,7 @@ SUITE(extraction) {
     RUN_TEST(complexity_recursion_in_loop_unguarded);
     RUN_TEST(complexity_guarded_recursion);
     RUN_TEST(complexity_access_depth_and_params);
+    RUN_TEST(extract_cpp_statement_macro_does_not_hide_later_classes);
 
     cbm_shutdown();
 }

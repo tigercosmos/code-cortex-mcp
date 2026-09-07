@@ -1,0 +1,6917 @@
+[
+ {
+  "task": "codecortex_callchain",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 12.426,
+  "duration_ms": 10437,
+  "duration_api_ms": 10245,
+  "ttft_ms": 2550,
+  "num_turns": 3,
+  "assistant_msgs": 4,
+  "cost_usd": 0.11191580000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 380,
+  "cache_create": 22128,
+  "cache_read": 97959,
+  "total_ctx_tok": 120093,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 1
+  },
+  "hook_events": {
+   "hook_started": 10,
+   "hook_response": 10
+  },
+  "tool_result_bytes": {
+   "other": 77,
+   "mcp": 36447
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Path found: cbm_discover_ex2 \u2192 walk_dir \u2192 walk_dir_process_entry \u2192 walk_dir_process_file \u2192 detect_file_language \u2192 cbm_disambiguate_m\n\ncbm_discover_ex2\nwalk_dir\nwalk_dir_process_entry\nwalk_dir_process_file\ndetect_file_language\ncbm_disambiguate_m",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Path found: cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m",
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ],
+   "gold": [
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "codecortex_callchain",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.358,
+  "duration_ms": 7011,
+  "duration_api_ms": 6832,
+  "ttft_ms": 1576,
+  "num_turns": 3,
+  "assistant_msgs": 5,
+  "cost_usd": 0.09767400000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 385,
+  "cache_create": 18367,
+  "cache_read": 101720,
+  "total_ctx_tok": 120093,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 1
+  },
+  "hook_events": {
+   "hook_started": 10,
+   "hook_response": 10
+  },
+  "tool_result_bytes": {
+   "other": 77,
+   "mcp": 36447
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "cbm_discover_ex2\nwalk_dir\nwalk_dir_process_entry\nwalk_dir_process_file\ndetect_file_language\ncbm_disambiguate_m",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ],
+   "gold": [
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "codecortex_callchain",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 47.249,
+  "duration_ms": 45675,
+  "duration_api_ms": 44446,
+  "ttft_ms": 2513,
+  "num_turns": 14,
+  "assistant_msgs": 25,
+  "cost_usd": 0.1620346,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 26,
+  "out_tok": 1919,
+  "cache_create": 12445,
+  "cache_read": 465063,
+  "total_ctx_tok": 477534,
+  "tools": {
+   "ToolSearch": 2,
+   "Bash": 8,
+   "Read": 3
+  },
+  "hook_events": {
+   "hook_started": 43,
+   "hook_response": 43
+  },
+  "tool_result_bytes": {
+   "other": 64,
+   "builtin": 16209
+  },
+  "n_tool_calls": 13,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 11,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Line 841 is inside walk_dir (defined at 805), confirming the chain. So the full chain is:\n\ncbm_discover_ex2\nwalk_dir\nwalk_dir_process_entry\nwalk_dir_process_file\ndetect_file_language\ncbm_disambiguate_m",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Line 841 is inside walk_dir",
+    "confirming the chain. So the full chain is:",
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ],
+   "gold": [
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "codecortex_callchain",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 34.196,
+  "duration_ms": 32807,
+  "duration_api_ms": 31688,
+  "ttft_ms": 2484,
+  "num_turns": 10,
+  "assistant_msgs": 17,
+  "cost_usd": 0.1132462,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 18,
+  "out_tok": 1591,
+  "cache_create": 8909,
+  "cache_read": 308321,
+  "total_ctx_tok": 317248,
+  "tools": {
+   "ToolSearch": 4,
+   "Bash": 3,
+   "Read": 2
+  },
+  "hook_events": {
+   "hook_started": 29,
+   "hook_response": 29
+  },
+  "tool_result_bytes": {
+   "other": 128,
+   "builtin": 16113
+  },
+  "n_tool_calls": 9,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Confirmed. Chain verified: cbm_discover_ex2 \u2192 walk_dir \u2192 walk_dir_process_entry \u2192 walk_dir_process_file \u2192 detect_file_language \u2192 cbm_disambiguate_m.\n\n```\ncbm_discover_ex2\nwalk_dir\nwalk_dir_process_entry\nwalk_dir_process_file\ndetect_file_language\ncbm_disambiguate_m\n```",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Confirmed. Chain verified: cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m",
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ],
+   "gold": [
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "codecortex_callchain",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 14.259,
+  "duration_ms": 11937,
+  "duration_api_ms": 11617,
+  "ttft_ms": 2362,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.0959,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 613,
+  "cache_create": 15811,
+  "cache_read": 132550,
+  "total_ctx_tok": 148369,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "other": 77,
+   "mcp": 22174
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 2,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Trace path: cbm_discover_ex2 \u2192 walk_dir \u2192 walk_dir_process_entry \u2192 walk_dir_process_file \u2192 detect_file_language \u2192 cbm_disambiguate_m\n\ncbm_discover_ex2\nwalk_dir\nwalk_dir_process_entry\nwalk_dir_process_file\ndetect_file_language\ncbm_disambiguate_m",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Trace path: cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m",
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ],
+   "gold": [
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "codecortex_callchain",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 22.164,
+  "duration_ms": 20247,
+  "duration_api_ms": 20025,
+  "ttft_ms": 2412,
+  "num_turns": 6,
+  "assistant_msgs": 10,
+  "cost_usd": 0.09517420000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 975,
+  "cache_create": 12834,
+  "cache_read": 170341,
+  "total_ctx_tok": 183185,
+  "tools": {
+   "ToolSearch": 3,
+   "mcp__code-cortex-mcp__trace_path": 2
+  },
+  "hook_events": {
+   "hook_started": 16,
+   "hook_response": 16
+  },
+  "tool_result_bytes": {
+   "other": 141,
+   "mcp": 22292
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 2,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Chain reconstructed from the edges: cbm_discover_ex2 \u2192 walk_dir \u2192 walk_dir_process_entry \u2192 walk_dir_process_file \u2192 detect_file_language \u2192 cbm_disambiguate_m\n\ncbm_discover_ex2\nwalk_dir\nwalk_dir_process_entry\nwalk_dir_process_file\ndetect_file_language\ncbm_disambiguate_m",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Chain reconstructed from the edges: cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m",
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ],
+   "gold": [
+    "cbm_discover_ex2",
+    "walk_dir",
+    "walk_dir_process_entry",
+    "walk_dir_process_file",
+    "detect_file_language",
+    "cbm_disambiguate_m"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "codecortex_callers",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 15.462,
+  "duration_ms": 13244,
+  "duration_api_ms": 12497,
+  "ttft_ms": 3560,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.059571200000000005,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 434,
+  "cache_create": 7145,
+  "cache_read": 133176,
+  "total_ctx_tok": 140329,
+  "tools": {
+   "Bash": 1,
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1
+  },
+  "hook_events": {
+   "hook_started": 13,
+   "hook_response": 13
+  },
+  "tool_result_bytes": {
+   "builtin": 1196,
+   "other": 81,
+   "mcp": 3337
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "This confirms the grep results (excluding tests/ since the question restricts to src/).\n\nsrc/git/git_context.cpp\nsrc/mcp/mcp.cpp\nsrc/pipeline/artifact.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/watcher/watcher.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/git/git_context.cpp",
+    "src/mcp/mcp.cpp",
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp"
+   ],
+   "gold": [
+    "src/git/git_context.cpp",
+    "src/mcp/mcp.cpp",
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "codecortex_callers",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.325,
+  "duration_ms": 7112,
+  "duration_api_ms": 6340,
+  "ttft_ms": 1295,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.043063199999999996,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 436,
+  "cache_create": 2880,
+  "cache_read": 135836,
+  "total_ctx_tok": 138724,
+  "tools": {
+   "Bash": 1,
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1
+  },
+  "hook_events": {
+   "hook_started": 13,
+   "hook_response": 13
+  },
+  "tool_result_bytes": {
+   "builtin": 41,
+   "other": 81,
+   "mcp": 3337
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "src/git/git_context.cpp\nsrc/mcp/mcp.cpp\nsrc/pipeline/artifact.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/watcher/watcher.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/git/git_context.cpp",
+    "src/mcp/mcp.cpp",
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp"
+   ],
+   "gold": [
+    "src/git/git_context.cpp",
+    "src/mcp/mcp.cpp",
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "codecortex_callers",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 7.402,
+  "duration_ms": 5767,
+  "duration_api_ms": 5053,
+  "ttft_ms": 2887,
+  "num_turns": 2,
+  "assistant_msgs": 3,
+  "cost_usd": 0.029180599999999998,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 202,
+  "cache_create": 3660,
+  "cache_read": 62563,
+  "total_ctx_tok": 66227,
+  "tools": {
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 1196
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "src/pipeline/artifact.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/watcher/watcher.cpp\nsrc/mcp/mcp.cpp\nsrc/git/git_context.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp",
+    "src/mcp/mcp.cpp",
+    "src/git/git_context.cpp"
+   ],
+   "gold": [
+    "src/git/git_context.cpp",
+    "src/mcp/mcp.cpp",
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "codecortex_callers",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 5.296,
+  "duration_ms": 3484,
+  "duration_api_ms": 2731,
+  "ttft_ms": 1627,
+  "num_turns": 2,
+  "assistant_msgs": 2,
+  "cost_usd": 0.017858,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 175,
+  "cache_create": 751,
+  "cache_read": 65480,
+  "total_ctx_tok": 66235,
+  "tools": {
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 1269
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "src/pipeline/artifact.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/watcher/watcher.cpp\nsrc/mcp/mcp.cpp\nsrc/git/git_context.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp",
+    "src/mcp/mcp.cpp",
+    "src/git/git_context.cpp"
+   ],
+   "gold": [
+    "src/git/git_context.cpp",
+    "src/mcp/mcp.cpp",
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "codecortex_callers",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 11.9,
+  "duration_ms": 9932,
+  "duration_api_ms": 9109,
+  "ttft_ms": 2330,
+  "num_turns": 5,
+  "assistant_msgs": 6,
+  "cost_usd": 0.0618996,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 585,
+  "cache_create": 7406,
+  "cache_read": 132048,
+  "total_ctx_tok": 139462,
+  "tools": {
+   "Bash": 2,
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 1
+  },
+  "hook_events": {
+   "hook_started": 16,
+   "hook_response": 16
+  },
+  "tool_result_bytes": {
+   "builtin": 1802,
+   "other": 155,
+   "mcp": 1052
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Actual calls (excluding definition, declaration, and comments):\n\nsrc/pipeline/artifact.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/watcher/watcher.cpp\nsrc/mcp/mcp.cpp\nsrc/git/git_context.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp",
+    "src/mcp/mcp.cpp",
+    "src/git/git_context.cpp"
+   ],
+   "gold": [
+    "src/git/git_context.cpp",
+    "src/mcp/mcp.cpp",
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "codecortex_callers",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 7.431,
+  "duration_ms": 5403,
+  "duration_api_ms": 4703,
+  "ttft_ms": 2119,
+  "num_turns": 2,
+  "assistant_msgs": 3,
+  "cost_usd": 0.0199672,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 178,
+  "cache_create": 1213,
+  "cache_read": 66636,
+  "total_ctx_tok": 67853,
+  "tools": {
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 1759
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "src/pipeline/artifact.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/watcher/watcher.cpp\nsrc/mcp/mcp.cpp\nsrc/git/git_context.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp",
+    "src/mcp/mcp.cpp",
+    "src/git/git_context.cpp"
+   ],
+   "gold": [
+    "src/git/git_context.cpp",
+    "src/mcp/mcp.cpp",
+    "src/pipeline/artifact.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/watcher/watcher.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "codecortex_hierarchy",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 30.844,
+  "duration_ms": 27958,
+  "duration_api_ms": 25816,
+  "ttft_ms": 1749,
+  "num_turns": 6,
+  "assistant_msgs": 10,
+  "cost_usd": 0.1230836,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 2543,
+  "cache_create": 13640,
+  "cache_read": 215348,
+  "total_ctx_tok": 229000,
+  "tools": {
+   "Bash": 5
+  },
+  "hook_events": {
+   "hook_started": 21,
+   "hook_response": 21
+  },
+  "tool_result_bytes": {
+   "builtin": 13481
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Good, only pipeline/ directory files use this type. All candidates checked.\n\ncbm_pipeline_pass_tests\ncbm_pipeline_pass_usages\ncbm_pipeline_pass_definitions\ncbm_pipeline_pass_calls\ncbm_pipeline_pass_k8s\nseq_pass_lsp_cross_dispatch",
+  "grade": {
+   "precision": 1.0,
+   "recall": 0.8571428571428571,
+   "f1": 0.923076923076923,
+   "pred": [
+    "cbm_pipeline_pass_tests",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_k8s",
+    "seq_pass_lsp_cross_dispatch"
+   ],
+   "gold": [
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_semantic",
+    "cbm_pipeline_pass_tests",
+    "seq_pass_lsp_cross_dispatch"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "codecortex_hierarchy",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 40.115,
+  "duration_ms": 38191,
+  "duration_api_ms": 37011,
+  "ttft_ms": 2181,
+  "num_turns": 7,
+  "assistant_msgs": 12,
+  "cost_usd": 0.1289346,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 14,
+  "out_tok": 3483,
+  "cache_create": 10493,
+  "cache_read": 260523,
+  "total_ctx_tok": 271030,
+  "tools": {
+   "Bash": 6
+  },
+  "hook_events": {
+   "hook_started": 24,
+   "hook_response": 24
+  },
+  "tool_result_bytes": {
+   "builtin": 14087
+  },
+  "n_tool_calls": 6,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 6,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "No other directories reference this type, so the pipeline/ directory covers everything.\n\ncbm_pipeline_pass_tests\ncbm_pipeline_pass_calls\ncbm_pipeline_pass_definitions\ncbm_pipeline_pass_k8s\ncbm_pipeline_pass_usages\ncbm_pipeline_pass_semantic\nseq_pass_lsp_cross_dispatch",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cbm_pipeline_pass_tests",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_semantic",
+    "seq_pass_lsp_cross_dispatch"
+   ],
+   "gold": [
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_semantic",
+    "cbm_pipeline_pass_tests",
+    "seq_pass_lsp_cross_dispatch"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "codecortex_hierarchy",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 41.089,
+  "duration_ms": 39331,
+  "duration_api_ms": 37390,
+  "ttft_ms": 1871,
+  "num_turns": 9,
+  "assistant_msgs": 17,
+  "cost_usd": 0.17479999999999998,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 18,
+  "out_tok": 3325,
+  "cache_create": 17810,
+  "cache_read": 351370,
+  "total_ctx_tok": 369198,
+  "tools": {
+   "Bash": 8
+  },
+  "hook_events": {
+   "hook_started": 30,
+   "hook_response": 30
+  },
+  "tool_result_bytes": {
+   "builtin": 21250
+  },
+  "n_tool_calls": 8,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 8,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "These all take only 1 param, confirming exclusion. Final answer:\n\ncbm_pipeline_pass_tests\ncbm_pipeline_pass_calls\ncbm_pipeline_pass_definitions\ncbm_pipeline_pass_usages\ncbm_pipeline_pass_k8s\ncbm_pipeline_pass_semantic\nseq_pass_lsp_cross_dispatch",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cbm_pipeline_pass_tests",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_semantic",
+    "seq_pass_lsp_cross_dispatch"
+   ],
+   "gold": [
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_semantic",
+    "cbm_pipeline_pass_tests",
+    "seq_pass_lsp_cross_dispatch"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "codecortex_hierarchy",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 27.841,
+  "duration_ms": 26302,
+  "duration_api_ms": 25451,
+  "ttft_ms": 2152,
+  "num_turns": 4,
+  "assistant_msgs": 7,
+  "cost_usd": 0.089589,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 2439,
+  "cache_create": 9041,
+  "cache_read": 145095,
+  "total_ctx_tok": 154144,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 12387
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "That also matches. Final list:\n\ncbm_pipeline_pass_tests\ncbm_pipeline_pass_calls\ncbm_pipeline_pass_usages\ncbm_pipeline_pass_definitions\ncbm_pipeline_pass_semantic\ncbm_pipeline_pass_k8s\nseq_pass_lsp_cross_dispatch",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cbm_pipeline_pass_tests",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_semantic",
+    "cbm_pipeline_pass_k8s",
+    "seq_pass_lsp_cross_dispatch"
+   ],
+   "gold": [
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_semantic",
+    "cbm_pipeline_pass_tests",
+    "seq_pass_lsp_cross_dispatch"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "codecortex_hierarchy",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 32.33,
+  "duration_ms": 29855,
+  "duration_api_ms": 27924,
+  "ttft_ms": 2271,
+  "num_turns": 6,
+  "assistant_msgs": 12,
+  "cost_usd": 0.12013020000000002,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 2071,
+  "cache_create": 14122,
+  "cache_read": 214541,
+  "total_ctx_tok": 228675,
+  "tools": {
+   "Bash": 5
+  },
+  "hook_events": {
+   "hook_started": 21,
+   "hook_response": 21
+  },
+  "tool_result_bytes": {
+   "builtin": 15547
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "That single-line regex missed the multi-line signatures already checked manually. I have the confirmed complete list.\n\ncbm_pipeline_pass_tests\ncbm_pipeline_pass_calls\ncbm_pipeline_pass_usages\ncbm_pipeline_pass_definitions\ncbm_pipeline_pass_k8s\nseq_pass_lsp_cross_dispatch",
+  "grade": {
+   "precision": 1.0,
+   "recall": 0.8571428571428571,
+   "f1": 0.923076923076923,
+   "pred": [
+    "cbm_pipeline_pass_tests",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "seq_pass_lsp_cross_dispatch"
+   ],
+   "gold": [
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_semantic",
+    "cbm_pipeline_pass_tests",
+    "seq_pass_lsp_cross_dispatch"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "codecortex_hierarchy",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 64.738,
+  "duration_ms": 4458,
+  "duration_api_ms": 63538,
+  "ttft_ms": 3719,
+  "num_turns": 1,
+  "assistant_msgs": 16,
+  "cost_usd": 0.1955785,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 2,
+  "out_tok": 155,
+  "cache_create": 3430,
+  "cache_read": 36079,
+  "total_ctx_tok": 39511,
+  "tools": {
+   "Bash": 5,
+   "Agent": 1
+  },
+  "hook_events": {
+   "hook_started": 29,
+   "hook_response": 29
+  },
+  "tool_result_bytes": {
+   "builtin": 21325,
+   "other": 1122
+  },
+  "n_tool_calls": 6,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "cbm_pipeline_pass_tests\ncbm_pipeline_pass_calls\ncbm_pipeline_pass_definitions\ncbm_pipeline_pass_k8s\ncbm_pipeline_pass_usages\ncbm_pipeline_pass_semantic\nseq_pass_lsp_cross_dispatch",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cbm_pipeline_pass_tests",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_semantic",
+    "seq_pass_lsp_cross_dispatch"
+   ],
+   "gold": [
+    "cbm_pipeline_pass_definitions",
+    "cbm_pipeline_pass_k8s",
+    "cbm_pipeline_pass_calls",
+    "cbm_pipeline_pass_usages",
+    "cbm_pipeline_pass_semantic",
+    "cbm_pipeline_pass_tests",
+    "seq_pass_lsp_cross_dispatch"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "codecortex_impact",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 11.956,
+  "duration_ms": 9524,
+  "duration_api_ms": 8689,
+  "ttft_ms": 1566,
+  "num_turns": 5,
+  "assistant_msgs": 7,
+  "cost_usd": 0.08941100000000002,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 738,
+  "cache_create": 11542,
+  "cache_read": 179215,
+  "total_ctx_tok": 190767,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1,
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 16,
+   "hook_response": 16
+  },
+  "tool_result_bytes": {
+   "other": 81,
+   "mcp": 12624,
+   "builtin": 101
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "src/foundation/str_util.cpp\nsrc/foundation/str_util.h\nsrc/git/git_context.cpp\nsrc/pipeline/pass_calls.cpp\nsrc/pipeline/pass_configlink.cpp\nsrc/pipeline/pass_cross_repo.cpp\nsrc/pipeline/pass_definitions.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/pipeline/pass_k8s.cpp\nsrc/pipeline/pass_parallel.cpp\nsrc/pipeline/pass_route_nodes.cpp\nsrc/pipeline/pass_semantic.cpp\nsrc/pipeline/pass_usages.cpp\nsrc/pipeline/pipeline.cpp\nsrc/pipeline/pipeline_incremental.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ],
+   "gold": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "codecortex_impact",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 15.377,
+  "duration_ms": 12963,
+  "duration_api_ms": 12112,
+  "ttft_ms": 2221,
+  "num_turns": 5,
+  "assistant_msgs": 6,
+  "cost_usd": 0.076898,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 720,
+  "cache_create": 8275,
+  "cache_read": 182890,
+  "total_ctx_tok": 191175,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1,
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 16,
+   "hook_response": 16
+  },
+  "tool_result_bytes": {
+   "other": 81,
+   "mcp": 12624,
+   "builtin": 1019
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "This gives 15 files: 13 caller files + declaration header + definition file. Matches grep results exactly.\n\nsrc/foundation/str_util.cpp\nsrc/foundation/str_util.h\nsrc/git/git_context.cpp\nsrc/pipeline/pass_calls.cpp\nsrc/pipeline/pass_configlink.cpp\nsrc/pipeline/pass_cross_repo.cpp\nsrc/pipeline/pass_definitions.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/pipeline/pass_k8s.cpp\nsrc/pipeline/pass_parallel.cpp\nsrc/pipeline/pass_route_nodes.cpp\nsrc/pipeline/pass_semantic.cpp\nsrc/pipeline/pass_usages.cpp\nsrc/pipeline/pipeline.cpp\nsrc/pipeline/pipeline_incremental.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ],
+   "gold": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "codecortex_impact",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 8.937,
+  "duration_ms": 7118,
+  "duration_api_ms": 6413,
+  "ttft_ms": 2736,
+  "num_turns": 2,
+  "assistant_msgs": 3,
+  "cost_usd": 0.031010600000000003,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 382,
+  "cache_create": 3667,
+  "cache_read": 62573,
+  "total_ctx_tok": 66244,
+  "tools": {
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 978
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "src/foundation/str_util.cpp\nsrc/foundation/str_util.h\nsrc/git/git_context.cpp\nsrc/pipeline/pass_calls.cpp\nsrc/pipeline/pass_configlink.cpp\nsrc/pipeline/pass_cross_repo.cpp\nsrc/pipeline/pass_definitions.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/pipeline/pass_k8s.cpp\nsrc/pipeline/pass_parallel.cpp\nsrc/pipeline/pass_route_nodes.cpp\nsrc/pipeline/pass_semantic.cpp\nsrc/pipeline/pass_usages.cpp\nsrc/pipeline/pipeline.cpp\nsrc/pipeline/pipeline_incremental.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ],
+   "gold": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "codecortex_impact",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 6.754,
+  "duration_ms": 4828,
+  "duration_api_ms": 4113,
+  "ttft_ms": 1805,
+  "num_turns": 2,
+  "assistant_msgs": 3,
+  "cost_usd": 0.019636,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 364,
+  "cache_create": 722,
+  "cache_read": 65500,
+  "total_ctx_tok": 66226,
+  "tools": {
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 978
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "src/foundation/str_util.cpp\nsrc/foundation/str_util.h\nsrc/git/git_context.cpp\nsrc/pipeline/pass_calls.cpp\nsrc/pipeline/pass_configlink.cpp\nsrc/pipeline/pass_cross_repo.cpp\nsrc/pipeline/pass_definitions.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/pipeline/pass_k8s.cpp\nsrc/pipeline/pass_parallel.cpp\nsrc/pipeline/pass_route_nodes.cpp\nsrc/pipeline/pass_semantic.cpp\nsrc/pipeline/pass_usages.cpp\nsrc/pipeline/pipeline.cpp\nsrc/pipeline/pipeline_incremental.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ],
+   "gold": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "codecortex_impact",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 18.313,
+  "duration_ms": 16260,
+  "duration_api_ms": 15346,
+  "ttft_ms": 2321,
+  "num_turns": 5,
+  "assistant_msgs": 7,
+  "cost_usd": 0.0851344,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 883,
+  "cache_create": 10647,
+  "cache_read": 168482,
+  "total_ctx_tok": 179139,
+  "tools": {
+   "Bash": 1,
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 2
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 978,
+   "other": 77,
+   "mcp": 9994
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 2,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "This confirms all call sites map to the same 15 files found by grep (all functions belong to these files). Combined with the declaration/definition in str_util.h/.cpp, the file list matches the grep result exactly.\n\nsrc/foundation/str_util.cpp\nsrc/foundation/str_util.h\nsrc/git/git_context.cpp\nsrc/pipeline/pass_calls.cpp\nsrc/pipeline/pass_configlink.cpp\nsrc/pipeline/pass_cross_repo.cpp\nsrc/pipeline/pass_definitions.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/pipeline/pass_k8s.cpp\nsrc/pipeline/pass_parallel.cpp\nsrc/pipeline/pass_route_nodes.cpp\nsrc/pipeline/pass_semantic.cpp\nsrc/pipeline/pass_usages.cpp\nsrc/pipeline/pipeline.cpp\nsrc/pipeline/pipeline_incremental.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ],
+   "gold": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "codecortex_impact",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 14.902,
+  "duration_ms": 12997,
+  "duration_api_ms": 12225,
+  "ttft_ms": 2958,
+  "num_turns": 3,
+  "assistant_msgs": 5,
+  "cost_usd": 0.050134200000000004,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 804,
+  "cache_create": 5495,
+  "cache_read": 100511,
+  "total_ctx_tok": 106012,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 8736
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "All 15 files contain actual calls or the declaration/definition (comments are just next to real call lines in same files, so all files qualify).\n\nsrc/foundation/str_util.cpp\nsrc/foundation/str_util.h\nsrc/git/git_context.cpp\nsrc/pipeline/pass_calls.cpp\nsrc/pipeline/pass_configlink.cpp\nsrc/pipeline/pass_cross_repo.cpp\nsrc/pipeline/pass_definitions.cpp\nsrc/pipeline/pass_githistory.cpp\nsrc/pipeline/pass_k8s.cpp\nsrc/pipeline/pass_parallel.cpp\nsrc/pipeline/pass_route_nodes.cpp\nsrc/pipeline/pass_semantic.cpp\nsrc/pipeline/pass_usages.cpp\nsrc/pipeline/pipeline.cpp\nsrc/pipeline/pipeline_incremental.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ],
+   "gold": [
+    "src/foundation/str_util.cpp",
+    "src/foundation/str_util.h",
+    "src/git/git_context.cpp",
+    "src/pipeline/pass_calls.cpp",
+    "src/pipeline/pass_configlink.cpp",
+    "src/pipeline/pass_cross_repo.cpp",
+    "src/pipeline/pass_definitions.cpp",
+    "src/pipeline/pass_githistory.cpp",
+    "src/pipeline/pass_k8s.cpp",
+    "src/pipeline/pass_parallel.cpp",
+    "src/pipeline/pass_route_nodes.cpp",
+    "src/pipeline/pass_semantic.cpp",
+    "src/pipeline/pass_usages.cpp",
+    "src/pipeline/pipeline.cpp",
+    "src/pipeline/pipeline_incremental.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "codecortex_locate",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.961,
+  "duration_ms": 6897,
+  "duration_api_ms": 5452,
+  "ttft_ms": 2317,
+  "num_turns": 3,
+  "assistant_msgs": 4,
+  "cost_usd": 0.0411512,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 260,
+  "cache_create": 4770,
+  "cache_read": 97296,
+  "total_ctx_tok": 102072,
+  "tools": {
+   "Bash": 1,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 722
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "src/mcp/mcp.cpp:5747",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "src/mcp/mcp.cpp:5747",
+   "gold": "src/mcp/mcp.cpp:5747",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "codecortex_locate",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 7.744,
+  "duration_ms": 5865,
+  "duration_api_ms": 5077,
+  "ttft_ms": 2033,
+  "num_turns": 3,
+  "assistant_msgs": 4,
+  "cost_usd": 0.0251534,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 262,
+  "cache_create": 561,
+  "cache_read": 101387,
+  "total_ctx_tok": 101954,
+  "tools": {
+   "Bash": 1,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 455
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "src/mcp/mcp.cpp:5747",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "src/mcp/mcp.cpp:5747",
+   "gold": "src/mcp/mcp.cpp:5747",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "codecortex_locate",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 10.263,
+  "duration_ms": 7772,
+  "duration_api_ms": 5940,
+  "ttft_ms": 2405,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.035188000000000004,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 212,
+  "cache_create": 3491,
+  "cache_read": 95460,
+  "total_ctx_tok": 98957,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 583
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "src/mcp/mcp.cpp:5747",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "src/mcp/mcp.cpp:5747",
+   "gold": "src/mcp/mcp.cpp:5747",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "codecortex_locate",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 8.441,
+  "duration_ms": 6742,
+  "duration_api_ms": 5675,
+  "ttft_ms": 2162,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.0242256,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 219,
+  "cache_create": 587,
+  "cache_read": 98378,
+  "total_ctx_tok": 98971,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 583
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "src/mcp/mcp.cpp:5747",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "src/mcp/mcp.cpp:5747",
+   "gold": "src/mcp/mcp.cpp:5747",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "codecortex_locate",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 8.553,
+  "duration_ms": 5754,
+  "duration_api_ms": 4096,
+  "ttft_ms": 1948,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.0384394,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 224,
+  "cache_create": 4209,
+  "cache_read": 96757,
+  "total_ctx_tok": 100972,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 379
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "src/mcp/mcp.cpp:5747",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "src/mcp/mcp.cpp:5747",
+   "gold": "src/mcp/mcp.cpp:5747",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "codecortex_locate",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 10.576,
+  "duration_ms": 8530,
+  "duration_api_ms": 7819,
+  "ttft_ms": 3146,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.022445200000000002,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 224,
+  "cache_create": 0,
+  "cache_read": 100966,
+  "total_ctx_tok": 100972,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 379
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "src/mcp/mcp.cpp:5747",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "src/mcp/mcp.cpp:5747",
+   "gold": "src/mcp/mcp.cpp:5747",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "codecortex_textcfg",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 19.845,
+  "duration_ms": 17290,
+  "duration_api_ms": 15327,
+  "ttft_ms": 2388,
+  "num_turns": 6,
+  "assistant_msgs": 9,
+  "cost_usd": 0.0714108,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 801,
+  "cache_create": 7465,
+  "cache_read": 167604,
+  "total_ctx_tok": 175079,
+  "tools": {
+   "Bash": 4,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 21,
+   "hook_response": 21
+  },
+  "tool_result_bytes": {
+   "builtin": 4971
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Found it: CMAKE_ARGS in build.sh sets `-DCBM_SANITIZE=OFF -DCBM_WERROR=OFF` first, both default ON.\n\nOPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Found it: CMAKE_ARGS in build.sh sets `-DCBM_SANITIZE=OFF -DCBM_WERROR=OFF` first, both default ON.\n\nOPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST",
+   "gold": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "codecortex_textcfg",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 17.094,
+  "duration_ms": 15137,
+  "duration_api_ms": 14277,
+  "ttft_ms": 2492,
+  "num_turns": 5,
+  "assistant_msgs": 7,
+  "cost_usd": 0.051207,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 894,
+  "cache_create": 1994,
+  "cache_read": 171355,
+  "total_ctx_tok": 173359,
+  "tools": {
+   "Bash": 3,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "builtin": 2333
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Confirmed macro is `CBM_ENABLE_TEST_SEAMS`, script is `scripts/test.sh` with `-DCBM_TEST_SEAMS=ON`, and `build.sh` turns off the two ON-default options (`CBM_SANITIZE`, `CBM_WERROR`) in that left-to-right order.\n\nOPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Confirmed macro is `CBM_ENABLE_TEST_SEAMS`, script is `scripts/test.sh` with `-DCBM_TEST_SEAMS=ON`, and `build.sh` turns off the two ON-default options (`CBM_SANITIZE`, `CBM_WERROR`) in that left-to-r",
+   "gold": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "codecortex_textcfg",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 17.608,
+  "duration_ms": 15453,
+  "duration_api_ms": 13495,
+  "ttft_ms": 2326,
+  "num_turns": 4,
+  "assistant_msgs": 7,
+  "cost_usd": 0.05390980000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 630,
+  "cache_create": 5380,
+  "cache_read": 130369,
+  "total_ctx_tok": 135757,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 2826
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+   "gold": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "codecortex_textcfg",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 18.512,
+  "duration_ms": 17022,
+  "duration_api_ms": 15849,
+  "ttft_ms": 2027,
+  "num_turns": 7,
+  "assistant_msgs": 10,
+  "cost_usd": 0.10979200000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 14,
+  "out_tok": 794,
+  "cache_create": 12199,
+  "cache_read": 265140,
+  "total_ctx_tok": 277353,
+  "tools": {
+   "Bash": 6
+  },
+  "hook_events": {
+   "hook_started": 24,
+   "hook_response": 24
+  },
+  "tool_result_bytes": {
+   "builtin": 26871
+  },
+  "n_tool_calls": 6,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 6,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "All confirmed.\n\nOPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "All confirmed.\n\nOPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+   "gold": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "codecortex_textcfg",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 16.473,
+  "duration_ms": 13339,
+  "duration_api_ms": 11548,
+  "ttft_ms": 2437,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.057967199999999997,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 578,
+  "cache_create": 6401,
+  "cache_read": 132836,
+  "total_ctx_tok": 139245,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 2843
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+   "gold": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "codecortex_textcfg",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "code-cortex-mcp",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 21.31,
+  "duration_ms": 19077,
+  "duration_api_ms": 18142,
+  "ttft_ms": 3530,
+  "num_turns": 6,
+  "assistant_msgs": 9,
+  "cost_usd": 0.0673576,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 865,
+  "cache_create": 4330,
+  "cache_read": 206818,
+  "total_ctx_tok": 211160,
+  "tools": {
+   "Bash": 5
+  },
+  "hook_events": {
+   "hook_started": 21,
+   "hook_response": 21
+  },
+  "tool_result_bytes": {
+   "builtin": 5713
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Both defaults ON options (CBM_SANITIZE, CBM_WERROR) are turned OFF, in that left-to-right order: `-DCBM_SANITIZE=OFF -DCBM_WERROR=OFF`.\n\nOPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Both defaults ON options (CBM_SANITIZE, CBM_WERROR) are turned OFF, in that left-to-right order: `-DCBM_SANITIZE=OFF -DCBM_WERROR=OFF`.\n\nOPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nS",
+   "gold": "OPTION=CBM_TEST_SEAMS\nDEFAULT=OFF\nMACRO=CBM_ENABLE_TEST_SEAMS\nSCRIPT=scripts/test.sh\nARG=-DCBM_TEST_SEAMS=ON\nPROD_OFF=CBM_SANITIZE,CBM_WERROR"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "modmesh_callchain",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 8.573,
+  "duration_ms": 6071,
+  "duration_api_ms": 5884,
+  "ttft_ms": 1765,
+  "num_turns": 3,
+  "assistant_msgs": 4,
+  "cost_usd": 0.2707686,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 399,
+  "cache_create": 62366,
+  "cache_read": 86513,
+  "total_ctx_tok": 148885,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 1
+  },
+  "hook_events": {
+   "hook_started": 10,
+   "hook_response": 10
+  },
+  "tool_result_bytes": {
+   "other": 77,
+   "mcp": 36290
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "EulerCore::march\nEulerCore::march_substep\nEulerCore::calc_dsoln\nGradientElement::solve_gradient\nGradientElement::adjugate",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ],
+   "gold": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "modmesh_callchain",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 13.316,
+  "duration_ms": 11361,
+  "duration_api_ms": 11159,
+  "ttft_ms": 3624,
+  "num_turns": 3,
+  "assistant_msgs": 4,
+  "cost_usd": 0.1086798,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 409,
+  "cache_create": 19681,
+  "cache_read": 129269,
+  "total_ctx_tok": 148956,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 1
+  },
+  "hook_events": {
+   "hook_started": 10,
+   "hook_response": 10
+  },
+  "tool_result_bytes": {
+   "other": 77,
+   "mcp": 36514
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "EulerCore::march\nEulerCore::march_substep\nEulerCore::calc_dsoln\nGradientElement::solve_gradient\nGradientElement::adjugate",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ],
+   "gold": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "modmesh_callchain",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 28.259,
+  "duration_ms": 26636,
+  "duration_api_ms": 25577,
+  "ttft_ms": 3077,
+  "num_turns": 9,
+  "assistant_msgs": 15,
+  "cost_usd": 0.28006000000000003,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 18,
+  "out_tok": 1115,
+  "cache_create": 49542,
+  "cache_read": 353530,
+  "total_ctx_tok": 403090,
+  "tools": {
+   "ToolSearch": 2,
+   "Bash": 6
+  },
+  "hook_events": {
+   "hook_started": 34,
+   "hook_response": 34
+  },
+  "tool_result_bytes": {
+   "other": 64,
+   "builtin": 11639
+  },
+  "n_tool_calls": 8,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 6,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "EulerCore::march\nEulerCore::march_substep\nEulerCore::calc_dsoln\nGradientElement::solve_gradient\nGradientElement::adjugate",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ],
+   "gold": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "modmesh_callchain",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 36.306,
+  "duration_ms": 34850,
+  "duration_api_ms": 33658,
+  "ttft_ms": 3174,
+  "num_turns": 11,
+  "assistant_msgs": 17,
+  "cost_usd": 0.13960319999999998,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 22,
+  "out_tok": 1337,
+  "cache_create": 7368,
+  "cache_read": 483586,
+  "total_ctx_tok": 490976,
+  "tools": {
+   "ToolSearch": 3,
+   "Bash": 4,
+   "Read": 3
+  },
+  "hook_events": {
+   "hook_started": 37,
+   "hook_response": 37
+  },
+  "tool_result_bytes": {
+   "other": 96,
+   "builtin": 10410
+  },
+  "n_tool_calls": 10,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 7,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "EulerCore::march\nEulerCore::march_substep\nEulerCore::calc_dsoln\nGradientElement::solve_gradient\nGradientElement::adjugate",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ],
+   "gold": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "modmesh_callchain",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 30.003,
+  "duration_ms": 27972,
+  "duration_api_ms": 27273,
+  "ttft_ms": 3198,
+  "num_turns": 10,
+  "assistant_msgs": 14,
+  "cost_usd": 0.3534758,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 16,
+  "out_tok": 1319,
+  "cache_create": 68740,
+  "cache_read": 326469,
+  "total_ctx_tok": 395225,
+  "tools": {
+   "ToolSearch": 2,
+   "mcp__code-cortex-mcp__trace_path": 3,
+   "mcp__code-cortex-mcp__search_graph": 4
+  },
+  "hook_events": {
+   "hook_started": 24,
+   "hook_response": 24
+  },
+  "tool_result_bytes": {
+   "other": 156,
+   "mcp": 44478
+  },
+  "n_tool_calls": 9,
+  "n_mcp_calls": 7,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "EulerCore::march\nEulerCore::march_substep\nEulerCore::calc_dsoln\nGradientElement::solve_gradient\nGradientElement::adjugate",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ],
+   "gold": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "modmesh_callchain",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 21.554,
+  "duration_ms": 19476,
+  "duration_api_ms": 18877,
+  "ttft_ms": 3035,
+  "num_turns": 7,
+  "assistant_msgs": 9,
+  "cost_usd": 0.14481299999999997,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 1085,
+  "cache_create": 19413,
+  "cache_read": 281435,
+  "total_ctx_tok": 300860,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 3,
+   "mcp__code-cortex-mcp__search_graph": 2
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "other": 156,
+   "mcp": 31161
+  },
+  "n_tool_calls": 6,
+  "n_mcp_calls": 5,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "EulerCore::march\nEulerCore::march_substep\nEulerCore::calc_dsoln\nGradientElement::solve_gradient\nGradientElement::adjugate",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ],
+   "gold": [
+    "march",
+    "march_substep",
+    "calc_dsoln",
+    "solve_gradient",
+    "adjugate"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "modmesh_callers",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 20.045,
+  "duration_ms": 17863,
+  "duration_api_ms": 16827,
+  "ttft_ms": 2726,
+  "num_turns": 6,
+  "assistant_msgs": 9,
+  "cost_usd": 0.2293316,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 1134,
+  "cache_create": 47886,
+  "cache_read": 132158,
+  "total_ctx_tok": 180052,
+  "tools": {
+   "Bash": 3,
+   "Read": 2
+  },
+  "hook_events": {
+   "hook_started": 24,
+   "hook_response": 24
+  },
+  "tool_result_bytes": {
+   "builtin": 6900
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "All qualifying files confirmed. Final list:\n\nsolvcon/pilot/apps/obsrefl/_control.py\nsolvcon/pilot/apps/obsrefl/_session.py\ntests/apps/obsrefl/test_colorbar.py\ntests/apps/obsrefl/test_panel.py\ntests/apps/obsrefl/test_session.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ],
+   "gold": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "modmesh_callers",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 12.835,
+  "duration_ms": 10810,
+  "duration_api_ms": 9905,
+  "ttft_ms": 2897,
+  "num_turns": 3,
+  "assistant_msgs": 5,
+  "cost_usd": 0.03891700000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 590,
+  "cache_create": 1765,
+  "cache_read": 129725,
+  "total_ctx_tok": 131496,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 14,
+   "hook_response": 14
+  },
+  "tool_result_bytes": {
+   "builtin": 2558
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "solvcon/pilot/apps/obsrefl/_control.py\ntests/apps/obsrefl/test_colorbar.py\ntests/apps/obsrefl/test_panel.py\ntests/apps/obsrefl/test_session.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 0.8,
+   "f1": 0.888888888888889,
+   "pred": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ],
+   "gold": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "modmesh_callers",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 22.731,
+  "duration_ms": 21090,
+  "duration_api_ms": 19825,
+  "ttft_ms": 3228,
+  "num_turns": 6,
+  "assistant_msgs": 11,
+  "cost_usd": 0.2350184,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 1048,
+  "cache_create": 45306,
+  "cache_read": 216452,
+  "total_ctx_tok": 261770,
+  "tools": {
+   "Bash": 4,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 25,
+   "hook_response": 25
+  },
+  "tool_result_bytes": {
+   "builtin": 4090
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "All confirmed.\n\nsolvcon/pilot/apps/obsrefl/_control.py\nsolvcon/pilot/apps/obsrefl/_session.py\ntests/apps/obsrefl/test_colorbar.py\ntests/apps/obsrefl/test_panel.py\ntests/apps/obsrefl/test_session.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ],
+   "gold": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "modmesh_callers",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 18.272,
+  "duration_ms": 16884,
+  "duration_api_ms": 15798,
+  "ttft_ms": 1556,
+  "num_turns": 6,
+  "assistant_msgs": 11,
+  "cost_usd": 0.07944079999999999,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 1089,
+  "cache_create": 4207,
+  "cache_read": 258494,
+  "total_ctx_tok": 262713,
+  "tools": {
+   "Bash": 3,
+   "Read": 2
+  },
+  "hook_events": {
+   "hook_started": 24,
+   "hook_response": 24
+  },
+  "tool_result_bytes": {
+   "builtin": 7046
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "All confirmed as real calls on `ReflectionSession` instances. Sorted output:\n\n```\nsolvcon/pilot/apps/obsrefl/_control.py\nsolvcon/pilot/apps/obsrefl/_session.py\ntests/apps/obsrefl/test_colorbar.py\ntests/apps/obsrefl/test_panel.py\ntests/apps/obsrefl/test_session.py\n```",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ],
+   "gold": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "modmesh_callers",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 22.673,
+  "duration_ms": 20518,
+  "duration_api_ms": 19221,
+  "ttft_ms": 3082,
+  "num_turns": 6,
+  "assistant_msgs": 10,
+  "cost_usd": 0.24769700000000003,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 1232,
+  "cache_create": 47771,
+  "cache_read": 221345,
+  "total_ctx_tok": 269128,
+  "tools": {
+   "Bash": 3,
+   "Read": 2
+  },
+  "hook_events": {
+   "hook_started": 24,
+   "hook_response": 24
+  },
+  "tool_result_bytes": {
+   "builtin": 6794
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "All confirmed as real calls on `ReflectionSession` instances.\n\nsolvcon/pilot/apps/obsrefl/_control.py\nsolvcon/pilot/apps/obsrefl/_session.py\ntests/apps/obsrefl/test_colorbar.py\ntests/apps/obsrefl/test_panel.py\ntests/apps/obsrefl/test_session.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ],
+   "gold": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "modmesh_callers",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 21.885,
+  "duration_ms": 19847,
+  "duration_api_ms": 18772,
+  "ttft_ms": 1892,
+  "num_turns": 6,
+  "assistant_msgs": 10,
+  "cost_usd": 0.10857560000000002,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 1478,
+  "cache_create": 9640,
+  "cache_read": 276058,
+  "total_ctx_tok": 285710,
+  "tools": {
+   "Bash": 4,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 25,
+   "hook_response": 25
+  },
+  "tool_result_bytes": {
+   "builtin": 16693
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "All confirmed. Final list:\n\nsolvcon/pilot/apps/obsrefl/_control.py\nsolvcon/pilot/apps/obsrefl/_session.py\ntests/apps/obsrefl/test_colorbar.py\ntests/apps/obsrefl/test_panel.py\ntests/apps/obsrefl/test_session.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ],
+   "gold": [
+    "solvcon/pilot/apps/obsrefl/_control.py",
+    "solvcon/pilot/apps/obsrefl/_session.py",
+    "tests/apps/obsrefl/test_colorbar.py",
+    "tests/apps/obsrefl/test_panel.py",
+    "tests/apps/obsrefl/test_session.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "modmesh_hierarchy",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 46.09,
+  "duration_ms": 44274,
+  "duration_api_ms": 42778,
+  "ttft_ms": 3299,
+  "num_turns": 6,
+  "assistant_msgs": 10,
+  "cost_usd": 0.12297260000000002,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 960,
+  "cache_create": 17913,
+  "cache_read": 208503,
+  "total_ctx_tok": 226426,
+  "tools": {
+   "Bash": 4,
+   "ToolSearch": 1
+  },
+  "hook_events": {
+   "hook_started": 24,
+   "hook_response": 24
+  },
+  "tool_result_bytes": {
+   "builtin": 6398,
+   "other": 81
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "This gives the complete list within the main repo (excluding worktree duplicates):\n\nSerializableRadixTreeNode\nSerializableRadixTree\nWorldShapeState\nWorldState\nWorldIntersection\nWorldDegeneracy\nWorldDiagnostics\nAddress\nPet\nPerson\nSecretItem\nEscapeItem\nTestUnorderedMapItem",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ],
+   "gold": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "modmesh_hierarchy",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.32,
+  "duration_ms": 7365,
+  "duration_api_ms": 6548,
+  "ttft_ms": 1341,
+  "num_turns": 3,
+  "assistant_msgs": 5,
+  "cost_usd": 0.0355154,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 423,
+  "cache_create": 1383,
+  "cache_read": 128707,
+  "total_ctx_tok": 130096,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 14,
+   "hook_response": 14
+  },
+  "tool_result_bytes": {
+   "builtin": 1237
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "SerializableRadixTreeNode\nSerializableRadixTree\nWorldShapeState\nWorldState\nWorldIntersection\nWorldDegeneracy\nWorldDiagnostics\nAddress\nPet\nPerson\nSecretItem\nEscapeItem\nTestUnorderedMapItem",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ],
+   "gold": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "modmesh_hierarchy",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 17.122,
+  "duration_ms": 15792,
+  "duration_api_ms": 14717,
+  "ttft_ms": 1489,
+  "num_turns": 7,
+  "assistant_msgs": 12,
+  "cost_usd": 0.1278244,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 14,
+  "out_tok": 1049,
+  "cache_create": 14913,
+  "cache_read": 288272,
+  "total_ctx_tok": 303199,
+  "tools": {
+   "ToolSearch": 2,
+   "Bash": 4
+  },
+  "hook_events": {
+   "hook_started": 26,
+   "hook_response": 26
+  },
+  "tool_result_bytes": {
+   "other": 64,
+   "builtin": 3676
+  },
+  "n_tool_calls": 6,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "No multi-line base-clause declarations found. Full list:\n\nSerializableRadixTreeNode\nSerializableRadixTree\nWorldShapeState\nWorldState\nWorldIntersection\nWorldDegeneracy\nWorldDiagnostics\nAddress\nPet\nPerson\nSecretItem\nEscapeItem\nTestUnorderedMapItem",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ],
+   "gold": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "modmesh_hierarchy",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 15.335,
+  "duration_ms": 13662,
+  "duration_api_ms": 12798,
+  "ttft_ms": 2792,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.0495772,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 641,
+  "cache_create": 2364,
+  "cache_read": 168476,
+  "total_ctx_tok": 170848,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "builtin": 3314
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "SerializableRadixTreeNode\nSerializableRadixTree\nWorldShapeState\nWorldState\nWorldIntersection\nWorldDegeneracy\nWorldDiagnostics\nAddress\nPet\nPerson\nSecretItem\nEscapeItem\nTestUnorderedMapItem",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ],
+   "gold": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "modmesh_hierarchy",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 29.349,
+  "duration_ms": 27624,
+  "duration_api_ms": 25912,
+  "ttft_ms": 2412,
+  "num_turns": 9,
+  "assistant_msgs": 15,
+  "cost_usd": 0.1923194,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 18,
+  "out_tok": 1959,
+  "cache_create": 22801,
+  "cache_read": 407447,
+  "total_ctx_tok": 430266,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__query_graph": 3,
+   "Bash": 4
+  },
+  "hook_events": {
+   "hook_started": 30,
+   "hook_response": 30
+  },
+  "tool_result_bytes": {
+   "other": 236,
+   "mcp": 2445,
+   "builtin": 5283
+  },
+  "n_tool_calls": 8,
+  "n_mcp_calls": 3,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "11 direct subclasses found:\n\nSerializableRadixTreeNode\nSerializableRadixTree\nWorldShapeState\nWorldState\nWorldIntersection\nWorldDegeneracy\nWorldDiagnostics\nAddress\nPet\nPerson\nSecretItem\nEscapeItem\nTestUnorderedMapItem",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ],
+   "gold": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "modmesh_hierarchy",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 33.305,
+  "duration_ms": 31710,
+  "duration_api_ms": 29877,
+  "ttft_ms": 2573,
+  "num_turns": 10,
+  "assistant_msgs": 17,
+  "cost_usd": 0.1571786,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 20,
+  "out_tok": 1755,
+  "cache_create": 11280,
+  "cache_read": 472343,
+  "total_ctx_tok": 483643,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__query_graph": 4,
+   "mcp__code-cortex-mcp__search_graph": 1,
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 30,
+   "hook_response": 30
+  },
+  "tool_result_bytes": {
+   "other": 157,
+   "mcp": 7748,
+   "builtin": 3645
+  },
+  "n_tool_calls": 9,
+  "n_mcp_calls": 5,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "This is the direct-grep source of truth (the graph index missed several, likely stale). Direct inheritors of `SerializableItem`:\n\nSerializableRadixTreeNode\nSerializableRadixTree\nWorldShapeState\nWorldState\nWorldIntersection\nWorldDegeneracy\nWorldDiagnostics\nAddress\nPet\nPerson\nSecretItem\nEscapeItem\nTestUnorderedMapItem",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ],
+   "gold": [
+    "SerializableRadixTreeNode",
+    "SerializableRadixTree",
+    "WorldShapeState",
+    "WorldState",
+    "WorldIntersection",
+    "WorldDegeneracy",
+    "WorldDiagnostics",
+    "Address",
+    "Pet",
+    "Person",
+    "SecretItem",
+    "EscapeItem",
+    "TestUnorderedMapItem"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "modmesh_impact",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 20.186,
+  "duration_ms": 17958,
+  "duration_api_ms": 17195,
+  "ttft_ms": 4404,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.2299782,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 1032,
+  "cache_create": 48182,
+  "cache_read": 134571,
+  "total_ctx_tok": 182761,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1,
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 14,
+   "hook_response": 14
+  },
+  "tool_result_bytes": {
+   "other": 159,
+   "mcp": 5901,
+   "builtin": 40
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Only one header file, no separate .cpp for the class. That confirms the full list.\n\ncpp/solvcon/universe/ViewTransform2d.hpp\ncpp/solvcon/pilot/canvas/R2DWidget.cpp\ncpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp\ncpp/solvcon/universe/pymod/wrap_view_transform2d.cpp\nsolvcon/agent/window/view.py\nsolvcon/pilot/painter/_canvas.py\ntests/test_agent_view_command.py\ntests/test_pilot_painter_canvas.py\ntests/test_universe_view.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py"
+   ],
+   "gold": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "modmesh_impact",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 23.948,
+  "duration_ms": 21751,
+  "duration_api_ms": 18844,
+  "ttft_ms": 3059,
+  "num_turns": 5,
+  "assistant_msgs": 8,
+  "cost_usd": 0.0885798,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 931,
+  "cache_create": 8615,
+  "cache_read": 223949,
+  "total_ctx_tok": 232574,
+  "tools": {
+   "Bash": 2,
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "builtin": 6395,
+   "other": 81,
+   "mcp": 5901
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "This gives declaration+definition+all call sites across languages, plus binding and test files.\n\ncpp/solvcon/universe/ViewTransform2d.hpp\ncpp/solvcon/universe/pymod/wrap_view_transform2d.cpp\ncpp/solvcon/pilot/canvas/R2DWidget.cpp\ncpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp\nsolvcon/agent/window/view.py\nsolvcon/pilot/painter/_canvas.py\ntests/test_universe_view.py\ntests/test_agent_view_command.py\ntests/test_pilot_painter_canvas.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_universe_view.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py"
+   ],
+   "gold": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "modmesh_impact",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 13.52,
+  "duration_ms": 11578,
+  "duration_api_ms": 10521,
+  "ttft_ms": 1512,
+  "num_turns": 4,
+  "assistant_msgs": 7,
+  "cost_usd": 0.21563400000000002,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 929,
+  "cache_create": 45116,
+  "cache_read": 129320,
+  "total_ctx_tok": 174444,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "builtin": 4233
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "No .pyi stubs exist. All files are git-tracked (none under build/). Final list:\n\ncpp/solvcon/universe/ViewTransform2d.hpp\ncpp/solvcon/universe/pymod/wrap_view_transform2d.cpp\ncpp/solvcon/pilot/canvas/R2DWidget.cpp\ncpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp\nsolvcon/agent/window/view.py\nsolvcon/pilot/painter/_canvas.py\ntests/test_pilot_painter_canvas.py\ntests/test_universe_view.py\ntests/test_agent_view_command.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py",
+    "tests/test_agent_view_command.py"
+   ],
+   "gold": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "modmesh_impact",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 12.388,
+  "duration_ms": 10726,
+  "duration_api_ms": 9563,
+  "ttft_ms": 1357,
+  "num_turns": 4,
+  "assistant_msgs": 7,
+  "cost_usd": 0.0542998,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 869,
+  "cache_create": 2909,
+  "cache_read": 169789,
+  "total_ctx_tok": 172706,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "builtin": 3861
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "cpp/solvcon/universe/ViewTransform2d.hpp\ncpp/solvcon/universe/pymod/wrap_view_transform2d.cpp\ncpp/solvcon/pilot/canvas/R2DWidget.cpp\ncpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp\nsolvcon/agent/window/view.py\nsolvcon/pilot/painter/_canvas.py\ntests/test_pilot_painter_canvas.py\ntests/test_universe_view.py\ntests/test_agent_view_command.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py",
+    "tests/test_agent_view_command.py"
+   ],
+   "gold": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "modmesh_impact",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 14.144,
+  "duration_ms": 12015,
+  "duration_api_ms": 9131,
+  "ttft_ms": 2123,
+  "num_turns": 4,
+  "assistant_msgs": 7,
+  "cost_usd": 0.21944660000000002,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 652,
+  "cache_create": 46662,
+  "cache_read": 131313,
+  "total_ctx_tok": 177983,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "builtin": 5883
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "cpp/solvcon/pilot/canvas/R2DWidget.cpp\ncpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp\ncpp/solvcon/universe/ViewTransform2d.hpp\ncpp/solvcon/universe/pymod/wrap_view_transform2d.cpp\nsolvcon/agent/window/view.py\nsolvcon/pilot/painter/_canvas.py\ntests/test_agent_view_command.py\ntests/test_pilot_painter_canvas.py\ntests/test_universe_view.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py"
+   ],
+   "gold": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "modmesh_impact",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 22.262,
+  "duration_ms": 20054,
+  "duration_api_ms": 19024,
+  "ttft_ms": 4154,
+  "num_turns": 5,
+  "assistant_msgs": 8,
+  "cost_usd": 0.06654760000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 1088,
+  "cache_create": 3139,
+  "cache_read": 215458,
+  "total_ctx_tok": 218607,
+  "tools": {
+   "Bash": 4
+  },
+  "hook_events": {
+   "hook_started": 22,
+   "hook_response": 22
+  },
+  "tool_result_bytes": {
+   "builtin": 3309
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "All 9 files have real declaration/definition/call sites, plus one internal caller (line 149 in the .hpp itself). Final list:\n\ncpp/solvcon/universe/ViewTransform2d.hpp\ncpp/solvcon/universe/pymod/wrap_view_transform2d.cpp\ncpp/solvcon/pilot/canvas/R2DWidget.cpp\ncpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp\nsolvcon/agent/window/view.py\nsolvcon/pilot/painter/_canvas.py\ntests/test_pilot_painter_canvas.py\ntests/test_universe_view.py\ntests/test_agent_view_command.py",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py",
+    "tests/test_agent_view_command.py"
+   ],
+   "gold": [
+    "cpp/solvcon/universe/ViewTransform2d.hpp",
+    "cpp/solvcon/universe/pymod/wrap_view_transform2d.cpp",
+    "cpp/solvcon/pilot/canvas/R2DWidget.cpp",
+    "cpp/solvcon/pilot/canvas/RWorldRenderer2d.cpp",
+    "solvcon/agent/window/view.py",
+    "solvcon/pilot/painter/_canvas.py",
+    "tests/test_agent_view_command.py",
+    "tests/test_pilot_painter_canvas.py",
+    "tests/test_universe_view.py"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "modmesh_locate",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.808,
+  "duration_ms": 7842,
+  "duration_api_ms": 7066,
+  "ttft_ms": 3095,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.07931980000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 221,
+  "cache_create": 13456,
+  "cache_read": 116369,
+  "total_ctx_tok": 129831,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 14,
+   "hook_response": 14
+  },
+  "tool_result_bytes": {
+   "builtin": 186
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "gold": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "modmesh_locate",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 14.772,
+  "duration_ms": 12520,
+  "duration_api_ms": 11698,
+  "ttft_ms": 4148,
+  "num_turns": 4,
+  "assistant_msgs": 5,
+  "cost_usd": 0.04443040000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 362,
+  "cache_create": 1570,
+  "cache_read": 172572,
+  "total_ctx_tok": 174150,
+  "tools": {
+   "Bash": 2,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 17,
+   "hook_response": 17
+  },
+  "tool_result_bytes": {
+   "builtin": 532
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "gold": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "modmesh_locate",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 13.886,
+  "duration_ms": 12152,
+  "duration_api_ms": 9402,
+  "ttft_ms": 2292,
+  "num_turns": 6,
+  "assistant_msgs": 7,
+  "cost_usd": 0.11078080000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 460,
+  "cache_create": 14333,
+  "cache_read": 244124,
+  "total_ctx_tok": 258469,
+  "tools": {
+   "Bash": 5
+  },
+  "hook_events": {
+   "hook_started": 26,
+   "hook_response": 26
+  },
+  "tool_result_bytes": {
+   "builtin": 3540
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "gold": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "modmesh_locate",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 7.794,
+  "duration_ms": 6084,
+  "duration_api_ms": 5258,
+  "ttft_ms": 1749,
+  "num_turns": 3,
+  "assistant_msgs": 4,
+  "cost_usd": 0.0319332,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 231,
+  "cache_create": 1102,
+  "cache_read": 126016,
+  "total_ctx_tok": 127124,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 14,
+   "hook_response": 14
+  },
+  "tool_result_bytes": {
+   "builtin": 1286
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "gold": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "modmesh_locate",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 7.859,
+  "duration_ms": 5991,
+  "duration_api_ms": 5237,
+  "ttft_ms": 2548,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.07827200000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 228,
+  "cache_create": 13202,
+  "cache_read": 115860,
+  "total_ctx_tok": 129068,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 14,
+   "hook_response": 14
+  },
+  "tool_result_bytes": {
+   "builtin": 186
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "gold": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "modmesh_locate",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 7.767,
+  "duration_ms": 5901,
+  "duration_api_ms": 5143,
+  "ttft_ms": 2329,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.031950400000000004,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 220,
+  "cache_create": 1034,
+  "cache_read": 128012,
+  "total_ctx_tok": 129052,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 14,
+   "hook_response": 14
+  },
+  "tool_result_bytes": {
+   "builtin": 186
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "gold": "cpp/solvcon/mesh/StaticMesh.hpp:363",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "modmesh_textcfg",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 15.838,
+  "duration_ms": 13695,
+  "duration_api_ms": 12725,
+  "ttft_ms": 1742,
+  "num_turns": 6,
+  "assistant_msgs": 10,
+  "cost_usd": 0.1252086,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 836,
+  "cache_create": 16587,
+  "cache_read": 252383,
+  "total_ctx_tok": 268982,
+  "tools": {
+   "Bash": 4,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 25,
+   "hook_response": 25
+  },
+  "tool_result_bytes": {
+   "builtin": 4848
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": ".github/workflows/lint.yml\nJOB_MAKE_ARGS\n-warnings-as-errors=*\n-Werror\nbase",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ],
+   "gold": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ]
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "modmesh_textcfg",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 18.978,
+  "duration_ms": 16922,
+  "duration_api_ms": 15951,
+  "ttft_ms": 2346,
+  "num_turns": 5,
+  "assistant_msgs": 9,
+  "cost_usd": 0.0810998,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 822,
+  "cache_create": 6953,
+  "cache_read": 225239,
+  "total_ctx_tok": 232202,
+  "tools": {
+   "Bash": 3,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 21,
+   "hook_response": 21
+  },
+  "tool_result_bytes": {
+   "builtin": 10505
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "`base` sets it but is hidden \u2014 the question asks for \"the configure preset\" that sets it, so `base` is the answer since it's set there (inherited by others). That's correct as the literal location.\n\n.github/workflows/lint.yml\nJOB_MAKE_ARGS\n-warnings-as-errors=*\n-Werror\nbase",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "base` sets it but is hidden \u2014 the question asks for \"the configure preset\" that sets it",
+    "so `base` is the answer since it's set there",
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ],
+   "gold": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ]
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "modmesh_textcfg",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 16.376,
+  "duration_ms": 14931,
+  "duration_api_ms": 14011,
+  "ttft_ms": 2715,
+  "num_turns": 5,
+  "assistant_msgs": 8,
+  "cost_usd": 0.114591,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 658,
+  "cache_create": 16823,
+  "cache_read": 203495,
+  "total_ctx_tok": 220328,
+  "tools": {
+   "Bash": 4
+  },
+  "hook_events": {
+   "hook_started": 22,
+   "hook_response": 22
+  },
+  "tool_result_bytes": {
+   "builtin": 8177
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": ".github/workflows/lint.yml\nJOB_MAKE_ARGS\n-warnings-as-errors=*\n-Werror\nbase",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ],
+   "gold": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ]
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "modmesh_textcfg",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 20.355,
+  "duration_ms": 19067,
+  "duration_api_ms": 18028,
+  "ttft_ms": 3049,
+  "num_turns": 6,
+  "assistant_msgs": 9,
+  "cost_usd": 0.07213000000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 736,
+  "cache_create": 3279,
+  "cache_read": 258150,
+  "total_ctx_tok": 261441,
+  "tools": {
+   "Bash": 4,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 25,
+   "hook_response": 25
+  },
+  "tool_result_bytes": {
+   "builtin": 3698
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": ".github/workflows/lint.yml\nJOB_MAKE_ARGS\n-warnings-as-errors=*\n-Werror\nbase",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ],
+   "gold": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ]
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "modmesh_textcfg",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 19.162,
+  "duration_ms": 17132,
+  "duration_api_ms": 16115,
+  "ttft_ms": 2335,
+  "num_turns": 6,
+  "assistant_msgs": 10,
+  "cost_usd": 0.127257,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 1009,
+  "cache_create": 16718,
+  "cache_read": 251355,
+  "total_ctx_tok": 268085,
+  "tools": {
+   "Bash": 4,
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 25,
+   "hook_response": 25
+  },
+  "tool_result_bytes": {
+   "builtin": 3657
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": ".github/workflows/lint.yml\nJOB_MAKE_ARGS\n-warnings-as-errors=*\n-Werror\nbase",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ],
+   "gold": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ]
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "modmesh_textcfg",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "modmesh",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 11.792,
+  "duration_ms": 10047,
+  "duration_api_ms": 9189,
+  "ttft_ms": 1477,
+  "num_turns": 5,
+  "assistant_msgs": 9,
+  "cost_usd": 0.0674632,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 653,
+  "cache_create": 4348,
+  "cache_read": 217606,
+  "total_ctx_tok": 221964,
+  "tools": {
+   "Bash": 4
+  },
+  "hook_events": {
+   "hook_started": 22,
+   "hook_response": 22
+  },
+  "tool_result_bytes": {
+   "builtin": 5266
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "\"base\" is a configure preset (first in list, line 7) since it sets LINT_AS_ERRORS at line 11.\n\n.github/workflows/lint.yml\nJOB_MAKE_ARGS\n-warnings-as-errors=*\n-Werror\nbase",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "base\" is a configure preset",
+    "line 7) since it sets LINT_AS_ERRORS at line 11",
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ],
+   "gold": [
+    "github/workflows/lint.yml",
+    "JOB_MAKE_ARGS",
+    "warnings-as-errors=*",
+    "Werror",
+    "base"
+   ]
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "pcapplusplus_callchain",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 26.796,
+  "duration_ms": 24721,
+  "duration_api_ms": 23315,
+  "ttft_ms": 1880,
+  "num_turns": 11,
+  "assistant_msgs": 18,
+  "cost_usd": 0.11966320000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 22,
+  "out_tok": 2063,
+  "cache_create": 5473,
+  "cache_read": 385486,
+  "total_ctx_tok": 390981,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 1,
+   "Bash": 8
+  },
+  "hook_events": {
+   "hook_started": 34,
+   "hook_response": 34
+  },
+  "tool_result_bytes": {
+   "other": 77,
+   "mcp": 1562,
+   "builtin": 2051
+  },
+  "n_tool_calls": 10,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 8,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "All confirmed.\n\nCryptoDataReader::fromPEMFile\nCryptoDataReader::fromPEM\nPemCodec::decode\nBase64::decodeToByteVector\nBase64::decodeToByteArray",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "All confirmed",
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ],
+   "gold": [
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "pcapplusplus_callchain",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 28.585,
+  "duration_ms": 26719,
+  "duration_api_ms": 25461,
+  "ttft_ms": 1663,
+  "num_turns": 10,
+  "assistant_msgs": 15,
+  "cost_usd": 0.11063040000000002,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 20,
+  "out_tok": 1918,
+  "cache_create": 5345,
+  "cache_read": 350152,
+  "total_ctx_tok": 355517,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 1,
+   "Bash": 7
+  },
+  "hook_events": {
+   "hook_started": 31,
+   "hook_response": 31
+  },
+  "tool_result_bytes": {
+   "other": 77,
+   "mcp": 1562,
+   "builtin": 2452
+  },
+  "n_tool_calls": 9,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 7,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Now I have all names: `PemCodec::decode`, `Base64::decodeToByteVector`, `Base64::decodeToByteArray`, and `fromPEM`/`fromPEMFile` are in `CryptoDataReader<T>` (templated, defined inline in header, class name `CryptoDataReader`).\n\nCryptoDataReader::fromPEMFile\nCryptoDataReader::fromPEM\nPemCodec::decode\nBase64::decodeToByteVector\nBase64::decodeToByteArray",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray",
+    "and `fromPEM`/`fromPEMFile` are in `CryptoDataReader<T>`",
+    "defined inline in header",
+    "class name `CryptoDataReader`)",
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ],
+   "gold": [
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "pcapplusplus_callchain",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 28.027,
+  "duration_ms": 26745,
+  "duration_api_ms": 25769,
+  "ttft_ms": 2312,
+  "num_turns": 10,
+  "assistant_msgs": 16,
+  "cost_usd": 0.10216240000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 20,
+  "out_tok": 1205,
+  "cache_create": 5829,
+  "cache_read": 333782,
+  "total_ctx_tok": 339631,
+  "tools": {
+   "ToolSearch": 3,
+   "Bash": 4,
+   "Read": 2
+  },
+  "hook_events": {
+   "hook_started": 30,
+   "hook_response": 30
+  },
+  "tool_result_bytes": {
+   "other": 96,
+   "builtin": 9865
+  },
+  "n_tool_calls": 9,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 6,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Confirmed: decodeToByteVector calls decodeToByteArray internally.\n\nCryptoDataReader::fromPEMFile\nCryptoDataReader::fromPEM\nPemCodec::decode\nBase64::decodeToByteVector\nBase64::decodeToByteArray",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Confirmed: decodeToByteVector calls decodeToByteArray internally",
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ],
+   "gold": [
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "pcapplusplus_callchain",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 31.425,
+  "duration_ms": 1497,
+  "duration_api_ms": 30306,
+  "ttft_ms": 1394,
+  "num_turns": 1,
+  "assistant_msgs": 17,
+  "cost_usd": 0.1212381,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 2,
+  "out_tok": 68,
+  "cache_create": 1739,
+  "cache_read": 33180,
+  "total_ctx_tok": 34921,
+  "tools": {
+   "ToolSearch": 2,
+   "Agent": 1,
+   "Bash": 3,
+   "Read": 3
+  },
+  "hook_events": {
+   "hook_started": 36,
+   "hook_response": 36
+  },
+  "tool_result_bytes": {
+   "other": 1183,
+   "builtin": 14409
+  },
+  "n_tool_calls": 9,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 6,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "CryptoDataReader::fromPEMFile\nCryptoDataReader::fromPEM\nPemCodec::decode\nBase64::decodeToByteVector\nBase64::decodeToByteArray",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ],
+   "gold": [
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "pcapplusplus_callchain",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 15.451,
+  "duration_ms": 13313,
+  "duration_api_ms": 12963,
+  "ttft_ms": 1575,
+  "num_turns": 5,
+  "assistant_msgs": 7,
+  "cost_usd": 0.1287094,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 1101,
+  "cache_create": 20161,
+  "cache_read": 185177,
+  "total_ctx_tok": 205348,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 2,
+   "mcp__code-cortex-mcp__search_graph": 1
+  },
+  "hook_events": {
+   "hook_started": 14,
+   "hook_response": 14
+  },
+  "tool_result_bytes": {
+   "other": 156,
+   "mcp": 35568
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 3,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Both confirmed as `CryptoDataReader::fromPEMFile` and `CryptoDataReader::fromPEM`. The chain from callee_edges: fromPEMFile\u2192fromPEM\u2192decode(PemCodec)\u2192decodeToByteVector(Base64)\u2192decodeToByteArray(Base64).\n\nCryptoDataReader::fromPEMFile\nCryptoDataReader::fromPEM\nPemCodec::decode\nBase64::decodeToByteVector\nBase64::decodeToByteArray",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray",
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ],
+   "gold": [
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "pcapplusplus_callchain",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 10.837,
+  "duration_ms": 8698,
+  "duration_api_ms": 8467,
+  "ttft_ms": 1705,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.10692159999999999,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 740,
+  "cache_create": 18142,
+  "cache_read": 134688,
+  "total_ctx_tok": 152838,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__trace_path": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "other": 156,
+   "mcp": 32596
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 2,
+  "n_builtin_search": 0,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "CryptoDataReader::fromPEMFile\nCryptoDataReader::fromPEM\nPemCodec::decode\nBase64::decodeToByteVector\nBase64::decodeToByteArray",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ],
+   "gold": [
+    "fromPEMFile",
+    "fromPEM",
+    "decode",
+    "decodeToByteVector",
+    "decodeToByteArray"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callchain"
+ },
+ {
+  "task": "pcapplusplus_callers",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 11.709,
+  "duration_ms": 9721,
+  "duration_api_ms": 8883,
+  "ttft_ms": 2367,
+  "num_turns": 3,
+  "assistant_msgs": 5,
+  "cost_usd": 0.029092,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 433,
+  "cache_create": 1244,
+  "cache_read": 98870,
+  "total_ctx_tok": 100120,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 1393
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "PacketUtils.h has only declarations (no calls). The files with actual call expressions:\n\nPacket++/src/PacketUtils.cpp\nPacket++/src/IPReassembly.cpp\nExamples/PcapSplitter/IPPortSplitters.h",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Packet++/src/PacketUtils.cpp",
+    "Packet++/src/IPReassembly.cpp",
+    "Examples/PcapSplitter/IPPortSplitters.h"
+   ],
+   "gold": [
+    "Examples/PcapSplitter/IPPortSplitters.h",
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "pcapplusplus_callers",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 17.859,
+  "duration_ms": 15978,
+  "duration_api_ms": 15120,
+  "ttft_ms": 2105,
+  "num_turns": 5,
+  "assistant_msgs": 9,
+  "cost_usd": 0.057905,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 687,
+  "cache_create": 4301,
+  "cache_read": 169055,
+  "total_ctx_tok": 173366,
+  "tools": {
+   "Bash": 2,
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1
+  },
+  "hook_events": {
+   "hook_started": 16,
+   "hook_response": 16
+  },
+  "tool_result_bytes": {
+   "builtin": 1308,
+   "other": 81,
+   "mcp": 3441
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "This matches the graph exactly \u2014 3 files contain actual calls (IPReassembly.cpp:268 has a stray hit but that's the file marker at line 268 which is the same as the `fnvHash(vec,3)` call already counted).\n\nPacket++/src/IPReassembly.cpp\nPacket++/src/PacketUtils.cpp\nExamples/PcapSplitter/IPPortSplitters.h",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp",
+    "Examples/PcapSplitter/IPPortSplitters.h"
+   ],
+   "gold": [
+    "Examples/PcapSplitter/IPPortSplitters.h",
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "pcapplusplus_callers",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 8.126,
+  "duration_ms": 6583,
+  "duration_api_ms": 5861,
+  "ttft_ms": 2464,
+  "num_turns": 2,
+  "assistant_msgs": 3,
+  "cost_usd": 0.0184776,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 197,
+  "cache_create": 919,
+  "cache_read": 64118,
+  "total_ctx_tok": 65041,
+  "tools": {
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 1265
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Packet++/src/IPReassembly.cpp\nPacket++/src/PacketUtils.cpp\nExamples/PcapSplitter/IPPortSplitters.h",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp",
+    "Examples/PcapSplitter/IPPortSplitters.h"
+   ],
+   "gold": [
+    "Examples/PcapSplitter/IPPortSplitters.h",
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "pcapplusplus_callers",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.27,
+  "duration_ms": 7645,
+  "duration_api_ms": 6864,
+  "ttft_ms": 1276,
+  "num_turns": 4,
+  "assistant_msgs": 5,
+  "cost_usd": 0.0357064,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 456,
+  "cache_create": 1341,
+  "cache_read": 128832,
+  "total_ctx_tok": 130181,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 1436
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Files containing at least one actual call to `fnvHash`:\n\nPacket++/src/PacketUtils.cpp\nPacket++/src/IPReassembly.cpp\nExamples/PcapSplitter/IPPortSplitters.h",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Packet++/src/PacketUtils.cpp",
+    "Packet++/src/IPReassembly.cpp",
+    "Examples/PcapSplitter/IPPortSplitters.h"
+   ],
+   "gold": [
+    "Examples/PcapSplitter/IPPortSplitters.h",
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "pcapplusplus_callers",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.749,
+  "duration_ms": 7853,
+  "duration_api_ms": 7005,
+  "ttft_ms": 1246,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.0367032,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 499,
+  "cache_create": 1368,
+  "cache_read": 131126,
+  "total_ctx_tok": 132502,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 1436
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "PacketUtils.h has only declarations (no calls), so it's excluded. The others contain actual calls.\n\nPacket++/src/PacketUtils.cpp\nPacket++/src/IPReassembly.cpp\nExamples/PcapSplitter/IPPortSplitters.h",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Packet++/src/PacketUtils.cpp",
+    "Packet++/src/IPReassembly.cpp",
+    "Examples/PcapSplitter/IPPortSplitters.h"
+   ],
+   "gold": [
+    "Examples/PcapSplitter/IPPortSplitters.h",
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "pcapplusplus_callers",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 8.309,
+  "duration_ms": 6493,
+  "duration_api_ms": 5908,
+  "ttft_ms": 2523,
+  "num_turns": 2,
+  "assistant_msgs": 3,
+  "cost_usd": 0.019518800000000003,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 216,
+  "cache_create": 1074,
+  "cache_read": 65274,
+  "total_ctx_tok": 66352,
+  "tools": {
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 1265
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Packet++/src/IPReassembly.cpp\nPacket++/src/PacketUtils.cpp\nExamples/PcapSplitter/IPPortSplitters.h",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp",
+    "Examples/PcapSplitter/IPPortSplitters.h"
+   ],
+   "gold": [
+    "Examples/PcapSplitter/IPPortSplitters.h",
+    "Packet++/src/IPReassembly.cpp",
+    "Packet++/src/PacketUtils.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "callers"
+ },
+ {
+  "task": "pcapplusplus_hierarchy",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 12.768,
+  "duration_ms": 10344,
+  "duration_api_ms": 9471,
+  "ttft_ms": 2477,
+  "num_turns": 3,
+  "assistant_msgs": 5,
+  "cost_usd": 0.0429694,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 427,
+  "cache_create": 4856,
+  "cache_read": 96317,
+  "total_ctx_tok": 101179,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 2393
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "9 matches, consistent with code-cortex's count.\n\nRadiusAttribute\nNdpOption\nTcpOption\nGtpV2InformationElement\nDhcpV6Option\nIPv4Option\nPPPoETag\nIPv6Option\nDhcpOption",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "IPv4Option",
+    "PPPoETag",
+    "IPv6Option",
+    "DhcpOption"
+   ],
+   "gold": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "pcapplusplus_hierarchy",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 20.374,
+  "duration_ms": 18435,
+  "duration_api_ms": 17583,
+  "ttft_ms": 2750,
+  "num_turns": 5,
+  "assistant_msgs": 8,
+  "cost_usd": 0.06326580000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 918,
+  "cache_create": 5099,
+  "cache_read": 168349,
+  "total_ctx_tok": 173458,
+  "tools": {
+   "Bash": 2,
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1
+  },
+  "hook_events": {
+   "hook_started": 16,
+   "hook_response": 16
+  },
+  "tool_result_bytes": {
+   "builtin": 1771,
+   "other": 81,
+   "mcp": 4637
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "All 9 confirmed as direct subclasses.\n\nDhcpOption\nDhcpV6Option\nGtpV2InformationElement\nIPv4Option\nIPv6Option\nNdpOption\nPPPoETag\nRadiusAttribute\nTcpOption",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "DhcpOption",
+    "DhcpV6Option",
+    "GtpV2InformationElement",
+    "IPv4Option",
+    "IPv6Option",
+    "NdpOption",
+    "PPPoETag",
+    "RadiusAttribute",
+    "TcpOption"
+   ],
+   "gold": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "pcapplusplus_hierarchy",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 10.673,
+  "duration_ms": 9102,
+  "duration_api_ms": 8214,
+  "ttft_ms": 1315,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.0454046,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 552,
+  "cache_create": 3628,
+  "cache_read": 126783,
+  "total_ctx_tok": 130419,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 1882
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "All confirmed direct derivations, one per file, no multiline base clauses missed.\n\nRadiusAttribute\nNdpOption\nTcpOption\nGtpV2InformationElement\nDhcpV6Option\nPPPoETag\nIPv6Option\nIPv4Option\nDhcpOption",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ],
+   "gold": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "pcapplusplus_hierarchy",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 16.761,
+  "duration_ms": 15255,
+  "duration_api_ms": 14253,
+  "ttft_ms": 1702,
+  "num_turns": 6,
+  "assistant_msgs": 10,
+  "cost_usd": 0.10295779999999999,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 938,
+  "cache_create": 12101,
+  "cache_read": 225749,
+  "total_ctx_tok": 237862,
+  "tools": {
+   "Bash": 5
+  },
+  "hook_events": {
+   "hook_started": 21,
+   "hook_response": 21
+  },
+  "tool_result_bytes": {
+   "builtin": 22027
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "NflogTlv is not derived from TLVRecord \u2014 it's a similarly-named wrapper class, so excluded per instructions. Final list confirmed from the 8 found.\n\nNdpOption\nRadiusAttribute\nTcpOption\nGtpV2InformationElement\nDhcpV6Option\nPPPoETag\nIPv6Option\nIPv4Option\nDhcpOption",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "NdpOption",
+    "RadiusAttribute",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ],
+   "gold": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "pcapplusplus_hierarchy",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 14.021,
+  "duration_ms": 11610,
+  "duration_api_ms": 10746,
+  "ttft_ms": 2328,
+  "num_turns": 4,
+  "assistant_msgs": 5,
+  "cost_usd": 0.0621364,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 422,
+  "cache_create": 8018,
+  "cache_read": 129142,
+  "total_ctx_tok": 137168,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 7084
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "These directly derive from TLVRecord (excluding TLVRecordBuilder subclasses, which derive from a different type):\n\nDhcpOption\nDhcpV6Option\nIPv6Option\nGtpV2InformationElement\nIPv4Option\nNdpOption\nRadiusAttribute\nPPPoETag\nTcpOption",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "DhcpOption",
+    "DhcpV6Option",
+    "IPv6Option",
+    "GtpV2InformationElement",
+    "IPv4Option",
+    "NdpOption",
+    "RadiusAttribute",
+    "PPPoETag",
+    "TcpOption"
+   ],
+   "gold": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "pcapplusplus_hierarchy",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 13.409,
+  "duration_ms": 11506,
+  "duration_api_ms": 10681,
+  "ttft_ms": 2196,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.04682,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 641,
+  "cache_create": 3476,
+  "cache_read": 132450,
+  "total_ctx_tok": 135934,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 3070
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Confirmed complete list of 9 direct subclasses.\n\nRadiusAttribute\nNdpOption\nTcpOption\nGtpV2InformationElement\nDhcpV6Option\nPPPoETag\nIPv6Option\nIPv4Option\nDhcpOption",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ],
+   "gold": [
+    "RadiusAttribute",
+    "NdpOption",
+    "TcpOption",
+    "GtpV2InformationElement",
+    "DhcpV6Option",
+    "PPPoETag",
+    "IPv6Option",
+    "IPv4Option",
+    "DhcpOption"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "hierarchy"
+ },
+ {
+  "task": "pcapplusplus_impact",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 14.838,
+  "duration_ms": 12614,
+  "duration_api_ms": 11756,
+  "ttft_ms": 1673,
+  "num_turns": 5,
+  "assistant_msgs": 7,
+  "cost_usd": 0.0699456,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 896,
+  "cache_create": 6470,
+  "cache_read": 175428,
+  "total_ctx_tok": 181908,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1,
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 16,
+   "hook_response": 16
+  },
+  "tool_result_bytes": {
+   "other": 81,
+   "mcp": 8292,
+   "builtin": 527
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "This matches the graph query exactly, with no matches under Pcap++ or Examples.\n\nCommon++/header/GeneralUtils.h\nCommon++/src/GeneralUtils.cpp\nPacket++/header/CryptoDataReader.h\nPacket++/src/DnsResourceData.cpp\nPacket++/src/X509ExtensionDataDecoder.cpp\nPacket++/src/LdapLayer.cpp\nPacket++/src/RadiusLayer.cpp\nPacket++/src/BgpLayer.cpp\nPacket++/src/CryptoKeyDecoder.cpp\nPacket++/src/Asn1Codec.cpp\nPacket++/src/PayloadLayer.cpp\nPacket++/src/TLVData.cpp\nTests/Pcap++Test/Tests/IpMacTests.cpp\nTests/Packet++Test/Tests/Asn1Tests.cpp\nTests/Packet++Test/Tests/X509Tests.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp"
+   ],
+   "gold": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "pcapplusplus_impact",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 21.305,
+  "duration_ms": 19404,
+  "duration_api_ms": 18622,
+  "ttft_ms": 2665,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.10328960000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 1360,
+  "cache_create": 15496,
+  "cache_read": 138448,
+  "total_ctx_tok": 153952,
+  "tools": {
+   "ToolSearch": 1,
+   "mcp__code-cortex-mcp__inspect_symbol": 1,
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 13,
+   "hook_response": 13
+  },
+  "tool_result_bytes": {
+   "other": 159,
+   "mcp": 8292,
+   "builtin": 14651
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 1,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Common++/header/GeneralUtils.h\nCommon++/src/GeneralUtils.cpp\nPacket++/header/CryptoDataReader.h\nPacket++/src/Asn1Codec.cpp\nPacket++/src/BgpLayer.cpp\nPacket++/src/CryptoKeyDecoder.cpp\nPacket++/src/DnsResourceData.cpp\nPacket++/src/LdapLayer.cpp\nPacket++/src/PayloadLayer.cpp\nPacket++/src/RadiusLayer.cpp\nPacket++/src/TLVData.cpp\nPacket++/src/X509ExtensionDataDecoder.cpp\nTests/Packet++Test/Tests/Asn1Tests.cpp\nTests/Packet++Test/Tests/X509Tests.cpp\nTests/Pcap++Test/Tests/IpMacTests.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp"
+   ],
+   "gold": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "pcapplusplus_impact",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 11.51,
+  "duration_ms": 9970,
+  "duration_api_ms": 9154,
+  "ttft_ms": 2308,
+  "num_turns": 3,
+  "assistant_msgs": 5,
+  "cost_usd": 0.028588800000000004,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 644,
+  "cache_create": 721,
+  "cache_read": 96264,
+  "total_ctx_tok": 96991,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 560
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "It's a call inside the header (inline function). All files listed are relevant.\n\nCommon++/header/GeneralUtils.h\nCommon++/src/GeneralUtils.cpp\nPacket++/header/CryptoDataReader.h\nPacket++/src/X509ExtensionDataDecoder.cpp\nPacket++/src/DnsResourceData.cpp\nPacket++/src/RadiusLayer.cpp\nPacket++/src/CryptoKeyDecoder.cpp\nPacket++/src/LdapLayer.cpp\nPacket++/src/PayloadLayer.cpp\nPacket++/src/BgpLayer.cpp\nPacket++/src/Asn1Codec.cpp\nPacket++/src/TLVData.cpp\nTests/Pcap++Test/Tests/IpMacTests.cpp\nTests/Packet++Test/Tests/Asn1Tests.cpp\nTests/Packet++Test/Tests/X509Tests.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp"
+   ],
+   "gold": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "pcapplusplus_impact",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 19.905,
+  "duration_ms": 18490,
+  "duration_api_ms": 17552,
+  "ttft_ms": 2351,
+  "num_turns": 6,
+  "assistant_msgs": 11,
+  "cost_usd": 0.082428,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 12,
+  "out_tok": 1235,
+  "cache_create": 7836,
+  "cache_read": 193550,
+  "total_ctx_tok": 201398,
+  "tools": {
+   "ToolSearch": 3,
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "other": 96,
+   "builtin": 12063
+  },
+  "n_tool_calls": 5,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Common++/header/GeneralUtils.h\nCommon++/src/GeneralUtils.cpp\nPacket++/header/CryptoDataReader.h\nPacket++/src/X509ExtensionDataDecoder.cpp\nPacket++/src/DnsResourceData.cpp\nPacket++/src/RadiusLayer.cpp\nPacket++/src/LdapLayer.cpp\nPacket++/src/PayloadLayer.cpp\nPacket++/src/CryptoKeyDecoder.cpp\nPacket++/src/BgpLayer.cpp\nPacket++/src/Asn1Codec.cpp\nPacket++/src/TLVData.cpp\nTests/Pcap++Test/Tests/IpMacTests.cpp\nTests/Packet++Test/Tests/Asn1Tests.cpp\nTests/Packet++Test/Tests/X509Tests.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp"
+   ],
+   "gold": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "pcapplusplus_impact",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 14.382,
+  "duration_ms": 12109,
+  "duration_api_ms": 11267,
+  "ttft_ms": 2234,
+  "num_turns": 4,
+  "assistant_msgs": 6,
+  "cost_usd": 0.0397232,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 735,
+  "cache_create": 1528,
+  "cache_read": 131226,
+  "total_ctx_tok": 132762,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 1068
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "All matches are real declarations/calls (including a caller inline in a header). Here's the list:\n\nCommon++/header/GeneralUtils.h\nCommon++/src/GeneralUtils.cpp\nPacket++/header/CryptoDataReader.h\nPacket++/src/DnsResourceData.cpp\nPacket++/src/LdapLayer.cpp\nPacket++/src/X509ExtensionDataDecoder.cpp\nPacket++/src/RadiusLayer.cpp\nPacket++/src/BgpLayer.cpp\nPacket++/src/CryptoKeyDecoder.cpp\nPacket++/src/Asn1Codec.cpp\nPacket++/src/PayloadLayer.cpp\nPacket++/src/TLVData.cpp\nTests/Pcap++Test/Tests/IpMacTests.cpp\nTests/Packet++Test/Tests/Asn1Tests.cpp\nTests/Packet++Test/Tests/X509Tests.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp"
+   ],
+   "gold": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "pcapplusplus_impact",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 13.27,
+  "duration_ms": 11206,
+  "duration_api_ms": 10362,
+  "ttft_ms": 1644,
+  "num_turns": 3,
+  "assistant_msgs": 5,
+  "cost_usd": 0.0690298,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 934,
+  "cache_create": 9994,
+  "cache_read": 98509,
+  "total_ctx_tok": 108509,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 15615
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "All files confirmed as declaring/defining/calling the function:\n\nCommon++/header/GeneralUtils.h\nCommon++/src/GeneralUtils.cpp\nPacket++/header/CryptoDataReader.h\nPacket++/src/DnsResourceData.cpp\nPacket++/src/X509ExtensionDataDecoder.cpp\nPacket++/src/LdapLayer.cpp\nPacket++/src/RadiusLayer.cpp\nPacket++/src/BgpLayer.cpp\nPacket++/src/Asn1Codec.cpp\nPacket++/src/PayloadLayer.cpp\nPacket++/src/CryptoKeyDecoder.cpp\nPacket++/src/TLVData.cpp\nTests/Packet++Test/Tests/Asn1Tests.cpp\nTests/Pcap++Test/Tests/IpMacTests.cpp\nTests/Packet++Test/Tests/X509Tests.cpp",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp"
+   ],
+   "gold": [
+    "Common++/header/GeneralUtils.h",
+    "Common++/src/GeneralUtils.cpp",
+    "Packet++/header/CryptoDataReader.h",
+    "Packet++/src/Asn1Codec.cpp",
+    "Packet++/src/BgpLayer.cpp",
+    "Packet++/src/CryptoKeyDecoder.cpp",
+    "Packet++/src/DnsResourceData.cpp",
+    "Packet++/src/LdapLayer.cpp",
+    "Packet++/src/PayloadLayer.cpp",
+    "Packet++/src/RadiusLayer.cpp",
+    "Packet++/src/TLVData.cpp",
+    "Packet++/src/X509ExtensionDataDecoder.cpp",
+    "Tests/Packet++Test/Tests/Asn1Tests.cpp",
+    "Tests/Packet++Test/Tests/X509Tests.cpp",
+    "Tests/Pcap++Test/Tests/IpMacTests.cpp"
+   ]
+  },
+  "favours": "graph",
+  "archetype": "impact"
+ },
+ {
+  "task": "pcapplusplus_locate",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 7.731,
+  "duration_ms": 5739,
+  "duration_api_ms": 5006,
+  "ttft_ms": 2931,
+  "num_turns": 2,
+  "assistant_msgs": 2,
+  "cost_usd": 0.030074000000000004,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 125,
+  "cache_create": 4078,
+  "cache_read": 62520,
+  "total_ctx_tok": 66602,
+  "tools": {
+   "Bash": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 1240
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Pcap++/src/PcapFileDevice.cpp:1183",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "gold": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "pcapplusplus_locate",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 8.268,
+  "duration_ms": 6248,
+  "duration_api_ms": 5500,
+  "ttft_ms": 2713,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.025714,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 239,
+  "cache_create": 903,
+  "cache_read": 98500,
+  "total_ctx_tok": 99409,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 319
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "Pcap++/src/PcapFileDevice.cpp:1183",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "gold": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "pcapplusplus_locate",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 16.297,
+  "duration_ms": 14634,
+  "duration_api_ms": 13672,
+  "ttft_ms": 2673,
+  "num_turns": 7,
+  "assistant_msgs": 9,
+  "cost_usd": 0.0712912,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 14,
+  "out_tok": 735,
+  "cache_create": 4757,
+  "cache_read": 224426,
+  "total_ctx_tok": 229197,
+  "tools": {
+   "ToolSearch": 1,
+   "Bash": 5
+  },
+  "hook_events": {
+   "hook_started": 23,
+   "hook_response": 23
+  },
+  "tool_result_bytes": {
+   "other": 32,
+   "builtin": 3002
+  },
+  "n_tool_calls": 6,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 5,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Pcap++/src/PcapFileDevice.cpp:1183",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "gold": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "pcapplusplus_locate",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 8.393,
+  "duration_ms": 6604,
+  "duration_api_ms": 5677,
+  "ttft_ms": 1827,
+  "num_turns": 4,
+  "assistant_msgs": 4,
+  "cost_usd": 0.032045000000000004,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 323,
+  "cache_create": 792,
+  "cache_read": 128155,
+  "total_ctx_tok": 128955,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 629
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Pcap++/src/PcapFileDevice.cpp:1183",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "gold": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "pcapplusplus_locate",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.304,
+  "duration_ms": 7138,
+  "duration_api_ms": 6372,
+  "ttft_ms": 2696,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.0377726,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 256,
+  "cache_create": 4030,
+  "cache_read": 95403,
+  "total_ctx_tok": 99439,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 400
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Pcap++/src/PcapFileDevice.cpp:1183",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "gold": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "pcapplusplus_locate",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 7.685,
+  "duration_ms": 5444,
+  "duration_api_ms": 4579,
+  "ttft_ms": 1945,
+  "num_turns": 3,
+  "assistant_msgs": 3,
+  "cost_usd": 0.027598200000000003,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 6,
+  "out_tok": 229,
+  "cache_create": 1425,
+  "cache_read": 97981,
+  "total_ctx_tok": 99412,
+  "tools": {
+   "Bash": 2
+  },
+  "hook_events": {
+   "hook_started": 12,
+   "hook_response": 12
+  },
+  "tool_result_bytes": {
+   "builtin": 505
+  },
+  "n_tool_calls": 2,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 2,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Pcap++/src/PcapFileDevice.cpp:1183",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "gold": "Pcap++/src/PcapFileDevice.cpp:1183",
+   "path_ok": true,
+   "line_ok": true
+  },
+  "favours": "neutral",
+  "archetype": "locate"
+ },
+ {
+  "task": "pcapplusplus_textcfg",
+  "arm": "new",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 13.97,
+  "duration_ms": 11523,
+  "duration_api_ms": 10960,
+  "ttft_ms": 2271,
+  "num_turns": 2,
+  "assistant_msgs": 4,
+  "cost_usd": 0.1131474,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 579,
+  "cache_create": 23709,
+  "cache_read": 62567,
+  "total_ctx_tok": 86280,
+  "tools": {
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 43268
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+   "gold": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "pcapplusplus_textcfg",
+  "arm": "new",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 10.347,
+  "duration_ms": 8232,
+  "duration_api_ms": 7837,
+  "ttft_ms": 2995,
+  "num_turns": 2,
+  "assistant_msgs": 3,
+  "cost_usd": 0.0996348,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 349,
+  "cache_create": 20759,
+  "cache_read": 65504,
+  "total_ctx_tok": 86267,
+  "tools": {
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 43268
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 40,
+  "result_text": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+   "gold": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "pcapplusplus_textcfg",
+  "arm": "off",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 9.145,
+  "duration_ms": 7644,
+  "duration_api_ms": 7255,
+  "ttft_ms": 1670,
+  "num_turns": 2,
+  "assistant_msgs": 3,
+  "cost_usd": 0.10950560000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 4,
+  "out_tok": 564,
+  "cache_create": 22877,
+  "cache_read": 61748,
+  "total_ctx_tok": 84629,
+  "tools": {
+   "Read": 1
+  },
+  "hook_events": {
+   "hook_started": 9,
+   "hook_response": 9
+  },
+  "tool_result_bytes": {
+   "builtin": 43268
+  },
+  "n_tool_calls": 1,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 1,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+   "gold": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "pcapplusplus_textcfg",
+  "arm": "off",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 21.865,
+  "duration_ms": 20528,
+  "duration_api_ms": 19687,
+  "ttft_ms": 3342,
+  "num_turns": 5,
+  "assistant_msgs": 8,
+  "cost_usd": 0.0793848,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 10,
+  "out_tok": 1175,
+  "cache_create": 8351,
+  "cache_read": 171054,
+  "total_ctx_tok": 179415,
+  "tools": {
+   "Bash": 2,
+   "Read": 2
+  },
+  "hook_events": {
+   "hook_started": 18,
+   "hook_response": 18
+  },
+  "tool_result_bytes": {
+   "builtin": 14041
+  },
+  "n_tool_calls": 4,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 4,
+  "mcp_servers_init": [],
+  "tools_available_n": 25,
+  "result_text": "Confirmed \u2014 `libpcap-free` configures coverage but never uploads to Codecov.\n\nconfigures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Confirmed \u2014 `libpcap-free` configures coverage but never uploads to Codecov.\n\nconfigures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+   "gold": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "pcapplusplus_textcfg",
+  "arm": "old",
+  "rep": 1,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 14.824,
+  "duration_ms": 12636,
+  "duration_api_ms": 11702,
+  "ttft_ms": 1455,
+  "num_turns": 4,
+  "assistant_msgs": 7,
+  "cost_usd": 0.06825300000000001,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 850,
+  "cache_create": 8297,
+  "cache_read": 132745,
+  "total_ctx_tok": 141050,
+  "tools": {
+   "Bash": 1,
+   "Read": 2
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 9060
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Confirmed: `visual-studio` uses codecov-action but never sets `-DPCAPPP_BUILD_COVERAGE=ON`.\n\nconfigures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Confirmed: `visual-studio` uses codecov-action but never sets `-DPCAPPP_BUILD_COVERAGE=ON`.\n\nconfigures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+   "gold": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ },
+ {
+  "task": "pcapplusplus_textcfg",
+  "arm": "old",
+  "rep": 2,
+  "model": "sonnet",
+  "repo": "PcapPlusPlus",
+  "rc": 0,
+  "effort": "medium",
+  "wall_s": 17.347,
+  "duration_ms": 15301,
+  "duration_api_ms": 14466,
+  "ttft_ms": 4382,
+  "num_turns": 4,
+  "assistant_msgs": 5,
+  "cost_usd": 0.04656,
+  "is_error": false,
+  "subtype": "success",
+  "in_tok": 8,
+  "out_tok": 576,
+  "cache_create": 3485,
+  "cache_read": 134220,
+  "total_ctx_tok": 137713,
+  "tools": {
+   "Bash": 3
+  },
+  "hook_events": {
+   "hook_started": 15,
+   "hook_response": 15
+  },
+  "tool_result_bytes": {
+   "builtin": 5147
+  },
+  "n_tool_calls": 3,
+  "n_mcp_calls": 0,
+  "n_builtin_search": 3,
+  "mcp_servers_init": [
+   "code-cortex-mcp"
+  ],
+  "tools_available_n": 39,
+  "result_text": "Confirmed both.\n\nconfigures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+  "grade": {
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "pred": "Confirmed both.\n\nconfigures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio",
+   "gold": "configures-but-no-upload: libpcap-free\nuploads-but-no-coverage-flag: visual-studio"
+  },
+  "favours": "grep",
+  "archetype": "textcfg"
+ }
+]

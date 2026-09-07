@@ -79,6 +79,13 @@ bool cbm_store_meta_get(cbm_store_meta_db_t *db, const char *db_path, const cbm_
 bool cbm_store_meta_find_project(cbm_store_meta_db_t *db, const char *project,
                                  cbm_store_meta_row_t *row);
 
+/* Find the row whose recorded project root is `root_path` (exact string match
+ * on the canonical path index_repository stored). Lets a working directory
+ * resolve to a project indexed under a custom name. Same verification duty
+ * as cbm_store_meta_find_project. */
+bool cbm_store_meta_find_root(cbm_store_meta_db_t *db, const char *root_path,
+                              cbm_store_meta_row_t *row);
+
 /* Insert or replace the row. Best-effort: returns false when the write did not
  * happen (busy, read-only cache dir, disabled). A TRANSIENT verdict is stored
  * as UNKNOWN. */

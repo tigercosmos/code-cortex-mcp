@@ -171,6 +171,20 @@ void cbm_mcp_server_set_scan_fallback(cbm_mcp_server_t *srv, bool enabled);
 char *cbm_mcp_coverage_note(cbm_mcp_server_t *srv, const char *project, const char *rel_path,
                             bool *resolved);
 
+/* PostToolUse(Edit|Write) blast-radius note for one repo-relative file: how
+ * many direct callers the symbols it defines have, in which files, how many
+ * in tests. Same *resolved contract as cbm_mcp_coverage_note. Returns
+ * malloc'd text or NULL when the file defines nothing the graph tracks. */
+char *cbm_mcp_edit_impact_note(cbm_mcp_server_t *srv, const char *project, const char *rel_path,
+                               bool *resolved);
+
+/* Project the working directory (or one of its 8 nearest ancestors) maps to,
+ * when that project has an indexed db in the cache; NULL otherwise. Query
+ * tools use this when the project argument is missing or names nothing that
+ * exists. Cached per process; cbm_mcp_reset_cwd_project_cache forgets it. */
+const char *cbm_mcp_cwd_project(void);
+void cbm_mcp_reset_cwd_project_cache(void);
+
 /* ── Testing helpers ───────────────────────────────────────────── */
 
 /* Get the store handle from a server (for test setup). */

@@ -476,92 +476,98 @@ int cbm_replace_binary(const char *path, const unsigned char *data, int len, int
 static const char skill_content[] =
     "---\n"
     "name: code-cortex\n"
-    "description: Use the codebase knowledge graph for structural code queries. "
-    "Triggers on: explore the codebase, understand the architecture, what functions exist, "
-    "show me the structure, who calls this function, what does X call, trace the call chain, "
-    "find callers of, show dependencies, impact analysis, dead code, unused functions, "
-    "high fan-out, refactor candidates, code quality audit, graph query syntax, "
-    "Cypher query examples, edge types, how to use search_graph.\n"
+    "description: Use the codebase knowledge graph for structural questions a text search cannot answer. Triggers on: who calls this function, find callers of, what does X call, trace the call chain, impact of changing X, which files must I edit, blast radius, which tests cover X, cross-language callers, pybind or FFI binding users, direct subclasses, class hierarchy, most-called functions, architecture overview, dead code, high fan-in or fan-out, Cypher query examples, how to use inspect_symbol or trace_path.\n"
     "---\n"
     "\n"
-    "# Code Cortex — Knowledge Graph Tools\n"
+    "# Code Cortex — when the graph beats grep\n"
     "\n"
-    "Graph tools return precise structural results in ~500 tokens vs ~80K for grep.\n"
+    "The graph does not replace text search. Plain grep already answers \"where is\n"
+    "`X` defined\" and \"which files mention `Y`\" well. Reach for the graph when the\n"
+    "answer needs relationships, and let the reply carry the evidence (file:line,\n"
+    "confidence, coverage) so you rarely need to re-check with grep.\n"
     "\n"
-    "## Quick Decision Matrix\n"
+    "## Use the graph for\n"
     "\n"
-    "| Question | Tool call |\n"
-    "|----------|----------|\n"
-    "| Who calls X? | `trace_path(direction=\"inbound\")` |\n"
-    "| What does X call? | `trace_path(direction=\"outbound\")` |\n"
-    "| Full call context | `trace_path(direction=\"both\")` |\n"
-    "| Find by name pattern | `search_graph(name_pattern=\"...\")` |\n"
-    "| Dead code | `search_graph(max_degree=0, exclude_entry_points=true)` |\n"
-    "| Cross-service edges | `query_graph` with Cypher |\n"
-    "| Impact of local changes | `detect_changes()` |\n"
-    "| Risk-classified trace | `trace_path(risk_labels=true)` |\n"
-    "| Text search | `search_code` or Grep |\n"
+    "| Question | Call |\n"
+    "|----------|------|\n"
+    "| Who calls `X`? With file:line, tests separated, cross-language callers | `inspect_symbol(symbol=\"X\")` |\n"
+    "| Which files must I edit if I change `X`'s signature? | `inspect_symbol(symbol=\"X\")` → `caller_files` (complete, never paged) |\n"
+    "| Which tests exercise `X`? | `inspect_symbol(symbol=\"X\")` → `related_tests` |\n"
+    "| Multi-hop call chain to/from `X` | `trace_path(function_name=\"X\", direction=\"inbound\"\\|\"outbound\"\\|\"both\", depth=3)` |\n"
+    "| Blast radius of my uncommitted edits | `detect_changes()` |\n"
+    "| Direct subclasses / implementations of a class | `inspect_symbol(symbol=\"Base\")` → `subclasses` |\n"
+    "| Most-called functions, module sizes, languages | `get_architecture()` |\n"
+    "| Dead code | `search_graph(max_degree=0, exclude_entry_points=true, label=\"Function\")` |\n"
+    "| Anything else structural | `query_graph(query=\"MATCH ... RETURN ...\")` |\n"
     "\n"
-    "## Exploration Workflow\n"
-    "1. `list_projects` — check if project is indexed\n"
-    "2. `get_graph_schema` — understand node/edge types\n"
-    "3. `search_graph(label=\"Function\", name_pattern=\".*Pattern.*\")` — find code\n"
-    "4. `get_code_snippet(qualified_name=\"project.path.FuncName\")` — read source\n"
+    "## Leave to grep / Read\n"
     "\n"
-    "## Tracing Workflow\n"
-    "1. `search_graph(name_pattern=\".*FuncName.*\")` — discover exact name\n"
-    "2. `trace_path(function_name=\"FuncName\", direction=\"both\", depth=3)` — trace\n"
-    "3. `detect_changes()` — map git diff to affected symbols\n"
+    "- Exact identifier or string literal lookups, config values, error messages.\n"
+    "- Non-code files. Reading a file before editing it.\n"
+    "- Anything in a file the reply marks `coverage_note` (partially parsed): the\n"
+    "  graph is a lower bound there.\n"
     "\n"
-    "## Quality Analysis\n"
-    "- Dead code: `search_graph(max_degree=0, exclude_entry_points=true)`\n"
-    "- High fan-out: `search_graph(min_degree=10, relationship=\"CALLS\", "
-    "direction=\"outbound\")`\n"
-    "- High fan-in: `search_graph(min_degree=10, relationship=\"CALLS\", "
-    "direction=\"inbound\")`\n"
+    "## Reading a reply\n"
     "\n"
-    "## 14 MCP Tools\n"
-    "`index_repository`, `index_status`, `list_projects`, `delete_project`,\n"
-    "`search_graph`, `search_code`, `trace_path`, `detect_changes`,\n"
-    "`query_graph`, `get_graph_schema`, `get_code_snippet`, `get_architecture`,\n"
-    "`manage_adr`, `ingest_traces`\n"
+    "- `callers[].call_lines` are call-site lines in `callers[].file`; open that\n"
+    "  line to verify. `confidence` + `strategy` say how the edge was resolved;\n"
+    "  `heuristic: true` marks a pattern-only match.\n"
+    "- `callers_total`, `related_tests_total`, `subclasses_total` are exact even\n"
+    "  when the list is paged; `caller_files` is always complete.\n"
+    "- `index.file_modified_after_index` / `freshness_note`: the file changed since\n"
+    "  indexing — re-run `index_repository` if it matters.\n"
+    "- `truncated` + `continuation`: the reply hit its byte budget; page with\n"
+    "  `callers_offset` or raise `max_bytes`.\n"
     "\n"
-    "## Edge Types\n"
-    "CALLS, HTTP_CALLS, ASYNC_CALLS, IMPORTS, DEFINES, DEFINES_METHOD,\n"
-    "HANDLES, IMPLEMENTS, OVERRIDE, USAGE, FILE_CHANGES_WITH,\n"
-    "CONTAINS_FILE, CONTAINS_FOLDER, CONTAINS_PACKAGE\n"
+    "## Names\n"
     "\n"
-    "## Cypher Examples (for query_graph)\n"
+    "`project` is optional inside an indexed repository (it is inferred from the\n"
+    "working directory; a wrong name is answered for the cwd project with a\n"
+    "`project_note`). `inspect_symbol`, `trace_path` and `get_code_snippet` accept\n"
+    "a bare name, `Class::method`, or a qualified name; an ambiguous name returns\n"
+    "`suggestions`.\n"
+    "\n"
+    "## Tools\n"
+    "\n"
+    "`inspect_symbol`, `trace_path`, `detect_changes`, `search_graph`,\n"
+    "`get_code_snippet`, `get_architecture`, `query_graph`, `search_code`,\n"
+    "`get_graph_schema`, `index_repository`, `index_status`, `list_projects`,\n"
+    "`delete_project`, `manage_adr`, `ingest_traces`\n"
+    "\n"
+    "## Cypher examples (query_graph)\n"
+    "\n"
     "```\n"
-    "MATCH (a)-[r:HTTP_CALLS]->(b) RETURN a.name, b.name, r.url_path, "
-    "r.confidence LIMIT 20\n"
-    "MATCH (f:Function) WHERE f.name =~ '.*Handler.*' RETURN f.name, f.file_path\n"
-    "MATCH (a)-[r:CALLS]->(b) WHERE a.name = 'main' RETURN b.name\n"
+    "MATCH (c)-[:INHERITS]->(p) WHERE p.name = 'Layer' RETURN c.name, c.file_path\n"
+    "MATCH (a)-[r:CALLS]->(b) WHERE b.name = 'fnvHash' RETURN a.name, a.file_path, r.line\n"
+    "MATCH (a)-[r:HTTP_CALLS]->(b) RETURN a.name, b.name, r.url_path LIMIT 20\n"
     "```\n"
     "\n"
     "## Gotchas\n"
-    "1. `search_graph(relationship=\"HTTP_CALLS\")` filters nodes by degree — "
-    "use `query_graph` with Cypher to see actual edges.\n"
-    "2. `query_graph` has a 200-row cap — use `search_graph` with degree filters "
-    "for counting.\n"
-    "3. `trace_path` needs exact names — use `search_graph(name_pattern=...)` first.\n"
-    "4. `direction=\"outbound\"` misses cross-service callers — use "
-    "`direction=\"both\"`.\n"
-    "5. Results default to 10 per page — check `has_more` and use `offset`.\n";
+    "\n"
+    "1. `query_graph` caps at 200 rows; use `inspect_symbol` totals or\n"
+    "   `search_graph` degree filters for counts.\n"
+    "2. Header-only prototypes and macros are not graph nodes: a signature change\n"
+    "   still needs the declaring header — grep for it.\n"
+    "3. C++ class extraction can miss classes in some headers (`coverage_note`\n"
+    "   flags the file); treat class sets as lower bounds and cross-check.\n"
+    "4. `trace_path` follows CALLS only by default; pass `edge_types` for others.\n";
 
 static const char codex_instructions_content[] =
     "# Codebase Knowledge Graph\n"
     "\n"
-    "This project uses code-cortex-mcp to maintain a knowledge graph of the codebase.\n"
-    "Use the MCP tools to explore and understand the code:\n"
+    "This project is indexed by code-cortex-mcp. In Codex its tools appear as\n"
+    "`mcp__code_cortex_mcp__<tool>` (for example `mcp__code_cortex_mcp__inspect_symbol`).\n"
     "\n"
-    "- `search_graph` — find functions, classes, routes by pattern\n"
-    "- `trace_path` — trace who calls a function or what it calls\n"
-    "- `get_code_snippet` — read function source code\n"
-    "- `query_graph` — run Cypher queries for complex patterns\n"
-    "- `get_architecture` — high-level project summary\n"
+    "Use the graph when the question is about relationships:\n"
+    "- `inspect_symbol` — direct callers with call-site lines, related tests, callers from\n"
+    "  other languages, subclasses; `caller_files` is the complete edit list for a signature change\n"
+    "- `trace_path` — multi-hop call chains (direction inbound/outbound/both, depth)\n"
+    "- `detect_changes` — blast radius of uncommitted edits\n"
+    "- `get_architecture` — modules, languages, most-called functions\n"
     "\n"
-    "Always prefer graph tools over grep for code discovery.\n";
+    "Plain shell search is fine for text, config values and exact identifiers.\n"
+    "The `project` argument is optional inside this repository. Replies include\n"
+    "file:line evidence and confidence, so verify from the reply rather than re-searching.\n";
 
 /* Old skill names — cleaned up during install to remove stale directories. */
 static const char *old_skill_names[] = {
@@ -1278,25 +1284,26 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
 static const char agent_instructions_content[] =
     "# Codebase Knowledge Graph (code-cortex-mcp)\n"
     "\n"
-    "This project uses code-cortex-mcp to maintain a knowledge graph of the codebase.\n"
-    "ALWAYS prefer MCP graph tools over grep/glob/file-search for code discovery.\n"
+    "This repository is indexed by code-cortex-mcp. Use the graph for questions a\n"
+    "text search cannot answer; keep grep for text and exact identifiers.\n"
     "\n"
-    "## Priority Order\n"
-    "1. `search_graph` — find functions, classes, routes, variables by pattern\n"
-    "2. `trace_path` — trace who calls a function or what it calls\n"
-    "3. `get_code_snippet` — read specific function/class source code\n"
-    "4. `query_graph` — run Cypher queries for complex patterns\n"
-    "5. `get_architecture` — high-level project summary\n"
+    "## Use the graph for\n"
+    "- Callers of a symbol with call-site lines, related tests, callers from other\n"
+    "  languages: `inspect_symbol(symbol=\"X\")` (`caller_files` lists every file to edit)\n"
+    "- Multi-hop call chains: `trace_path(function_name=\"X\", direction=\"inbound\", depth=3)`\n"
+    "- Blast radius of uncommitted edits: `detect_changes()`\n"
+    "- Direct subclasses, most-called functions, module map: `inspect_symbol`, `get_architecture()`\n"
     "\n"
-    "## When to fall back to grep/glob\n"
-    "- Searching for string literals, error messages, config values\n"
-    "- Searching non-code files (Dockerfiles, shell scripts, configs)\n"
-    "- When MCP tools return insufficient results\n"
+    "## Keep using grep / file reads for\n"
+    "- String literals, config values, error messages, non-code files\n"
+    "- Exact identifier lookups you can already spell\n"
+    "- Files a reply flags with `coverage_note` (partially parsed — graph is a lower bound)\n"
     "\n"
-    "## Examples\n"
-    "- Find a handler: `search_graph(name_pattern=\".*OrderHandler.*\")`\n"
-    "- Who calls it: `trace_path(function_name=\"OrderHandler\", direction=\"inbound\")`\n"
-    "- Read source: `get_code_snippet(qualified_name=\"pkg/orders.OrderHandler\")`\n";
+    "## Notes\n"
+    "- `project` is optional inside this repository (inferred from the working directory).\n"
+    "- Names may be bare (`parse`), scoped (`Packet::addLayer`) or fully qualified.\n"
+    "- Replies carry file:line evidence, resolver confidence and freshness flags; verify\n"
+    "  from those instead of re-searching.\n";
 
 const char *cbm_get_agent_instructions(void) {
     return agent_instructions_content;
@@ -1699,10 +1706,12 @@ int cbm_remove_codex_mcp(const char *config_path) {
  * so it is valid both inside a TOML single-quoted literal (Codex config.toml)
  * and a JSON string (Gemini settings.json) — i.e. it contains NO single quotes
  * and NO newlines. (issues #330 + Gemini/Antigravity parity) */
-#define CMM_SESSION_REMINDER_CMD                                                \
-    "echo \"Code discovery: prefer code-cortex-mcp (search_graph, trace_path, " \
-    "get_code_snippet, query_graph, search_code) over grep/file-read; run "     \
-    "index_repository first if the project is not indexed.\""
+#define CMM_SESSION_REMINDER_CMD                                                       \
+    "echo \"code-cortex-mcp: use inspect_symbol(<name>) for direct callers with "      \
+    "call-site lines, related tests and cross-language callers; trace_path for "       \
+    "multi-hop call chains; detect_changes for the blast radius of edits. Plain grep " \
+    "is fine for text and exact identifiers. The project argument is optional inside " \
+    "an indexed repository; run index_repository once if it is not indexed.\""
 
 /* Sentinel-delimited block so upsert/remove are robust to the nested TOML
  * array-of-tables (which both start with '['). */
@@ -2220,6 +2229,33 @@ int cbm_remove_claude_hooks(const char *settings_path) {
     });
 }
 
+/* PostToolUse on edits: the same shim script; the binary dispatches on
+ * hook_event_name and answers with the edited file's blast radius. Fires
+ * exactly when the agent needs impact information and costs it nothing. */
+#define CMM_POST_HOOK_MATCHER "Edit|Write|MultiEdit"
+
+int cbm_upsert_claude_post_hooks(const char *settings_path) {
+    char command[CLI_BUF_1K];
+    cbm_resolve_hook_command(CMM_HOOK_GATE_SCRIPT, command, sizeof(command));
+    return upsert_hooks_json((hooks_upsert_args_t){
+        .settings_path = settings_path,
+        .hook_event = "PostToolUse",
+        .matcher_str = CMM_POST_HOOK_MATCHER,
+        .command_str = command,
+        .timeout_sec = CMM_HOOK_TIMEOUT_SEC,
+        .match_command_substr = CMM_HOOK_GATE_SCRIPT,
+    });
+}
+
+int cbm_remove_claude_post_hooks(const char *settings_path) {
+    return remove_hooks_json((hooks_remove_args_t){
+        .settings_path = settings_path,
+        .hook_event = "PostToolUse",
+        .matcher_str = CMM_POST_HOOK_MATCHER,
+        .match_command_substr = CMM_HOOK_GATE_SCRIPT,
+    });
+}
+
 /* Install the search-augmenter shim to ~/.claude/hooks/.
  * The shim is a thin wrapper that delegates to `<binary> hook-augment`,
  * which adds graph context to Grep/Glob/Bash search calls. It NEVER blocks a
@@ -2278,8 +2314,8 @@ void cbm_install_hook_gate_script(const char *home, const char *binary_path) {
 /* SessionStart hook: remind agent to use MCP tools on every context reset. */
 #define CMM_SESSION_REMINDER_SCRIPT "cbm-session-reminder"
 
-static void cbm_install_session_reminder_script(const char *home) {
-    if (!home) {
+static void cbm_install_session_reminder_script(const char *home, const char *binary_path) {
+    if (!home || !binary_path || strchr(binary_path, '"') != NULL) {
         return;
     }
     char config_dir[CLI_BUF_1K];
@@ -2298,23 +2334,30 @@ static void cbm_install_session_reminder_script(const char *home) {
     if (!f) {
         return;
     }
-    (void)fprintf(
-        f, "#!/usr/bin/env bash\n"
-           "# SessionStart hook: remind agent to use code-cortex-mcp tools.\n"
-           "# Installed by code-cortex-mcp. Fires on startup/resume/clear/compact.\n"
-           "cat << 'REMINDER'\n"
-           "CRITICAL - Code Discovery Protocol:\n"
-           "1. ALWAYS use code-cortex-mcp tools FIRST for ANY code exploration:\n"
-           "   - search_graph(name_pattern/label/qn_pattern) to find functions/classes/routes\n"
-           "   - trace_path(function_name, mode=calls|data_flow|cross_service) for call chains\n"
-           "   - get_code_snippet(qualified_name) for exact symbol source (precise ranges)\n"
-           "   - query_graph(query) for complex Cypher patterns\n"
-           "   - get_architecture(aspects) for project structure\n"
-           "   - search_code(pattern) for text search (graph-augmented grep)\n"
-           "2. Use Grep/Glob/Read freely for text, configs, non-code files, and\n"
-           "   always Read a file before editing it.\n"
-           "3. If a project is not indexed yet, run index_repository FIRST.\n"
-           "REMINDER\n");
+    /* The binary renders an architecture brief for the session's project
+     * (or a one-line "not indexed" pointer) from the hook payload on stdin.
+     * The heredoc is the fallback when the binary is gone: a short statement
+     * of what the graph is for, not a directive to use it for everything —
+     * "ALWAYS use graph tools FIRST" measurably made agents search more
+     * without ever calling the graph. */
+    (void)fprintf(f,
+                  "#!/usr/bin/env bash\n"
+                  "# SessionStart hook: code-cortex-mcp architecture brief.\n"
+                  "# Installed by code-cortex-mcp. Fires on startup/resume/clear/compact.\n"
+                  "BIN=\"%s\"\n"
+                  "if [ -x \"$BIN\" ]; then\n"
+                  "  OUT=\"$(\"$BIN\" hook-augment 2>/dev/null)\"\n"
+                  "  if [ -n \"$OUT\" ]; then printf '%%s\\n' \"$OUT\"; exit 0; fi\n"
+                  "fi\n"
+                  "cat << 'REMINDER'\n"
+                  "code-cortex-mcp is installed. Use its graph for what grep cannot do: "
+                  "inspect_symbol(<name>) for direct callers with call-site lines, related "
+                  "tests and cross-language callers; trace_path for multi-hop call chains; "
+                  "detect_changes for the blast radius of your edits. Plain grep is fine for "
+                  "text and exact identifiers. The project argument is optional inside an "
+                  "indexed repository; run index_repository once if it is not indexed.\n"
+                  "REMINDER\n",
+                  binary_path);
 #ifndef _WIN32
     fchmod(fileno(f), CLI_OCTAL_PERM);
 #endif
@@ -2393,10 +2436,12 @@ static void cbm_install_subagent_reminder_script(const char *home) {
                   "# SubagentStart injects context via JSON additionalContext, not plain stdout.\n"
                   "cat << 'REMINDER'\n"
                   "{\"hookSpecificOutput\":{\"hookEventName\":\"SubagentStart\","
-                  "\"additionalContext\":\"Code discovery: prefer code-cortex-mcp tools "
-                  "(search_graph, trace_path, get_code_snippet, query_graph, get_architecture, "
-                  "search_code) over grep/file-read for navigating code. Use Grep/Glob/Read for "
-                  "text, configs, and non-code files.\"}}\n"
+                  "\"additionalContext\":\"code-cortex-mcp graph tools are available. Use "
+                  "inspect_symbol(<name>) for direct callers with call-site lines, related tests "
+                  "and cross-language callers; trace_path for multi-hop call chains; "
+                  "detect_changes for the blast radius of edits. Plain grep is fine for text and "
+                  "exact identifiers. The project argument is optional inside this "
+                  "repository.\"}}\n"
                   "REMINDER\n");
 #ifndef _WIN32
     fchmod(fileno(f), CLI_OCTAL_PERM);
@@ -2432,9 +2477,9 @@ int cbm_remove_claude_subagent_hooks(const char *settings_path) {
 /* Matcher excludes read_file for consistency with the Claude fix: the hook
  * is an advisory reminder, not a gate over the agent's file reads. */
 #define GEMINI_HOOK_MATCHER "google_search|grep_search"
-#define GEMINI_HOOK_COMMAND                                           \
-    "echo 'Reminder: prefer code-cortex-mcp search_graph/trace_path/" \
-    "get_code_snippet over grep/file search for code discovery.' >&2"
+#define GEMINI_HOOK_COMMAND                                                        \
+    "echo 'code-cortex-mcp: for callers, impact, call chains or tests of a symbol, " \
+    "inspect_symbol / trace_path / detect_changes beat a text search.' >&2"
 
 int cbm_upsert_gemini_hooks(const char *settings_path) {
     return upsert_hooks_json((hooks_upsert_args_t){
@@ -3476,15 +3521,18 @@ static void install_claude_code_config(const char *home, const char *binary_path
     snprintf(settings_path, sizeof(settings_path), "%s/settings.json", config_dir);
     if (!dry_run) {
         cbm_upsert_claude_hooks(settings_path);
+        cbm_upsert_claude_post_hooks(settings_path);
         cbm_install_hook_gate_script(home, binary_path);
-        cbm_install_session_reminder_script(home);
+        cbm_install_session_reminder_script(home, binary_path);
         cbm_upsert_session_hooks(settings_path);
         cbm_install_subagent_reminder_script(home);
         cbm_upsert_claude_subagent_hooks(settings_path);
     }
-    printf("  hooks: PreToolUse (Grep/Glob/Bash search-graph augmenter, non-blocking)\n");
-    printf("  hooks: SessionStart (MCP usage reminder on startup/resume/clear/compact)\n");
-    printf("  hooks: SubagentStart (MCP usage reminder for subagents)\n");
+    printf("  hooks: PreToolUse (Grep/Glob/Bash: exact-symbol facts grep cannot show; "
+           "Read: coverage note; non-blocking)\n");
+    printf("  hooks: PostToolUse (Edit/Write/MultiEdit: blast radius of the edited file)\n");
+    printf("  hooks: SessionStart (architecture brief on startup/resume/clear/compact)\n");
+    printf("  hooks: SubagentStart (when to use the graph, for subagents)\n");
 
     /* Migration nudge: when CLAUDE_CONFIG_DIR is set and a legacy ~/.claude tree
      * still exists, mention it so users can clean up stale artifacts. */
@@ -4195,10 +4243,11 @@ static void uninstall_claude_code(const char *home, bool dry_run) {
     snprintf(settings_path, sizeof(settings_path), "%s/settings.json", config_dir);
     if (!dry_run) {
         cbm_remove_claude_hooks(settings_path);
+        cbm_remove_claude_post_hooks(settings_path);
         cbm_remove_session_hooks(settings_path);
         cbm_remove_claude_subagent_hooks(settings_path);
     }
-    printf("  removed PreToolUse + SessionStart + SubagentStart hooks\n");
+    printf("  removed PreToolUse + PostToolUse + SessionStart + SubagentStart hooks\n");
 }
 
 /* Remove MCP + instructions for a generic agent. */
@@ -4966,4 +5015,206 @@ int cbm_cli_print_tool_help(const char *tool_name) {
         yyjson_doc_free(doc);
     }
     return CLI_OK;
+}
+
+/* ── doctor ────────────────────────────────────────────────────────
+ * A stale install degrades to a silent no-op: list_projects hides projects,
+ * the hook matcher misses Bash, the agent concludes "not indexed" and falls
+ * back to grep with no error anywhere. `doctor` makes that visible in one
+ * command: binary version, tool count, whether the cwd resolves to an
+ * indexed project (and how fresh/complete that index is), and whether the
+ * Claude Code / Codex integration files reference this binary and the
+ * current hook matchers. */
+
+static char *doctor_read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    enum { DOCTOR_FILE_CAP = 1024 * 1024 };
+    char *buf = (char *)malloc(DOCTOR_FILE_CAP + 1);
+    if (!buf) {
+        (void)fclose(f);
+        return NULL;
+    }
+    size_t n = fread(buf, 1, DOCTOR_FILE_CAP, f);
+    (void)fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
+static int doctor_count_substr(const char *hay, const char *needle) {
+    int n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle)) {
+        n++;
+    }
+    return n;
+}
+
+/* Value of "<key>": in an escaped-JSON tool envelope (index_status text). */
+static int doctor_json_int(const char *res, const char *key) {
+    char pat[CLI_BUF_256];
+    snprintf(pat, sizeof(pat), "\\\"%s\\\":", key);
+    const char *p = res ? strstr(res, pat) : NULL;
+    return p ? (int)strtol(p + strlen(pat), NULL, 10) : 0;
+}
+
+int cbm_cmd_doctor(const char *version) {
+    int warnings = 0;
+    int failures = 0;
+    printf("code-cortex-mcp doctor\n");
+    printf("  version:   %s\n", version ? version : "?");
+    printf("  cache dir: %s\n", cbm_resolve_cache_dir());
+
+    /* Tool catalog: one page must hold every tool (Codex never follows the
+     * cursor). */
+    char *tools = cbm_mcp_tools_list();
+    int tool_count = tools ? doctor_count_substr(tools, "\"name\":") : 0;
+    bool has_inspect = tools && strstr(tools, "\"inspect_symbol\"") != NULL;
+    free(tools);
+    if (tool_count >= 15 && has_inspect) {
+        printf("  OK   tools/list: %d tools on one page (inspect_symbol present)\n", tool_count);
+    } else {
+        printf("  FAIL tools/list: %d tools, inspect_symbol %s — this binary predates the "
+               "single-page catalog fix\n",
+               tool_count, has_inspect ? "present" : "missing");
+        failures++;
+    }
+
+    /* Working directory → project. */
+    const char *project = cbm_mcp_cwd_project();
+    if (!project) {
+        char cwd[CLI_BUF_1K];
+        if (!getcwd(cwd, sizeof(cwd))) {
+            cwd[0] = '\0';
+        }
+        printf("  WARN cwd %s is not inside an indexed repository: graph tools will need an "
+               "explicit project, and callers/impact queries for this code are unavailable. "
+               "Fix: run the index_repository tool once (or `code-cortex-mcp cli "
+               "index_repository --repo_path <root>`).\n",
+               cwd);
+        warnings++;
+    } else {
+        cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+        if (srv) {
+            char args[CLI_BUF_1K];
+            snprintf(args, sizeof(args), "{\"project\":\"%s\"}", project);
+            char *res = cbm_mcp_handle_tool(srv, "index_status", args);
+            int nodes = doctor_json_int(res, "nodes");
+            int edges = doctor_json_int(res, "edges");
+            int partial = 0;
+            const char *pp = res ? strstr(res, "\\\"parse_partial\\\":{") : NULL;
+            if (pp) {
+                partial = doctor_json_int(pp, "count");
+            }
+            char indexed_at[CLI_BUF_256] = "";
+            const char *ia = res ? strstr(res, "\\\"indexed_at\\\":\\\"") : NULL;
+            if (ia) {
+                ia += strlen("\\\"indexed_at\\\":\\\"");
+                size_t k = 0;
+                while (ia[k] && ia[k] != '\\' && k + 1 < sizeof(indexed_at)) {
+                    indexed_at[k] = ia[k];
+                    k++;
+                }
+                indexed_at[k] = '\0';
+            }
+            free(res);
+            printf("  OK   cwd resolves to project \"%s\" (%d nodes, %d edges%s%s)\n", project,
+                   nodes, edges, indexed_at[0] ? ", indexed " : "", indexed_at);
+            if (partial > 0) {
+                printf("  WARN %d file(s) were only partially parsed; graph answers for them are "
+                       "lower bounds (index_status lists them)\n",
+                       partial);
+                warnings++;
+            }
+            cbm_mcp_server_free(srv);
+        }
+    }
+
+    /* Claude Code integration. */
+    const char *home = cbm_get_home_dir();
+    char config_dir[CLI_BUF_1K] = "";
+    if (home) {
+        cbm_claude_config_dir(home, config_dir, sizeof(config_dir));
+    }
+    if (config_dir[0]) {
+        char path[CLI_BUF_1K];
+        snprintf(path, sizeof(path), "%s/settings.json", config_dir);
+        char *settings = doctor_read_file(path);
+        if (!settings) {
+            printf("  INFO Claude Code: no %s (not installed for Claude Code)\n", path);
+        } else {
+            bool pre = strstr(settings, "\"" CMM_HOOK_MATCHER "\"") != NULL &&
+                       strstr(settings, CMM_HOOK_GATE_SCRIPT) != NULL;
+            bool post = strstr(settings, "\"PostToolUse\"") != NULL &&
+                        strstr(settings, "\"" CMM_POST_HOOK_MATCHER "\"") != NULL;
+            bool session = strstr(settings, CMM_SESSION_REMINDER_SCRIPT) != NULL;
+            if (pre && post && session) {
+                printf("  OK   Claude Code hooks: PreToolUse(%s), PostToolUse(%s), SessionStart\n",
+                       CMM_HOOK_MATCHER, CMM_POST_HOOK_MATCHER);
+            } else {
+                printf("  WARN Claude Code hooks out of date (PreToolUse %s, PostToolUse %s, "
+                       "SessionStart %s). Fix: code-cortex-mcp install -y\n",
+                       pre ? "ok" : "missing/old matcher", post ? "ok" : "missing",
+                       session ? "ok" : "missing");
+                warnings++;
+            }
+            free(settings);
+        }
+        snprintf(path, sizeof(path), "%s/hooks/%s", config_dir, CMM_HOOK_GATE_SCRIPT);
+        char *gate = doctor_read_file(path);
+        if (gate) {
+            const char *bin = strstr(gate, "BIN=\"");
+            char shown[CLI_BUF_1K] = "?";
+            if (bin) {
+                bin += strlen("BIN=\"");
+                size_t k = 0;
+                while (bin[k] && bin[k] != '"' && k + 1 < sizeof(shown)) {
+                    shown[k] = bin[k];
+                    k++;
+                }
+                shown[k] = '\0';
+            }
+            if (cbm_file_exists(shown)) {
+                printf("  OK   hook shim runs %s\n", shown);
+            } else {
+                printf("  WARN hook shim points at %s, which does not exist. Fix: "
+                       "code-cortex-mcp install -y\n",
+                       shown);
+                warnings++;
+            }
+            free(gate);
+        }
+        snprintf(path, sizeof(path), "%s/.mcp.json", config_dir);
+        char *mcp = doctor_read_file(path);
+        if (mcp && strstr(mcp, "code-cortex-mcp")) {
+            printf("  OK   Claude Code MCP registration: %s\n", path);
+        } else if (mcp) {
+            printf("  WARN %s does not register code-cortex-mcp. Fix: code-cortex-mcp install -y\n",
+                   path);
+            warnings++;
+        }
+        free(mcp);
+    }
+
+    /* Codex. */
+    if (home) {
+        char path[CLI_BUF_1K];
+        snprintf(path, sizeof(path), "%s/.codex/config.toml", home);
+        char *toml = doctor_read_file(path);
+        if (toml) {
+            if (strstr(toml, "[mcp_servers.code-cortex-mcp]")) {
+                printf("  OK   Codex MCP registration: %s (tools appear as "
+                       "mcp__code_cortex_mcp__<tool>; optional servers get a 1 s startup grace, "
+                       "which a cold first exec can exceed — install warms the binary)\n",
+                       path);
+            } else {
+                printf("  INFO Codex: %s does not register code-cortex-mcp\n", path);
+            }
+            free(toml);
+        }
+    }
+
+    printf("%d failure(s), %d warning(s)\n", failures, warnings);
+    return failures ? CLI_ERR : 0;
 }

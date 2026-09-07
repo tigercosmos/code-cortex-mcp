@@ -15,6 +15,7 @@ int tf_skip_count = 0;
 #include "mcp/mcp.h"               /* cbm_mcp_handle_tool — act as a real worker */
 #include <stdio.h>
 #include <stdlib.h>
+#include "foundation/compat.h" /* cbm_mkdtemp / cbm_setenv / cbm_mkdir — HOME isolation (all platforms) */
 #if !defined(_WIN32)
 #include "foundation/platform.h" /* cbm_resolve_self_exe_path — deleted-self probe */
 #include <unistd.h>
@@ -220,6 +221,31 @@ int main(int argc, char **argv) {
     int deleted_self_rc = tf_maybe_run_deleted_self_probe(argc, argv);
     if (deleted_self_rc >= 0) {
         return deleted_self_rc;
+    }
+
+    /* Isolate the suite from the developer's cache: query tools now resolve
+     * a missing or unknown project from the working directory, so a suite
+     * run inside an indexed checkout would otherwise answer "missing
+     * project" tests with the real repository. Isolation is by HOME, not
+     * CBM_CACHE_DIR: eighteen suites spell the cache path out as
+     * $HOME/.cache/code-cortex-mcp, and cbm_resolve_cache_dir derives the
+     * same path from HOME, so both stay in agreement. Suites that need a
+     * specific cache dir still set CBM_CACHE_DIR themselves. */
+    if (!getenv("CBM_CACHE_DIR") && !getenv("CBM_TEST_KEEP_HOME")) {
+        /* cbm_mkdtemp needs a CBM_SZ_256-sized template on Windows (it maps
+         * /tmp/ to %TEMP%\ in place). */
+        char home_tmp[256] = "/tmp/cbm_test_home_XXXXXX";
+        if (cbm_mkdtemp(home_tmp)) {
+            cbm_setenv("HOME", home_tmp, 1);
+#ifdef _WIN32
+            cbm_setenv("USERPROFILE", home_tmp, 1);
+#endif
+            char cache[300];
+            snprintf(cache, sizeof(cache), "%s/.cache", home_tmp);
+            cbm_mkdir(cache);
+            snprintf(cache, sizeof(cache), "%s/.cache/code-cortex-mcp", home_tmp);
+            cbm_mkdir(cache);
+        }
     }
 
     printf("\n  code-cortex-mcp  C test suite\n");

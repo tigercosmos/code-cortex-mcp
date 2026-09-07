@@ -1,20 +1,28 @@
 /*
  * hook_augment.c — `code-cortex-mcp hook-augment`
  *
- * A non-blocking Claude Code PreToolUse augmenter. Reads the hook JSON from
- * stdin, and for Grep/Glob calls — and Bash commands that ARE searches
- * (rg, grep, ag, ack, ugrep, git grep) — injects matching graph symbols as
- * `additionalContext` so the agent gets structured context alongside its
- * normal search results.
+ * A non-blocking Claude Code hook that delivers the graph as context instead
+ * of as a tool the agent has to choose to call. Reads the hook JSON from
+ * stdin and dispatches on hook_event_name:
+ *
+ *   SessionStart          -> a 1-2 KB architecture brief for the cwd's project
+ *                            (size, languages, modules, most-called functions)
+ *                            or a one-line "not indexed" pointer.
+ *   PreToolUse Grep/Glob, -> for an EXACT symbol in the search pattern, what
+ *   Bash searches            grep cannot show: definition vs declaration,
+ *                            caller/test/file counts with call-site lines,
+ *                            cross-language callers, subclasses, trust notes.
+ *   PreToolUse Read       -> coverage note when the file was not fully indexed.
+ *   PostToolUse Edit/Write-> blast radius of the edited file: direct callers of
+ *                            the symbols it defines, by file, tests separated.
  *
  * Cardinal rule: this NEVER blocks a tool call. Every error, timeout, missing
  * project, or short/odd pattern path results in `exit 0` with NO stdout
  * output (a clean pass-through). This is what makes issue #362 structurally
  * impossible to recur — the hook cannot deny a tool.
  *
- * The underlying query is `search_graph` (pure SQLite, shell-free) — chosen
- * over `search_code` (which shells out to grep|xargs) so the hook stays cheap
- * enough to run before every Grep/Glob/Bash call.
+ * Everything is pure SQLite through the in-process tool handlers (no shell),
+ * with a per-event hard deadline so the hook stays invisible.
  */
 
 #include "cli/cli.h"
@@ -38,10 +46,13 @@
 #define HA_STDIN_CAP (256 * 1024) /* hook payloads are tiny; cap defensively */
 #define HA_MIN_TOKEN 4            /* skip short/noisy patterns before any work */
 #define HA_MAX_TOKEN 96
-#define HA_RESULT_LIMIT 5
 #define HA_MAX_WALKUP 8    /* cwd may be a subdir of the indexed root  */
-#define HA_DEADLINE_MS 300 /* hard in-process budget (see also: the    */
-                           /* settings.json "timeout" backstop)        */
+/* Hard in-process budgets per hook event (see also: the settings.json
+ * "timeout" backstop). A search augment must be invisible; a post-edit
+ * note and the session brief may take a little longer. */
+#define HA_DEADLINE_PRE_MS 300
+#define HA_DEADLINE_POST_MS 1500
+#define HA_DEADLINE_SESSION_MS 3000
 
 /* ── Hard deadline ────────────────────────────────────────────────
  * A slow SQLite open or query must never stall the agent. When the timer
@@ -53,7 +64,7 @@ static void ha_deadline_exit(int sig) {
     _exit(0);
 }
 
-static void ha_arm_deadline(void) {
+static void ha_arm_deadline(int deadline_ms) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = ha_deadline_exit;
@@ -61,12 +72,14 @@ static void ha_arm_deadline(void) {
 
     struct itimerval it;
     memset(&it, 0, sizeof(it));
-    it.it_value.tv_sec = HA_DEADLINE_MS / 1000;
-    it.it_value.tv_usec = (HA_DEADLINE_MS % 1000) * 1000;
+    it.it_value.tv_sec = deadline_ms / 1000;
+    it.it_value.tv_usec = (deadline_ms % 1000) * 1000;
     setitimer(ITIMER_REAL, &it, NULL);
 }
 #else
-static void ha_arm_deadline(void) { /* Windows: rely on settings.json timeout */ }
+static void ha_arm_deadline(int deadline_ms) {
+    (void)deadline_ms; /* Windows: rely on settings.json timeout */
+}
 #endif
 
 /* ── stdin ────────────────────────────────────────────────────────── */
@@ -85,46 +98,71 @@ static char *ha_read_stdin(void) {
     return buf;
 }
 
-/* ── pattern → token ──────────────────────────────────────────────
- * Extract the longest identifier-like run ([A-Za-z_][A-Za-z0-9_]*) of at
- * least HA_MIN_TOKEN chars. Pure-identifier output means it is always safe
- * to embed in a regex (name_pattern) with no escaping. Returns false when
- * the pattern has no usable token (path globs, short/regex-only patterns) —
- * the caller then no-ops, which keeps the common cheap case cheap. */
-static bool ha_extract_token(const char *pattern, char *out, size_t out_sz) {
+/* ── pattern → tokens ─────────────────────────────────────────────
+ * Up to `max` distinct identifier-like runs ([A-Za-z_][A-Za-z0-9_]*, at least
+ * HA_MIN_TOKEN chars), longest first, so a pattern like "class Layer" tries
+ * "class" and then "Layer". Pure-identifier output is safe to embed in JSON
+ * and regexes unescaped. Returns the count (0 → the caller no-ops). */
+#define HA_MAX_CANDIDATES 3
+static int ha_extract_tokens(const char *pattern, char (*out)[HA_MAX_TOKEN + 1], int max) {
+    int n = 0;
     if (!pattern) {
-        return false;
+        return 0;
     }
-    size_t best_start = 0;
-    size_t best_len = 0;
     size_t i = 0;
     while (pattern[i]) {
-        if (isalpha((unsigned char)pattern[i]) || pattern[i] == '_') {
-            size_t start = i;
-            while (pattern[i] && (isalnum((unsigned char)pattern[i]) || pattern[i] == '_')) {
-                i++;
-            }
-            size_t len = i - start;
-            if (len > best_len) {
-                best_len = len;
-                best_start = start;
-            }
-        } else {
+        if (pattern[i] == '\\' && pattern[i + 1]) {
+            /* A regex escape (\b, \w, \s, ...) is a separator, not part of an
+             * identifier: '\bsdf_values\b' names sdf_values. */
+            i += 2;
+            continue;
+        }
+        if (!(isalpha((unsigned char)pattern[i]) || pattern[i] == '_')) {
+            i++;
+            continue;
+        }
+        size_t start = i;
+        while (pattern[i] && (isalnum((unsigned char)pattern[i]) || pattern[i] == '_')) {
             i++;
         }
+        size_t len = i - start;
+        if (len < HA_MIN_TOKEN) {
+            continue;
+        }
+        if (len > HA_MAX_TOKEN) {
+            len = HA_MAX_TOKEN;
+        }
+        char cand[HA_MAX_TOKEN + 1];
+        memcpy(cand, pattern + start, len);
+        cand[len] = '\0';
+        bool dup = false;
+        for (int k = 0; k < n; k++) {
+            if (strcmp(out[k], cand) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        /* Insert keeping longest-first order; drop the shortest on overflow. */
+        int pos = n;
+        while (pos > 0 && strlen(out[pos - 1]) < len) {
+            pos--;
+        }
+        if (pos >= max) {
+            continue;
+        }
+        int last = n < max ? n : max - 1;
+        for (int k = last; k > pos; k--) {
+            memcpy(out[k], out[k - 1], sizeof(out[k]));
+        }
+        memcpy(out[pos], cand, sizeof(cand));
+        if (n < max) {
+            n++;
+        }
     }
-    if (best_len < HA_MIN_TOKEN) {
-        return false;
-    }
-    if (best_len > HA_MAX_TOKEN) {
-        best_len = HA_MAX_TOKEN;
-    }
-    if (best_len + 1 > out_sz) {
-        best_len = out_sz - 1;
-    }
-    memcpy(out, pattern + best_start, best_len);
-    out[best_len] = '\0';
-    return true;
+    return n;
 }
 
 /* ── JSON helpers ─────────────────────────────────────────────────── */
@@ -132,98 +170,6 @@ static bool ha_extract_token(const char *pattern, char *out, size_t out_sz) {
 static const char *ha_obj_str(yyjson_val *obj, const char *key) {
     yyjson_val *v = obj ? yyjson_obj_get(obj, key) : NULL;
     return (v && yyjson_is_str(v)) ? yyjson_get_str(v) : NULL;
-}
-
-/* Build the search_graph args JSON: {"project":..,"name_pattern":".*tok.*",
- * "limit":N}. `token` is a pure identifier so regex embedding is safe. */
-static char *ha_build_args(const char *project, const char *token) {
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    char name_pattern[HA_MAX_TOKEN + 8];
-    snprintf(name_pattern, sizeof(name_pattern), ".*%s.*", token);
-
-    yyjson_mut_obj_add_str(doc, root, "project", project);
-    yyjson_mut_obj_add_str(doc, root, "name_pattern", name_pattern);
-    yyjson_mut_obj_add_int(doc, root, "limit", HA_RESULT_LIMIT);
-
-    char *out = yyjson_mut_write(doc, 0, NULL);
-    yyjson_mut_doc_free(doc);
-    return out; /* caller frees */
-}
-
-/* Parse the MCP envelope returned by cbm_mcp_handle_tool and, if it is a
- * successful search_graph result with >=1 hit, format a compact
- * additionalContext string. Returns malloc'd text or NULL.
- *
- * *is_error is set when the envelope is an MCP error (e.g. project not
- * indexed) so the caller can try a parent directory. */
-static char *ha_format_context(const char *envelope, const char *token, bool *is_error) {
-    *is_error = false;
-    yyjson_doc *edoc = yyjson_read(envelope, strlen(envelope), 0);
-    if (!edoc) {
-        return NULL;
-    }
-    yyjson_val *eroot = yyjson_doc_get_root(edoc);
-    yyjson_val *err = yyjson_obj_get(eroot, "isError");
-    if (err && yyjson_is_true(err)) {
-        *is_error = true;
-        yyjson_doc_free(edoc);
-        return NULL;
-    }
-    yyjson_val *content = yyjson_obj_get(eroot, "content");
-    yyjson_val *item0 = (content && yyjson_is_arr(content)) ? yyjson_arr_get(content, 0) : NULL;
-    const char *inner = ha_obj_str(item0, "text");
-    if (!inner) {
-        yyjson_doc_free(edoc);
-        return NULL;
-    }
-
-    yyjson_doc *idoc = yyjson_read(inner, strlen(inner), 0);
-    if (!idoc) {
-        yyjson_doc_free(edoc);
-        return NULL;
-    }
-    yyjson_val *iroot = yyjson_doc_get_root(idoc);
-    yyjson_val *results = yyjson_obj_get(iroot, "results");
-    size_t nres = (results && yyjson_is_arr(results)) ? yyjson_arr_size(results) : 0;
-    if (nres == 0) {
-        yyjson_doc_free(idoc);
-        yyjson_doc_free(edoc);
-        return NULL; /* valid project, just no matching symbols */
-    }
-
-    char *text = (char *)malloc(4096);
-    if (!text) {
-        yyjson_doc_free(idoc);
-        yyjson_doc_free(edoc);
-        return NULL;
-    }
-    int off = snprintf(text, 4096,
-                       "[code-cortex] %zu graph symbol(s) match \"%s\" "
-                       "(structured context; your search results below are "
-                       "unaffected):",
-                       nres, token);
-    size_t idx;
-    size_t maxn;
-    yyjson_val *r;
-    yyjson_arr_foreach(results, idx, maxn, r) {
-        if (off < 0 || off >= 3900) {
-            break;
-        }
-        const char *qn = ha_obj_str(r, "qualified_name");
-        const char *nm = ha_obj_str(r, "name");
-        const char *fp = ha_obj_str(r, "file_path");
-        const char *lb = ha_obj_str(r, "label");
-        const char *disp = (qn && qn[0]) ? qn : (nm ? nm : "");
-        off += snprintf(text + off, (size_t)(4096 - off), "\n- %s  %s%s%s", disp, fp ? fp : "",
-                        (lb && lb[0]) ? "  " : "", (lb && lb[0]) ? lb : "");
-    }
-
-    yyjson_doc_free(idoc);
-    yyjson_doc_free(edoc);
-    return text;
 }
 
 /* ── Read coverage note (#963) ────────────────────────────────────
@@ -278,13 +224,13 @@ static char *ha_resolve_coverage(cbm_mcp_server_t *srv, const char *file_path) {
     return NULL;
 }
 
-/* Emit the PreToolUse additionalContext payload to stdout (exactly once). */
-static void ha_emit(const char *text) {
+/* Emit a hookSpecificOutput additionalContext payload to stdout (exactly once). */
+static void ha_emit(const char *event, const char *text) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
     yyjson_mut_val *hso = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, hso, "hookEventName", "PreToolUse");
+    yyjson_mut_obj_add_str(doc, hso, "hookEventName", event);
     yyjson_mut_obj_add_str(doc, hso, "additionalContext", text);
     yyjson_mut_obj_add_val(doc, root, "hookSpecificOutput", hso);
 
@@ -310,48 +256,6 @@ bool cbm_hook_path_is_abs(const char *d) {
     return isalpha((unsigned char)d[0]) && d[1] == ':' && (d[2] == '/' || d[2] == '\0');
 }
 
-/* Walk up from `start`, deriving a project name at each level and querying
- * search_graph until an indexed project is found (or the walk is exhausted).
- * Stops at the first non-error result: a valid project with zero hits is a
- * legitimate "no match" and must NOT cause a parent-directory probe. */
-static char *ha_resolve_and_query(cbm_mcp_server_t *srv, const char *start, const char *token) {
-    char dir[4096];
-    snprintf(dir, sizeof(dir), "%s", start);
-
-    for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
-        char *project = cbm_project_name_from_path(dir);
-        if (project) {
-            char *args = ha_build_args(project, token);
-            free(project);
-            if (args) {
-                char *res = cbm_mcp_handle_tool(srv, "search_graph", args);
-                free(args);
-                if (res) {
-                    bool is_error = false;
-                    char *ctx = ha_format_context(res, token, &is_error);
-                    free(res);
-                    if (ctx) {
-                        return ctx; /* hits → done */
-                    }
-                    if (!is_error) {
-                        return NULL; /* valid project, no hits → stop */
-                    }
-                }
-            }
-        }
-        /* Not indexed at this level — climb to the parent. */
-        char *slash = strrchr(dir, '/');
-        if (!slash || slash == dir) {
-            break; /* POSIX root "/" */
-        }
-        if (slash == dir + 2 && dir[1] == ':') {
-            break; /* Windows drive root "X:/" — don't strip to "X:" */
-        }
-        *slash = '\0';
-    }
-    return NULL;
-}
-
 /* ── Bash search-command pattern extractor ────────────────────────────────
  * Tokenises and walks a Bash tool command to extract a search pattern for
  * graph augmentation.  Returns true and fills out when one clear pattern is
@@ -360,6 +264,10 @@ static char *ha_resolve_and_query(cbm_mcp_server_t *srv, const char *start, cons
 
 #define HA_BASH_TOK_MAX 32
 #define HA_BASH_TOK_SZ 256
+
+/* Directory named by a leading "cd <dir>;" in the last parsed Bash search
+ * command ("" when none). The augment starts its project walk-up there. */
+static char g_ha_cd_dir[HA_BASH_TOK_SZ];
 
 static int ha_tokenize(const char *cmd, char toks[][HA_BASH_TOK_SZ], int max) {
     int n = 0;
@@ -586,6 +494,27 @@ static bool ha_parse_bash_search_pattern(const char *cmd, char *out, size_t out_
             i++;
         } else if (strcmp(t, "tokf") == 0 && i + 1 < n && strcmp(toks[i + 1], "run") == 0) {
             i += 2;
+        } else if (strcmp(t, "cd") == 0) {
+            /* "cd <dir>; grep ..." / "cd <dir> && rg ...": skip to the command
+             * after the separator, remembering <dir> so the augment resolves
+             * the project the search actually runs in (not the payload cwd). */
+            i++;
+            g_ha_cd_dir[0] = '\0';
+            bool sep = false;
+            while (i < n && !sep) {
+                size_t tl = strlen(toks[i]);
+                bool bare_sep = strcmp(toks[i], ";") == 0 || strcmp(toks[i], "&&") == 0;
+                bool trailing = tl > 0 && toks[i][tl - 1] == ';';
+                if (!bare_sep && !g_ha_cd_dir[0]) {
+                    snprintf(g_ha_cd_dir, sizeof(g_ha_cd_dir), "%.*s",
+                             (int)(trailing ? tl - 1 : tl), toks[i]);
+                }
+                sep = bare_sep || trailing;
+                i++;
+            }
+            if (!sep) {
+                return false;
+            }
         } else {
             break;
         }
@@ -704,8 +633,429 @@ bool cbm_hook_augment_parse_bash_pattern_for_testing(const char *cmd, char *out,
     return ha_parse_bash_search_pattern(cmd, out, out_sz);
 }
 
+/* ── Tool-call plumbing ───────────────────────────────────────────── */
+
+#define HA_BRIEF_CALLERS 5
+#define HA_TEXT_SZ 2048
+
+/* Run one tool in-process and return its inner JSON payload (the parsed text
+ * of content[0]); *is_error mirrors the envelope's isError. Caller frees. */
+static yyjson_doc *ha_call(cbm_mcp_server_t *srv, const char *tool, const char *args,
+                           bool *is_error) {
+    *is_error = false;
+    char *env = cbm_mcp_handle_tool(srv, tool, args);
+    if (!env) {
+        return NULL;
+    }
+    yyjson_doc *edoc = yyjson_read(env, strlen(env), 0);
+    free(env);
+    if (!edoc) {
+        return NULL;
+    }
+    yyjson_val *eroot = yyjson_doc_get_root(edoc);
+    yyjson_val *err = yyjson_obj_get(eroot, "isError");
+    if (err && yyjson_is_true(err)) {
+        *is_error = true;
+    }
+    yyjson_val *content = yyjson_obj_get(eroot, "content");
+    yyjson_val *item0 = (content && yyjson_is_arr(content)) ? yyjson_arr_get(content, 0) : NULL;
+    const char *inner = ha_obj_str(item0, "text");
+    yyjson_doc *idoc = inner ? yyjson_read(inner, strlen(inner), 0) : NULL;
+    yyjson_doc_free(edoc);
+    return idoc;
+}
+
+/* An error payload that means "this project is not indexed" (climb to the
+ * parent directory), as opposed to "the project is fine, the symbol is not"
+ * (stop, say nothing). */
+static bool ha_error_is_project_miss(yyjson_doc *idoc) {
+    if (!idoc) {
+        return true;
+    }
+    const char *e = ha_obj_str(yyjson_doc_get_root(idoc), "error");
+    if (!e) {
+        return true;
+    }
+    return strstr(e, "project") != NULL || strstr(e, "not indexed") != NULL;
+}
+
+static int ha_obj_int(yyjson_val *obj, const char *key) {
+    yyjson_val *v = obj ? yyjson_obj_get(obj, key) : NULL;
+    return (v && yyjson_is_int(v)) ? yyjson_get_int(v) : 0;
+}
+
+static size_t ha_arr_size(yyjson_val *obj, const char *key) {
+    yyjson_val *v = obj ? yyjson_obj_get(obj, key) : NULL;
+    return (v && yyjson_is_arr(v)) ? yyjson_arr_size(v) : 0;
+}
+
+/* Append with bounds; keeps `off` valid. `cap` is the buffer capacity (the
+ * buffers here are heap blocks, so sizeof would be the pointer size). */
+#define HA_APPEND(buf, cap, off, ...)                                                    \
+    do {                                                                                 \
+        if ((off) >= 0 && (size_t)(off) < (size_t)(cap)) {                               \
+            int _n = snprintf((buf) + (off), (size_t)(cap) - (size_t)(off), __VA_ARGS__); \
+            (off) = _n < 0 ? (int)(cap) : (off) + _n;                                    \
+        }                                                                                \
+    } while (0)
+
+/* ── PreToolUse search augment: what grep does not know ───────────────
+ * The old hook listed up to five fuzzy name matches — a list the grep output
+ * already shows, which measured as a null effect in 243 sessions. This one
+ * fires only on an exact symbol and says what the text search cannot: where
+ * the definition is versus its declaration, how many callers exist and in
+ * how many files/tests, whether other languages call it, and whether the
+ * graph's answer for it is trustworthy. */
+static char *ha_symbol_brief(cbm_mcp_server_t *srv, const char *project, const char *token,
+                             bool *resolved) {
+    *resolved = false;
+    /* Project names are validated to [A-Za-z0-9._-] and tokens to identifier
+     * characters, so neither needs JSON escaping; the buffer must still hold
+     * the longest legal pair (project up to 1 KB) or the request is cut into
+     * malformed JSON and the augment silently vanishes. */
+    char args[HA_MAX_TOKEN + 1024 + 128];
+    int need = snprintf(args, sizeof(args),
+                        "{\"project\":\"%s\",\"symbol\":\"%s\",\"source_lines\":0,"
+                        "\"callers_limit\":%d,\"callees_limit\":0,\"max_bytes\":8000}",
+                        project, token, HA_BRIEF_CALLERS);
+    if (need < 0 || (size_t)need >= sizeof(args)) {
+        return NULL;
+    }
+    bool is_error = false;
+    yyjson_doc *d = ha_call(srv, "inspect_symbol", args, &is_error);
+    if (is_error) {
+        if (!ha_error_is_project_miss(d)) {
+            *resolved = true;
+        }
+        yyjson_doc_free(d);
+        return NULL;
+    }
+    *resolved = true;
+    if (!d) {
+        return NULL;
+    }
+    yyjson_val *r = yyjson_doc_get_root(d);
+    char *text = (char *)malloc(HA_TEXT_SZ);
+    if (!text) {
+        yyjson_doc_free(d);
+        return NULL;
+    }
+    int off = 0;
+
+    const char *status = ha_obj_str(r, "status");
+    if (status && strcmp(status, "ambiguous") == 0) {
+        yyjson_val *sugg = yyjson_obj_get(r, "suggestions");
+        size_t n = (sugg && yyjson_is_arr(sugg)) ? yyjson_arr_size(sugg) : 0;
+        HA_APPEND(text, HA_TEXT_SZ, off, "[code-cortex] `%s` has %zu definitions in the graph:", token, n);
+        size_t idx;
+        size_t maxn;
+        yyjson_val *s;
+        size_t shown = 0;
+        yyjson_arr_foreach(sugg, idx, maxn, s) {
+            if (shown++ >= 4) {
+                break;
+            }
+            HA_APPEND(text, HA_TEXT_SZ, off, "%s %s (%s, %s)", shown > 1 ? "," : "",
+                      ha_obj_str(s, "qualified_name") ? ha_obj_str(s, "qualified_name") : "?",
+                      ha_obj_str(s, "label") ? ha_obj_str(s, "label") : "?",
+                      ha_obj_str(s, "file_path") ? ha_obj_str(s, "file_path") : "?");
+        }
+        HA_APPEND(text, HA_TEXT_SZ, off, ". inspect_symbol(<qualified_name>) picks one.");
+        yyjson_doc_free(d);
+        return text;
+    }
+
+    yyjson_val *sym = yyjson_obj_get(r, "symbol");
+    if (!sym) {
+        free(text);
+        yyjson_doc_free(d);
+        return NULL;
+    }
+    const char *label = ha_obj_str(sym, "label");
+    const char *file = ha_obj_str(sym, "file");
+    HA_APPEND(text, HA_TEXT_SZ, off, "[code-cortex] `%s` is a %s defined at %s:%d-%d", token,
+              label ? label : "symbol", file ? file : "?", ha_obj_int(sym, "start_line"),
+              ha_obj_int(sym, "end_line"));
+    yyjson_val *also = yyjson_obj_get(r, "also_defined_as");
+    if (also && yyjson_is_arr(also) && yyjson_arr_size(also) > 0) {
+        yyjson_val *a0 = yyjson_arr_get(also, 0);
+        HA_APPEND(text, HA_TEXT_SZ, off, " (also %s at %s:%d%s)",
+                  ha_obj_str(a0, "label") ? ha_obj_str(a0, "label") : "declared",
+                  ha_obj_str(a0, "file") ? ha_obj_str(a0, "file") : "?", ha_obj_int(a0, "start_line"),
+                  yyjson_arr_size(also) > 1 ? ", +more" : "");
+    }
+    yyjson_val *decl = yyjson_obj_get(r, "declared_in");
+    if (decl && yyjson_is_arr(decl) && yyjson_arr_size(decl) > 0) {
+        yyjson_val *d0 = yyjson_arr_get(decl, 0);
+        HA_APPEND(text, HA_TEXT_SZ, off, ", declared in %s:%d",
+                  ha_obj_str(d0, "file") ? ha_obj_str(d0, "file") : "?", ha_obj_int(d0, "line"));
+    }
+    int callers_total = ha_obj_int(r, "callers_total");
+    int tests_total = ha_obj_int(r, "related_tests_total");
+    size_t files = ha_arr_size(r, "caller_files");
+    HA_APPEND(text, HA_TEXT_SZ, off, ". %d direct caller(s) in %zu file(s)", callers_total, files);
+    if (tests_total > 0) {
+        HA_APPEND(text, HA_TEXT_SZ, off, ", %d test(s)", tests_total);
+    }
+    yyjson_val *callers = yyjson_obj_get(r, "callers");
+    if (callers && yyjson_is_arr(callers) && yyjson_arr_size(callers) > 0) {
+        HA_APPEND(text, HA_TEXT_SZ, off, ": ");
+        size_t idx;
+        size_t maxn;
+        yyjson_val *c;
+        size_t shown = 0;
+        yyjson_arr_foreach(callers, idx, maxn, c) {
+            yyjson_val *lines = yyjson_obj_get(c, "call_lines");
+            int line = (lines && yyjson_is_arr(lines) && yyjson_arr_size(lines) > 0)
+                           ? (int)yyjson_get_int(yyjson_arr_get(lines, 0))
+                           : ha_obj_int(c, "start_line");
+            HA_APPEND(text, HA_TEXT_SZ, off, "%s%s:%d", shown ? ", " : "",
+                      ha_obj_str(c, "file") ? ha_obj_str(c, "file") : "?", line);
+            shown++;
+        }
+        if ((int)shown < callers_total) {
+            HA_APPEND(text, HA_TEXT_SZ, off, ", +%d more", callers_total - (int)shown);
+        }
+    }
+    int heuristic = ha_obj_int(r, "callers_heuristic");
+    if (heuristic > 0) {
+        HA_APPEND(text, HA_TEXT_SZ, off, " [%d resolved by name pattern only]", heuristic);
+    }
+    int subs = ha_obj_int(r, "subclasses_total");
+    if (subs > 0) {
+        HA_APPEND(text, HA_TEXT_SZ, off, ". %d subclass(es)", subs);
+    }
+    int cross = ha_obj_int(r, "cross_language_callers_total");
+    if (cross > 0) {
+        yyjson_val *cl = yyjson_obj_get(r, "cross_language_callers");
+        yyjson_val *c0 = (cl && yyjson_is_arr(cl)) ? yyjson_arr_get(cl, 0) : NULL;
+        HA_APPEND(text, HA_TEXT_SZ, off, ". %d caller(s) from %s (e.g. %s)", cross,
+                  ha_obj_str(c0, "language") ? ha_obj_str(c0, "language") : "another language",
+                  ha_obj_str(c0, "file") ? ha_obj_str(c0, "file") : "?");
+    }
+    yyjson_val *index = yyjson_obj_get(r, "index");
+    yyjson_val *stale = index ? yyjson_obj_get(index, "file_modified_after_index") : NULL;
+    if (stale && yyjson_is_true(stale)) {
+        HA_APPEND(text, HA_TEXT_SZ, off, ". NOTE: the defining file changed after indexing");
+    }
+    if (ha_obj_str(r, "coverage_note")) {
+        HA_APPEND(text, HA_TEXT_SZ, off, ". NOTE: the defining file was only partially parsed; treat graph "
+                             "counts as lower bounds");
+    }
+    HA_APPEND(text, HA_TEXT_SZ, off, ". Full list with call-site lines: inspect_symbol(\"%s\").", token);
+    yyjson_doc_free(d);
+    return text;
+}
+
+/* ── SessionStart brief ──────────────────────────────────────────────
+ * Replaces the "ALWAYS use graph tools" directive — which measurably made
+ * the agent search more without using the graph — with the one thing the
+ * graph had that grep could not produce: a 1-2 KB architecture brief. */
+static int ha_cmp_degree_desc(const void *a, const void *b) {
+    const int *x = (const int *)a;
+    const int *y = (const int *)b;
+    return (y[1] > x[1]) - (y[1] < x[1]);
+}
+
+static char *ha_session_brief(cbm_mcp_server_t *srv, const char *project, bool *resolved) {
+    *resolved = false;
+    char args[512];
+    snprintf(args, sizeof(args), "{\"project\":\"%s\"}", project);
+    bool is_error = false;
+    yyjson_doc *arch = ha_call(srv, "get_architecture", args, &is_error);
+    if (is_error || !arch) {
+        yyjson_doc_free(arch);
+        return NULL;
+    }
+    *resolved = true;
+    yyjson_val *ar = yyjson_doc_get_root(arch);
+    char *text = (char *)malloc(HA_TEXT_SZ);
+    if (!text) {
+        yyjson_doc_free(arch);
+        return NULL;
+    }
+    int off = 0;
+    HA_APPEND(text, HA_TEXT_SZ, off, "code-cortex: this repository is indexed as \"%s\" (%d symbols, %d edges",
+              project, ha_obj_int(ar, "total_nodes"), ha_obj_int(ar, "total_edges"));
+    yyjson_val *langs = yyjson_obj_get(ar, "languages");
+    if (langs && yyjson_is_arr(langs) && yyjson_arr_size(langs) > 0) {
+        HA_APPEND(text, HA_TEXT_SZ, off, "; ");
+        size_t idx;
+        size_t maxn;
+        yyjson_val *l;
+        size_t shown = 0;
+        yyjson_arr_foreach(langs, idx, maxn, l) {
+            if (shown >= 4) {
+                break;
+            }
+            HA_APPEND(text, HA_TEXT_SZ, off, "%s%s %d files", shown ? ", " : "",
+                      ha_obj_str(l, "language") ? ha_obj_str(l, "language") : "?",
+                      ha_obj_int(l, "file_count"));
+            shown++;
+        }
+    }
+    HA_APPEND(text, HA_TEXT_SZ, off, ").");
+    yyjson_val *pkgs = yyjson_obj_get(ar, "packages");
+    if (pkgs && yyjson_is_arr(pkgs) && yyjson_arr_size(pkgs) > 0) {
+        HA_APPEND(text, HA_TEXT_SZ, off, " Largest modules: ");
+        size_t idx;
+        size_t maxn;
+        yyjson_val *p;
+        size_t shown = 0;
+        yyjson_arr_foreach(pkgs, idx, maxn, p) {
+            if (shown >= 6) {
+                break;
+            }
+            HA_APPEND(text, HA_TEXT_SZ, off, "%s%s (%d)", shown ? ", " : "",
+                      ha_obj_str(p, "name") ? ha_obj_str(p, "name") : "?", ha_obj_int(p, "node_count"));
+            shown++;
+        }
+        HA_APPEND(text, HA_TEXT_SZ, off, ".");
+    }
+    yyjson_doc_free(arch);
+
+    /* Most-called functions: the centrality signal nothing in a shell has. */
+    snprintf(args, sizeof(args),
+             "{\"project\":\"%s\",\"label\":\"Function\",\"min_degree\":8,\"relationship\":"
+             "\"CALLS\",\"direction\":\"inbound\",\"limit\":120}",
+             project);
+    yyjson_doc *central = ha_call(srv, "search_graph", args, &is_error);
+    if (!is_error && central) {
+        yyjson_val *cr = yyjson_doc_get_root(central);
+        yyjson_val *results = yyjson_obj_get(cr, "results");
+        size_t n = (results && yyjson_is_arr(results)) ? yyjson_arr_size(results) : 0;
+        if (n > 0) {
+            enum { MAX_CENTRAL = 120 };
+            int order[MAX_CENTRAL][2];
+            size_t cnt = 0;
+            size_t idx;
+            size_t maxn;
+            yyjson_val *item;
+            yyjson_arr_foreach(results, idx, maxn, item) {
+                if (cnt >= MAX_CENTRAL) {
+                    break;
+                }
+                order[cnt][0] = (int)idx;
+                order[cnt][1] = ha_obj_int(item, "in_degree");
+                cnt++;
+            }
+            qsort(order, cnt, sizeof(order[0]), ha_cmp_degree_desc);
+            HA_APPEND(text, HA_TEXT_SZ, off, " Most-called functions: ");
+            for (size_t i = 0; i < cnt && i < 8; i++) {
+                yyjson_val *it = yyjson_arr_get(results, (size_t)order[i][0]);
+                HA_APPEND(text, HA_TEXT_SZ, off, "%s%s (%d callers, %s)", i ? ", " : "",
+                          ha_obj_str(it, "name") ? ha_obj_str(it, "name") : "?", order[i][1],
+                          ha_obj_str(it, "file_path") ? ha_obj_str(it, "file_path") : "?");
+            }
+            HA_APPEND(text, HA_TEXT_SZ, off, ".");
+        }
+    }
+    yyjson_doc_free(central);
+
+    HA_APPEND(text, HA_TEXT_SZ, off,
+              "\nUse the graph for what grep cannot do: inspect_symbol(<name>) for direct "
+              "callers with call-site lines, the tests that cover a symbol and callers from other "
+              "languages; trace_path for multi-hop call chains; detect_changes for the blast "
+              "radius of your edits. Plain grep is fine for text and for an exact identifier. The "
+              "project argument is optional inside this repository. Graph answers for partially "
+              "parsed files are lower bounds (results say so).");
+    return text;
+}
+
+/* ── Walk-up drivers ─────────────────────────────────────────────────
+ * Each derives a project name per directory level and stops at the first
+ * level that resolves to an indexed project — hits or not. */
+
+static char *ha_walk_symbol(cbm_mcp_server_t *srv, const char *start, const char *token) {
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", start);
+    for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
+        char *project = cbm_project_name_from_path(dir);
+        if (project) {
+            bool resolved = false;
+            char *ctx = ha_symbol_brief(srv, project, token, &resolved);
+            free(project);
+            if (ctx) {
+                return ctx;
+            }
+            if (resolved) {
+                return NULL;
+            }
+        }
+        if (!ha_strip_last_component(dir)) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+static char *ha_walk_session(cbm_mcp_server_t *srv, const char *start) {
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", start);
+    for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
+        char *project = cbm_project_name_from_path(dir);
+        if (project) {
+            bool resolved = false;
+            char *ctx = ha_session_brief(srv, project, &resolved);
+            free(project);
+            if (ctx) {
+                return ctx;
+            }
+            if (resolved) {
+                return NULL;
+            }
+        }
+        if (!ha_strip_last_component(dir)) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+static char *ha_walk_edit(cbm_mcp_server_t *srv, const char *file_path) {
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", file_path);
+    if (!ha_strip_last_component(dir)) {
+        return NULL;
+    }
+    for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
+        char *project = cbm_project_name_from_path(dir);
+        if (project) {
+            bool resolved = false;
+            const char *rel = file_path + strlen(dir) + 1;
+            char *ctx = cbm_mcp_edit_impact_note(srv, project, rel, &resolved);
+            free(project);
+            if (ctx) {
+                return ctx;
+            }
+            if (resolved) {
+                return NULL;
+            }
+        }
+        if (!ha_strip_last_component(dir)) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+/* Normalize a hook-provided path: '\\' -> '/', and require absolute. Returns
+ * false when unusable (the hook then no-ops). */
+static bool ha_norm_abs(const char *in, char *out, size_t out_sz) {
+    if (!in) {
+        return false;
+    }
+    snprintf(out, out_sz, "%s", in);
+    for (char *p = out; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    return cbm_hook_path_is_abs(out);
+}
+
 int cbm_cmd_hook_augment(void) {
-    ha_arm_deadline();
+    ha_arm_deadline(HA_DEADLINE_PRE_MS);
 
     char *input = ha_read_stdin();
     if (!input) {
@@ -717,37 +1067,99 @@ int cbm_cmd_hook_augment(void) {
         return 0;
     }
     yyjson_val *root = yyjson_doc_get_root(doc);
-
+    const char *event = ha_obj_str(root, "hook_event_name");
+    if (!event) {
+        event = "PreToolUse"; /* older payloads */
+    }
     const char *tool = ha_obj_str(root, "tool_name");
-    if (!tool || (strcmp(tool, "Grep") != 0 && strcmp(tool, "Glob") != 0 &&
-                  strcmp(tool, "Bash") != 0 && strcmp(tool, "Read") != 0)) {
+    yyjson_val *tin = yyjson_obj_get(root, "tool_input");
+
+    char cwdbuf[4096];
+    const char *cwd = ha_obj_str(root, "cwd");
+    if (!ha_norm_abs(cwd, cwdbuf, sizeof(cwdbuf))) {
+#ifndef _WIN32
+        if (!getcwd(cwdbuf, sizeof(cwdbuf))) {
+            cwdbuf[0] = '\0';
+        }
+#else
+        cwdbuf[0] = '\0';
+#endif
+    }
+    cwd = cwdbuf[0] ? cwdbuf : NULL;
+
+    /* SessionStart → architecture brief (plain stdout is the context). */
+    if (strcmp(event, "SessionStart") == 0) {
+        ha_arm_deadline(HA_DEADLINE_SESSION_MS);
+        if (cwd) {
+            cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+            if (srv) {
+                cbm_mcp_server_set_scan_fallback(srv, false);
+                char *brief = ha_walk_session(srv, cwd);
+                if (brief) {
+                    fputs(brief, stdout);
+                    fputc('\n', stdout);
+                    free(brief);
+                } else {
+                    fputs("code-cortex: this repository is not indexed, so callers, impact and "
+                          "cross-language queries are unavailable. Index it once with the "
+                          "index_repository tool (repo_path = the repository root); it takes "
+                          "seconds for most repositories and stays current afterwards.\n",
+                          stdout);
+                }
+                cbm_mcp_server_free(srv);
+            }
+        }
         yyjson_doc_free(doc);
         free(input);
         return 0;
     }
 
-    yyjson_val *tin = yyjson_obj_get(root, "tool_input");
-
-    /* Read → coverage note (#963): warn when the file being read is listed as
-     * not fully indexed. Independent of the Grep/Glob symbol augment below. */
-    if (strcmp(tool, "Read") == 0) {
-        const char *fp = ha_obj_str(tin, "file_path");
+    /* PostToolUse(Edit|Write|MultiEdit) → blast radius of the edited file. */
+    if (strcmp(event, "PostToolUse") == 0) {
+        if (!tool || (strcmp(tool, "Edit") != 0 && strcmp(tool, "Write") != 0 &&
+                      strcmp(tool, "MultiEdit") != 0)) {
+            yyjson_doc_free(doc);
+            free(input);
+            return 0;
+        }
+        ha_arm_deadline(HA_DEADLINE_POST_MS);
         char fpbuf[4096];
-        if (fp) {
-            snprintf(fpbuf, sizeof(fpbuf), "%s", fp);
-            for (char *p = fpbuf; *p; p++) {
-                if (*p == '\\') {
-                    *p = '/';
+        if (ha_norm_abs(ha_obj_str(tin, "file_path"), fpbuf, sizeof(fpbuf))) {
+            cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+            if (srv) {
+                cbm_mcp_server_set_scan_fallback(srv, false);
+                char *note = ha_walk_edit(srv, fpbuf);
+                if (note) {
+                    ha_emit("PostToolUse", note);
+                    free(note);
                 }
+                cbm_mcp_server_free(srv);
             }
         }
-        if (fp && cbm_hook_path_is_abs(fpbuf)) {
+        yyjson_doc_free(doc);
+        free(input);
+        return 0;
+    }
+
+    if (strcmp(event, "PreToolUse") != 0 || !tool ||
+        (strcmp(tool, "Grep") != 0 && strcmp(tool, "Glob") != 0 && strcmp(tool, "Bash") != 0 &&
+         strcmp(tool, "Read") != 0)) {
+        yyjson_doc_free(doc);
+        free(input);
+        return 0;
+    }
+
+    /* Read → coverage note (#963): warn when the file being read is listed as
+     * not fully indexed. Independent of the search augment below. */
+    if (strcmp(tool, "Read") == 0) {
+        char fpbuf[4096];
+        if (ha_norm_abs(ha_obj_str(tin, "file_path"), fpbuf, sizeof(fpbuf))) {
             cbm_mcp_server_t *rsrv = cbm_mcp_server_new(NULL);
             if (rsrv) {
                 cbm_mcp_server_set_scan_fallback(rsrv, false);
                 char *note = ha_resolve_coverage(rsrv, fpbuf);
                 if (note) {
-                    ha_emit(note);
+                    ha_emit("PreToolUse", note);
                     free(note);
                 }
                 cbm_mcp_server_free(rsrv);
@@ -763,55 +1175,41 @@ int cbm_cmd_hook_augment(void) {
      * and gets the ordinary silent pass-through. */
     char bash_pattern[HA_BASH_TOK_SZ];
     const char *pattern;
+    char startbuf[4096];
     if (strcmp(tool, "Bash") == 0) {
         const char *cmd = ha_obj_str(tin, "command");
+        g_ha_cd_dir[0] = '\0';
         if (!ha_parse_bash_search_pattern(cmd, bash_pattern, sizeof(bash_pattern))) {
             yyjson_doc_free(doc);
             free(input);
             return 0;
         }
         pattern = bash_pattern;
+        /* "cd <dir>; grep ..." searches <dir>, so resolve the project from
+         * there; a relative <dir> is joined onto the payload cwd. */
+        if (g_ha_cd_dir[0] && cwd) {
+            if (cbm_hook_path_is_abs(g_ha_cd_dir)) {
+                snprintf(startbuf, sizeof(startbuf), "%s", g_ha_cd_dir);
+            } else {
+                snprintf(startbuf, sizeof(startbuf), "%s/%s", cwd, g_ha_cd_dir);
+            }
+            for (char *p = startbuf; *p; p++) {
+                if (*p == '\\') {
+                    *p = '/';
+                }
+            }
+            cwd = startbuf;
+        }
     } else {
         pattern = ha_obj_str(tin, "pattern");
     }
-    char token[HA_MAX_TOKEN + 1];
-    if (!ha_extract_token(pattern, token, sizeof(token))) {
+    char tokens[HA_MAX_CANDIDATES][HA_MAX_TOKEN + 1];
+    int ntok = ha_extract_tokens(pattern, tokens, HA_MAX_CANDIDATES);
+    if (ntok == 0 || !cwd) {
         yyjson_doc_free(doc);
         free(input);
         return 0;
     }
-
-    const char *cwd = ha_obj_str(root, "cwd");
-    char cwdbuf[4096];
-#ifndef _WIN32
-    if (!cwd || !cbm_hook_path_is_abs(cwd)) {
-        if (!getcwd(cwdbuf, sizeof(cwdbuf))) {
-            yyjson_doc_free(doc);
-            free(input);
-            return 0;
-        }
-        cwd = cwdbuf;
-    }
-#else
-    /* Windows: Claude Code passes an absolute drive-letter cwd in the hook
-     * payload (e.g. C:\repo). Normalize '\\' -> '/' and require an absolute
-     * path; the walk-up loop handles POSIX and "X:/..." roots alike. Without
-     * a usable cwd there is nothing to augment — fail open cleanly. */
-    if (cwd) {
-        snprintf(cwdbuf, sizeof(cwdbuf), "%s", cwd);
-        for (char *p = cwdbuf; *p; p++) {
-            if (*p == '\\') {
-                *p = '/';
-            }
-        }
-        cwd = cwdbuf;
-    }
-    if (!cwd || !cbm_hook_path_is_abs(cwd)) {
-        yyjson_doc_free(doc);
-        free(input);
-        return 0;
-    }
-#endif
 
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
     if (!srv) {
@@ -820,13 +1218,14 @@ int cbm_cmd_hook_augment(void) {
         return 0;
     }
     cbm_mcp_server_set_scan_fallback(srv, false);
-
-    char *ctx = ha_resolve_and_query(srv, cwd, token);
-    if (ctx) {
-        ha_emit(ctx);
-        free(ctx);
+    for (int t = 0; t < ntok; t++) {
+        char *ctx = ha_walk_symbol(srv, cwd, tokens[t]);
+        if (ctx) {
+            ha_emit("PreToolUse", ctx);
+            free(ctx);
+            break;
+        }
     }
-
     cbm_mcp_server_free(srv);
     yyjson_doc_free(doc);
     free(input);

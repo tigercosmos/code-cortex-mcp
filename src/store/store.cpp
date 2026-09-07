@@ -3455,7 +3455,9 @@ static int bfs_collect_edges(cbm_store_t *s, int64_t start_id, const cbm_node_ho
 
     char edge_sql[ST_SQL_BUF];
     snprintf(edge_sql, sizeof(edge_sql),
-             "SELECT n1.name, n2.name, e.type, e.source_id, e.target_id, e.properties "
+             "SELECT n1.name, n2.name, e.type, e.source_id, e.target_id, e.properties, "
+             "CASE WHEN json_valid(e.properties) THEN "
+             "COALESCE(json_extract(e.properties, '$.confidence'), 1.0) ELSE 1.0 END "
              "FROM edges e "
              "JOIN nodes n1 ON n1.id = e.source_id "
              "JOIN nodes n2 ON n2.id = e.target_id "
@@ -3492,7 +3494,10 @@ static int bfs_collect_edges(cbm_store_t *s, int64_t start_id, const cbm_node_ho
         edges[en].from_name = heap_strdup((const char *)sqlite3_column_text(estmt, 0));
         edges[en].to_name = heap_strdup((const char *)sqlite3_column_text(estmt, SKIP_ONE));
         edges[en].type = heap_strdup((const char *)sqlite3_column_text(estmt, CBM_SZ_2));
-        edges[en].confidence = (double)SKIP_ONE;
+        /* Resolver confidence lives in the edge properties (pass_calls writes
+         * "confidence":0.xx); a missing value means an unscored edge, which
+         * is reported as 1.0 so min_confidence filters keep prior behavior. */
+        edges[en].confidence = sqlite3_column_double(estmt, ST_COL_6);
         edges[en].source_id = sqlite3_column_int64(estmt, ST_COL_3);
         edges[en].target_id = sqlite3_column_int64(estmt, ST_COL_4);
         edges[en].properties_json = heap_strdup((const char *)sqlite3_column_text(estmt, CBM_SZ_5));

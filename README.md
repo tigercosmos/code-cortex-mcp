@@ -45,10 +45,18 @@ Invoke-WebRequest -Uri https://raw.githubusercontent.com/tigercosmos/code-cortex
 ```
 
 The installer configures Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Aider, VS Code,
-and other MCP clients: server entries, instruction files, and pre-tool hooks. Restart your
-agent and say "Index this project."
+and other MCP clients: server entries, instruction files, and hooks. Restart your agent and
+say "Index this project."
 
-Other subcommands: `config set auto_index true`, `update`, `uninstall`.
+In Claude Code the graph mostly arrives as context rather than as a tool the agent has to
+choose: a SessionStart hook prints a short architecture brief for the repository you are in,
+a PreToolUse hook on searches adds what grep cannot show for an exact symbol (definition vs
+declaration, caller and test counts with call-site lines, callers from other languages), and
+a PostToolUse hook on edits reports the blast radius of the file you just changed. All hooks
+are non-blocking and bounded (300 ms for searches, 1.5 s after edits, 3 s at session start).
+
+Other subcommands: `doctor` (checks the install, hooks, and whether the current directory is
+indexed), `config set auto_index true`, `update`, `uninstall`.
 
 It needs no LLM and no API key. The server is the structural backend; your agent is the
 language layer. All data stays in `~/.cache/code-cortex-mcp/` as SQLite.
@@ -58,8 +66,9 @@ language layer. All data stays in `~/.cache/code-cortex-mcp/` as SQLite.
 | Tool | Purpose |
 |------|---------|
 | `index_repository`, `index_status`, `list_projects`, `delete_project` | Index and manage projects |
+| `inspect_symbol` | One call: definition with source head, direct callers with call-site lines and resolver confidence, related tests, cross-language callers, subclasses, a complete caller-file list, and trust signals (index freshness, partial-parse coverage) |
 | `search_graph` | Search by label, name pattern, file pattern, or degree |
-| `trace_path` | Callers, callees, data flow, and cross-service chains |
+| `trace_path` | Callers, callees, data flow, and cross-service chains; entries carry file, lines, and call sites |
 | `query_graph` | Read-only Cypher-subset queries |
 | `get_code_snippet` | Source of a symbol by qualified name |
 | `get_architecture` | Languages, packages, routes, hotspots, clusters, cycles, ADRs |
@@ -69,9 +78,16 @@ language layer. All data stays in `~/.cache/code-cortex-mcp/` as SQLite.
 | `manage_adr` | Architecture Decision Records (CRUD) |
 | `ingest_traces` | Runtime traces (stub: counts spans only) |
 
+The `project` argument is optional for every query tool: inside an indexed repository it is
+inferred from the working directory, and a name that matches nothing is answered for that
+project with a `project_note` saying so. Names may be bare (`parse`), scoped
+(`Packet::addLayer`), or fully qualified. Replies are bounded (`max_bytes` on
+`inspect_symbol` and `search_code`) and say when they were cut and how to continue.
+
 Every tool also runs from the CLI:
 
 ```bash
+code-cortex-mcp cli inspect_symbol '{"symbol": "hexStringToByteArray"}'
 code-cortex-mcp cli search_graph '{"name_pattern": ".*Handler.*", "label": "Function"}'
 code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LIMIT 5"}'
 ```
@@ -136,7 +152,10 @@ Query latency:
 |-----------|------|
 | `search_graph`, `trace_path` (warm) | 0.1–0.5 ms |
 | `get_code_snippet` (warm) | ~2 ms |
-| PreToolUse hook (`Grep` or `Read`) | ~10 ms |
+| `inspect_symbol` (warm, 40 callers) | ~10 ms |
+| PreToolUse hook (`Grep`, `Bash` search, or `Read`) | 10–25 ms |
+| PostToolUse hook (`Edit`/`Write`) | ~10 ms |
+| SessionStart brief | ~130 ms |
 
 Two mechanisms keep calls fast. A persistent worker process serves tool calls, so each call
 skips a process exec and a database open. A memo in `_config.db` records each database's
