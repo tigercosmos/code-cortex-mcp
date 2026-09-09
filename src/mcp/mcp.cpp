@@ -10545,8 +10545,13 @@ static void *update_check_thread(void *arg) {
     return NULL;
 }
 
+bool cbm_mcp_update_check_enabled(void) {
+    const char *value = getenv("CBM_UPDATE_CHECK");
+    return !value || strcmp(value, "0") != 0;
+}
+
 static void start_update_check(cbm_mcp_server_t *srv) {
-    if (srv->update_checked) {
+    if (srv->update_checked || !cbm_mcp_update_check_enabled()) {
         return;
     }
     srv->update_checked = true; /* prevent double-launch */

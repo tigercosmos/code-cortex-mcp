@@ -30,6 +30,10 @@ bool cbm_detect_node_in_hunks(const cbm_node_t *node, const cbm_changed_hunk_t *
  * PowerShell -like contract. Exposed for direct boundary tests only. */
 bool cbm_search_code_file_pattern_can_prefilter(const char *file_pattern);
 
+/* Background release checks are enabled unless CBM_UPDATE_CHECK=0. Exposed
+ * for a direct environment-contract test without starting a network thread. */
+bool cbm_mcp_update_check_enabled(void);
+
 /* Internal command builder, exposed so tests can pin the PowerShell pipeline
  * ORDERING without starting an external shell — the Windows branch cannot be
  * exercised end-to-end from a POSIX CI host. */

@@ -65,6 +65,26 @@ TEST(mcp_tool_worker_name_rejects_option_injection) {
     PASS();
 }
 
+TEST(mcp_update_check_can_be_disabled) {
+    const char *saved = getenv("CBM_UPDATE_CHECK");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+
+    cbm_unsetenv("CBM_UPDATE_CHECK");
+    ASSERT_TRUE(cbm_mcp_update_check_enabled());
+    cbm_setenv("CBM_UPDATE_CHECK", "0", 1);
+    ASSERT_FALSE(cbm_mcp_update_check_enabled());
+    cbm_setenv("CBM_UPDATE_CHECK", "1", 1);
+    ASSERT_TRUE(cbm_mcp_update_check_enabled());
+
+    if (saved_copy) {
+        cbm_setenv("CBM_UPDATE_CHECK", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_UPDATE_CHECK");
+    }
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  JSON-RPC PARSING
  * ══════════════════════════════════════════════════════════════════ */
@@ -4838,6 +4858,7 @@ SUITE(mcp) {
     RUN_TEST(mcp_tool_result_validation_rejects_partial_response);
     RUN_TEST(mcp_tool_deadlines_are_bounded_and_tool_specific);
     RUN_TEST(mcp_tool_worker_name_rejects_option_injection);
+    RUN_TEST(mcp_update_check_can_be_disabled);
 
     /* Argument extraction */
     RUN_TEST(mcp_get_tool_name);
