@@ -1,0 +1,9 @@
+{
+  "cgroup": "0::/user.slice/user-1001.slice/user@1001.service/app.slice/cbm-v743-run-1884e8790c528c877eb36ab286e5eb8a.service",
+  "cgroup_path": "/user.slice/user-1001.slice/user@1001.service/app.slice/cbm-v743-run-1884e8790c528c877eb36ab286e5eb8a.service",
+  "nonce": "1884e8790c528c877eb36ab286e5eb8a",
+  "role": "run",
+  "schema": "v743-exact-user-systemd-scope-receipt",
+  "unit": "cbm-v743-run-1884e8790c528c877eb36ab286e5eb8a.service",
+  "verified": true
+}

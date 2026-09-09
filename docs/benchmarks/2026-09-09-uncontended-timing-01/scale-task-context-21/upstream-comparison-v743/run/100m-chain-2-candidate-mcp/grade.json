@@ -1,0 +1,15 @@
+{
+  "correct": true,
+  "expected": [
+    "capacity_function_1666338",
+    "capacity_function_1666337",
+    "capacity_function_1666336",
+    "capacity_function_1666335"
+  ],
+  "observed": [
+    "capacity_function_1666338",
+    "capacity_function_1666337",
+    "capacity_function_1666336",
+    "capacity_function_1666335"
+  ]
+}

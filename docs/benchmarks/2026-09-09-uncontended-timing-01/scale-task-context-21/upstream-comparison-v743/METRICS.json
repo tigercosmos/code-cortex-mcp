@@ -1,0 +1,247 @@
+{
+  "admission": {
+    "admitted": 64,
+    "max_foreign_cpu_percent": 0,
+    "max_load_1m": 1.72802734375,
+    "rejected": 0,
+    "rows": 64
+  },
+  "arm_totals": {
+    "candidate-mcp": {
+      "correct": 22,
+      "correct_only_wall_seconds_sum": 213.80566263198853,
+      "incorrect": 2,
+      "planned": 24,
+      "terminal_completed": 24,
+      "terminal_wall_seconds_sum": 238.48397254943848
+    },
+    "shell": {
+      "correct": 24,
+      "correct_only_wall_seconds_sum": 555.4691524505615,
+      "incorrect": 0,
+      "planned": 24,
+      "terminal_completed": 24,
+      "terminal_wall_seconds_sum": 555.4691524505615
+    },
+    "upstream-mcp": {
+      "correct": 16,
+      "correct_only_wall_seconds_sum": 253.50675868988037,
+      "incorrect": 0,
+      "planned": 16,
+      "terminal_completed": 16,
+      "terminal_wall_seconds_sum": 253.50675868988037
+    }
+  },
+  "incorrect_rows": [
+    {
+      "answer_sha256": "37e27c0738c8be7ddb92d05b8f1487c63ab45b52ef159a4ea0af6999e5f43e7b",
+      "arm": "candidate-mcp",
+      "expected": [
+        "capacity_function_3279",
+        "capacity_function_3278",
+        "capacity_function_3277",
+        "capacity_function_3276"
+      ],
+      "grade_sha256": "b8394a89a7000e5d274f431eb05cdc88a4191187fb8759757cf49005155b5324",
+      "observed": [
+        "capacity_function_3279bbe3bdc5e",
+        "capacity_function_3278bbe3bdc5e\u03bb\u03b5\u03cd",
+        "capacity_function_3277bbe3bdc5e",
+        "capacity_function_3276bbe3bdc5e"
+      ],
+      "retrieval_context_bytes": 114,
+      "root_reason": "The completed model response added non-answer suffix text to exact chain symbols; retrieval and source-oracle checks passed.",
+      "run": "1m-chain-1-candidate-mcp",
+      "source_oracle_correct": true,
+      "summary_sha256": "41da7fb783c4b9c21fe824e8b14f1b57bea11b37aeed24b24edde3d517c9f75e",
+      "task": "1m-chain-1",
+      "task_wall_seconds": 6.696298360824585
+    },
+    {
+      "answer_sha256": "6315efca9924964f12e7a7b75b85a90291c9cef051894e2bd2b46a84c78fab5c",
+      "arm": "candidate-mcp",
+      "expected": [
+        "capacity_function_17317",
+        "capacity_function_17316",
+        "capacity_function_17315",
+        "capacity_function_17314"
+      ],
+      "grade_sha256": "6aba92018a51b7c31b5e4fc8107d89196708587dc8ce61722a0355271383b76b",
+      "observed": [
+        "capacity_function_17317(crash)",
+        "capacity_function_17316",
+        "capacity_function_17315/not existing?",
+        "capacity_function_17314"
+      ],
+      "retrieval_context_bytes": 118,
+      "root_reason": "The completed model response added non-answer suffix text to exact chain symbols; retrieval and source-oracle checks passed.",
+      "run": "1m-chain-3-candidate-mcp",
+      "source_oracle_correct": true,
+      "summary_sha256": "7761f11280fad0acb3e9870530baf56e403f69d781dae60fbe12b1171c04755d",
+      "task": "1m-chain-3",
+      "task_wall_seconds": 17.982011556625366
+    }
+  ],
+  "paired_comparisons": {
+    "candidate_to_shell": {
+      "all": {
+        "eligible_pairs": 22,
+        "geometric_percent_reduction": 57.87207394442346,
+        "geometric_ratio": 0.4212792605557653,
+        "left_seconds_sum": 213.80566263198853,
+        "planned_pairs": 24,
+        "right_seconds_sum": 505.60298800468445
+      },
+      "archetype:multi-step": {
+        "eligible_pairs": 10,
+        "geometric_percent_reduction": 75.73218419645549,
+        "geometric_ratio": 0.24267815803544504,
+        "left_seconds_sum": 85.44198226928711,
+        "planned_pairs": 12,
+        "right_seconds_sum": 331.8295695781708
+      },
+      "archetype:one-shot": {
+        "eligible_pairs": 12,
+        "geometric_percent_reduction": 33.29072243627588,
+        "geometric_ratio": 0.6670927756372412,
+        "left_seconds_sum": 128.36368036270142,
+        "planned_pairs": 12,
+        "right_seconds_sum": 173.77341842651367
+      },
+      "scale:100m": {
+        "eligible_pairs": 8,
+        "geometric_percent_reduction": 59.35232499979225,
+        "geometric_ratio": 0.4064767500020775,
+        "left_seconds_sum": 71.0657844543457,
+        "planned_pairs": 8,
+        "right_seconds_sum": 179.39800548553467
+      },
+      "scale:10k": {
+        "eligible_pairs": 8,
+        "geometric_percent_reduction": 57.70134393559088,
+        "geometric_ratio": 0.4229865606440913,
+        "left_seconds_sum": 76.73408389091492,
+        "planned_pairs": 8,
+        "right_seconds_sum": 186.21289801597595
+      },
+      "scale:1m": {
+        "eligible_pairs": 6,
+        "geometric_percent_reduction": 56.051851148473105,
+        "geometric_ratio": 0.43948148851526897,
+        "left_seconds_sum": 66.0057942867279,
+        "planned_pairs": 8,
+        "right_seconds_sum": 139.99208450317383
+      }
+    },
+    "candidate_to_upstream": {
+      "all": {
+        "eligible_pairs": 14,
+        "geometric_percent_reduction": 37.43957246499855,
+        "geometric_ratio": 0.6256042753500145,
+        "left_seconds_sum": 142.73987817764282,
+        "planned_pairs": 16,
+        "right_seconds_sum": 207.0035524368286
+      },
+      "archetype:multi-step": {
+        "eligible_pairs": 6,
+        "geometric_percent_reduction": 42.56975003669405,
+        "geometric_ratio": 0.5743024996330595,
+        "left_seconds_sum": 56.56257104873657,
+        "planned_pairs": 8,
+        "right_seconds_sum": 90.4281177520752
+      },
+      "archetype:one-shot": {
+        "eligible_pairs": 8,
+        "geometric_percent_reduction": 33.293376398743035,
+        "geometric_ratio": 0.6670662360125696,
+        "left_seconds_sum": 86.17730712890625,
+        "planned_pairs": 8,
+        "right_seconds_sum": 116.57543468475342
+      },
+      "scale:10k": {
+        "eligible_pairs": 8,
+        "geometric_percent_reduction": 37.84714618292877,
+        "geometric_ratio": 0.6215285381707123,
+        "left_seconds_sum": 76.73408389091492,
+        "planned_pairs": 8,
+        "right_seconds_sum": 115.62949776649475
+      },
+      "scale:1m": {
+        "eligible_pairs": 6,
+        "geometric_percent_reduction": 36.89198027169209,
+        "geometric_ratio": 0.6310801972830791,
+        "left_seconds_sum": 66.0057942867279,
+        "planned_pairs": 8,
+        "right_seconds_sum": 91.37405467033386
+      }
+    },
+    "upstream_to_shell": {
+      "all": {
+        "eligible_pairs": 16,
+        "geometric_percent_reduction": 28.836270800682662,
+        "geometric_ratio": 0.7116372919931734,
+        "left_seconds_sum": 253.50675868988037,
+        "planned_pairs": 16,
+        "right_seconds_sum": 376.07114696502686
+      },
+      "archetype:multi-step": {
+        "eligible_pairs": 8,
+        "geometric_percent_reduction": 48.2123087540424,
+        "geometric_ratio": 0.517876912459576,
+        "left_seconds_sum": 136.93132400512695,
+        "planned_pairs": 8,
+        "right_seconds_sum": 258.58919978141785
+      },
+      "archetype:one-shot": {
+        "eligible_pairs": 8,
+        "geometric_percent_reduction": 2.210810489662962,
+        "geometric_ratio": 0.9778918951033704,
+        "left_seconds_sum": 116.57543468475342,
+        "planned_pairs": 8,
+        "right_seconds_sum": 117.48194718360901
+      },
+      "scale:10k": {
+        "eligible_pairs": 8,
+        "geometric_percent_reduction": 31.944145012386937,
+        "geometric_ratio": 0.6805585498761306,
+        "left_seconds_sum": 115.62949776649475,
+        "planned_pairs": 8,
+        "right_seconds_sum": 186.21289801597595
+      },
+      "scale:1m": {
+        "eligible_pairs": 8,
+        "geometric_percent_reduction": 25.586470782337155,
+        "geometric_ratio": 0.7441352921766284,
+        "left_seconds_sum": 137.87726092338562,
+        "planned_pairs": 8,
+        "right_seconds_sum": 189.8582489490509
+      }
+    }
+  },
+  "run_nonce": "1884e8790c528c877eb36ab286e5eb8a",
+  "run_report": {
+    "all_terminal": true,
+    "attempted": 64,
+    "completed": 64,
+    "correct": 62,
+    "scheduled": 64
+  },
+  "runtime_source_oracle_passed": true,
+  "schema": "v743-curated-publication-metrics",
+  "setup_cache_seal": {
+    "aggregate_sha256": "3c6c97b4e0fdb68ad25c6f9704db936f245f764dadc1223eff157103b5f3cbe7",
+    "entry_count": 17,
+    "path": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/runtime-cache-manifest.json",
+    "sealed_after_cleanup_final_zero": true,
+    "sha256": "6f1f43066b68deaf12570768af0c4b38a0f2f8223a7378f796e2a5674dce6508"
+  },
+  "setup_nonce": "86bd5949ed97235b9da416b02294fa3b",
+  "source_manifest_sha256": "69dcb689a74f1aec7fd130f48ec7cd210d94266863d4a2ffeac43ebab1a9e699",
+  "upstream_100m": {
+    "setup_failures": [
+      "4GiB",
+      "32GiB"
+    ],
+    "timing_estimate": null
+  }
+}

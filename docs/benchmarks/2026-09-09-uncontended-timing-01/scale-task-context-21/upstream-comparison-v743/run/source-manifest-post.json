@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "projects": {
+    "100m": {
+      "actual_files": 100000,
+      "entries_checked": 100000,
+      "expected_files": 100000,
+      "failures": [],
+      "manifest_sha256": "d89263bdec7f9a30b8fc9c697f8fb52c9c0deb8c977827c9fd481889589c9acf",
+      "passed": true,
+      "sealed_manifest_sha256": "d89263bdec7f9a30b8fc9c697f8fb52c9c0deb8c977827c9fd481889589c9acf"
+    },
+    "10k": {
+      "actual_files": 10,
+      "entries_checked": 10,
+      "expected_files": 10,
+      "failures": [],
+      "manifest_sha256": "4a363ab0009fdb5e46a04b178cfd94d02e5710ad12ba39f9bbd8364be8e1b332",
+      "passed": true,
+      "sealed_manifest_sha256": "4a363ab0009fdb5e46a04b178cfd94d02e5710ad12ba39f9bbd8364be8e1b332"
+    },
+    "1m": {
+      "actual_files": 1000,
+      "entries_checked": 1000,
+      "expected_files": 1000,
+      "failures": [],
+      "manifest_sha256": "baec0c3d9b62529fc0374959df35bdf6df47512a9c6ec4681b412d9d1e23d45a",
+      "passed": true,
+      "sealed_manifest_sha256": "baec0c3d9b62529fc0374959df35bdf6df47512a9c6ec4681b412d9d1e23d45a"
+    }
+  }
+}

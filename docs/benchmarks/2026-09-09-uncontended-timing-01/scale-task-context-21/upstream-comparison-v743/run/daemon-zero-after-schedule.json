@@ -1,0 +1,1751 @@
+{
+  "candidate": {
+    "backend": "candidate_foreground_stdio",
+    "binary": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/candidate-repo-0aa36e53/build/c/code-cortex-mcp",
+    "binary_sha256": "06d6157e04e8c45805f260ec78dbcadef23dd1c6a9e5c3e65ab16506d469978a",
+    "isolated_env": {
+      "CBM_CACHE_DIR": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/runtime/86bd5949ed97235b9da416b02294fa3b/candidate/cache",
+      "CBM_UPDATE_CHECK": "0",
+      "HOME": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/runtime/86bd5949ed97235b9da416b02294fa3b/candidate/home",
+      "TMPDIR": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/runtime/86bd5949ed97235b9da416b02294fa3b/candidate/tmp"
+    },
+    "passed": true,
+    "scanner": "candidate_lifecycle_v743.py",
+    "update_check_policy": "CBM_UPDATE_CHECK=0 is a source-backed, task-neutral disable; active tree permits only pinned cli --tool-server and rejects curl/sh/index workers",
+    "zero": {
+      "elapsed_seconds": 1.0314841358922422,
+      "interval_seconds": 0.25,
+      "passed": true,
+      "required_duration_seconds": 1.0,
+      "sample_count": 5,
+      "samples": [
+        {
+          "monotonic": 3767630.322471925,
+          "ordinal": 0,
+          "scan": {
+            "active": false,
+            "enumeration_errors": [
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 177237
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338649
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392388
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392425
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 394199
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 410841
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 411992
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533021
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533022
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 556077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 563009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 566977
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 604867
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 605175
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606669
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607391
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607407
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607745
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607849
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607861
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607878
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607898
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607903
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607908
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607916
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607917
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607929
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607931
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608047
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608048
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608071
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608085
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608091
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 936764
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937008
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937116
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937179
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937224
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937363
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937417
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937601
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937639
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937680
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937723
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937862
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937937
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937975
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938068
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938197
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938243
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938297
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938400
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938431
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938432
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 941818
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942622
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942832
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942880
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942930
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1142254
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1420567
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1517814
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999318
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999319
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2342327
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2546633
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2798596
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3245492
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3670246
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3757928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3785241
+              },
+              {
+                "error": "ValueError: malformed proc cmdline",
+                "pid": 3820949
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3848831
+              }
+            ],
+            "identity": {
+              "device": 2050,
+              "inode": 234107826
+            },
+            "indeterminate": [],
+            "kind": "foreground_scanner",
+            "owned": [],
+            "passed": true,
+            "problems": [],
+            "processes": [],
+            "roots": [],
+            "vanished": []
+          }
+        },
+        {
+          "monotonic": 3767630.578945047,
+          "ordinal": 1,
+          "scan": {
+            "active": false,
+            "enumeration_errors": [
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 177237
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338649
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392388
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392425
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 394199
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 410841
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 411992
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533021
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533022
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 556077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 563009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 566977
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 604867
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 605175
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606669
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607391
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607407
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607745
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607849
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607861
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607878
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607898
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607903
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607908
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607916
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607917
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607929
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607931
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608047
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608048
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608071
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608085
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608091
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 936764
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937008
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937116
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937179
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937224
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937363
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937417
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937601
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937639
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937680
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937723
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937862
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937937
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937975
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938068
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938197
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938243
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938297
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938400
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938431
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938432
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 941818
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942622
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942832
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942880
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942930
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1142254
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1420567
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1517814
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999318
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999319
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2342327
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2546633
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2798596
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3245492
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3670246
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3757928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3785241
+              },
+              {
+                "error": "ValueError: malformed proc cmdline",
+                "pid": 3820949
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3848831
+              }
+            ],
+            "identity": {
+              "device": 2050,
+              "inode": 234107826
+            },
+            "indeterminate": [],
+            "kind": "foreground_scanner",
+            "owned": [],
+            "passed": true,
+            "problems": [],
+            "processes": [],
+            "roots": [],
+            "vanished": []
+          }
+        },
+        {
+          "monotonic": 3767630.835378348,
+          "ordinal": 2,
+          "scan": {
+            "active": false,
+            "enumeration_errors": [
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 177237
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338649
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392388
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392425
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 394199
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 410841
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 411992
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533021
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533022
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 556077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 563009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 566977
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 604867
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 605175
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606669
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607391
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607407
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607745
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607849
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607861
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607878
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607898
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607903
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607908
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607916
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607917
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607929
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607931
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608047
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608048
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608071
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608085
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608091
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 936764
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937008
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937116
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937179
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937224
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937363
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937417
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937601
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937639
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937680
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937723
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937862
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937937
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937975
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938068
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938197
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938243
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938297
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938400
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938431
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938432
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 941818
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942622
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942832
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942880
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942930
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1142254
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1420567
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1517814
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999318
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999319
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2342327
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2546633
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2798596
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3245492
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3670246
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3757928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3785241
+              },
+              {
+                "error": "ValueError: malformed proc cmdline",
+                "pid": 3820949
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3848831
+              }
+            ],
+            "identity": {
+              "device": 2050,
+              "inode": 234107826
+            },
+            "indeterminate": [],
+            "kind": "foreground_scanner",
+            "owned": [],
+            "passed": true,
+            "problems": [],
+            "processes": [],
+            "roots": [],
+            "vanished": []
+          }
+        },
+        {
+          "monotonic": 3767631.091916228,
+          "ordinal": 3,
+          "scan": {
+            "active": false,
+            "enumeration_errors": [
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 177237
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338649
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392388
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392425
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 394199
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 410841
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 411992
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533021
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533022
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 556077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 563009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 566977
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 604867
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 605175
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606669
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607391
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607407
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607745
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607849
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607861
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607878
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607898
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607903
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607908
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607916
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607917
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607929
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607931
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608047
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608048
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608071
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608085
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608091
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 936764
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937008
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937116
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937179
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937224
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937363
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937417
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937601
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937639
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937680
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937723
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937862
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937937
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937975
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938068
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938197
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938243
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938297
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938400
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938431
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938432
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 941818
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942622
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942832
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942880
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942930
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1142254
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1420567
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1517814
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999318
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999319
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2342327
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2546633
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2798596
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3245492
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3670246
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3757928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3785241
+              },
+              {
+                "error": "ValueError: malformed proc cmdline",
+                "pid": 3820949
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3848831
+              }
+            ],
+            "identity": {
+              "device": 2050,
+              "inode": 234107826
+            },
+            "indeterminate": [],
+            "kind": "foreground_scanner",
+            "owned": [],
+            "passed": true,
+            "problems": [],
+            "processes": [],
+            "roots": [],
+            "vanished": []
+          }
+        },
+        {
+          "monotonic": 3767631.348414309,
+          "ordinal": 4,
+          "scan": {
+            "active": false,
+            "enumeration_errors": [
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 177237
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338649
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 338650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392388
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 392425
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 394199
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 410841
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 411992
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533021
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 533022
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 556077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 563009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 566977
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 604867
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 605175
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606650
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 606669
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607391
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607407
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607745
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607849
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607861
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607878
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607898
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607903
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607908
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607916
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607917
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607929
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 607931
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608047
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608048
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608071
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608085
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 608091
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 936764
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937008
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937116
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937179
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937224
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937363
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937417
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937601
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937639
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937680
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937723
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937862
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937937
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 937975
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938013
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938068
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938197
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938243
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938297
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938400
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938431
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 938432
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 941818
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942622
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942832
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942880
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 942930
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943009
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 943077
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1142254
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1420567
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1517814
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999318
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 1999319
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2342327
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2546633
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 2798596
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3245492
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3670246
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3757928
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3785241
+              },
+              {
+                "error": "ValueError: malformed proc cmdline",
+                "pid": 3820949
+              },
+              {
+                "error": "ValueError: empty proc cmdline",
+                "pid": 3848831
+              }
+            ],
+            "identity": {
+              "device": 2050,
+              "inode": 234107826
+            },
+            "indeterminate": [],
+            "kind": "foreground_scanner",
+            "owned": [],
+            "passed": true,
+            "problems": [],
+            "processes": [],
+            "roots": [],
+            "vanished": []
+          }
+        }
+      ]
+    }
+  },
+  "upstream": {
+    "absent": true,
+    "action": "status",
+    "active": false,
+    "binary_sha256": "b4f6228736b3f95fa6b0a39f201b12154d200e4fb65e2570e236c707118c83bb",
+    "build_prefix": null,
+    "build_version": null,
+    "cache": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/runtime/86bd5949ed97235b9da416b02294fa3b/upstream/cache",
+    "environment_binding": {
+      "association": "status build identity plus exact isolated client environment; daemon status protocol does not expose cache path",
+      "binary": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/upstream-repo/build/benchmark-upstream/codebase-memory-mcp",
+      "binary_sha256": "b4f6228736b3f95fa6b0a39f201b12154d200e4fb65e2570e236c707118c83bb",
+      "cbm_cache_dir": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/runtime/86bd5949ed97235b9da416b02294fa3b/upstream/cache",
+      "home": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/runtime/86bd5949ed97235b9da416b02294fa3b/upstream/home",
+      "status_exposes_cache": false,
+      "tmpdir": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/runtime/86bd5949ed97235b9da416b02294fa3b/upstream/tmp"
+    },
+    "pid": null,
+    "returncode": 1,
+    "stdout": "daemon: not running\nhint: `codebase-memory-mcp daemon start` keeps a daemon warm so CLI commands and hooks skip the per-command startup cost.\n"
+  }
+}

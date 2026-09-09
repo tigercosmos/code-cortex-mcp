@@ -1,0 +1,10 @@
+{
+  "backend": "upstream_production_mcp_stdio_jsonrpc",
+  "context_bytes": 47,
+  "normalized_context_sha256": "bc9cd2ceb05a5f22b73d9f56203ff1cc3caedeb45d91d63a19ddb61ccf842308",
+  "observed": "part_0000/unit_000310.cpp:351",
+  "payload_sha256": "7f64a83a95485340115bd8db42c2086217533038cf73ad32756e5fac895458f5",
+  "source_oracle_correct": true,
+  "tool": "search_graph",
+  "wall_seconds": 0.015041172970086336
+}

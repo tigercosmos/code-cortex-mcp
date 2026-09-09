@@ -1,0 +1,29 @@
+{
+  "agent_exit_code": 0,
+  "answer_correct": true,
+  "arm": "upstream-mcp",
+  "block_id": 6,
+  "effort": "medium",
+  "model": "gpt-5.6-sol",
+  "no_session_mcp_calls": true,
+  "position_in_block": 2,
+  "retrieval_backend": "upstream_production_mcp_stdio_jsonrpc",
+  "retrieval_context_bytes": 106,
+  "retrieval_wall_seconds": 0.03257948067039251,
+  "run": "10k-chain-3-upstream-mcp",
+  "source_oracle_correct": true,
+  "state": "completed",
+  "task": "10k-chain-3",
+  "task_started_epoch_seconds": 1788978269.1475785,
+  "task_wall_seconds": 9.705196619033813,
+  "terminal_observation_seconds": 10.077780460938811,
+  "terminal_observed": true,
+  "timing_basis": "retrieval start through codexmon ended_at",
+  "triarm_arm": "upstream-mcp",
+  "usage": {
+    "cached_input_tokens": 7680,
+    "input_tokens": 9446,
+    "output_tokens": 23,
+    "reasoning_output_tokens": 0
+  }
+}

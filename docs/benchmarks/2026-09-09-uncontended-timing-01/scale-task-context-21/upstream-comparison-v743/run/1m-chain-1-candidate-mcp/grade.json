@@ -1,0 +1,15 @@
+{
+  "correct": false,
+  "expected": [
+    "capacity_function_3279",
+    "capacity_function_3278",
+    "capacity_function_3277",
+    "capacity_function_3276"
+  ],
+  "observed": [
+    "capacity_function_3279bbe3bdc5e",
+    "capacity_function_3278bbe3bdc5e\u03bb\u03b5\u03cd",
+    "capacity_function_3277bbe3bdc5e",
+    "capacity_function_3276bbe3bdc5e"
+  ]
+}

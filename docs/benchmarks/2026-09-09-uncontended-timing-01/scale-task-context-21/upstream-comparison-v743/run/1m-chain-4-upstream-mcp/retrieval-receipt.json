@@ -1,0 +1,15 @@
+{
+  "backend": "upstream_production_mcp_stdio_jsonrpc",
+  "context_bytes": 118,
+  "normalized_context_sha256": "6eb71bb5d446a45f2d443188bd03bb0b0cd8c6b1c2162ced1d9b239c8c13587f",
+  "observed": [
+    "capacity_function_14716",
+    "capacity_function_14715",
+    "capacity_function_14714",
+    "capacity_function_14713"
+  ],
+  "payload_sha256": "c63f4d00990a9e3bd9843044cd72bd44b94b51e5b01491e9808a49820811a956",
+  "source_oracle_correct": true,
+  "tool": "query_graph",
+  "wall_seconds": 0.04973946185782552
+}

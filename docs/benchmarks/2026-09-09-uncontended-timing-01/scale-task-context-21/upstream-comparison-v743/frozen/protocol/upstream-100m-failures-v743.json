@@ -1,0 +1,18 @@
+{
+  "availability_32g": {
+    "budget_mb": 32768,
+    "path": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/setup-v6-runtime-01/evidence/upstream/100m-retry-32g/index.stdout",
+    "peak_rss_mb": 32859,
+    "reason": "over_memory_budget"
+  },
+  "consequence": "No upstream 100m MCP task context or timed session is eligible; candidate/shell retain all 24 tasks; upstream comparisons use only 10k and 1m.",
+  "equal_budget_4g": {
+    "budget_mb": 4096,
+    "path": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/setup-v5-runtime-01/evidence/upstream/100m/index.stdout",
+    "peak_rss_mb": 4140,
+    "reason": "over_memory_budget"
+  },
+  "excluded_from_schedule": true,
+  "no_timing_estimate": true,
+  "schema": "upstream-100m-availability-v743"
+}

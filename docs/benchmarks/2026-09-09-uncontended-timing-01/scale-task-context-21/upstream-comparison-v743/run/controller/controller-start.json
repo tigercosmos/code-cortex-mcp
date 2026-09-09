@@ -1,0 +1,7 @@
+{
+  "nonce": "1884e8790c528c877eb36ab286e5eb8a",
+  "output": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-run-runtime-1884e8790c528c877eb36ab286e5eb8a",
+  "ready": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-05-upstream-triarm/v743-setup-runtime-86bd5949ed97235b9da416b02294fa3b/setup-runtime-ready.json",
+  "started_unix": 1788977742.2826335,
+  "unit": "cbm-v743-run-1884e8790c528c877eb36ab286e5eb8a.service"
+}

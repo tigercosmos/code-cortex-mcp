@@ -115,6 +115,42 @@ code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LI
 
 ## Performance
 
+### Complete-task performance
+
+A controlled, uncontended Linux run on 2026-09-10 compared complete tasks with the current
+Code Cortex MCP, pure shell tools, and pinned upstream codebase-memory-mcp. Lower ratios are
+faster. Each total contains only matched pairs for which both answers were terminal,
+source-correct, and exact; failed answers were not retried or assigned an estimated time.
+
+| Comparison | Eligible pairs | Matched task time | Geometric time ratio | Reduction |
+|---|---:|---:|---:|---:|
+| Code Cortex / shell | 22 / 24 | 213.806 s / 505.603 s | **0.421** | **57.9%** |
+| Code Cortex / upstream | 14 / 16 | 142.740 s / 207.004 s | **0.626** | **37.4%** |
+| Upstream / shell | 16 / 16 | 253.507 s / 376.071 s | **0.712** | **28.8%** |
+
+| Comparison | 10K lines | 1M lines | 100M lines | One-shot | Multi-step |
+|---|---:|---:|---:|---:|---:|
+| Code Cortex / shell | 57.7% (8/8) | 56.1% (6/8) | 59.4% (8/8) | 33.3% (12/12) | 75.7% (10/12) |
+| Code Cortex / upstream | 37.8% (8/8) | 36.9% (6/8) | unavailable | 33.3% (8/8) | 42.6% (6/8) |
+| Upstream / shell | 31.9% (8/8) | 25.6% (8/8) | unavailable | 2.2% (8/8) | 48.2% (8/8) |
+
+The run used fresh `gpt-5.6-sol` sessions at medium reasoning effort and warm synthetic C++
+indexes. It serialized all 64 sessions on the same 32-core host and included MCP startup,
+initialization, tool discovery, retrieval, the candidate's post-retrieval topology scan, and
+the model session in complete-task time. Fixture generation and indexing were outside the task
+timer. The candidate was `0aa36e53`; upstream was `1db8bace`. Candidate and upstream used
+task-equivalent one-call adapters and supplied byte-identical normalized context on all 16
+shared tasks.
+
+Code Cortex completed 22 of 24 answers exactly; its two incorrect 1M multi-step responses had
+source-correct retrieval but added text to required symbol names. Shell completed 24/24 and
+upstream completed 16/16. Upstream has no 100M timing: indexing exceeded both sealed 4 GiB and
+32 GiB memory budgets, and no time was imputed. These results establish the stated benefit for
+the measured warm-index lookup and three-hop-chain tasks, not for edits, cold indexing, every
+language, or every task shape. See the [full results and reproducibility evidence](docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md).
+
+### Full-index performance
+
 Full-index wall clock, median of three runs from an empty cache, on an Apple M3 Max (14 cores,
 36 GB) and a 32-core Linux machine (62 GB). The full 13-repository comparison with
 codebase-memory-mcp is in [docs/benchmarks/2026-08-25](docs/benchmarks/2026-08-25/README.md).
@@ -137,14 +173,18 @@ repository size — CPython needs 4.3 GB against Kubernetes' 4.9 GB with less th
 lines — and stays between 0.7 and 13.4 GB across every repository measured. Indexing is the expensive
 phase; answering queries afterwards reads the SQLite file and needs almost none of it.
 
-The peak is not the graph. It is the definitions, calls and usages the pipeline keeps for every
-file, from extraction until call resolution ends: about six times the graph buffer on
+The peak is not the graph. By default, the pipeline keeps each file's definitions, calls, and
+usages from extraction until call resolution ends: about six times the graph buffer on
 Elasticsearch. On top of that sits the parse working set of the files being read at that
-moment, which is what `CBM_WORKERS` moves. The indexer also throttles workers by
-itself whenever its resident size passes a budget derived from total RAM (25–50%, a larger
-share on larger machines; `CBM_MEM_BUDGET_MB` overrides it in MiB), so a machine smaller than
-the figures above still finishes, more slowly. `CBM_MEM_PROFILE=1` logs a byte-level breakdown
-at every phase boundary.
+moment, which is what `CBM_WORKERS` moves. Set `CBM_RESULT_STORE=1` to serialize full per-file
+results to bounded system temporary storage after extraction and keep compact registry
+summaries in memory; resolution loads each full result on demand. This store is not durable.
+
+The indexer throttles workers when resident memory passes a budget derived from total RAM
+(25–50%, with a larger share on larger machines; `CBM_MEM_BUDGET_MB` overrides it in MiB).
+The budget is a soft back-pressure target, not a hard RSS limit: the resident graph, in-flight
+work, or allocator behavior can exceed it. `CBM_MEM_PROFILE=1` logs a byte-level breakdown at
+every phase boundary.
 
 Query latency:
 
@@ -167,6 +207,8 @@ verify databases again.
 | `CBM_TOOL_SERVER=0` | One worker process per tool call (the Windows default) |
 | `CBM_TOOL_SUPERVISOR=0` | Run tools in-process, without isolation |
 | `CBM_STORE_META=0` | Disable the memo; every lookup verifies again |
+| `CBM_RESULT_STORE=1` | Spill full extraction results to bounded system temporary storage |
+| `CBM_UPDATE_CHECK=0` | Disable the background GitHub release check at MCP initialization |
 
 ## Language Support
 
