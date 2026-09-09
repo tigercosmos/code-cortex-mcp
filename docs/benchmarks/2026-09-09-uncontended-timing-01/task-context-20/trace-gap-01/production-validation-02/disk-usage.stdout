@@ -1,0 +1,13 @@
+1340220	/Users/tigercosmos/tmp/cortex-trace-gap-validation-01
+0	/Users/tigercosmos/tmp/cortex-trace-gap-validation-02
+3116	docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/trace-gap-01/production-validation-01
+1644	docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/trace-gap-01/production-validation-02
+756416	build/nosan
+461976	build/c
+0	/private/tmp/cbm_stalewal_uILoaE
+5760	/private/tmp/cbm_test_home_w2TQSd
+32	/private/tmp/cbm_cwd_cache_f9FLah
+0	/private/tmp/cbm_dump_TrQqHQ
+0	/private/tmp/cbm_corrupt_45S9UR
+8	/private/tmp/cbm_et_si1vfa
+28	/private/tmp/cbm_watcher_reset_s3xc90

@@ -1,3 +1,4 @@
+#include "pipeline/result_store.h"
 /*
  * pass_parallel.c — Three-phase parallel pipeline.
  *
@@ -98,6 +99,8 @@ enum { PP_CSHARP_M_PREFIX_LEN = 2 };
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
+#include <unordered_set>
 #include <time.h>
 
 /* Back-pressure nap-cycle counter (test observability): each execution of the
@@ -493,6 +496,7 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
         return;
     }
     size_t pos = (size_t)n;
+    append_json_string(buf, bufsize, &pos, "declaration_key", def->declaration_key);
     append_json_string(buf, bufsize, &pos, "docstring", def->docstring);
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
@@ -681,6 +685,7 @@ typedef struct {
     std::atomic<int> next_worker_id;
 
     CBMFileResult **result_cache;
+    cbm::ResultStore *result_store;
     std::atomic<int64_t> *shared_ids;
     std::atomic<int> *cancelled;
     std::atomic<int> next_file_idx;
@@ -890,10 +895,12 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
 
         uint64_t file_t0 = extract_now_ns();
 
+        const CBMExtractOptions extract_options = {.defer_cpp_operators = true,
+                                                   .deduplicate_usages = true};
         CBMFileResult *result =
-            cbm_extract_file(source, source_len, fi->language, ec->project_name, fi->rel_path,
+            cbm_extract_file_with_options(source, source_len, fi->language, ec->project_name, fi->rel_path,
                              CBM_EXTRACT_BUDGET, cbm_cc_index_defines(ec->cc_index, fi->rel_path),
-                             cbm_cc_index_includes(ec->cc_index, fi->rel_path));
+                             cbm_cc_index_includes(ec->cc_index, fi->rel_path), &extract_options);
 
         uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
 
@@ -989,6 +996,23 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
         free_source(source);
 
         /* Cache result (arena + extracted data, no tree) for Phase 3B and Phase 4 */
+        if (ec->result_store) {
+            std::string error;
+            auto *summary = cbm::make_registry_summary(*result, 256ULL * 1024 * 1024, error);
+            if (!summary || !ec->result_store->put(file_idx, *result, error)) {
+                cbm_free_result(summary);
+                cbm_free_result(result);
+                cbm_log_error("result_store.publish_failed", "path", fi->rel_path,
+                              "reason", error.c_str());
+                atomic_store(ec->cancelled, 1);
+                cbm_destroy_thread_parser();
+                cbm_slab_reclaim();
+                cbm_mem_collect();
+                break;
+            }
+            cbm_free_result(result);
+            result = summary;
+        }
         ec->result_cache[file_idx] = result;
 
         /* Progress logging: log every 10 files (atomic read, no contention) */
@@ -1133,6 +1157,7 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
         .workers = workers,
         .max_workers = worker_count,
         .result_cache = result_cache,
+        .result_store = static_cast<cbm::ResultStore *>(ctx->result_store),
         .shared_ids = shared_ids,
         .cancelled = ctx->cancelled,
         .pkg_entries = pkg_entries,
@@ -1461,6 +1486,7 @@ typedef struct {
     int max_workers;
 
     CBMFileResult **result_cache;
+    cbm::ResultStore *result_store;
     const cbm_gbuf_t *main_gbuf;    /* READ-ONLY during Phase 4 */
     const cbm_registry_t *registry; /* READ-ONLY during Phase 4 */
     std::atomic<int64_t> *shared_ids;
@@ -2258,7 +2284,7 @@ static void lsp_idx_put(CBMHashTable *lsp_idx, const char *caller_qn, const char
         return;
     }
     char key[1024];
-    int kn = snprintf(key, sizeof(key), "%s|%s", caller_qn, name);
+    int kn = cbm_pipeline_lsp_key(key, sizeof(key), caller_qn, name, rc_e->source_byte);
     if (kn <= 0 || kn >= (int)sizeof(key)) {
         return;
     }
@@ -2282,6 +2308,7 @@ static void lsp_idx_put(CBMHashTable *lsp_idx, const char *caller_qn, const char
 static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFileResult *result,
                                const char *rel, const char *module_qn, const char **imp_keys,
                                const char **imp_vals, int imp_count, CBMLanguage lang) {
+    cbm_materialize_deferred_cpp_operators(result);
     /* Build a per-file hash index of resolved_calls keyed by
      * "caller_qn|callee_short" for O(1) lookup. cbm_pipeline_find_lsp_
      * resolution would otherwise do an O(N) linear scan over
@@ -2357,10 +2384,14 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             const char *call_leaf = cbm_pipeline_call_callee_leaf(call->callee_name);
             char key[1024];
             int kn = call_leaf
-                         ? snprintf(key, sizeof(key), "%s|%s", call->enclosing_func_qn, call_leaf)
+                         ? cbm_pipeline_lsp_key(key, sizeof(key), call->enclosing_func_qn, call_leaf, call->source_byte)
                          : -1;
             if (kn > 0 && kn < (int)sizeof(key)) {
                 lsp = (const CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
+                if (!lsp && call->source_byte) {
+                    cbm_pipeline_lsp_key(key, sizeof(key), call->enclosing_func_qn, call_leaf, 0);
+                    lsp = (const CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
+                }
                 /* The index and the linear scan share the exact same match
                  * rule (caller_qn + callee short-name + confidence floor),
                  * and key equality implies equal key length — so any entry
@@ -2369,7 +2400,10 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                  * the linear scan as well; skip it. The per-miss fallback
                  * scan was O(calls × resolved_calls) per file — the bulk of
                  * resolve_calls time on C++ repos (8s CPU on rocksdb). */
-                idx_authoritative = true;
+                // JVM source roots can produce different caller prefixes. An
+                // exact-key miss cannot rule out the shared unique class/method
+                // fallback used by the sequential resolver.
+                idx_authoritative = !allow_tail;
             }
         }
         if (!lsp && !idx_authoritative) {
@@ -2406,6 +2440,9 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * (~21% of a Next.js call graph) while the sequential pass, which falls
          * THROUGH to the registry here, kept them. This restores seq/parallel
          * parity via the import_map / unique_name resolution. */
+        if (call->requires_typed_resolution && (!res.qualified_name || !res.qualified_name[0])) {
+            continue;
+        }
         if (!res.qualified_name || !res.qualified_name[0]) {
             res = cbm_registry_resolve(rc->registry, call->callee_name, module_qn, imp_keys,
                                        imp_vals, imp_count);
@@ -2815,6 +2852,43 @@ static CBMTypeRegistry *pp_rust_shared_registry_get(void *ctx) {
     return pp_rust_shared_registry((resolve_ctx_t *)ctx);
 }
 
+// Count is not a coverage proof: unresolved diagnostics and duplicate
+// successes share resolved_calls. Prove coverage by exact caller/leaf/offset.
+// Larger inputs conservatively retain cross-LSP; the primitive fast path is
+// checked by the caller before this bounded proof is attempted.
+static bool pp_cpp_sites_need_cross(const CBMFileResult *result) {
+    if (result->pending_cpp_operator_count > 0 || result->calls.count > 4096 ||
+        result->resolved_calls.count > 8192) return true;
+    std::unordered_set<std::string> covered;
+    char key[1024];
+    for (int i = 0; i < result->resolved_calls.count; ++i) {
+        const auto& resolved = result->resolved_calls.items[i];
+        if (resolved.strategy && strcmp(resolved.strategy, "lsp_unresolved") == 0) return true;
+        if (!resolved.source_byte || !resolved.caller_qn || !resolved.callee_qn ||
+            resolved.confidence < CBM_LSP_CONFIDENCE_FLOOR) continue;
+        const char *name = cbm_lsp_strategy_matches_on_reason(resolved.strategy) && resolved.reason
+                              ? resolved.reason : resolved.callee_qn;
+        int size = cbm_pipeline_lsp_key(key, sizeof(key), resolved.caller_qn,
+                                        cbm_lsp_bare_segment(name), resolved.source_byte);
+        if (size < 0 || (size_t)size >= sizeof(key)) return true;
+        covered.emplace(key);
+    }
+    for (int i = 0; i < result->calls.count; ++i) {
+        const auto& call = result->calls.items[i];
+        if (!call.source_byte || !call.enclosing_func_qn || !call.callee_name) return true;
+        int size = cbm_pipeline_lsp_key(key, sizeof(key), call.enclosing_func_qn,
+                                        cbm_lsp_bare_segment(call.callee_name), call.source_byte);
+        if (size < 0 || (size_t)size >= sizeof(key) || !covered.count(key)) return true;
+    }
+    return false;
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" bool cbm_test_cpp_sites_need_cross(const CBMFileResult *result) {
+    return pp_cpp_sites_need_cross(result);
+}
+#endif
+
 static void resolve_worker(int worker_id, void *ctx_ptr) {
     resolve_ctx_t *rc = (resolve_ctx_t *)ctx_ptr;
     resolve_worker_state_t *ws = &rc->workers[worker_id];
@@ -2851,6 +2925,21 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                                       memory_order_relaxed);
             continue;
         }
+        cbm::ResultStore::Lease stored_result;
+        if (rc->result_store) {
+            std::string error;
+            stored_result = rc->result_store->acquire(file_idx, error);
+            if (!stored_result) {
+                cbm_log_error("result_store.load_failed", "path", rc->files[file_idx].rel_path,
+                              "reason", error.c_str());
+                atomic_store(rc->cancelled, 1);
+                break;
+            }
+            // collect_all_defs can infer a JVM namespace in the retained summary.
+            // Preserve that update when resolving the original stored record.
+            stored_result.get()->namespace_name = result->namespace_name;
+            result = stored_result.get();
+        }
         atomic_fetch_add_explicit(&rc->total_files_visited, 1, memory_order_relaxed);
 
         CBMLanguage lang = rc->files[file_idx].language;
@@ -2876,19 +2965,28 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         /* Cross-file LSP is a per-file tree-sitter re-parse + AST walk +
          * registry lookups — ~50-150ms per file. It can ONLY find calls
-         * that exist in the AST. If the per-file extract found zero calls,
-         * cross-LSP will too: the AST is the same. For non-JVM languages,
-         * skip when per-file LSP already produced at least as many resolved
-         * entries as textual calls. Java/Kotlin per-file LSP can fill the
+         * that exist in the AST. Count deferred binary operators as pending
+         * calls even when no textual call records were retained. If the
+         * per-file extract found zero calls and zero pending operators,
+         * cross-LSP will too: the AST is the same. C++ uses the bounded
+         * call-site coverage proof below; unresolved records or duplicate
+         * successes cannot establish completeness. Other non-JVM languages
+         * retain the existing entry-count gate. Java/Kotlin per-file LSP can fill the
          * count with constructors or same-file calls while a mixed-source-root
          * Java↔Kotlin call remains unresolved, so JVM callers run whenever
          * calls exist. */
         bool jvm_cross_lsp = (lang == CBM_LANG_JAVA || lang == CBM_LANG_KOTLIN);
+        int64_t pending_calls = (int64_t)result->calls.count + result->deferred_cpp_operator_count;
+        bool cpp_cross_lsp = (lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA);
+        bool primitive_complete = cpp_cross_lsp && cbm_pipeline_cpp_primitives_complete(result);
+        bool cpp_sites_pending = cpp_cross_lsp && !primitive_complete &&
+                                 pp_cpp_sites_need_cross(result);
         bool cross_lsp_eligible =
             (rc->all_defs && rc->def_count > 0 && cbm_pxc_has_cross_lsp(lang) &&
-             result->calls.count > 0 &&
-             (jvm_cross_lsp || result->resolved_calls.count < result->calls.count) &&
-             !is_generated);
+             pending_calls > 0 &&
+             (jvm_cross_lsp || (cpp_cross_lsp ? cpp_sites_pending :
+                               result->resolved_calls.count < pending_calls)) &&
+             !is_generated && !primitive_complete);
 
         /* Skip files with nothing else to resolve and no cross-LSP work. */
         if (result->calls.count == 0 && result->usages.count == 0 && result->throws.count == 0 &&
@@ -3091,6 +3189,7 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
         .workers = workers,
         .max_workers = worker_count,
         .result_cache = result_cache,
+        .result_store = static_cast<cbm::ResultStore *>(ctx->result_store),
         .main_gbuf = ctx->gbuf,
         .registry = ctx->registry,
         .shared_ids = shared_ids,

@@ -1,0 +1,10 @@
+[
+  "/usr/bin/python3",
+  "/home/anchi/code-cortex-mcp-goal-20260909/repo/docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/generate_fixture.py",
+  "--root",
+  "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/scratch/source-10k",
+  "--lines",
+  "10000",
+  "--manifest",
+  "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/setup/10k/source-manifest.jsonl"
+]

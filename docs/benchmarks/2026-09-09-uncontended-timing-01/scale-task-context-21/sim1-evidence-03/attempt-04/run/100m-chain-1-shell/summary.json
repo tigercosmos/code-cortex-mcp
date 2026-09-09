@@ -1,0 +1,27 @@
+{
+  "agent_exit_code": 0,
+  "answer_correct": true,
+  "arm": "shell",
+  "block_id": 10,
+  "effort": "medium",
+  "model": "gpt-5.6-sol",
+  "no_session_mcp_calls": true,
+  "retrieval_backend": "none",
+  "retrieval_context_bytes": 0,
+  "retrieval_wall_seconds": 0.0,
+  "run": "100m-chain-1-shell",
+  "source_oracle_correct": true,
+  "state": "completed",
+  "task": "100m-chain-1",
+  "task_started_epoch_seconds": 1788945192.7338047,
+  "task_wall_seconds": 24.17447829246521,
+  "terminal_observation_seconds": 24.597802717704326,
+  "terminal_observed": true,
+  "timing_basis": "retrieval start through codexmon ended_at",
+  "usage": {
+    "cached_input_tokens": 18048,
+    "input_tokens": 33466,
+    "output_tokens": 350,
+    "reasoning_output_tokens": 89
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "depth": 3,
+  "direction": "inbound",
+  "from_function": "capacity_function_1753457",
+  "function_name": "capacity_function_1753454",
+  "max_bytes": 6000,
+  "max_work": 128,
+  "mode": "calls",
+  "project": "scale-task-context-21-100m",
+  "source_context": 1
+}

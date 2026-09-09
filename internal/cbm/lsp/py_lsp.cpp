@@ -377,8 +377,7 @@ static void py_emit_resolved_call_reason(PyLSPContext* ctx, const char* callee_q
             return;
         }
     }
-    CBMResolvedCall rc;
-    memset(&rc, 0, sizeof(rc));
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = cbm_arena_strdup(ctx->arena, callee_qn);
     rc.strategy = strategy;

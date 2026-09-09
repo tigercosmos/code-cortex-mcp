@@ -1,0 +1,323 @@
+{
+  "binary": "/home/anchi/code-cortex-mcp-goal-20260909/repo/build/c/code-cortex-mcp",
+  "binary_sha256": "bbfeb274225eaabeea8fac20ccb183647cae33b46f28bf9bd01dfa25307f2e60",
+  "cache": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/scratch/cache",
+  "harness_hashes": {
+    "analyze.py": "b5a4438783a6ae6099a20a93fbc4dddcb06de8370a05705cbc90f536d5af557a",
+    "build_protocol.py": "b1ac27c8b053e5c86733c6d4ac3a6b75942b3e62d49f4444e4de36df6481fe4e",
+    "generate_fixture.py": "c51e88d4e840ff8c3bbe359438c12e2c3cb370ec755f0ff87bc88dfc7b1d9240",
+    "mcp_once.py": "3c9a6fc7546d16ec0581c953231d7f601b2ae6d4b708e67d68f6f424c74ad6ad",
+    "prepare.py": "c59c878c6f94de288e1fdf700d6a8f19770cda3a19129e12d84b7e7ee5f896d1",
+    "run.py": "ece1a568c65f8faf617ead8edf8e2943a3385741ec80ca15407934235782f3ed",
+    "source_oracle.py": "d00c42c5165153b117d22658b3ce4501756d481bb192ceb0eb2d692fbe87b074",
+    "test_harness.py": "466730cacace3ddcfa4e61576aa5405cbdb71c5790069aad057e2e29af582b01"
+  },
+  "home": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/scratch/home",
+  "host": "t2-sim-1",
+  "index_configuration": {
+    "memory_budget_mb": 4096,
+    "outer_timeout_seconds": 7500,
+    "tool_timeout_seconds": 7200,
+    "worker_total_timeout_seconds": 7200,
+    "workers": 4
+  },
+  "model_sessions": 0,
+  "projects": {
+    "100m": {
+      "code_lines": 100000000,
+      "index_payload": {
+        "adr_hint": "Project indexed. Consider creating an Architecture Decision Record: explore the codebase with get_architecture(aspects=['all']), then use manage_adr(mode='update') to persist architectural insights across sessions.",
+        "adr_present": false,
+        "artifact_present": false,
+        "edges": 4100101,
+        "expected_edges": 4100101,
+        "expected_nodes": 2200102,
+        "nodes": 2200102,
+        "not_indexed_files_count": 0,
+        "parse_partial_count": 0,
+        "project": "scale-task-context-21-100m",
+        "skipped_count": 0,
+        "status": "indexed"
+      },
+      "manifest": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/setup/100m/source-manifest.jsonl",
+      "project": "scale-task-context-21-100m",
+      "repo_root": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/scratch/source-100m",
+      "scale": "100m",
+      "source_audit": {
+        "code_lines": 100000000,
+        "files": 100000,
+        "manifest_sha256": "d89263bdec7f9a30b8fc9c697f8fb52c9c0deb8c977827c9fd481889589c9acf",
+        "source_bytes": 2977133335
+      }
+    },
+    "10k": {
+      "code_lines": 10000,
+      "index_payload": {
+        "adr_hint": "Project indexed. Consider creating an Architecture Decision Record: explore the codebase with get_architecture(aspects=['all']), then use manage_adr(mode='update') to persist architectural insights across sessions.",
+        "adr_present": false,
+        "artifact_present": false,
+        "edges": 412,
+        "expected_edges": 412,
+        "expected_nodes": 223,
+        "nodes": 223,
+        "not_indexed_files_count": 0,
+        "parse_partial_count": 0,
+        "project": "scale-task-context-21-10k",
+        "skipped_count": 0,
+        "status": "indexed"
+      },
+      "manifest": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/setup/10k/source-manifest.jsonl",
+      "project": "scale-task-context-21-10k",
+      "repo_root": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/scratch/source-10k",
+      "scale": "10k",
+      "source_audit": {
+        "code_lines": 10000,
+        "files": 10,
+        "manifest_sha256": "4a363ab0009fdb5e46a04b178cfd94d02e5710ad12ba39f9bbd8364be8e1b332",
+        "source_bytes": 296155
+      }
+    },
+    "1m": {
+      "code_lines": 1000000,
+      "index_payload": {
+        "adr_hint": "Project indexed. Consider creating an Architecture Decision Record: explore the codebase with get_architecture(aspects=['all']), then use manage_adr(mode='update') to persist architectural insights across sessions.",
+        "adr_present": false,
+        "artifact_present": false,
+        "edges": 41002,
+        "expected_edges": 41002,
+        "expected_nodes": 22003,
+        "nodes": 22003,
+        "not_indexed_files_count": 0,
+        "parse_partial_count": 0,
+        "project": "scale-task-context-21-1m",
+        "skipped_count": 0,
+        "status": "indexed"
+      },
+      "manifest": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/setup/1m/source-manifest.jsonl",
+      "project": "scale-task-context-21-1m",
+      "repo_root": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/scratch/source-1m",
+      "scale": "1m",
+      "source_audit": {
+        "code_lines": 1000000,
+        "files": 1000,
+        "manifest_sha256": "baec0c3d9b62529fc0374959df35bdf6df47512a9c6ec4681b412d9d1e23d45a",
+        "source_bytes": 29693335
+      }
+    }
+  },
+  "protocol_hashes": {
+    "protocol.json": "77466510867bd0974400eac50326e6d15ab472715fc94d2db88cf43f9027d027",
+    "schedule.json": "0949c5b37a64f37cc3e17032f4d3f648bc76841eecada2f2763959af1826ad4e",
+    "tasks.json": "f215da6ef70a1bbc437f74a0e3d71a80af7ae0b4309abef3e700eddb900a7146"
+  },
+  "setup_wall_seconds": 593.5237754113041,
+  "state": "ready",
+  "task_oracle": [
+    {
+      "correct": true,
+      "observed": "part_0000/unit_000009.cpp:601",
+      "payload_sha256": "ad5591a022f753777b5c299a7d40521b31b5931aac0f1b41785d3c371676b6ed",
+      "task": "10k-lookup-1"
+    },
+    {
+      "correct": true,
+      "observed": "part_0000/unit_000005.cpp:751",
+      "payload_sha256": "e4aa9060fd636a885ea2c04501d40e44d6bf7bcda70b2e2285acd423f1f703e7",
+      "task": "10k-lookup-2"
+    },
+    {
+      "correct": true,
+      "observed": "part_0000/unit_000000.cpp:151",
+      "payload_sha256": "2a54374cd8e995b4917b8c5d0c98615d45cde5623cba5798e5b55dbe1ac46e09",
+      "task": "10k-lookup-3"
+    },
+    {
+      "correct": true,
+      "observed": "part_0000/unit_000004.cpp:851",
+      "payload_sha256": "f9219a0d7c9f65a455fb380298beefece8ec786926ae8ddc05879305602eb170",
+      "task": "10k-lookup-4"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_159",
+        "capacity_function_158",
+        "capacity_function_157",
+        "capacity_function_156"
+      ],
+      "payload_sha256": "410448917aded9a9c3555dfdcd5ada554d7f350939659ccd18cd075ca2100b1f",
+      "task": "10k-chain-1"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_58",
+        "capacity_function_57",
+        "capacity_function_56",
+        "capacity_function_55"
+      ],
+      "payload_sha256": "bd2ced74b68f3a8ab1d7724c9a5d4fa972a949da93a60218f78d54d122f7003a",
+      "task": "10k-chain-2"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_77",
+        "capacity_function_76",
+        "capacity_function_75",
+        "capacity_function_74"
+      ],
+      "payload_sha256": "b95b03e5210b4cdcfe317fea74d4b1e111740e54c9522d072358024293106cbf",
+      "task": "10k-chain-3"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_176",
+        "capacity_function_175",
+        "capacity_function_174",
+        "capacity_function_173"
+      ],
+      "payload_sha256": "4e1809112eb18a82e17d8aae35fcce53f5ca008dabe08047254dad051e6f6e5d",
+      "task": "10k-chain-4"
+    },
+    {
+      "correct": true,
+      "observed": "part_0000/unit_000750.cpp:601",
+      "payload_sha256": "aa018b7728b2c1f826e167bdfd9a7b42092186d0cf0d05e5050d15858309bfe7",
+      "task": "1m-lookup-1"
+    },
+    {
+      "correct": true,
+      "observed": "part_0000/unit_000310.cpp:351",
+      "payload_sha256": "6b9e549426e655d32010d61693d26720bf2645f4e0a9762a0df44886c6178a9c",
+      "task": "1m-lookup-2"
+    },
+    {
+      "correct": true,
+      "observed": "part_0000/unit_000049.cpp:351",
+      "payload_sha256": "bd2ca341ec5ff1a816ea7829fe67e9958b7d67dc2d474b1a10dd34916a2408db",
+      "task": "1m-lookup-3"
+    },
+    {
+      "correct": true,
+      "observed": "part_0000/unit_000039.cpp:801",
+      "payload_sha256": "f534db2a245ab7233ebc6c404b73994ab2b3893d7546a4b4ce26663be89ee173",
+      "task": "1m-lookup-4"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_3279",
+        "capacity_function_3278",
+        "capacity_function_3277",
+        "capacity_function_3276"
+      ],
+      "payload_sha256": "417bd703a39ec7bf2aac2d99a586004a47278238a5a9fddfa0dd92e7b5e0af2e",
+      "task": "1m-chain-1"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_3138",
+        "capacity_function_3137",
+        "capacity_function_3136",
+        "capacity_function_3135"
+      ],
+      "payload_sha256": "25a1499a0719268a1564acb8f127d7a33c1b5544299d3b644387e532db5ff181",
+      "task": "1m-chain-2"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_17317",
+        "capacity_function_17316",
+        "capacity_function_17315",
+        "capacity_function_17314"
+      ],
+      "payload_sha256": "a913db732992371b62c4693a8b561eef8e30509a1156e51d47548608b11c61fe",
+      "task": "1m-chain-3"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_14716",
+        "capacity_function_14715",
+        "capacity_function_14714",
+        "capacity_function_14713"
+      ],
+      "payload_sha256": "e6f9063c99a71a5bcaf94a435e0fdbf8cdc9f4ca615ee297c1f6ed5a3551b977",
+      "task": "1m-chain-4"
+    },
+    {
+      "correct": true,
+      "observed": "part_0044/unit_044858.cpp:401",
+      "payload_sha256": "d68e453ed141e06a2d43ccbaf9a39eef8fefd38e265f8c35b5a695e0b47a3cff",
+      "task": "100m-lookup-1"
+    },
+    {
+      "correct": true,
+      "observed": "part_0029/unit_029979.cpp:101",
+      "payload_sha256": "410681ec28370bb7c86fd4be99685a44454be294cc4224ece87a051529753875",
+      "task": "100m-lookup-2"
+    },
+    {
+      "correct": true,
+      "observed": "part_0072/unit_072229.cpp:351",
+      "payload_sha256": "cb38ecd00a05edcb336580efa63eb7f59b89f8461a45e445966ad060138c9185",
+      "task": "100m-lookup-3"
+    },
+    {
+      "correct": true,
+      "observed": "part_0010/unit_010681.cpp:101",
+      "payload_sha256": "59e670127209ee369d752421b79bb5c455618019408c9a06da124063c05dec53",
+      "task": "100m-lookup-4"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_38519",
+        "capacity_function_38518",
+        "capacity_function_38517",
+        "capacity_function_38516"
+      ],
+      "payload_sha256": "98475513db904269582a7bac8e963896f317ea88efa181aa08fa7c163aae8045",
+      "task": "100m-chain-1"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_1666338",
+        "capacity_function_1666337",
+        "capacity_function_1666336",
+        "capacity_function_1666335"
+      ],
+      "payload_sha256": "05df8d1bfdc8cf266a090c6a8666da8da6413528ffdd1eaf9d33fc1282c1d274",
+      "task": "100m-chain-2"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_1753457",
+        "capacity_function_1753456",
+        "capacity_function_1753455",
+        "capacity_function_1753454"
+      ],
+      "payload_sha256": "91ff28afc211e41c1a3f3237e7d77b2e2a78fe7d3f772c17dc8a34adade378e8",
+      "task": "100m-chain-3"
+    },
+    {
+      "correct": true,
+      "observed": [
+        "capacity_function_1532376",
+        "capacity_function_1532375",
+        "capacity_function_1532374",
+        "capacity_function_1532373"
+      ],
+      "payload_sha256": "bfad4b8190292961c21d6526a6a41dd7f93db1ff281c69b2a94c6fd16a5780cf",
+      "task": "100m-chain-4"
+    }
+  ],
+  "task_oracle_passed": true,
+  "tmp": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/scratch/tmp"
+}

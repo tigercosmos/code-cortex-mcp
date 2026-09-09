@@ -59,7 +59,13 @@ void cbm_pipeline_set_persistence(cbm_pipeline_t *p, bool enabled);
 /* Free a pipeline and all its internal state. NULL-safe. */
 void cbm_pipeline_free(cbm_pipeline_t *p);
 
-/* Run the full indexing pipeline. Returns 0 on success, -1 on error.
+/* Claim this pipeline's DB before any artifact installation or rebuild.
+ * Nonblocking: 0 acquired, CBM_INDEX_BUSY held elsewhere, -1 error. Reentrant
+ * only for this pipeline object. run() releases on every exit; free() releases
+ * an unused claim. The claim freezes the canonical DB target/project name. */
+int cbm_pipeline_claim_index(cbm_pipeline_t *p);
+
+/* Run the full indexing pipeline. Returns 0, CBM_INDEX_BUSY, or -1 on error.
  * Discovers files, extracts, resolves, and dumps to SQLite. */
 int cbm_pipeline_run(cbm_pipeline_t *p);
 
@@ -135,9 +141,9 @@ void cbm_pipeline_get_file_errors(const cbm_pipeline_t *p, cbm_file_error_t **ou
 void cbm_pipeline_get_ignored(const cbm_pipeline_t *p, cbm_ignored_file_t **out, int *count,
                               int *total);
 
-/* ── Index lock (prevents concurrent pipeline runs on same DB) ──── */
+/* ── Process-local gate (global extraction state and server threads) ── */
 
-/* Try to acquire the global index lock. Returns true if acquired,
+/* Try to acquire the process-local gate. Returns true if acquired,
  * false if another pipeline is already running (non-blocking).
  * Use this in the watcher — skip reindex if busy. */
 bool cbm_pipeline_try_lock(void);

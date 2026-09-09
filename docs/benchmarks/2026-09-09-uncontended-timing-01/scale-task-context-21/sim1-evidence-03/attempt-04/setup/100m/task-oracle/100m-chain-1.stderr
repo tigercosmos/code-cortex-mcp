@@ -1,0 +1,13 @@
+level=info msg=mem.init budget_mb=4096 total_ram_mb=64125 source=CBM_MEM_BUDGET_MB
+level=info msg=server.start version=dev
+level=info msg=watcher.start interval_ms=multi-sec
+level=info msg=session.root.cwd path=/home/anchi/code-cortex-mcp-goal-20260909/repo
+level=info msg=autoindex.skip reason=disabled hint=run:_code-cortex-mcp_config_set_auto_index_true
+level=info msg=mcp.request protocol=jsonrpc method=initialize status=ok duration_ms=0
+level=info msg=tool.server.spawn spawn_count=first
+level=info msg=mem.init budget_mb=4096 total_ram_mb=64125 source=CBM_MEM_BUDGET_MB
+level=info msg=worker.watchdog.start
+level=info msg=tool.server.start max_requests=bounded
+level=info msg=mcp.request protocol=jsonrpc method=tools/call tool=trace_path status=ok duration_ms=4
+level=info msg=server.shutdown
+level=info msg=watcher.stop

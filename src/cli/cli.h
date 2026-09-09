@@ -344,10 +344,23 @@ int cbm_cmd_config(int argc, char **argv);
  * with search_graph hits for Grep/Glob calls. NEVER blocks: every failure
  * path returns 0 with no stdout output. */
 int cbm_cmd_hook_augment(void);
+/* Optional pre-request source context. Stdin: {project|repo_path, symbol|request, max_bytes?}.
+ * Emits compact JSON or nothing; never indexes or changes client settings. */
+int cbm_cmd_task_context(void);
 
 /* `code-cortex-mcp doctor`: version, tool catalog, cwd → project, hook and
  * MCP registration checks. Returns non-zero on a hard failure. */
 int cbm_cmd_doctor(const char *version);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+int cbm_cli_doctor_catalog_for_testing(const char *json, bool *has_inspect, bool *has_cursor);
+char *cbm_hook_symbol_brief_for_testing(const char *json, const char *token);
+char *cbm_task_context_for_testing(const char *json, size_t max_bytes);
+char *cbm_source_context_for_testing(const char *events, size_t max_bytes, bool complete);
+char *cbm_definition_context_for_testing(const char *events, const char *symbol, size_t max_bytes);
+char *cbm_request_symbol_for_testing(const char *request, bool automatic);
+char *cbm_request_chain_for_testing(const char *request);
+#endif
 
 /* Extract a search pattern from a Bash tool command (rg/grep/ag/ack/ugrep/
  * git grep, through env/nice/time/command/rtk/tokf-run wrappers). Returns

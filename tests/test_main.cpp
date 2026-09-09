@@ -13,6 +13,8 @@ int tf_skip_count = 0;
 #include <string.h>
 #include "mcp/index_supervisor.h" /* cbm_index_set_worker_role */
 #include "mcp/mcp.h"               /* cbm_mcp_handle_tool — act as a real worker */
+#include "pipeline/pipeline.h"
+#include "foundation/constants.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include "foundation/compat.h" /* cbm_mkdtemp / cbm_setenv / cbm_mkdir — HOME isolation (all platforms) */
@@ -32,6 +34,27 @@ int tf_skip_count = 0;
  * quarantine guards in test_mcp drive a REAL supervised run through public
  * APIs. Returns an exit code (>=0) when it handled a worker invocation,
  * else -1. */
+/* A freshly exec'd process is essential: a second object/thread cannot prove
+ * cross-process admission. This dispatch never indexes a real checkout. */
+static int tf_maybe_run_index_lease_probe(int argc, char **argv) {
+    if (argc != 4 || strcmp(argv[1], "--index-lease-probe") != 0) {
+        return -1;
+    }
+    char missing_repo[4096];
+    snprintf(missing_repo, sizeof(missing_repo), "%s.missing-repo", argv[3]);
+    cbm_pipeline_t *p = cbm_pipeline_new(missing_repo, argv[3], CBM_MODE_FAST);
+    if (!p) {
+        return 74;
+    }
+    int rc = strcmp(argv[2], "run") == 0 ? cbm_pipeline_run(p) : cbm_pipeline_claim_index(p);
+    if (rc == 0 && strcmp(argv[2], "abandon") == 0) {
+        // Deliberately bypass destructors/free: OS process exit must release it.
+        _Exit(79);
+    }
+    cbm_pipeline_free(p);
+    return rc == 0 ? 0 : (rc == CBM_INDEX_BUSY ? 73 : 74);
+}
+
 static int tf_maybe_run_index_worker(int argc, char **argv) {
     if (argc < 7 || strcmp(argv[1], "cli") != 0 || strcmp(argv[2], "--index-worker") != 0 ||
         strcmp(argv[3], "index_repository") != 0 || strcmp(argv[5], "--response-out") != 0) {
@@ -212,6 +235,10 @@ extern void suite_stack_overflow(void);
 extern "C" void cbm_kind_in_set_free_cache(void);
 
 int main(int argc, char **argv) {
+    int lease_rc = tf_maybe_run_index_lease_probe(argc, argv);
+    if (lease_rc >= 0) {
+        return lease_rc;
+    }
     /* Both dispatches must precede every suite: this process may have been
      * spawned as a supervised worker or as the deleted-self probe. */
     int worker_rc = tf_maybe_run_index_worker(argc, argv);

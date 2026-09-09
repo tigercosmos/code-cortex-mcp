@@ -9,6 +9,10 @@
 extern "C" {
 #endif
 
+const char *cbm_overload_at(const CBMFileResult *result, uint32_t offset);
+const char *cbm_overload_qn(CBMArena *arena, const char *family, uint32_t offset);
+const char *cbm_overload_family(CBMArena *arena, const char *qualified_name);
+
 // Portable memmem: find first occurrence of `needle` (needle_len bytes) within
 // `haystack` (haystack_len bytes). Returns a pointer into haystack, or NULL.
 // Hand-rolled so it compiles identically on all platforms (GNU/BSD-only

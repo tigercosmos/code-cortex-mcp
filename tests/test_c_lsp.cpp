@@ -20,6 +20,201 @@
  */
 #include "test_framework.h"
 #include "cbm.h"
+#include "../internal/cbm/lsp/c_lsp.h"
+#include "../internal/cbm/lsp/type_registry.h"
+#include "../src/pipeline/lsp_resolve.h"
+
+TEST(clsp_primitive_completion_requires_known_sites_and_local_calls) {
+    struct Fixture { const char *source; int pending; bool complete; } fixtures[] = {
+        {"int leaf(int x){return x;} int f(int x){int v=leaf(x);return (v^1)+2;}", 0, true},
+        {"int f(int x){return x+1+2;}", 0, true},
+        {"int external(int); int f(int x){int v=external(x);return (x^1)+2;}", 0, false},
+        {"int f(int x, Unknown y){return x+y;}", 1, false},
+        {"Unknown f(Unknown x){return x+1;}", 1, false},
+        {"struct size_t {size_t operator+(int);}; size_t f(size_t x){return x+1;}", 1, false},
+        {"#define BUMP(v) ((v)+1)\nint f(int x){return BUMP(x)+2;}\n", 1, false},
+        {"struct N{}; N operator\"\"_tag(unsigned long long); N operator+(int,N); N f(int x){return x+1_tag;}", 1, false},
+    };
+    for (const auto &fixture : fixtures) {
+        CBMExtractOptions options = {.defer_cpp_operators = true, .deduplicate_usages = true};
+        auto *result = cbm_extract_file_with_options(fixture.source, (int)strlen(fixture.source),
+            CBM_LANG_CPP, "probe", "primitive.cpp", 0, nullptr, nullptr, &options);
+        ASSERT_NOT_NULL(result);
+        ASSERT_EQ(result->pending_cpp_operator_count, fixture.pending);
+        ASSERT_EQ(cbm_pipeline_cpp_primitives_complete(result), fixture.complete);
+        ASSERT(result->cpp_operator_tracker == nullptr);
+        cbm_free_result(result);
+    }
+    PASS();
+}
+
+TEST(clsp_batch_preserves_operator_source_metadata) {
+    const char *source =
+        "struct Box { Box operator+(const Box&) const; };\n"
+        "Box combine(Box a, Box b) { return a + b; }\n";
+    CBMLSPDef definition = {};
+    definition.qualified_name = "probe.box.Box";
+    definition.short_name = "Box";
+    definition.label = "Class";
+    CBMBatchCLSPFile file = {};
+    file.source = source;
+    file.source_len = (int)strlen(source);
+    file.module_qn = "probe.box";
+    file.cpp_mode = true;
+    file.defs = &definition;
+    file.def_count = 1;
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {};
+    cbm_batch_c_lsp_cross(&arena, &file, 1, &out);
+    ASSERT_EQ(out.count, 1);
+    ASSERT_EQ(out.items[0].source_byte, (uint32_t)(strstr(source, "a + b") - source + 1));
+    ASSERT_EQ(out.items[0].binary_operator_line, 2);
+    ASSERT_STR_EQ(out.items[0].caller_qn, "probe.box.combine");
+    ASSERT_STR_EQ(out.items[0].callee_qn, "probe.box.Box.operator+");
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
+TEST(clsp_overload_lookup_preserves_distinct_graph_identities) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMTypeRegistry registry;
+    cbm_registry_init(&registry, &arena);
+    const CBMType *integer = cbm_type_builtin(&arena, "int");
+    const CBMType *floating = cbm_type_builtin(&arena, "double");
+    const CBMType *ints[] = {integer, nullptr};
+    const CBMType *doubles[] = {floating, nullptr};
+    const CBMType *pair[] = {floating, floating, nullptr};
+    const char *names[] = {"x", "y", nullptr};
+    const char *identities[] = {"p.api.blend#int", "p.api.blend#double", "p.api.blend#pair"};
+    const CBMType **params[] = {ints, doubles, pair};
+    for (int i = 0; i < 3; i++) {
+        CBMRegisteredFunc f = {};
+        f.qualified_name = identities[i];
+        f.lookup_qn = "p.api.blend";
+        f.short_name = "blend";
+        f.signature = cbm_type_func(&arena, names, params[i], nullptr);
+        f.min_params = -1;
+        cbm_registry_add_func(&registry, f);
+    }
+    for (int finalized = 0; finalized < 2; finalized++) {
+        if (finalized) cbm_registry_finalize(&registry);
+        for (int i = 0; i < 3; i++) {
+            const auto *found = cbm_registry_lookup_symbol_by_types(
+                &registry, "p.api", "blend", params[i], i == 2 ? 2 : 1);
+            ASSERT_NOT_NULL(found);
+            ASSERT_STR_EQ(found->qualified_name, identities[i]);
+            ASSERT_NOT_NULL(cbm_registry_lookup_func(&registry, identities[i]));
+        }
+        const auto *two = cbm_registry_lookup_symbol_by_args(&registry, "p.api", "blend", 2);
+        ASSERT_NOT_NULL(two);
+        ASSERT_STR_EQ(two->qualified_name, identities[2]);
+        ASSERT_NULL(cbm_registry_lookup_func(&registry, "other.api.blend"));
+    }
+    // Aliases add hash entries, but the post-finalize tail starts at the
+    // number of indexed functions, not at the number of hash entries.
+    CBMRegisteredFunc tail = {};
+    tail.qualified_name = "p.api.tail#int";
+    tail.lookup_qn = "p.api.tail";
+    cbm_registry_add_func(&registry, tail);
+    ASSERT_NOT_NULL(cbm_registry_lookup_func(&registry, "p.api.tail"));
+    ASSERT_NOT_NULL(cbm_registry_lookup_func(&registry, "p.api.tail#int"));
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
+TEST(clsp_extracted_overloads_keep_body_ownership) {
+    const char *source =
+        "int integer_helper(int x) { return x; }\n"
+        "double floating_helper(double x) { return x; }\n"
+        "int blend(int x) { return integer_helper(x); }\n"
+        "double blend(double x) { return floating_helper(x); }\n"
+        "struct Box { int blend(int x) { return integer_helper(x); } "
+        "double blend(double x) { return floating_helper(x); } };\n"
+        "int main() { Box box; return blend(2) == 2 && blend(2.0) == 2.0 "
+        "&& box.blend(2) == 2 && box.blend(2.0) == 2.0; }\n";
+    auto *result = cbm_extract_file(source, (int)strlen(source), CBM_LANG_CPP,
+                                    "probe", "api.cpp", 0, nullptr, nullptr);
+    ASSERT_NOT_NULL(result);
+    int definitions = 0, textual_owned = 0, resolved_owned = 0;
+    for (int i = 0; i < result->defs.count; i++) {
+        const auto &def = result->defs.items[i];
+        if (strcmp(def.name, "blend") != 0 ||
+            (strcmp(def.label, "Function") != 0 && strcmp(def.label, "Method") != 0)) continue;
+        definitions++;
+        ASSERT_NOT_NULL(strstr(def.qualified_name, "@overload_"));
+        ASSERT(def.definition_offset < strlen(source));
+        const char *helper = strncmp(source + def.definition_offset, "double", 6) == 0
+                                 ? "floating_helper" : "integer_helper";
+        int textual = 0, resolved = 0;
+        for (int j = 0; j < result->calls.count; j++) {
+            const auto &call = result->calls.items[j];
+            if (call.enclosing_func_qn && strcmp(call.enclosing_func_qn, def.qualified_name) == 0) {
+                ASSERT_STR_EQ(call.callee_name, helper);
+                textual++;
+            }
+        }
+        for (int j = 0; j < result->resolved_calls.count; j++) {
+            const auto &call = result->resolved_calls.items[j];
+            if (call.caller_qn && strcmp(call.caller_qn, def.qualified_name) == 0) {
+                ASSERT_NOT_NULL(call.callee_qn);
+                ASSERT_NOT_NULL(strstr(call.callee_qn, helper));
+                resolved++;
+            }
+        }
+        ASSERT_EQ(textual, 1);
+        ASSERT_EQ(resolved, 1);
+        textual_owned += textual;
+        resolved_owned += resolved;
+    }
+    ASSERT_EQ(definitions, 4);
+    ASSERT_EQ(textual_owned, 4);
+    ASSERT_EQ(resolved_owned, 4);
+    int incoming = 0;
+    for (int i = 0; i < result->calls.count; i++) {
+        const auto &call = result->calls.items[i];
+        if (strcmp(call.callee_name, "blend") != 0 && strcmp(call.callee_name, "box.blend") != 0) continue;
+        const auto *resolved = cbm_pipeline_find_lsp_resolution(&result->resolved_calls, &call, false);
+        ASSERT_NOT_NULL(resolved);
+        ASSERT_EQ(resolved->source_byte, call.source_byte);
+        ASSERT_NOT_NULL(strstr(resolved->callee_qn, "@overload_"));
+        char resolved_key[1024], textual_key[1024], other_site_key[1024];
+        cbm_pipeline_lsp_key(resolved_key, sizeof(resolved_key), resolved->caller_qn,
+                             cbm_lsp_bare_segment(resolved->callee_qn), resolved->source_byte);
+        cbm_pipeline_lsp_key(textual_key, sizeof(textual_key), call.enclosing_func_qn,
+                             cbm_lsp_bare_segment(call.callee_name), call.source_byte);
+        cbm_pipeline_lsp_key(other_site_key, sizeof(other_site_key), call.enclosing_func_qn,
+                             cbm_lsp_bare_segment(call.callee_name), call.source_byte + 1);
+        ASSERT_STR_EQ(resolved_key, textual_key);
+        ASSERT(strcmp(textual_key, other_site_key) != 0);
+        bool correct = false;
+        const char *expression = source + call.source_byte - 1;
+        if (strncmp(expression, "box.", 4) == 0) expression += 4;
+        bool integer = strncmp(expression, "blend(2)", 8) == 0;
+        for (int j = 0; j < result->defs.count; j++) {
+            const auto &def = result->defs.items[j];
+            if (strcmp(def.qualified_name, resolved->callee_qn) == 0 && def.signature) {
+                correct = (strstr(def.signature, "double") == nullptr) == integer;
+            }
+        }
+        if (!correct) fprintf(stderr, "overload mismatch expression=%.18s target=%s integer=%d\n",
+                              expression, resolved->callee_qn, integer);
+        if (!correct) for (int j = 0; j < result->defs.count; j++) {
+            const auto &def = result->defs.items[j];
+            if (strcmp(def.name, "blend") == 0)
+                fprintf(stderr, "candidate %s signature=%s param=%s\n", def.qualified_name,
+                        def.signature ? def.signature : "null",
+                        def.param_types && def.param_types[0] ? def.param_types[0] : "null");
+        }
+        ASSERT(correct);
+        incoming++;
+    }
+    ASSERT_EQ(incoming, 4);
+    cbm_free_result(result);
+    PASS();
+}
+#include "cbm.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -53,6 +248,96 @@ static CBMFileResult *extract_c(const char *src) {
 
 static CBMFileResult *extract_cpp(const char *src) {
     return cbm_extract_file(src, (int)strlen(src), CBM_LANG_CPP, "test", "main.cpp", 0, NULL, NULL);
+}
+
+TEST(clsp_include_type_bindings_preserve_namespaces_and_ambiguity) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMCVisibleType bindings[] = {
+        {"test.client.__cpp_visible.alpha.Widget", "test.header.Alpha.Widget"},
+        {"test.client.__cpp_visible.beta.Widget", "test.header.Beta.Widget"},
+        {"test.client.__cpp_visible.Widget", nullptr},
+    };
+    CBMLSPDef defs[4] = {};
+    defs[0].qualified_name = "test.header.Alpha.Widget";
+    defs[0].short_name = "Widget"; defs[0].label = "Class";
+    defs[0].cpp_visible_types = bindings; defs[0].cpp_visible_type_count = 3;
+    defs[1].qualified_name = "test.header.Beta.Widget";
+    defs[1].short_name = "Widget"; defs[1].label = "Class";
+    defs[2].qualified_name = "test.impl.Alpha.Widget.act";
+    defs[2].short_name = "act"; defs[2].label = "Method";
+    defs[2].receiver_type = "test.impl.Alpha.Widget";
+    defs[2].cpp_declaring_type = "test.header.Alpha.Widget";
+    defs[3].qualified_name = "test.impl.Beta.Widget.act";
+    defs[3].short_name = "act"; defs[3].label = "Method";
+    defs[3].receiver_type = "test.impl.Beta.Widget";
+    defs[3].cpp_declaring_type = "test.header.Beta.Widget";
+    for (auto& def : defs) def.lang = CBM_LANG_CPP;
+    const char *source =
+        "namespace alpha { void first(Widget *value) { value->act(); } }\n"
+        "namespace beta { void second(Widget *value) { value->act(); } }\n"
+        "void qualified(alpha::Widget *value) { value->act(); }\n"
+        "void ambiguous(Widget *value) { value->act(); }\n";
+    auto *registry = cbm_c_build_cross_registry(&arena, defs, 4);
+    ASSERT_NOT_NULL(registry);
+    CBMResolvedCallArray out = {};
+    cbm_run_c_lsp_cross_with_registry(&arena, source, (int)strlen(source), "test.client", true,
+                                     registry, nullptr, nullptr, 0, nullptr, &out);
+    int seen = 0, unresolved = 0;
+    for (int i = 0; i < out.count; ++i) {
+        const auto& call = out.items[i];
+        if (strstr(call.caller_qn, ".ambiguous")) {
+            ASSERT_STR_EQ(call.strategy, "lsp_unresolved");
+            ASSERT_EQ(call.confidence, 0.0f);
+            ++unresolved;
+            continue;
+        }
+        ASSERT_STR_NEQ(call.strategy, "lsp_unresolved");
+        if (strstr(call.caller_qn, ".first")) {
+            ASSERT_STR_EQ(call.callee_qn, "test.impl.Alpha.Widget.act"); seen |= 1;
+        } else if (strstr(call.caller_qn, ".second")) {
+            ASSERT_STR_EQ(call.callee_qn, "test.impl.Beta.Widget.act"); seen |= 2;
+        } else if (strstr(call.caller_qn, ".qualified")) {
+            ASSERT_STR_EQ(call.callee_qn, "test.impl.Alpha.Widget.act"); seen |= 4;
+        } else FAIL("unexpected caller identity");
+    }
+    ASSERT_EQ(seen, 7);
+    ASSERT_EQ(unresolved, 1);
+    ASSERT_EQ(out.count, 4);
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
+TEST(clsp_implicit_field_receiver_preserves_local_shadowing) {
+    const char *source =
+        "struct Target { void act() {} };\n"
+        "struct Other { void act() {} };\n"
+        "struct Owner { Target *member;\n"
+        "void call() { member->act(); }\n"
+        "void shadow(Other *member) { member->act(); }\n"
+        "void unknown(auto member) { member->act(); } };\n";
+    CBMFileResult *result = extract_cpp(source);
+    ASSERT_NOT_NULL(result);
+    int member = find_resolved(result, "Owner.call", "Target.act");
+    int shadow = find_resolved(result, "Owner.shadow", "Other.act");
+    ASSERT_GTE(member, 0);
+    ASSERT_GTE(shadow, 0);
+    ASSERT_STR_EQ(result->resolved_calls.items[member].callee_qn, "test.main.Target.act");
+    ASSERT_STR_EQ(result->resolved_calls.items[shadow].callee_qn, "test.main.Other.act");
+    ASSERT_EQ(find_resolved(result, "Owner.shadow", "Target.act"), -1);
+    // This array also contains unresolved diagnostics. The unknown lexical
+    // parameter must stay unresolved rather than fall back to either class.
+    ASSERT_EQ(count_resolved(result, "Owner.unknown", ".act"), 1);
+    int unknown = find_resolved(result, "Owner.unknown", "member.act");
+    ASSERT_GTE(unknown, 0);
+    ASSERT_STR_EQ(result->resolved_calls.items[unknown].callee_qn, "member.act");
+    ASSERT_STR_EQ(result->resolved_calls.items[unknown].strategy, "lsp_unresolved");
+    ASSERT_EQ(result->resolved_calls.items[unknown].confidence, 0.0f);
+    ASSERT_STR_EQ(result->resolved_calls.items[unknown].reason, "unknown_receiver_type");
+    ASSERT_EQ(find_resolved(result, "Owner.unknown", "Target.act"), -1);
+    ASSERT_EQ(find_resolved(result, "Owner.unknown", "Other.act"), -1);
+    cbm_free_result(result);
+    PASS();
 }
 
 TEST(clsp_simple_var_decl) {
@@ -15328,11 +15613,17 @@ TEST(clsp_golden_func_ptr_via_dispatch) {
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(c_lsp) {
+    RUN_TEST(clsp_extracted_overloads_keep_body_ownership);
+    RUN_TEST(clsp_overload_lookup_preserves_distinct_graph_identities);
+    RUN_TEST(clsp_batch_preserves_operator_source_metadata);
+    RUN_TEST(clsp_primitive_completion_requires_known_sites_and_local_calls);
     /* Golden regression (WS9) */
     RUN_TEST(clsp_golden_direct_same_file_func);
     RUN_TEST(clsp_golden_chained_stdlib_calls);
     RUN_TEST(clsp_golden_func_ptr_via_dispatch);
 
+    RUN_TEST(clsp_include_type_bindings_preserve_namespaces_and_ambiguity);
+    RUN_TEST(clsp_implicit_field_receiver_preserves_local_shadowing);
     RUN_TEST(clsp_simple_var_decl);
     RUN_TEST(clsp_pointer_arrow);
     RUN_TEST(clsp_dot_access);

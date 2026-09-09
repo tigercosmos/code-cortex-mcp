@@ -1,0 +1,3 @@
+sample_1_load1=0.55
+sample_2_load1=0.55
+sample_3_load1=0.55

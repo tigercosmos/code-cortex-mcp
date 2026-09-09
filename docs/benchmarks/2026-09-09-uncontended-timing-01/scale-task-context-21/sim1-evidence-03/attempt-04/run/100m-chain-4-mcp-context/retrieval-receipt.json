@@ -1,0 +1,14 @@
+{
+  "backend": "production_mcp_stdio_jsonrpc",
+  "context_bytes": 2417,
+  "observed": [
+    "capacity_function_1532376",
+    "capacity_function_1532375",
+    "capacity_function_1532374",
+    "capacity_function_1532373"
+  ],
+  "payload_sha256": "bfad4b8190292961c21d6526a6a41dd7f93db1ff281c69b2a94c6fd16a5780cf",
+  "source_oracle_correct": true,
+  "tool": "trace_path",
+  "wall_seconds": 0.001595300156623125
+}

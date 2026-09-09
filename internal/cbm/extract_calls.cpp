@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <algorithm>
+#include <string>
 
 /* Max ancestor depth for Lean type-position check. */
 enum { LEAN_MAX_PARENT_DEPTH = 20 };
@@ -1223,6 +1225,34 @@ static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, C
         }
     }
 
+    // CUDA's grammar recovers `value.operator->()` as an identifier function
+    // followed by ERROR(.operator->). Keep the explicit operator invocation,
+    // rather than treating the receiver identifier as the called function.
+    if (lang == CBM_LANG_CUDA && strcmp(ts_node_type(node), "call_expression") == 0) {
+        TSNode function = ts_node_child_by_field_name(node, TS_FIELD("function"));
+        TSNode arguments = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+        if (!ts_node_is_null(function) && !ts_node_is_null(arguments) &&
+            strcmp(ts_node_type(function), "identifier") == 0) {
+            for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
+                TSNode error = ts_node_named_child(node, i);
+                if (strcmp(ts_node_type(error), "ERROR") != 0 ||
+                    ts_node_named_child_count(error) != 1) continue;
+                TSNode op = ts_node_named_child(error, 0);
+                if (strcmp(ts_node_type(op), "operator_name") != 0 ||
+                    ts_node_start_byte(op) < ts_node_end_byte(function)) continue;
+                std::string separator(source + ts_node_end_byte(function),
+                                      ts_node_start_byte(op) - ts_node_end_byte(function));
+                separator.erase(std::remove_if(separator.begin(), separator.end(),
+                    [](unsigned char c) { return isspace(c); }), separator.end());
+                if (separator != "." && separator != "->") continue;
+                if (ts_node_end_byte(op) != ts_node_end_byte(error) ||
+                    ts_node_end_byte(error) > ts_node_start_byte(arguments)) continue;
+                return cbm_arena_sprintf(a, "%s%s%s", cbm_node_text(a, function, source),
+                                        separator.c_str(), cbm_node_text(a, op, source));
+            }
+        }
+    }
+
     // Try common field-based resolution first
     char *name = extract_callee_from_fields(a, node, source);
     if (name) {
@@ -1351,11 +1381,12 @@ static void process_keyword_arg(CBMExtractCtx *ctx, TSNode arg_node, CBMCallArg 
 /* Extract all arguments from a call expression into call->args[]. */
 static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
     uint32_t argc = ts_node_named_child_count(args);
+    CBMCallArg captured[CBM_MAX_CALL_ARGS] = {};
     int positional_idx = 0;
     for (uint32_t ai = 0; ai < argc && call->arg_count < CBM_MAX_CALL_ARGS; ai++) {
         TSNode arg_node = ts_node_named_child(args, ai);
         const char *ak = ts_node_type(arg_node);
-        CBMCallArg *ca = &call->args[call->arg_count];
+        CBMCallArg *ca = &captured[call->arg_count];
         memset(ca, 0, sizeof(*ca));
 
         if (strcmp(ak, "keyword_argument") == 0 || strcmp(ak, "pair") == 0) {
@@ -1388,6 +1419,15 @@ static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
                 }
             }
             call->arg_count++;
+        }
+    }
+    if (call->arg_count > 0) {
+        size_t bytes = (size_t)call->arg_count * sizeof(*call->args);
+        call->args = (CBMCallArg *)cbm_arena_alloc(ctx->arena, bytes);
+        if (call->args) {
+            memcpy(call->args, captured, bytes);
+        } else {
+            call->arg_count = 0;
         }
     }
 }
@@ -1788,9 +1828,8 @@ static void kt_push_implicit_call(CBMExtractCtx *ctx, TSNode node, const char *c
 // textual call to the bare operator name so the c-LSP's lsp_operator resolution
 // (which keys the same `operator<tok>` member on the lhs type) has a call site to
 // join. The operator token is the first unnamed child, mirroring c_lsp.c's binary
-// handling. Builtin-operand expressions (int + int) synthesize an `operator+`
-// callee too, but no such member exists so the call resolves to nothing and is
-// dropped — no spurious edge.
+// handling. Builtin expressions also produce candidates, so these calls require
+// typed resolution: a name-only fallback could select an unrelated operator.
 static void extract_cpp_operator_call(CBMExtractCtx *ctx, TSNode node, const char *kind,
                                       const char *enclosing_func_qn) {
     if (strcmp(kind, "binary_expression") != 0) {
@@ -1799,6 +1838,11 @@ static void extract_cpp_operator_call(CBMExtractCtx *ctx, TSNode node, const cha
     TSNode lhs = ts_node_child_by_field_name(node, TS_FIELD("left"));
     TSNode rhs = ts_node_child_by_field_name(node, TS_FIELD("right"));
     if (ts_node_is_null(lhs) || ts_node_is_null(rhs)) {
+        return;
+    }
+    if (ctx->defer_cpp_operators) {
+        ++ctx->result->deferred_cpp_operator_count;
+        cbm_track_deferred_cpp_operator(ctx->result, ts_node_start_byte(node), ts_node_end_byte(node));
         return;
     }
     for (uint32_t i = 0; i < ts_node_child_count(node); i++) {
@@ -1812,10 +1856,29 @@ static void extract_cpp_operator_call(CBMExtractCtx *ctx, TSNode node, const cha
             call.callee_name = cbm_arena_sprintf(ctx->arena, "operator%s", op);
             call.enclosing_func_qn = enclosing_func_qn;
             call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+            call.source_byte = ts_node_start_byte(node) + 1;
+            call.requires_typed_resolution = true;
             cbm_calls_push(&ctx->result->calls, ctx->arena, call);
         }
         break;
     }
+}
+
+static bool cpp_copy_initializes_object(TSNode declarator) {
+    // Parentheses do not change an object's declarator. Pointer/reference/array
+    // declarators bind or initialize existing storage instead of copying T.
+    while (!ts_node_is_null(declarator)) {
+        const char *kind = ts_node_type(declarator);
+        if (strcmp(kind, "identifier") == 0 || strcmp(kind, "qualified_identifier") == 0) {
+            return true;
+        }
+        if (strcmp(kind, "parenthesized_declarator") != 0 ||
+            ts_node_named_child_count(declarator) != 1) {
+            return false;
+        }
+        declarator = ts_node_named_child(declarator, 0);
+    }
+    return false;
 }
 
 // C++ implicit calls that produce no textual call node: the destructor
@@ -1866,6 +1929,10 @@ static void extract_cpp_implicit_calls(CBMExtractCtx *ctx, TSNode node, const ch
         TSNode decl = ts_node_child_by_field_name(node, TS_FIELD("declarator"));
         if (!ts_node_is_null(type) && !ts_node_is_null(decl) &&
             strcmp(ts_node_type(decl), "init_declarator") == 0) {
+            TSNode declarator = ts_node_child_by_field_name(decl, TS_FIELD("declarator"));
+            if (!cpp_copy_initializes_object(declarator)) {
+                return;
+            }
             TSNode value = ts_node_child_by_field_name(decl, TS_FIELD("value"));
             if (!ts_node_is_null(value) && strcmp(ts_node_type(value), "identifier") == 0) {
                 char *tn = cbm_node_text(ctx->arena, type, ctx->source);
@@ -1881,6 +1948,9 @@ static void extract_cpp_implicit_calls(CBMExtractCtx *ctx, TSNode node, const ch
         call.callee_name = callee;
         call.enclosing_func_qn = enclosing_func_qn;
         call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+        // A delete operand names storage, not a callable. Preserve the typed
+        // destructor join, but never resolve an unmatched operand by name.
+        call.requires_typed_resolution = strcmp(kind, "delete_expression") == 0;
         cbm_calls_push(&ctx->result->calls, ctx->arena, call);
     }
 }
@@ -1950,7 +2020,12 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
         return;
     }
 
-    if (cbm_kind_in_set(node, spec->call_node_types)) {
+    // C++ binary expressions have a dedicated operator-call path below. The
+    // generic identifier fallback would additionally turn `value + 1` into a
+    // call to `value`, even though the expression never invokes that symbol.
+    bool cpp_binary = (ctx->language == CBM_LANG_CPP || ctx->language == CBM_LANG_CUDA) &&
+                      strcmp(ts_node_type(node), "binary_expression") == 0;
+    if (!cpp_binary && cbm_kind_in_set(node, spec->call_node_types)) {
         char *callee = extract_callee_name(ctx->arena, node, ctx->source, ctx->language);
         // Keyword-filter callees, but keep builtins we mint a node for (len, str,
         // ...) so the LSP-resolved builtin call still forms a CALLS edge.
@@ -1963,6 +2038,7 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             call.loop_depth = state->loop_depth;     // enclosing loop nesting at this call
             call.branch_depth = state->branch_depth; // enclosing branch nesting at this call
             call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+            call.source_byte = ts_node_start_byte(node) + 1;
             // Perl-only: flag arrow/method calls ($obj->m / Class->m). The
             // generic short-name resolver cannot place a method without a known
             // receiver type, so the call-resolution pass suppresses those edges.

@@ -39,6 +39,8 @@ enum {
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <vector>
+#include <limits.h>
 
 #include "foundation/cbm_atomic.h"
 #include <stdint.h> // int64_t
@@ -204,7 +206,8 @@ static uint64_t fnv1a64(const char *s, size_t len) {
  * whichever symbol got dropped, not just "who imports X" queries. Other
  * edge types keep the plain (source,target,type) key: collapsing repeat
  * edges of the same type between the same two nodes (e.g. multiple call
- * sites) into one is the existing, intended dedup behavior there.
+ * sites) into one preserves the relationship; CALLS properties retain the
+ * distinct source lines separately.
  *
  * A local_name too long for the key buffer is re-keyed with an FNV-1a hash
  * of the FULL name instead of being truncated — a truncated key would
@@ -258,6 +261,9 @@ static node_ptr_array_t *get_or_create_node_array(CBMHashTable *ht, const char *
     node_ptr_array_t *arr = (node_ptr_array_t *)cbm_ht_get(ht, key);
     if (!arr) {
         arr = (__typeof__(arr))calloc(CBM_ALLOC_ONE, sizeof(node_ptr_array_t));
+        // Most secondary-index keys have one value. Keep geometric growth,
+        // but avoid reserving eight pointers for every singleton bucket.
+        cbm_da_reserve(arr, 1);
         cbm_ht_set(ht, strdup(key), arr);
     }
     return arr;
@@ -268,6 +274,9 @@ static edge_ptr_array_t *get_or_create_edge_array(CBMHashTable *ht, const char *
     edge_ptr_array_t *arr = (edge_ptr_array_t *)cbm_ht_get(ht, key);
     if (!arr) {
         arr = (__typeof__(arr))calloc(CBM_ALLOC_ONE, sizeof(edge_ptr_array_t));
+        // Most secondary-index keys have one value. Keep geometric growth,
+        // but avoid reserving eight pointers for every singleton bucket.
+        cbm_da_reserve(arr, 1);
         cbm_ht_set(ht, strdup(key), arr);
     }
     return arr;
@@ -1419,6 +1428,66 @@ static bool edge_props_should_replace(const char *existing_json, const char *inc
     return strcmp(incoming_json, existing_json) > 0;
 }
 
+/* Keep one relationship and its deterministic representative metadata, but
+ * union every known call line. Remove the aggregate before choosing metadata:
+ * otherwise a previously merged array changes the tie-break between workers. */
+static char *merge_call_props(const char *existing, const char *incoming) {
+    yyjson_doc *reads[2] = {};
+    yyjson_mut_doc *copies[2] = {};
+    char *base[2] = {};
+    const char *inputs[2] = {existing, incoming};
+    std::vector<int> lines;
+    for (int i = 0; i < 2; i++) {
+        const char *input = inputs[i] ? inputs[i] : "{}";
+        reads[i] = yyjson_read(input, strlen(input), 0);
+        yyjson_val *root = reads[i] ? yyjson_doc_get_root(reads[i]) : nullptr;
+        if (!yyjson_is_obj(root)) {
+            continue;
+        }
+        auto add_line = [&](yyjson_val *value) {
+            if (yyjson_is_int(value)) {
+                int64_t line = yyjson_get_sint(value);
+                if (line > 0 && line < INT_MAX) {
+                    lines.push_back((int)line);
+                }
+            }
+        };
+        add_line(yyjson_obj_get(root, "line"));
+        yyjson_val *array = yyjson_obj_get(root, "call_lines");
+        size_t index, count;
+        yyjson_val *value;
+        yyjson_arr_foreach(array, index, count, value) {
+            add_line(value);
+        }
+        copies[i] = yyjson_doc_mut_copy(reads[i], nullptr);
+        if (copies[i]) {
+            yyjson_mut_obj_remove_str(yyjson_mut_doc_get_root(copies[i]), "call_lines");
+            base[i] = yyjson_mut_write(copies[i], 0, nullptr);
+        }
+    }
+    char *result = nullptr;
+    if (base[0] && base[1]) {
+        int winner = edge_props_should_replace(base[0], base[1]) ? 1 : 0;
+        std::sort(lines.begin(), lines.end());
+        lines.erase(std::unique(lines.begin(), lines.end()), lines.end());
+        if (!lines.empty()) {
+            yyjson_mut_val *array = yyjson_mut_arr(copies[winner]);
+            for (int line : lines) {
+                yyjson_mut_arr_add_int(copies[winner], array, line);
+            }
+            yyjson_mut_obj_add_val(copies[winner], yyjson_mut_doc_get_root(copies[winner]),
+                                   "call_lines", array);
+        }
+        result = yyjson_mut_write(copies[winner], 0, nullptr);
+    }
+    for (int i = 0; i < 2; i++) {
+        free(base[i]);
+        yyjson_mut_doc_free(copies[i]);
+        yyjson_doc_free(reads[i]);
+    }
+    return result;
+}
+
 int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
                              const char *properties_json) {
     if (!gb || !type) {
@@ -1431,6 +1500,19 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
 
     cbm_gbuf_edge_t *existing = (cbm_gbuf_edge_t *)cbm_ht_get(gb->edge_by_key, key);
     if (existing) {
+        if (strcmp(type, "CALLS") == 0 &&
+            ((properties_json && (strstr(properties_json, "\"line\"") ||
+                                  strstr(properties_json, "\"call_lines\""))) ||
+             (existing->properties_json &&
+              (strstr(existing->properties_json, "\"line\"") ||
+               strstr(existing->properties_json, "\"call_lines\""))))) {
+            char *merged = merge_call_props(existing->properties_json, properties_json);
+            if (merged) {
+                free(existing->properties_json);
+                existing->properties_json = merged;
+                return existing->id;
+            }
+        }
         if (edge_props_should_replace(existing->properties_json, properties_json)) {
             /* strdup BEFORE freeing the old blob: on OOM the edge keeps its
              * existing properties instead of being left with NULL. */

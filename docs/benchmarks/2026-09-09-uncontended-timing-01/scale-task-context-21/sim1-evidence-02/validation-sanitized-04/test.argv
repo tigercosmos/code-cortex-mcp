@@ -1,0 +1,1 @@
+timeout 5400s ./scripts/test.sh

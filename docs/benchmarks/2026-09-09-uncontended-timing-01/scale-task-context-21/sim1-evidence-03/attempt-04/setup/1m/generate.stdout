@@ -1,0 +1,2 @@
+{"completed_files": 1000, "total_files": 1000, "elapsed_seconds": 0.09497443772852421}
+{"elapsed_seconds": 0.0949896308593452, "files": 1000, "functions": 20000, "manifest_sha256": "baec0c3d9b62529fc0374959df35bdf6df47512a9c6ec4681b412d9d1e23d45a", "requested_code_lines": 1000000, "source_bytes": 29693335, "state": "complete"}

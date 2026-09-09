@@ -26,7 +26,8 @@ typedef struct cbm_watcher cbm_watcher_t;
 
 /* ── Index callback ─────────────────────────────────────────────── */
 
-/* Called when file changes are detected. Return 0 on success, -1 on error.
+/* Called when file changes are detected. Return 0 on success, -1 on error,
+ * CBM_INDEX_BUSY (foundation/constants.h) to defer without failure backoff.
  * project_name: project identifier
  * root_path: absolute path to the repository root */
 typedef int (*cbm_index_fn)(const char *project_name, const char *root_path, void *user_data);
@@ -49,6 +50,10 @@ void cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *r
 
 /* Remove a project from the watch list. */
 void cbm_watcher_unwatch(cbm_watcher_t *w, const char *project_name);
+
+/* Retry a deferred initial index even if its first baseline is clean.
+ * Does not claim that another process completed an index. */
+void cbm_watcher_mark_index_pending(cbm_watcher_t *w, const char *project_name);
 
 /* Refresh a project's timestamp (resets adaptive backoff). */
 void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name);

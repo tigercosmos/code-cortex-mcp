@@ -14,7 +14,8 @@ static inline CBMTypeKind safe_kind(const CBMType* t) {
 
 // Forward declarations
 static void c_resolve_calls_in_node(CLSPContext* ctx, TSNode node);
-static void c_emit_resolved_call(CLSPContext* ctx, const char* callee_qn, const char* strategy, float confidence);
+static void c_emit_resolved_call(CLSPContext* ctx, const char* callee_qn, const char* strategy,
+    float confidence, uint32_t binary_operator_line = 0);
 static void c_emit_unresolved_call(CLSPContext* ctx, const char* expr_text, const char* reason);
 static const CBMType* c_lookup_field_type(CLSPContext* ctx, const char* type_qn, const char* field_name, int depth);
 static void c_process_function(CLSPContext* ctx, TSNode func_node);
@@ -506,6 +507,18 @@ static bool is_c_builtin_type(const char* name) {
     return false;
 }
 
+static bool c_proven_fundamental_type(const CBMType *type) {
+    if (!type || type->kind != CBM_TYPE_BUILTIN || !type->data.builtin.name) return false;
+    // Unlike is_c_builtin_type, exclude aliases such as size_t: a user can
+    // define a class with that spelling. Only language type keywords prove
+    // that these operands cannot select an overloaded operator.
+    static const char *names[] = {"int", "char", "bool", "short", "long", "signed",
+        "unsigned", "float", "double", "wchar_t", "char8_t", "char16_t", "char32_t", nullptr};
+    for (const char **name = names; *name; ++name)
+        if (strcmp(type->data.builtin.name, *name) == 0) return true;
+    return false;
+}
+
 static bool is_c_builtin_func(const char* name) {
     // C stdlib functions are registered in the registry, not hardcoded here.
     // But we skip certain compiler builtins that should not generate CALLS edges.
@@ -762,6 +775,36 @@ static const char* c_resolve_name_to_func_qn(CLSPContext* ctx, const char* name)
 }
 
 // Resolve a name to a type (for identifiers used as types)
+// Include-backed aliases are separate from graph QNs. An alias with no
+// target records ambiguity, which must not fall through to short-name guessing.
+static const CBMRegisteredType* c_visible_type(CLSPContext* ctx, const char* name) {
+    if (!ctx->cpp_mode || !ctx->module_qn || !name) return nullptr;
+    if (const auto *blocked = cbm_registry_lookup_type(ctx->registry,
+            cbm_arena_sprintf(ctx->arena, "%s.__cpp_visible.__blocked__", ctx->module_qn)))
+        return blocked;
+    if (ctx->current_namespace &&
+        strncmp(ctx->current_namespace, ctx->module_qn, ctx->module_qn_len) == 0 &&
+        ctx->current_namespace[ctx->module_qn_len] == '.') {
+        const char *ns = ctx->current_namespace + ctx->module_qn_len + 1;
+        const char *qn = cbm_arena_sprintf(ctx->arena, "%s.__cpp_visible.%s.%s",
+                                          ctx->module_qn, ns, name);
+        if (auto *type = cbm_registry_lookup_type(ctx->registry, qn)) return type;
+    }
+    return cbm_registry_lookup_type(ctx->registry,
+        cbm_arena_sprintf(ctx->arena, "%s.__cpp_visible.%s", ctx->module_qn, name));
+}
+
+// Field/return type text was qualified in its defining header. Resolve it
+// through that header's visible types, not the caller's unrelated namespace.
+static const CBMRegisteredType* c_visible_qualified_type(CLSPContext* ctx, const char* qn) {
+    if (!ctx->cpp_mode || !qn || strstr(qn, ".__cpp_visible.")) return nullptr;
+    if (const auto *visible = c_visible_type(ctx, qn)) return visible;
+    const char *dot = strrchr(qn, '.');
+    if (!dot) return c_visible_type(ctx, qn);
+    return cbm_registry_lookup_type(ctx->registry,
+        cbm_arena_sprintf(ctx->arena, "%.*s.__cpp_visible.%s", (int)(dot - qn), qn, dot + 1));
+}
+
 static const CBMType* c_resolve_name_to_type(CLSPContext* ctx, const char* name) {
     if (!name) return cbm_type_unknown();
 
@@ -804,6 +847,11 @@ static const CBMType* c_resolve_name_to_type(CLSPContext* ctx, const char* name)
         const char* qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->enclosing_class_qn, name);
         const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, qn);
         if (rt) return cbm_type_named(ctx->arena, qn);
+    }
+
+    if (const auto *visible = c_visible_type(ctx, name)) {
+        return visible->alias_of ? cbm_type_named(ctx->arena, visible->alias_of)
+                                 : cbm_type_unknown();
     }
 
     // Current namespace
@@ -1289,8 +1337,25 @@ static const CBMType* c_eval_expr_type_inner(CLSPContext* ctx, TSNode node) {
         if (!name) return cbm_type_unknown();
 
         // Scope lookup
-        const CBMType* t = cbm_scope_lookup(ctx->current_scope, name);
-        if (!cbm_type_is_unknown(t)) return t;
+        // Stop at a lexical binding even when its type is unknown. Such a
+        // binding still shadows an identically named class field.
+        for (const CBMScope* scope = ctx->current_scope; scope; scope = scope->parent) {
+            for (const CBMScopeChunk* chunk = scope->chunks; chunk; chunk = chunk->next) {
+                for (int i = 0; i < chunk->used; ++i) {
+                    const auto& binding = chunk->bindings[i];
+                    if (binding.name && strcmp(binding.name, name) == 0)
+                        return binding.type ? binding.type : cbm_type_unknown();
+                }
+            }
+        }
+
+        // A bare member name has implicit-this lookup after lexical locals.
+        // Use the owning class's registered field type, not a global name match.
+        if (ctx->enclosing_class_qn) {
+            const CBMType* field = c_lookup_field_type(
+                ctx, ctx->enclosing_class_qn, name, 0);
+            if (field && !cbm_type_is_unknown(field)) return field;
+        }
 
         // Check if it's a registered function (before type check — functions
         // return FUNC type which lets call_expression extract return types)
@@ -2415,6 +2480,10 @@ static const CBMRegisteredFunc* c_lookup_member_depth(CLSPContext* ctx,
     const char* type_qn, const char* member_name, int depth) {
     if (!type_qn || !member_name) return NULL;
     if (depth > CBM_LSP_MAX_LOOKUP_DEPTH) return NULL;
+    if (const auto *visible = c_visible_qualified_type(ctx, type_qn)) {
+        if (!visible->alias_of) return nullptr;
+        type_qn = visible->alias_of;
+    }
 
     // Direct method lookup. Runs FIRST, before consulting the memo, so a real
     // direct-resolvable member (incl. a hash-collision victim, or one registered
@@ -2511,7 +2580,7 @@ static const CBMRegisteredFunc* c_lookup_member_depth(CLSPContext* ctx,
         const char* best_qn = NULL;
         for (int i = 0; i < ctx->registry->type_count; i++) {
             const char* q = ctx->registry->types[i].qualified_name;
-            if (!q) {
+            if (!q || strstr(q, ".__cpp_visible.")) {
                 continue;
             }
             size_t qlen = strlen(q);
@@ -2570,6 +2639,10 @@ static bool c_base_declares_member(CLSPContext* ctx, const char* type_qn, const 
 static const CBMType* c_lookup_field_type(CLSPContext* ctx, const char* type_qn,
     const char* field_name, int depth) {
     if (!type_qn || !field_name || depth > 5) return NULL;
+    if (const auto *visible = c_visible_qualified_type(ctx, type_qn)) {
+        if (!visible->alias_of) return nullptr;
+        type_qn = visible->alias_of;
+    }
 
     const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, type_qn);
     if (!rt && ctx->module_qn) {
@@ -3240,9 +3313,9 @@ void c_process_statement(CLSPContext* ctx, TSNode node) {
 // ============================================================================
 
 static void c_emit_resolved_call_orig(CLSPContext* ctx, const char* callee_qn, const char* orig,
-    const char* strategy, float confidence) {
+    const char* strategy, float confidence, uint32_t binary_operator_line = 0) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn) return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy;
@@ -3254,21 +3327,25 @@ static void c_emit_resolved_call_orig(CLSPContext* ctx, const char* callee_qn, c
     // is otherwise NULL for resolved calls and is never read for them by the
     // pipeline consumers, so this overload is side-effect-free.
     rc.reason = orig;
+    rc.source_byte = ctx->call_source_byte;
+    rc.binary_operator_line = binary_operator_line;
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
-static void c_emit_resolved_call(CLSPContext* ctx, const char* callee_qn, const char* strategy, float confidence) {
-    c_emit_resolved_call_orig(ctx, callee_qn, NULL, strategy, confidence);
+static void c_emit_resolved_call(CLSPContext* ctx, const char* callee_qn, const char* strategy,
+    float confidence, uint32_t binary_operator_line) {
+    c_emit_resolved_call_orig(ctx, callee_qn, NULL, strategy, confidence, binary_operator_line);
 }
 
 static void c_emit_unresolved_call(CLSPContext* ctx, const char* expr_text, const char* reason) {
     if (!ctx->resolved_calls || !ctx->enclosing_func_qn) return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";
     rc.confidence = 0.0f;
     rc.reason = reason;
+    rc.source_byte = ctx->call_source_byte;
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
@@ -3289,7 +3366,10 @@ static void c_resolve_calls_in_node(CLSPContext* ctx, TSNode node) {
     if (ctx->walk_depth >= C_LSP_MAX_WALK_DEPTH)
         return;
     ctx->walk_depth++;
+    uint32_t saved_source_byte = ctx->call_source_byte;
+    ctx->call_source_byte = ts_node_start_byte(node) + 1;
     c_resolve_calls_in_node_inner(ctx, node);
+    ctx->call_source_byte = saved_source_byte;
     ctx->walk_depth--;
 }
 
@@ -3380,7 +3460,7 @@ static void c_resolve_calls_in_node_inner(CLSPContext* ctx, TSNode node) {
                         }
 
                         // Unresolved
-                        if (cbm_type_is_unknown(obj_type)) {
+                        if (cbm_type_is_unknown(obj_type) || cbm_type_is_unknown(base)) {
                             char* arg_text = c_node_text(ctx, arg_node);
                             c_emit_unresolved_call(ctx,
                                 cbm_arena_sprintf(ctx->arena, "%s.%s",
@@ -3592,6 +3672,22 @@ static void c_resolve_calls_in_node_inner(CLSPContext* ctx, TSNode node) {
                     // Regular function call
                     const char* fqn = c_resolve_name(ctx, name);
                     if (fqn) {
+                        const auto *candidate = cbm_registry_lookup_func(ctx->registry, fqn);
+                        if (candidate && candidate->lookup_qn) {
+                            int argument_count = 0;
+                            const auto **argument_types = c_extract_call_arg_types(ctx, node, &argument_count);
+                            const CBMRegisteredFunc *selected = nullptr;
+                            if (candidate->receiver_type) {
+                                selected = cbm_registry_lookup_method_by_types(ctx->registry,
+                                    candidate->receiver_type, candidate->short_name, argument_types, argument_count);
+                            } else if (const char *dot = strrchr(candidate->lookup_qn, '.')) {
+                                const char *package = cbm_arena_strndup(ctx->arena, candidate->lookup_qn,
+                                                                      dot - candidate->lookup_qn);
+                                selected = cbm_registry_lookup_symbol_by_types(ctx->registry,
+                                    package, dot + 1, argument_types, argument_count);
+                            }
+                            if (selected) fqn = selected->qualified_name;
+                        }
                         // Check if this is implicit 'this' call
                         const char* strategy = "lsp_direct";
                         if (ctx->enclosing_class_qn) {
@@ -3720,6 +3816,23 @@ static void c_resolve_calls_in_node_inner(CLSPContext* ctx, TSNode node) {
         if (!ts_node_is_null(left)) {
             const CBMType* lhs_type = c_eval_expr_type(ctx, left);
             const CBMType* base = c_simplify_type(ctx, lhs_type, false);
+            if (ctx->local_result && ctx->local_result->cpp_operator_tracker &&
+                c_proven_fundamental_type(base)) {
+                TSNode right = ts_node_child_by_field_name(node, "right", 5);
+                if (!ts_node_is_null(right)) {
+                    const char *right_kind = ts_node_type(right);
+                    // Restrict the extra inference to side-effect-free leaves.
+                    // Unknown types, complex RHS expressions, and overloads
+                    // remain pending for the cross-file pass.
+                    if (strcmp(right_kind, "number_literal") == 0 ||
+                        strcmp(right_kind, "identifier") == 0) {
+                        const CBMType *rhs = c_simplify_type(ctx, c_eval_expr_type(ctx, right), false);
+                        if (c_proven_fundamental_type(rhs))
+                            cbm_discharge_builtin_cpp_operator(ctx->local_result,
+                                ts_node_start_byte(node), ts_node_end_byte(node));
+                    }
+                }
+            }
             if (base && base->kind != CBM_TYPE_BUILTIN && !cbm_type_is_unknown(base)) {
                 const char* type_qn = type_to_qn(base);
                 if (type_qn) {
@@ -3732,7 +3845,8 @@ static void c_resolve_calls_in_node_inner(CLSPContext* ctx, TSNode node) {
                                 const char* op_name = cbm_arena_sprintf(ctx->arena, "operator%s", op);
                                 const CBMRegisteredFunc* m = c_lookup_member(ctx, type_qn, op_name);
                                 if (m) {
-                                    c_emit_resolved_call(ctx, m->qualified_name, "lsp_operator", 0.90f);
+                                    c_emit_resolved_call(ctx, m->qualified_name, "lsp_operator", 0.90f,
+                                        ts_node_start_point(node).row + 1);
                                 }
                             }
                             break;
@@ -4041,11 +4155,17 @@ static void c_process_function(CLSPContext* ctx, TSNode func_node) {
                 char* scope_text = c_node_text(ctx, scope_node);
                 if (scope_text) {
                     const char* scope_qn = c_build_qn(ctx, scope_text);
+                    // The source method and its declaring header retain their
+                    // own graph identities; only the receiver uses the header.
+                    const auto *visible = c_visible_type(ctx, scope_qn);
+                    if (visible && visible->alias_of) {
+                        ctx->enclosing_class_qn = visible->alias_of;
+                    }
                     // Try as a type for enclosing class
-                    const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, scope_qn);
+                    const CBMRegisteredType* rt = visible ? nullptr : cbm_registry_lookup_type(ctx->registry, scope_qn);
                     if (rt) {
                         ctx->enclosing_class_qn = scope_qn;
-                    } else if (ctx->module_qn) {
+                    } else if (!visible && ctx->module_qn) {
                         const char* fqn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, scope_qn);
                         rt = cbm_registry_lookup_type(ctx->registry, fqn);
                         if (rt) ctx->enclosing_class_qn = fqn;
@@ -4058,7 +4178,7 @@ static void c_process_function(CLSPContext* ctx, TSNode func_node) {
             func_name = c_node_text(ctx, cur);
             break;
         }
-        if (strcmp(dk, "field_identifier") == 0) {
+        if (strcmp(dk, "field_identifier") == 0 || strcmp(dk, "operator_name") == 0) {
             func_name = c_node_text(ctx, cur);
             break;
         }
@@ -4109,6 +4229,40 @@ static void c_process_function(CLSPContext* ctx, TSNode func_node) {
         const char* scope = ctx->current_namespace ? ctx->current_namespace : ctx->module_qn;
         if (scope) {
             func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", scope, func_qn);
+        }
+    }
+    // Changing the receiver identity must not change the caller graph node.
+    if (ctx->module_qn && strstr(func_name, "::")) {
+        const char *authored = c_build_qn(ctx, func_name);
+        const char *local_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, authored);
+        if (const auto *local = cbm_registry_lookup_func(ctx->registry, local_qn))
+            func_qn = local->qualified_name;
+    }
+    // Preprocessing can insert whitespace into punctuation operator names
+    // (operator+ -> operator +). Prefer the existing registry identity when
+    // that compact spelling exists; preserve authored names otherwise.
+    const char *method_leaf = strrchr(func_qn, '.');
+    method_leaf = method_leaf ? method_leaf + 1 : func_qn;
+    if (ctx->enclosing_class_qn && strncmp(method_leaf, "operator", 8) == 0 &&
+        isspace((unsigned char)method_leaf[8])) {
+        const char *token = method_leaf + 8;
+        while (isspace((unsigned char)*token)) ++token;
+        if (*token && !isalnum((unsigned char)*token) && *token != '_') {
+            char *compact = cbm_arena_strdup(ctx->arena, method_leaf);
+            char *write = compact;
+            for (const char *read = method_leaf; *read; ++read)
+                if (!isspace((unsigned char)*read)) *write++ = *read;
+            *write = '\0';
+            if (const auto *method = cbm_registry_lookup_method(
+                    ctx->registry, ctx->enclosing_class_qn, compact))
+                func_qn = method->qualified_name;
+        }
+    }
+    if (const auto *family = cbm_registry_lookup_func(ctx->registry, func_qn);
+        family && family->lookup_qn) {
+        const char *overload_qn = cbm_overload_qn(ctx->arena, func_qn, ts_node_start_byte(func_node));
+        if (const auto *overload = cbm_registry_lookup_func(ctx->registry, overload_qn)) {
+            func_qn = overload->qualified_name;
         }
     }
     ctx->enclosing_func_qn = func_qn;
@@ -4911,6 +5065,7 @@ void cbm_run_c_lsp(CBMArena* arena, CBMFileResult* result,
             memset(&rf, 0, sizeof(rf));
             rf.min_params = -1;
             rf.qualified_name = d->qualified_name;
+            rf.lookup_qn = cbm_overload_family(arena, d->qualified_name);
             rf.short_name = d->name;
 
             // Build return type — prefer return_type (raw text) over return_types
@@ -4968,6 +5123,7 @@ void cbm_run_c_lsp(CBMArena* arena, CBMFileResult* result,
     // Initialize context and run
     CLSPContext ctx;
     c_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, cpp_mode, &result->resolved_calls);
+    ctx.local_result = result;
 
     c_lsp_process_file(&ctx, root);
 }
@@ -4986,6 +5142,14 @@ static void c_register_lsp_defs(CBMArena* arena, CBMTypeRegistry* reg,
     for (int i = 0; i < def_count; i++) {
         CBMLSPDef* d = &defs[i];
         if (!d->qualified_name || !d->short_name) continue;
+        for (int vi = 0; vi < d->cpp_visible_type_count; ++vi) {
+            CBMRegisteredType visible = {};
+            visible.qualified_name = d->cpp_visible_types[vi].name;
+            visible.alias_of = d->cpp_visible_types[vi].target;
+            // No short name: these scoped lookup records must never enter the
+            // global short-name type fallback.
+            cbm_registry_add_type(reg, visible);
+        }
 
         if (d->label && (strcmp(d->label, "Class") == 0 || strcmp(d->label, "Type") == 0 ||
                          strcmp(d->label, "Interface") == 0)) {
@@ -5059,9 +5223,19 @@ static void c_register_lsp_defs(CBMArena* arena, CBMTypeRegistry* reg,
             memset(&rf, 0, sizeof(rf));
             rf.min_params = -1;
             rf.qualified_name = d->qualified_name; /* borrowed */
+            rf.lookup_qn = cbm_overload_family(arena, d->qualified_name);
             rf.short_name = d->short_name;
 
             const char* def_module = d->def_module_qn ? d->def_module_qn : module_qn;
+            if (d->parameter_types) {
+                int count = 0;
+                while (d->parameter_types[count]) count++;
+                const auto **parameters = (const CBMType **)cbm_arena_alloc(arena, (count + 1) * sizeof(CBMType *));
+                for (int p = 0; p < count; p++)
+                    parameters[p] = c_parse_return_type_text(arena, d->parameter_types[p], def_module);
+                parameters[count] = nullptr;
+                rf.signature = cbm_type_func(arena, nullptr, parameters, nullptr);
+            }
 
             // Return types
             if (d->return_types) {
@@ -5081,7 +5255,8 @@ static void c_register_lsp_defs(CBMArena* arena, CBMTypeRegistry* reg,
                     const CBMType** rarr = (const CBMType**)cbm_arena_alloc(arena, (rcount + 1) * sizeof(const CBMType*));
                     for (int j = 0; j < rcount; j++) rarr[j] = rets[j];
                     rarr[rcount] = NULL;
-                    rf.signature = cbm_type_func(arena, NULL, NULL, rarr);
+                    rf.signature = cbm_type_func(arena, NULL,
+                        rf.signature ? rf.signature->data.func.param_types : nullptr, rarr);
                 }
             }
             if (!rf.signature) rf.signature = cbm_type_func(arena, NULL, NULL, NULL);
@@ -5091,6 +5266,11 @@ static void c_register_lsp_defs(CBMArena* arena, CBMTypeRegistry* reg,
             }
 
             cbm_registry_add_func(reg, rf);
+            if (d->cpp_declaring_type && rf.receiver_type &&
+                strcmp(d->cpp_declaring_type, rf.receiver_type) != 0) {
+                rf.receiver_type = d->cpp_declaring_type;
+                cbm_registry_add_func(reg, rf);
+            }
         }
     }
 }
@@ -5258,6 +5438,7 @@ void cbm_batch_c_lsp_cross(
             for (int j = 0; j < file_out.count; j++) {
                 CBMResolvedCall* src = &file_out.items[j];
                 CBMResolvedCall* dst = &out[f].items[j];
+                *dst = *src; // Preserve source coordinates and future scalar metadata.
                 dst->caller_qn = src->caller_qn ? cbm_arena_strdup(arena, src->caller_qn) : NULL;
                 dst->callee_qn = src->callee_qn ? cbm_arena_strdup(arena, src->callee_qn) : NULL;
                 dst->strategy  = src->strategy  ? cbm_arena_strdup(arena, src->strategy)  : NULL;

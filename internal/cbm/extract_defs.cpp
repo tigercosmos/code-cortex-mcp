@@ -5,6 +5,7 @@
 #include "foundation/constants.h"
 #include "foundation/platform.h" // safe_realloc (frees old on failure)
 #include "foundation/log.h"      // cbm_log_warn
+#include "foundation/sha256.h"
 #include "extract_node_stack.h"
 #include "simhash/minhash.h"
 #include "semantic/ast_profile.h"
@@ -14,6 +15,9 @@
 #include <stdlib.h>          // getenv, atoi
 #include <string.h>
 #include <ctype.h>
+#include <string>
+#include <vector>
+#include <algorithm>
 
 // Buffer sizes for local arrays (base classes, params, return types).
 #define MAX_COMMENT_LEN 500
@@ -2926,7 +2930,22 @@ static const char **extract_param_types(CBMArena *a, TSNode params, const char *
         if (ts_node_is_null(param) || !ts_node_is_named(param)) {
             continue;
         }
-        add_dedup_type(a, types, &count, resolve_param_type_text(a, param, source, lang));
+        char *type = resolve_param_type_text(a, param, source, lang);
+        if (lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) {
+            const char *kind = ts_node_type(param);
+            if (strcmp(kind, "parameter_declaration") != 0 &&
+                strcmp(kind, "optional_parameter_declaration") != 0) continue;
+            // C-family overload selection needs ordered parameters, including
+            // repeated builtins. A set of referenced user types loses arity.
+            if (!type) {
+                TSNode tn = ts_node_child_by_field_name(param, TS_FIELD("type"));
+                if (!ts_node_is_null(tn)) type = cbm_node_text(a, tn, source);
+            }
+            if (type && strcmp(type, "void") == 0 && ts_node_named_child_count(params) == 1) continue;
+            types[count++] = type ? type : "?";
+        } else {
+            add_dedup_type(a, types, &count, type);
+        }
     }
 
     if (count == 0) {
@@ -3092,6 +3111,379 @@ static char *resolve_cpp_test_macro_name(CBMArena *a, const char *macro, TSNode 
     return NULL;
 }
 
+/* C/C++ declarations are source facts, separate from callable definitions.
+ * Keys compare lexical scope and parameter tokens, not compiler-resolved types.
+ * Typedef/template equivalence intentionally does not imply a match. */
+static bool c_declaration_language(CBMLanguage language) {
+    return language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA;
+}
+
+static TSNode c_next_declarator(TSNode node) {
+    TSNode next = ts_node_child_by_field_name(node, TS_FIELD("declarator"));
+    if (ts_node_is_null(next) &&
+        (strcmp(ts_node_type(node), "parenthesized_declarator") == 0 ||
+         strcmp(ts_node_type(node), "reference_declarator") == 0)) {
+        // The C++ grammar leaves these inner declarators unnamed.
+        for (uint32_t i = 0; i < ts_node_named_child_count(node); i++) {
+            TSNode child = ts_node_named_child(node, i);
+            if (strcmp(ts_node_type(child), "comment") != 0) {
+                next = child;
+                break;
+            }
+        }
+    }
+    return next;
+}
+
+/* The innermost function declarator must bind directly to the name. A pointer
+ * between it and the name denotes a variable; a pointer outside it is a return
+ * type. Resetting at each function declarator also handles pointer factories. */
+static TSNode c_callable_declarator(TSNode node, TSNode *name) {
+    TSNode callable = {};
+    bool indirect = false;
+    *name = {};
+    for (TSNode current = node; !ts_node_is_null(current); current = c_next_declarator(current)) {
+        const char *kind = ts_node_type(current);
+        if (strcmp(kind, "function_declarator") == 0) {
+            callable = current;
+            indirect = false;
+        } else if (strcmp(kind, "pointer_declarator") == 0 ||
+                   strcmp(kind, "reference_declarator") == 0 ||
+                   strcmp(kind, "array_declarator") == 0) {
+            indirect = true;
+        }
+        TSNode next = c_next_declarator(current);
+        if (ts_node_is_null(next) && !ts_node_is_null(callable) && !indirect &&
+            (strcmp(kind, "identifier") == 0 || strcmp(kind, "field_identifier") == 0 ||
+             strcmp(kind, "qualified_identifier") == 0 || strcmp(kind, "operator_name") == 0 ||
+             strcmp(kind, "destructor_name") == 0)) {
+            *name = current;
+            return callable;
+        }
+    }
+    return {};
+}
+
+static std::string c_node_string(CBMExtractCtx *ctx, TSNode node) {
+    uint32_t start = ts_node_start_byte(node);
+    return std::string(ctx->source + start, ts_node_end_byte(node) - start);
+}
+
+static TSNode c_parameter_name(TSNode parameter) {
+    TSNode current = ts_node_child_by_field_name(parameter, TS_FIELD("declarator"));
+    while (!ts_node_is_null(current)) {
+        const char *kind = ts_node_type(current);
+        if (strcmp(kind, "identifier") == 0) {
+            return current;
+        }
+        current = c_next_declarator(current);
+    }
+    return {};
+}
+
+/* Encode token lengths as well as bytes: "unsigned int" cannot collide with
+ * the typedef "unsignedint". Parameter names/defaults and comments are absent. */
+// Primary class-template members can share an identity across renamed type binders.
+// Defaulted, non-type, pack, constrained, and member-template parameters need richer semantics.
+static bool c_template_type_parameters(CBMExtractCtx *ctx, TSNode node,
+                                       std::vector<std::string> &names) {
+    TSNode parameters = ts_node_child_by_field_name(node, TS_FIELD("parameters"));
+    if (ts_node_is_null(parameters)) {
+        return false;
+    }
+    for (uint32_t i = 0; i < ts_node_named_child_count(node); i++) {
+        if (strcmp(ts_node_type(ts_node_named_child(node, i)), "requires_clause") == 0) {
+            return false;
+        }
+    }
+    for (uint32_t i = 0; i < ts_node_named_child_count(parameters); i++) {
+        TSNode parameter = ts_node_named_child(parameters, i);
+        if (strcmp(ts_node_type(parameter), "comment") == 0) {
+            continue;
+        }
+        if (strcmp(ts_node_type(parameter), "type_parameter_declaration") != 0) {
+            return false;
+        }
+        TSNode name = ts_node_named_child(parameter, 0);
+        if (ts_node_is_null(name) || strcmp(ts_node_type(name), "type_identifier") != 0 ||
+            ts_node_named_child_count(parameter) != 1) {
+            return false;
+        }
+        names.push_back(c_node_string(ctx, name));
+    }
+    return !names.empty();
+}
+
+static std::string c_template_token(const std::string &token, const std::string &previous,
+                                    const std::vector<std::string> *parameters) {
+    // A qualified member named T (Library::T) does not refer to the binder T.
+    if (parameters && previous != "::") {
+        for (size_t i = 0; i < parameters->size(); i++) {
+            if (token == (*parameters)[i]) {
+                return "#" + std::to_string(i);
+            }
+        }
+    }
+    return token;
+}
+
+static std::string c_template_owner(const std::string &name,
+                                    const std::vector<std::string> &parameters) {
+    std::string out, previous;
+    int angle_depth = 0;
+    for (size_t i = 0; i < name.size();) {
+        unsigned char ch = name[i];
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+            i++;
+            continue;
+        }
+        size_t start = i++;
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_') {
+            while (i < name.size()) {
+                unsigned char next = name[i];
+                if (!((next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') ||
+                      (next >= '0' && next <= '9') || next == '_')) {
+                    break;
+                }
+                i++;
+            }
+        } else if (ch == ':' && i < name.size() && name[i] == ':') {
+            i++;
+        }
+        std::string token = name.substr(start, i - start);
+        std::string normalized = c_template_token(token, previous,
+                                                  angle_depth > 0 ? &parameters : nullptr);
+        out += std::to_string(normalized.size()) + ":" + normalized;
+        if (token == "<") {
+            angle_depth++;
+        } else if (token == ">" && angle_depth > 0) {
+            angle_depth--;
+        }
+        previous = token;
+    }
+    return out;
+}
+
+static void c_signature_tokens(CBMExtractCtx *ctx, TSNode node, std::string &out,
+                               const std::vector<std::string> *parameters = nullptr) {
+    struct token_work {
+        TSNode node;
+        TSNode omitted;
+    };
+    std::vector<token_work> pending{{node, {}}};
+    std::string previous;
+    while (!pending.empty()) {
+        token_work work = pending.back();
+        pending.pop_back();
+        node = work.node;
+        TSNode omitted = work.omitted;
+        if (ts_node_is_null(node) || (!ts_node_is_null(omitted) && ts_node_eq(node, omitted)) ||
+            strcmp(ts_node_type(node), "comment") == 0) {
+            continue;
+        }
+        const char *kind = ts_node_type(node);
+        bool parameter = strcmp(kind, "parameter_declaration") == 0 ||
+                         strcmp(kind, "optional_parameter_declaration") == 0;
+        TSNode default_value = {};
+        if (parameter) {
+            omitted = c_parameter_name(node);
+            default_value = ts_node_child_by_field_name(node, TS_FIELD("default_value"));
+        }
+        uint32_t count = ts_node_child_count(node);
+        if (count == 0) {
+            std::string spelling = c_node_string(ctx, node);
+            bool identifier = strcmp(kind, "identifier") == 0 ||
+                              strcmp(kind, "type_identifier") == 0;
+            std::string token = c_template_token(spelling, previous,
+                                                 identifier ? parameters : nullptr);
+            previous = spelling;
+            out += std::to_string(token.size()) + ":" + token;
+            continue;
+        }
+        for (uint32_t i = count; i > 0; i--) {
+            TSNode child = ts_node_child(node, i - 1);
+            if ((!ts_node_is_null(default_value) && ts_node_eq(child, default_value)) ||
+                (parameter && strcmp(ts_node_type(child), "=") == 0)) {
+                continue;
+            }
+            pending.push_back({child, omitted});
+        }
+    }
+}
+
+static const char *c_declaration_key(CBMExtractCtx *ctx, TSNode node, TSNode declarator,
+                                     std::string *scoped_name = nullptr) {
+    if (!c_declaration_language(ctx->language)) {
+        return nullptr;
+    }
+    TSNode name = {};
+    TSNode callable = c_callable_declarator(declarator, &name);
+    if (ts_node_is_null(callable)) {
+        return nullptr;
+    }
+    std::vector<std::string> scopes;
+    std::vector<std::string> template_parameters;
+    TSNode template_node = {};
+    for (TSNode parent = ts_node_parent(node); !ts_node_is_null(parent);
+         parent = ts_node_parent(parent)) {
+        if (strcmp(ts_node_type(parent), "template_declaration") == 0) {
+            if (!ts_node_is_null(template_node) ||
+                !c_template_type_parameters(ctx, parent, template_parameters)) {
+                return nullptr;
+            }
+            template_node = parent;
+        }
+    }
+    bool local = false;
+    bool member = false;
+    bool primary_template_owner = false;
+    for (TSNode parent = ts_node_parent(node); !ts_node_is_null(parent);
+         parent = ts_node_parent(parent)) {
+        const char *kind = ts_node_type(parent);
+        bool class_scope = strcmp(kind, "class_specifier") == 0 ||
+                           strcmp(kind, "struct_specifier") == 0 ||
+                           strcmp(kind, "union_specifier") == 0;
+        if (class_scope || strcmp(kind, "namespace_definition") == 0) {
+            member = member || class_scope;
+            TSNode scope = ts_node_child_by_field_name(parent, TS_FIELD("name"));
+            if (ts_node_is_null(scope)) {
+                local = true;
+            } else {
+                std::string scope_name = c_node_string(ctx, scope);
+                if (class_scope && !ts_node_is_null(template_node) &&
+                    ts_node_eq(ts_node_parent(parent), template_node)) {
+                    if (strcmp(ts_node_type(scope), "type_identifier") != 0) {
+                        return nullptr; // Partial and explicit specializations are separate.
+                    }
+                    primary_template_owner = true;
+                    scope_name += "<";
+                    for (size_t j = 0; j < template_parameters.size(); j++) {
+                        if (j) {
+                            scope_name += ",";
+                        }
+                        scope_name += template_parameters[j];
+                    }
+                    scope_name += ">";
+                }
+                scopes.push_back(scope_name);
+            }
+        }
+    }
+    if (!template_parameters.empty() && member && !primary_template_owner) {
+        return nullptr; // A member-function template inside an ordinary class.
+    }
+    std::string qualified;
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+        qualified += *it + "::";
+    }
+    std::string callable_name = c_node_string(ctx, name);
+    qualified += callable_name;
+    if (!template_parameters.empty() && !member &&
+        (callable_name.find('<') == std::string::npos ||
+         callable_name.find("::") == std::string::npos)) {
+        return nullptr; // Free and ordinary member-function templates remain unsupported.
+    }
+    if (scoped_name) {
+        *scoped_name = qualified;
+    }
+    for (uint32_t i = 0; !member && i < ts_node_named_child_count(node); i++) {
+        TSNode child = ts_node_named_child(node, i);
+        if (strcmp(ts_node_type(child), "storage_class_specifier") == 0 &&
+            c_node_string(ctx, child) == "static") {
+            local = true;
+        }
+    }
+    std::string key = (template_parameters.empty() ? qualified :
+                       c_template_owner(qualified, template_parameters)) + "|";
+    if (local) {
+        key += std::string(ctx->rel_path) + "|";
+    }
+    TSNode params = ts_node_child_by_field_name(callable, TS_FIELD("parameters"));
+    // In C and C++, a sole void parameter has the same arity as an empty list.
+    bool void_only = ts_node_named_child_count(params) == 1 &&
+                     c_node_string(ctx, ts_node_named_child(params, 0)) == "void";
+    if (!void_only) {
+        c_signature_tokens(ctx, params, key, &template_parameters);
+    } else {
+        key += "1:(1:)";
+    }
+    for (uint32_t i = 0; i < ts_node_named_child_count(callable); i++) {
+        TSNode child = ts_node_named_child(callable, i);
+        const char *kind = ts_node_type(child);
+        if (!template_parameters.empty() && strcmp(kind, "requires_clause") == 0) {
+            return nullptr;
+        }
+        if (strcmp(kind, "type_qualifier") == 0 || strcmp(kind, "ref_qualifier") == 0) {
+            c_signature_tokens(ctx, child, key, &template_parameters);
+        }
+    }
+    char digest[CBM_SHA256_HEX_LEN + 1];
+    cbm_sha256_hex(key.data(), key.size(), digest);
+    return cbm_arena_strdup(ctx->arena, digest);
+}
+
+static void extract_c_declarations(CBMExtractCtx *ctx) {
+    if (!c_declaration_language(ctx->language)) {
+        return;
+    }
+    std::vector<TSNode> pending{ctx->root};
+    while (!pending.empty()) {
+        TSNode node = pending.back();
+        pending.pop_back();
+        const char *kind = ts_node_type(node);
+        if (strcmp(kind, "function_definition") == 0 || strcmp(kind, "lambda_expression") == 0 ||
+            strcmp(kind, "parameter_list") == 0 || strcmp(kind, "function_declarator") == 0 ||
+            strcmp(kind, "type_definition") == 0 || strcmp(kind, "alias_declaration") == 0) {
+            continue;
+        }
+        if (strcmp(kind, "declaration") == 0 || strcmp(kind, "field_declaration") == 0) {
+            for (uint32_t i = 0; i < ts_node_child_count(node); i++) {
+                const char *field = ts_node_field_name_for_child(node, i);
+                if (!field || strcmp(field, "declarator") != 0) {
+                    continue;
+                }
+                TSNode declarator = ts_node_child(node, i);
+                TSNode name = {};
+                TSNode callable = c_callable_declarator(declarator, &name);
+                if (ts_node_is_null(callable)) {
+                    continue;
+                }
+                std::string scoped = c_node_string(ctx, name);
+                CBMDefinition def = {};
+                def.declaration_key = c_declaration_key(ctx, node, declarator, &scoped);
+                const size_t scope_end = scoped.rfind("::");
+                def.name = cbm_arena_strdup(
+                    ctx->arena,
+                    (scope_end == std::string::npos ? scoped : scoped.substr(scope_end + 2))
+                        .c_str());
+                for (size_t at = 0; (at = scoped.find("::", at)) != std::string::npos;) {
+                    scoped.replace(at, 2, ".");
+                }
+                TSPoint point = ts_node_start_point(declarator);
+                char path_digest[CBM_SHA256_HEX_LEN + 1];
+                cbm_sha256_hex(ctx->rel_path, strlen(ctx->rel_path), path_digest);
+                const char *unique =
+                    cbm_arena_sprintf(ctx->arena, "__decl_%.16s_%u_%u.%s", path_digest,
+                                      point.row + 1, point.column + 1, scoped.c_str());
+                def.qualified_name =
+                    cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, unique);
+                def.label = "Declaration";
+                def.file_path = ctx->rel_path;
+                def.start_line = ts_node_start_point(node).row + 1;
+                def.end_line = ts_node_end_point(node).row + 1;
+                def.lines = (int)(def.end_line - def.start_line + 1);
+                def.is_exported = cbm_is_exported(def.name, ctx->language);
+                TSNode params = ts_node_child_by_field_name(callable, TS_FIELD("parameters"));
+                def.signature = cbm_node_text(ctx->arena, params, ctx->source);
+                cbm_defs_push(&ctx->result->defs, ctx->arena, def);
+            }
+        }
+        for (uint32_t i = ts_node_named_child_count(node); i > 0; i--) {
+            pending.push_back(ts_node_named_child(node, i - 1));
+        }
+    }
+}
+
 static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
     CBMArena *a = ctx->arena;
 
@@ -3142,6 +3534,9 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     memset(&def, 0, sizeof(def));
 
     def.name = name;
+    def.declaration_key = c_declaration_key(
+        ctx, func_node, ts_node_child_by_field_name(func_node, TS_FIELD("declarator")));
+    def.definition_offset = ts_node_start_byte(func_node);
     /* Nix: a binding's name is a path. The leaf is the name; the leading segments
      * are scope, so `a.b.fn = …` gets the same QN as `a = { b = { fn = …; }; }`.
      * Without this every binding whose path shares a leaf name collapsed onto one
@@ -4070,6 +4465,9 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
+    def.declaration_key =
+        c_declaration_key(ctx, child, ts_node_child_by_field_name(child, TS_FIELD("declarator")));
+    def.definition_offset = ts_node_start_byte(child);
     def.qualified_name = method_qn;
     def.label = "Method";
     // A method on a class defined in a test file (a JUnit/pytest TestFoo.test_bar)
@@ -4083,6 +4481,13 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
     def.is_exported = cbm_is_exported(name, ctx->language);
 
     TSNode params = ts_node_child_by_field_name(child, TS_FIELD("parameters"));
+    if (ts_node_is_null(params) && c_declaration_language(ctx->language)) {
+        TSNode ignored_name = {};
+        TSNode callable = c_callable_declarator(
+            ts_node_child_by_field_name(child, TS_FIELD("declarator")), &ignored_name);
+        if (!ts_node_is_null(callable))
+            params = ts_node_child_by_field_name(callable, TS_FIELD("parameters"));
+    }
     if (!ts_node_is_null(params)) {
         def.signature = cbm_node_text(a, params, ctx->source);
         def.param_types = extract_param_types(a, params, ctx->source, ctx->language);
@@ -6146,8 +6551,59 @@ void cbm_extract_definitions_without_module(CBMExtractCtx *ctx) {
     // Walk AST for function/class definitions
     walk_defs(ctx, ctx->root, spec, 0);
 
+    extract_c_declarations(ctx);
+
     // Extract module-level variables
     extract_variables(ctx, ctx->root, spec);
+}
+
+static void preserve_cpp_overloads(CBMExtractCtx *ctx) {
+    if (ctx->language != CBM_LANG_CPP && ctx->language != CBM_LANG_CUDA) return;
+    std::vector<CBMDefinition *> callables;
+    for (int i = 0; i < ctx->result->defs.count; i++) {
+        auto *d = &ctx->result->defs.items[i];
+        if (d->qualified_name && d->label &&
+            (strcmp(d->label, "Function") == 0 || strcmp(d->label, "Method") == 0))
+            callables.push_back(d);
+    }
+    std::sort(callables.begin(), callables.end(), [](auto *a, auto *b) {
+        return strcmp(a->qualified_name, b->qualified_name) < 0;
+    });
+    std::vector<CBMOverload> overloads;
+    std::vector<CBMDefinition> families;
+    for (size_t begin = 0; begin < callables.size();) {
+        size_t end = begin + 1;
+        const char *family = callables[begin]->qualified_name;
+        bool distinct = false;
+        while (end < callables.size() && strcmp(callables[end]->qualified_name, family) == 0) {
+            distinct |= callables[end]->definition_offset != callables[begin]->definition_offset;
+            end++;
+        }
+        if (distinct) {
+            CBMDefinition anchor = {};
+            anchor.name = callables[begin]->name;
+            anchor.qualified_name = family;
+            anchor.label = "OverloadSet";
+            anchor.file_path = ctx->rel_path;
+            anchor.is_exported = callables[begin]->is_exported;
+            families.push_back(anchor);
+            for (size_t i = begin; i < end; i++) {
+                auto *d = callables[i];
+                d->qualified_name = cbm_overload_qn(ctx->arena, family, d->definition_offset);
+                overloads.push_back({d->definition_offset, d->qualified_name});
+            }
+        }
+        begin = end;
+    }
+    if (overloads.empty()) return;
+    for (auto family : families) cbm_defs_push(&ctx->result->defs, ctx->arena, family);
+    std::sort(overloads.begin(), overloads.end(), [](auto a, auto b) {
+        return a.byte_offset < b.byte_offset;
+    });
+    auto *result = ctx->result;
+    result->overloads = (CBMOverload *)cbm_arena_alloc(ctx->arena, overloads.size() * sizeof(CBMOverload));
+    memcpy(result->overloads, overloads.data(), overloads.size() * sizeof(CBMOverload));
+    result->overload_count = (int)overloads.size();
 }
 
 void cbm_extract_definitions(CBMExtractCtx *ctx) {
@@ -6172,4 +6628,5 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     cbm_defs_push(&ctx->result->defs, a, mod);
 
     cbm_extract_definitions_without_module(ctx);
+    preserve_cpp_overloads(ctx);
 }

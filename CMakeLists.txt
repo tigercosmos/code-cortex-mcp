@@ -356,6 +356,8 @@ cbm_add_cxx_library(cbm_pipeline  SOURCES
     src/pipeline/path_alias.cpp
     src/pipeline/registry.cpp
     src/pipeline/pipeline.cpp
+    src/pipeline/result_snapshot.cpp
+    src/pipeline/result_store.cpp
     src/pipeline/pipeline_incremental.cpp
     src/pipeline/worker_pool.cpp
     src/pipeline/pass_parallel.cpp

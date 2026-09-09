@@ -730,6 +730,7 @@ TEST(store_find_by_qn_suffix_no_match) {
     int rc = cbm_store_find_nodes_by_qn_suffix(s, "test", "main.Bar", &nodes, &count);
     ASSERT_EQ(rc, CBM_STORE_OK);
     ASSERT_EQ(count, 0);
+    ASSERT_NULL(nodes);
     cbm_store_free_nodes(nodes, count);
 
     cbm_store_close(s);
@@ -1316,6 +1317,7 @@ TEST(store_find_by_name_any_cross_project) {
     rc = cbm_store_find_nodes_by_name_any(s, "Nonexistent", &nodes, &count);
     ASSERT_EQ(rc, CBM_STORE_OK);
     ASSERT_EQ(count, 0);
+    ASSERT_NULL(nodes);
     cbm_store_free_nodes(nodes, count);
 
     cbm_store_close(s);

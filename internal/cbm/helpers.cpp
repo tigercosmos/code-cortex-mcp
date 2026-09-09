@@ -6,6 +6,27 @@
 #include "foundation/constants.h"
 #include "foundation/compat.h" // CBM_TLS
 #include <stdlib.h>            // calloc/free for the symbol-set cache
+#include <string.h>
+
+const char *cbm_overload_at(const CBMFileResult *result, uint32_t offset) {
+    int low = 0, high = result->overload_count;
+    while (low < high) {
+        int mid = low + (high - low) / 2;
+        if (result->overloads[mid].byte_offset < offset) low = mid + 1;
+        else high = mid;
+    }
+    return low < result->overload_count && result->overloads[low].byte_offset == offset
+               ? result->overloads[low].qualified_name : nullptr;
+}
+
+const char *cbm_overload_qn(CBMArena *arena, const char *family, uint32_t offset) {
+    return cbm_arena_sprintf(arena, "%s@overload_%u", family, offset);
+}
+
+const char *cbm_overload_family(CBMArena *arena, const char *qualified_name) {
+    const char *suffix = qualified_name ? strstr(qualified_name, "@overload_") : nullptr;
+    return suffix ? cbm_arena_strndup(arena, qualified_name, suffix - qualified_name) : nullptr;
+}
 
 enum {
     MIN_ROUTE_LEN = 3,
@@ -190,6 +211,7 @@ bool cbm_label_is_registry_symbol(const char *label) {
         return false;
     }
     return strcmp(label, "Function") == 0 || strcmp(label, "Method") == 0 ||
+           strcmp(label, "OverloadSet") == 0 ||
            cbm_label_is_type_like(label) || strcmp(label, "Variable") == 0 ||
            strcmp(label, "Field") == 0 || cbm_label_is_relation(label);
 }

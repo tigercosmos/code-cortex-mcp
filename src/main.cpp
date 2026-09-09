@@ -146,7 +146,7 @@ static int watcher_index_fn(const char *project_name, const char *root_path, voi
      * Watcher will retry on next poll cycle (5-60s). */
     if (!cbm_pipeline_try_lock()) {
         cbm_log_info("watcher.skip", "project", project_name, "reason", "pipeline_busy");
-        return -1;
+        return CBM_INDEX_BUSY;
     }
 
     cbm_log_info("watcher.reindex", "project", project_name, "path", root_path);
@@ -161,8 +161,12 @@ static int watcher_index_fn(const char *project_name, const char *root_path, voi
         char *resp = cbm_mcp_index_run_supervised_path(root_path);
         bool is_error = true;
         bool valid = cbm_mcp_tool_result_valid(resp, &is_error);
+        bool busy = valid && cbm_mcp_result_is_index_busy(resp);
         free(resp);
         cbm_pipeline_unlock();
+        if (busy) {
+            return CBM_INDEX_BUSY;
+        }
         if (!valid || is_error) {
             cbm_log_warn("watcher.reindex_failed", "project", project_name, "mode", "supervised");
             return -1;
@@ -523,6 +527,8 @@ static void print_help(void) {
     printf("  code-cortex-mcp update [-y|-n]\n");
     printf("  code-cortex-mcp config <list|get|set|reset>\n");
     printf("  code-cortex-mcp doctor       Check install, hooks, and whether cwd is indexed\n");
+    printf("  code-cortex-mcp task-context Read {project|repo_path,symbol|request,max_bytes?} JSON from stdin; "
+           "emit optional source context\n");
     printf("  code-cortex-mcp --version    Print version\n");
     printf("  code-cortex-mcp --help       Print this help\n");
     printf("\nSupported agents (auto-detected):\n");
@@ -561,6 +567,10 @@ static int handle_subcommand(int argc, char **argv) {
         if (strcmp(argv[i], "hook-augment") == 0) {
             cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
             return cbm_cmd_hook_augment();
+        }
+        if (strcmp(argv[i], "task-context") == 0) {
+            cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
+            return cbm_cmd_task_context();
         }
         if (strcmp(argv[i], "install") == 0) {
             return cbm_cmd_install(argc - i - SKIP_ONE, argv + i + SKIP_ONE);

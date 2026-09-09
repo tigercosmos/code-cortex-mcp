@@ -1142,7 +1142,7 @@ static const CBMType *eval_member_call_type(PHPLSPContext *ctx, TSNode call_node
 static void emit_resolved_reason(PHPLSPContext *ctx, const char *callee_qn, const char *strategy,
                                  float confidence, const char *reason) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn) return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy;
@@ -1158,7 +1158,7 @@ static void emit_resolved(PHPLSPContext *ctx, const char *callee_qn, const char 
 
 static void emit_unresolved(PHPLSPContext *ctx, const char *expr_text, const char *reason) {
     if (!ctx->resolved_calls || !ctx->enclosing_func_qn) return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";

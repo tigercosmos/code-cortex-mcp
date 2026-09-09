@@ -312,7 +312,9 @@ static const char *cpp_field_types[] = {"field_declaration", NULL};
 static const char *cpp_module_types[] = {"translation_unit", "namespace_definition",
                                          "linkage_specification", "declaration", NULL};
 static const char *cpp_call_types[] = {
-    "call_expression",  "field_expression",  "subscript_expression",
+    // Member invocation is the enclosing call_expression. A field_expression
+    // alone is a data read, including the receiver inside a member invocation.
+    "call_expression",  "subscript_expression",
     "new_expression",   "delete_expression", "binary_expression",
     "unary_expression", "update_expression", NULL};
 static const char *cpp_import_types[] = {"preproc_include", "template_function", "declaration",

@@ -1,0 +1,5 @@
+Work only in this frozen synthetic repository. Read only: do not edit files, build, or run tests. Do not use the network, other agents, external repositories, graph services, graph CLIs/databases, prior sessions, benchmarks, answer keys, or skill files. Complete the task without questions. Use efficient rg and focused file reads when retrieval context below is empty, missing, or inconsistent. If the client supplied complete context, answer directly from it; the client source-audited it before this session.
+
+Find the defining signature of capacity_function_15012. Return exactly one repository-relative path:line and no other text.
+
+Client retrieval context:

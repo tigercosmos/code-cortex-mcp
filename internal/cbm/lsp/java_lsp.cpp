@@ -1783,7 +1783,7 @@ static void java_emit_resolved_orig(JavaLSPContext *ctx, const char *callee_qn, 
                                     const char *strategy, float confidence) {
     if (!ctx->resolved_calls || !ctx->enclosing_method_qn || !callee_qn)
         return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_method_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy;
@@ -1804,7 +1804,7 @@ static void java_emit_resolved(JavaLSPContext *ctx, const char *callee_qn, const
 static void java_emit_unresolved(JavaLSPContext *ctx, const char *expr_text, const char *reason) {
     if (!ctx->resolved_calls || !ctx->enclosing_method_qn)
         return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_method_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";

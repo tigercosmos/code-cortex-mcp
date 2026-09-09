@@ -427,7 +427,183 @@ TEST(arena_strndup_zero_len) {
     PASS();
 }
 
+TEST(arena_grow_buffer_owns_only_current_capacity) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    char *text = cbm_arena_strdup(&a, "stable bump allocation");
+    size_t bump_bytes = a.total_alloc;
+    auto *buffer = (unsigned char *)cbm_arena_grow_buffer(&a, NULL, 16);
+    ASSERT_NOT_NULL(buffer);
+    memset(buffer, 42, 16);
+    void *other = cbm_arena_grow_buffer(&a, NULL, 32);
+    ASSERT_NOT_NULL(other);
+    ASSERT(cbm_arena_contains(&a, buffer + 15));
+    ASSERT(cbm_arena_contains(&a, text + 1));
+    for (size_t size = 64; size <= 65536; size *= 2) {
+        buffer = (unsigned char *)cbm_arena_grow_buffer(&a, buffer, size);
+        ASSERT_NOT_NULL(buffer);
+        for (int i = 0; i < 16; i++) {
+            ASSERT_EQ(buffer[i], 42);
+        }
+        ASSERT_EQ(a.resizable_bytes, size + 32);
+        ASSERT_EQ(a.total_alloc, bump_bytes + size + 32);
+        ASSERT_STR_EQ(text, "stable bump allocation");
+    }
+    cbm_arena_reset(&a);
+    ASSERT_NULL(a.resizable);
+    ASSERT_EQ(a.resizable_bytes, 0);
+    ASSERT_EQ(a.total_alloc, 0);
+    ASSERT_NOT_NULL(cbm_arena_grow_buffer(&a, NULL, 100));
+    cbm_arena_destroy(&a);
+    ASSERT_NULL(a.resizable);
+    ASSERT_EQ(a.resizable_bytes, 0);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_grow_buffer_rejects_invalid_growth) {
+    CBMArena a, other;
+    cbm_arena_init(&a);
+    cbm_arena_init(&other);
+    char *bump = cbm_arena_strdup(&a, "bump");
+    char *buffer = (char *)cbm_arena_grow_buffer(&a, NULL, 32);
+    ASSERT_NOT_NULL(buffer);
+    strcpy(buffer, "preserved");
+    size_t before = a.total_alloc;
+    ASSERT_NULL(cbm_arena_grow_buffer(&a, buffer, 0));
+    ASSERT_NULL(cbm_arena_grow_buffer(&a, buffer, 16));
+    ASSERT_NULL(cbm_arena_grow_buffer(&other, buffer, 64));
+    ASSERT_NULL(cbm_arena_grow_buffer(&a, bump, 64));
+    ASSERT_NULL(cbm_arena_grow_buffer(&a, buffer, SIZE_MAX));
+    ASSERT_NULL(cbm_arena_grow_buffer(NULL, NULL, 32));
+    ASSERT_EQ(a.total_alloc, before);
+    ASSERT(!cbm_arena_contains(&other, buffer));
+    ASSERT(!cbm_arena_contains(&a, NULL));
+    ASSERT_STR_EQ(buffer, "preserved");
+    cbm_arena_destroy(&a);
+    cbm_arena_destroy(&other);
+    PASS();
+}
+
+TEST(arena_rejects_size_overflow_without_mutation) {
+    CBMArena a;
+    cbm_arena_init_sized(&a, 64);
+    char *text = cbm_arena_strdup(&a, "preserved");
+    ASSERT_NOT_NULL(text);
+    CBMArena before = a;
+    for (size_t offset = 0; offset < 7; ++offset) {
+        ASSERT_NULL(cbm_arena_alloc(&a, SIZE_MAX - offset));
+        ASSERT_NULL(cbm_arena_alloc_bounded(&a, SIZE_MAX - offset, SIZE_MAX));
+        ASSERT_NULL(cbm_arena_calloc(&a, SIZE_MAX - offset));
+    }
+    ASSERT_NULL(cbm_arena_strndup(&a, text, SIZE_MAX));
+    ASSERT_MEM_EQ(&a, &before, sizeof(a));
+    ASSERT_STR_EQ(text, "preserved");
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 8));
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_rejects_accounting_overflow_without_growth) {
+    CBMArena a;
+    cbm_arena_init_sized(&a, 64);
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 64));
+    /* Simulate an otherwise unreachable size boundary without huge mallocs. */
+    a.total_alloc = SIZE_MAX - 7;
+    CBMArena before = a;
+    ASSERT_NULL(cbm_arena_alloc(&a, 8));
+    ASSERT_NULL(cbm_arena_alloc_bounded(&a, 8, SIZE_MAX));
+    ASSERT_NULL(cbm_arena_grow_buffer(&a, NULL, 8));
+    ASSERT_MEM_EQ(&a, &before, sizeof(a));
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_rejects_block_growth_overflow) {
+    CBMArena a;
+    cbm_arena_init_sized(&a, 64);
+    /* Synthetic metadata exercises both used+n and doubling overflow. No
+     * pointer into this fictional capacity may be computed or returned. */
+    a.block_size = SIZE_MAX - 7;
+    a.used = a.block_size;
+    CBMArena before = a;
+    ASSERT_NULL(cbm_arena_alloc(&a, 8));
+    ASSERT_NULL(cbm_arena_alloc_bounded(&a, 8, SIZE_MAX));
+    ASSERT_MEM_EQ(&a, &before, sizeof(a));
+    a.block_size = a.block_sizes[0];
+    a.used = 0;
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 64));
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_growth_preserves_ownership_and_reset) {
+    CBMArena a;
+    cbm_arena_init_sized(&a, 64);
+    char *blocks[12];
+    size_t capacities[12];
+    for (int i = 0; i < 12; ++i) {
+        capacities[i] = (size_t)64 << i;
+        blocks[i] = (char *)cbm_arena_alloc(&a, capacities[i]);
+        ASSERT_NOT_NULL(blocks[i]);
+        memset(blocks[i], i + 1, capacities[i]);
+        ASSERT_EQ(a.nblocks, i + 1);
+        ASSERT_EQ(a.block_size, capacities[i]);
+        ASSERT(cbm_arena_contains(&a, blocks[i] + capacities[i] - 1));
+        for (int j = 0; j <= i; ++j) {
+            ASSERT_EQ(blocks[j][0], j + 1);
+            ASSERT_EQ(blocks[j][capacities[j] - 1], j + 1);
+        }
+    }
+    ASSERT_NOT_NULL(cbm_arena_grow_buffer(&a, NULL, 128));
+    cbm_arena_reset(&a);
+    ASSERT_EQ(a.nblocks, 1);
+    ASSERT_EQ(a.block_size, 64);
+    ASSERT_EQ(a.total_alloc, 0);
+    ASSERT_EQ(a.resizable_bytes, 0);
+    ASSERT_NULL(a.resizable);
+    for (int i = 1; i < 12; ++i) {
+        ASSERT_NULL(a.blocks[i]);
+        ASSERT_EQ(a.block_sizes[i], 0);
+    }
+    ASSERT(cbm_arena_alloc(&a, 64) == blocks[0]);
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 128));
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_bounded_accounts_for_blocks_and_grow_buffers) {
+    CBMArena a;
+    cbm_arena_init_sized(&a, 64);
+    char *buffer = (char *)cbm_arena_grow_buffer(&a, NULL, 32);
+    ASSERT_NOT_NULL(buffer);
+    strcpy(buffer, "preserved");
+    ASSERT_NULL(cbm_arena_alloc_bounded(&a, 8, 95));
+    ASSERT_NOT_NULL(cbm_arena_alloc_bounded(&a, 48, 96));
+    CBMArena before = a;
+    ASSERT_NULL(cbm_arena_alloc_bounded(&a, 24, 223));
+    ASSERT_MEM_EQ(&a, &before, sizeof(a));
+    ASSERT_NOT_NULL(cbm_arena_alloc_bounded(&a, 24, 224));
+    ASSERT_EQ(a.nblocks, 2);
+    buffer = (char *)cbm_arena_grow_buffer(&a, buffer, 64);
+    ASSERT_NOT_NULL(buffer);
+    ASSERT_STR_EQ(buffer, "preserved");
+    ASSERT_NULL(cbm_arena_alloc_bounded(&a, 8, 224));
+    ASSERT_NOT_NULL(cbm_arena_alloc_bounded(&a, 8, 256));
+    cbm_arena_reset(&a);
+    ASSERT_NOT_NULL(cbm_arena_alloc_bounded(&a, 64, 64));
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
 SUITE(arena) {
+    RUN_TEST(arena_rejects_size_overflow_without_mutation);
+    RUN_TEST(arena_rejects_accounting_overflow_without_growth);
+    RUN_TEST(arena_rejects_block_growth_overflow);
+    RUN_TEST(arena_growth_preserves_ownership_and_reset);
+    RUN_TEST(arena_bounded_accounts_for_blocks_and_grow_buffers);
+    RUN_TEST(arena_grow_buffer_owns_only_current_capacity);
+    RUN_TEST(arena_grow_buffer_rejects_invalid_growth);
     RUN_TEST(arena_init_default);
     RUN_TEST(arena_init_sized);
     RUN_TEST(arena_alloc_basic);

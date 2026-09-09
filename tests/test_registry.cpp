@@ -184,6 +184,21 @@ TEST(registry_create_free) {
     PASS();
 }
 
+TEST(registry_name_lookup_keeps_overload_family_only) {
+    auto *registry = cbm_registry_new();
+    ASSERT_NOT_NULL(registry);
+    cbm_registry_add(registry, "blend", "p.api.blend@overload_10", "Function");
+    cbm_registry_add(registry, "blend", "p.api.blend@overload_50", "Function");
+    cbm_registry_add(registry, "blend", "p.api.blend", "OverloadSet");
+    ASSERT_EQ(cbm_registry_size(registry), 1);
+    ASSERT_TRUE(cbm_registry_exists(registry, "p.api.blend"));
+    ASSERT_STR_EQ(cbm_registry_label_of(registry, "p.api.blend"), "OverloadSet");
+    auto resolved = cbm_registry_resolve(registry, "blend", "p.api", nullptr, nullptr, 0);
+    ASSERT_STR_EQ(resolved.qualified_name, "p.api.blend");
+    cbm_registry_free(registry);
+    PASS();
+}
+
 TEST(registry_free_null) {
     cbm_registry_free(NULL); /* should not crash */
     PASS();
@@ -688,6 +703,7 @@ TEST(fuzzy_no_import_map_passthrough) {
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(registry) {
+    RUN_TEST(registry_name_lookup_keeps_overload_family_only);
     /* FQN */
     RUN_TEST(fqn_simple);
     RUN_TEST(fqn_no_name);

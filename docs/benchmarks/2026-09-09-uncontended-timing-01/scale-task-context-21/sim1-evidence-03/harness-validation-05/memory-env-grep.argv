@@ -1,0 +1,1 @@
+rg -n --fixed-strings CBM_MEM_BUDGET_MB docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/prepare.py; legacy CBM_MEMORY_BUDGET_MB must be absent from prepare.py

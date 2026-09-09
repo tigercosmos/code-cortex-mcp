@@ -48,6 +48,17 @@ int cbm_pclose(FILE *f);
 /* Create directory (and parents). mode is ignored on Windows. Returns true on success. */
 bool cbm_mkdir_p(const char *path, int mode);
 
+/* Process-shared indexing lease on a canonical database target. Returns 0,
+ * CBM_INDEX_BUSY (nonblocking contention), or -1 (fail closed). Creates parent
+ * directories and a persistent <target>.index.lock; NEVER unlink that file.
+ * Only cooperating binaries are excluded. Handles are not inherited by exec.
+ * Existing hard-linked DBs are rejected; local OS advisory-lock semantics apply.
+ * The caller owns the lease and its borrowed canonical target until release. */
+typedef struct cbm_db_lease cbm_db_lease_t;
+int cbm_db_lease_try_acquire(const char *db_path, cbm_db_lease_t **out);
+const char *cbm_db_lease_target(const cbm_db_lease_t *lease);
+void cbm_db_lease_release(cbm_db_lease_t *lease);
+
 /* Delete a file. Returns 0 on success. */
 int cbm_unlink(const char *path);
 /* Remove <db_path>-wal/-shm. Any path installing a fresh DB generation must

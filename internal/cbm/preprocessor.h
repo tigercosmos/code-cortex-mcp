@@ -24,6 +24,8 @@ char *cbm_preprocess(const char *source, int source_len, const char *filename,
                      const char **extra_defines, const char **include_paths, int cpp_mode);
 
 // Preprocess and return source plus expanded-line -> original-line ownership map.
+// Authored line controls in the input or loaded headers leave the map zero/unowned;
+// expanded text is retained.
 // Returns NULL if no expansion is needed or preprocessing fails.
 // Free with cbm_preprocessed_source_free().
 CBMPreprocessedSource *cbm_preprocess_with_map(const char *source, int source_len,

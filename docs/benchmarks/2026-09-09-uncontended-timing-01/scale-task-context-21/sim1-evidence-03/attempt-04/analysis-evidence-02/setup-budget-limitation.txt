@@ -1,0 +1,6 @@
+CBM_MEM_BUDGET_MB=4096 observed=True
+CBM_MEMORY_BUDGET_MB observed=False
+sampled_worker_peak_rss_kb=4202924
+sampled_worker_peak_vmpk_kb=4640452
+time_v_max_rss_kb=10276764
+limitation=time_v_max_rss_exceeds_4096MiB

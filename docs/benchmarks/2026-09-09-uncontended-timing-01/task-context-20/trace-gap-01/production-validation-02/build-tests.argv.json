@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "cmake",
+    "--build",
+    "build/nosan",
+    "--target",
+    "test-runner",
+    "-j",
+    "2"
+  ],
+  "cwd": "/Users/tigercosmos/code-cortex-mcp",
+  "started_epoch": 1788925149.059846,
+  "timeout_seconds": 600
+}

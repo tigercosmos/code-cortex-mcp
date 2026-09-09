@@ -81,6 +81,11 @@ void cbm_go_stdlib_register(CBMTypeRegistry *reg, CBMArena *arena);
 // Simplified definition for cross-file type/function registration.
 // String fields are borrowed (caller owns memory until cbm_run_go_lsp_cross returns).
 typedef struct {
+    const char *name; // File-scoped lookup alias, not a graph identity.
+    const char *target; // Exact declaring type QN; NULL means ambiguous.
+} CBMCVisibleType;
+
+typedef struct {
     const char *qualified_name;
     const char *short_name;
     const char *label;          // "Function", "Method", "Type", "Interface"
@@ -97,6 +102,11 @@ typedef struct {
                       // registry build to filter all_defs
     const char
         *namespace_name; // declared namespace/package for source-root-independent JVM filtering
+    const char **parameter_types; // Ordered C-family parameters, borrowed; includes builtins.
+    const char *cpp_declaration_key;
+    const char *cpp_declaring_type; // Exact header owner, joined by declaration key.
+    const CBMCVisibleType *cpp_visible_types;
+    int cpp_visible_type_count;
 } CBMLSPDef;
 
 // Parse source, build registry from defs + stdlib, run LSP.

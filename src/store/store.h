@@ -31,8 +31,10 @@ typedef struct cbm_store cbm_store_t;
 /* Persisted index-format identity. Bump when a change alters the QN scheme
  * or node identity of an already-written graph, so an old DB is routed
  * through the full-reindex path instead of producing a mixed graph.
- * 1 = File QNs keep the file extension (#769/#964/#1077). */
-#define CBM_INDEX_FORMAT_VERSION 1
+ * 1 = File QNs keep the file extension (#769/#964/#1077).
+ * 2 = C/C++ Declaration nodes and declaration_key on callable definitions.
+ * 3 = Primary class-template identities and reference parameter normalization. */
+#define CBM_INDEX_FORMAT_VERSION 3
 
 /* ── Data structures ────────────────────────────────────────────── */
 
@@ -498,6 +500,19 @@ void cbm_store_search_free(cbm_search_output_t *out);
 
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out);
+
+/* Apply an output-file predicate before the result cap. Reachability and hop
+ * counts still include excluded transit nodes; the predicate does not prune
+ * traversal. The callback borrows the path and must not mutate this store.
+ * At most max_results accepted rows and max_examined candidate rows are
+ * inspected. One extra proves either result or candidate-scan truncation.
+ * max_examined must be positive and less than INT32_MAX; it also applies
+ * when filter is null (which accepts every candidate). */
+typedef bool (*cbm_bfs_file_filter_fn)(const char *file_path, void *context);
+int cbm_store_bfs_filtered(cbm_store_t *s, int64_t start_id, const char *direction,
+                           const char **edge_types, int edge_type_count, int max_depth,
+                           int max_results, int max_examined, cbm_bfs_file_filter_fn filter,
+                           void *context, cbm_traverse_result_t *out);
 
 /* Variable-length Cypher traversal with relationship-trail semantics: a path
  * may not reuse the same edge id, so a self-loop cannot pad a walk out to an

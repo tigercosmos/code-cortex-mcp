@@ -274,7 +274,7 @@ static bool node_kind_is(TSNode node, const char* kind) {
 static void ts_emit_resolved_call(TSLSPContext* ctx, const char* callee_qn,
                                const char* strategy, float confidence) {
     if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn) return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy ? strategy : "lsp_ts";
@@ -285,7 +285,7 @@ static void ts_emit_resolved_call(TSLSPContext* ctx, const char* callee_qn,
 
 static void ts_emit_unresolved_call(TSLSPContext* ctx, const char* expr_text, const char* reason) {
     if (!ctx || !ctx->resolved_calls || !ctx->enclosing_func_qn) return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = expr_text ? expr_text : "?";
     rc.strategy = "lsp_unresolved";

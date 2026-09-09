@@ -1,0 +1,23 @@
+	Command being timed: "python3 docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/run.py --setup /home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/setup/setup.json --protocol /home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/protocol --output /home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/run --codex-bin /home/anchi/.codex/packages/standalone/releases/0.152.1-x86_64-unknown-linux-musl/bin/codex --codexmon-bin /home/anchi/.local/bin/codexmon"
+	User time (seconds): 7.54
+	System time (seconds): 13.21
+	Percent of CPU this job got: 2%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 12:44.32
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 21020
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 2
+	Minor (reclaiming a frame) page faults: 954990
+	Voluntary context switches: 48344
+	Involuntary context switches: 1661
+	Swaps: 0
+	File system inputs: 16472
+	File system outputs: 207240
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

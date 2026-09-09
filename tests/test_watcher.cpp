@@ -337,6 +337,62 @@ TEST(watcher_detects_dirty_worktree) {
     PASS();
 }
 
+struct reset_index_state {
+    int calls;
+    bool fail;
+};
+
+static int reset_index_callback(const char *, const char *, void *data) {
+    auto *state = static_cast<reset_index_state *>(data);
+    state->calls++;
+    return state->fail ? -1 : 0;
+}
+
+TEST(watcher_reindexes_clean_reset_and_retries_failure) {
+    /* Cover both registration on an already-dirty index and an edit observed
+     * after registration. Failed clean reindex attempts must remain pending. */
+    for (int initially_dirty = 0; initially_dirty < 2; initially_dirty++) {
+        char tmpdir[] = "/tmp/cbm_watcher_reset_XXXXXX";
+        ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+        ASSERT_EQ(wt_git(tmpdir, "init -q"), 0);
+        char path[300];
+        wt_path(path, sizeof(path), tmpdir, "file.cpp");
+        th_write_file(path, "int target() { return 1; }\n");
+        ASSERT_EQ(wt_git(tmpdir, "add file.cpp"), 0);
+        ASSERT_EQ(wt_git(tmpdir, "commit -q -m initial"), 0);
+        if (initially_dirty) {
+            th_write_file(path, "int target(int tag) { return tag; }\n");
+        }
+        reset_index_state state = {};
+        cbm_store_t *store = cbm_store_open_memory();
+        cbm_watcher_t *w = cbm_watcher_new(store, reset_index_callback, &state);
+        cbm_watcher_watch(w, "reset-repo", tmpdir);
+        ASSERT_EQ(cbm_watcher_poll_once(w), 0);
+        if (!initially_dirty) {
+            th_write_file(path, "int target(int tag) { return tag; }\n");
+            cbm_watcher_touch(w, "reset-repo");
+            ASSERT_EQ(cbm_watcher_poll_once(w), 1);
+        }
+        ASSERT_EQ(wt_git(tmpdir, "checkout -- file.cpp"), 0);
+        int before = state.calls;
+        state.fail = true;
+        cbm_watcher_touch(w, "reset-repo");
+        ASSERT_EQ(cbm_watcher_poll_once(w), 0);
+        ASSERT_EQ(state.calls, before + 1);
+        state.fail = false;
+        cbm_watcher_touch(w, "reset-repo");
+        ASSERT_EQ(cbm_watcher_poll_once(w), 1);
+        ASSERT_EQ(state.calls, before + 2);
+        cbm_watcher_touch(w, "reset-repo");
+        ASSERT_EQ(cbm_watcher_poll_once(w), 0);
+        ASSERT_EQ(state.calls, before + 2);
+        cbm_watcher_free(w);
+        cbm_store_close(store);
+        th_rmtree(tmpdir);
+    }
+    PASS();
+}
+
 TEST(watcher_detects_new_file) {
     /* Create a temporary git repo */
     char tmpdir[256];
@@ -1534,7 +1590,125 @@ TEST(watcher_null_watch_count) {
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
 
+#include <foundation/constants.h>
+#include <string>
+
+struct prune_lease_env {
+    const char *name;
+    char *old;
+    prune_lease_env(const char *key, const char *value) : name(key), old(getenv(key) ? strdup(getenv(key)) : NULL) { cbm_setenv(key, value, 1); }
+    ~prune_lease_env() {
+        if (old) { cbm_setenv(name, old, 1); free(old); }
+        else { cbm_unsetenv(name); }
+    }
+};
+static bool prune_bytes_equal(const std::string& path, const char *expected) {
+    FILE *f = cbm_fopen(path.c_str(), "rb");
+    if (!f) { return false; }
+    char bytes[64] = {};
+    size_t n = fread(bytes, 1, sizeof(bytes), f);
+    fclose(f);
+    return n == strlen(expected) && memcmp(bytes, expected, n) == 0;
+}
+
+TEST(watcher_prune_lease_preserves_grace_and_retry) {
+    char root[256] = "/tmp/cbm_prune_lease_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    prune_lease_env cache("CBM_CACHE_DIR", root);
+    prune_lease_env grace("CBM_WATCHER_PRUNE_GRACE_S", "3600");
+    std::string db = std::string(root) + "/missing-target.db";
+    std::string absent = std::string(root) + "/absent-root";
+    const char *suffixes[] = {"", "-wal", "-shm"};
+    const char *values[] = {"keep db", "keep wal", "keep shm"};
+    for (int i = 0; i < 3; ++i) { ASSERT_EQ(th_write_file((db + suffixes[i]).c_str(), values[i]), 0); }
+    cbm_watcher_t *w = cbm_watcher_new(NULL, NULL, NULL);
+    cbm_watcher_watch(w, "missing-target", absent.c_str());
+    for (int i = 0; i < 4; ++i) { ASSERT_EQ(cbm_watcher_poll_once(w), 0); }
+    ASSERT_EQ(cbm_watcher_watch_count(w), 1); // Poll count alone cannot bypass grace.
+    cbm_db_lease_t *lease = NULL;
+    ASSERT_EQ(cbm_db_lease_try_acquire(db.c_str(), &lease), 0);
+    cbm_setenv("CBM_WATCHER_PRUNE_GRACE_S", "0", 1);
+    for (int i = 0; i < 4; ++i) { ASSERT_EQ(cbm_watcher_poll_once(w), 0); }
+    ASSERT_EQ(cbm_watcher_watch_count(w), 1); // Busy state remains registered and alive.
+    for (int i = 0; i < 3; ++i) { ASSERT(prune_bytes_equal(db + suffixes[i], values[i])); }
+    cbm_db_lease_release(lease);
+    ASSERT_EQ(cbm_watcher_poll_once(w), 0);
+    ASSERT_EQ(cbm_watcher_watch_count(w), 0); // Retained absence state retries when free.
+    for (const char *suffix : suffixes) { ASSERT(!cbm_is_regular_file((db + suffix).c_str())); }
+    ASSERT(cbm_is_regular_file((db + ".index.lock").c_str()));
+    cbm_watcher_free(w);
+    th_rmtree(root);
+    PASS();
+}
+
+struct pending_lease_calls { int calls = 0; };
+static int pending_lease_callback(const char *, const char *, void *ud) {
+    auto *state = static_cast<pending_lease_calls *>(ud);
+    return ++state->calls == 1 ? CBM_INDEX_BUSY : 0;
+}
+TEST(watcher_pending_initial_index_retries_clean_baseline) {
+    char root[256] = "/tmp/cbm_pending_lease_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    ASSERT_EQ(wt_git(root, "init -q"), 0);
+    ASSERT_EQ(wt_git(root, "commit --allow-empty -q -m initial"), 0);
+    pending_lease_calls calls;
+    cbm_watcher_t *w = cbm_watcher_new(NULL, pending_lease_callback, &calls);
+    cbm_watcher_watch(w, "clean-project", root);
+    // Autoindex could not obtain the DB lease. A clean baseline does not mean
+    // the other worker will succeed or publish any index for this project.
+    cbm_watcher_mark_index_pending(w, "clean-project");
+    ASSERT_EQ(cbm_watcher_poll_once(w), 0);
+    ASSERT_EQ(calls.calls, 1); // Holder is still busy.
+    cbm_watcher_touch(w, "clean-project");
+    ASSERT_EQ(cbm_watcher_poll_once(w), 1); // Holder failed; no source change needed.
+    ASSERT_EQ(calls.calls, 2);
+    cbm_watcher_touch(w, "clean-project");
+    ASSERT_EQ(cbm_watcher_poll_once(w), 0);
+    ASSERT_EQ(calls.calls, 2); // Success clears only the explicit pending request.
+    cbm_watcher_free(w);
+    th_rmtree(root);
+    PASS();
+}
+
+struct callback_pending_mark {
+    cbm_watcher_t *watcher = NULL;
+    int calls = 0;
+};
+static int callback_marks_pending(const char *project, const char *, void *ud) {
+    auto *state = static_cast<callback_pending_mark *>(ud);
+    if (++state->calls == 1) {
+        // Represents another initial-index request arriving while this callback
+        // runs. Its success must not consume this later request.
+        cbm_watcher_mark_index_pending(state->watcher, project);
+    }
+    return 0;
+}
+TEST(watcher_pending_mark_during_callback_survives_success) {
+    char root[256] = "/tmp/cbm_pending_mark_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    callback_pending_mark state;
+    state.watcher = cbm_watcher_new(NULL, callback_marks_pending, &state);
+    ASSERT(state.watcher);
+    cbm_watcher_watch(state.watcher, "pending-project", root);
+    cbm_watcher_mark_index_pending(state.watcher, "pending-project");
+    ASSERT_EQ(cbm_watcher_poll_once(state.watcher), 1);
+    ASSERT_EQ(state.calls, 1);
+    cbm_watcher_touch(state.watcher, "pending-project");
+    ASSERT_EQ(cbm_watcher_poll_once(state.watcher), 1);
+    ASSERT_EQ(state.calls, 2);
+    cbm_watcher_touch(state.watcher, "pending-project");
+    ASSERT_EQ(cbm_watcher_poll_once(state.watcher), 0);
+    ASSERT_EQ(state.calls, 2);
+    cbm_watcher_free(state.watcher);
+    th_rmtree(root);
+    PASS();
+}
+
 SUITE(watcher) {
+    RUN_TEST(watcher_pending_mark_during_callback_survives_success);
+    RUN_TEST(watcher_prune_lease_preserves_grace_and_retry);
+    RUN_TEST(watcher_pending_initial_index_retries_clean_baseline);
+
     /* Adaptive interval */
     RUN_TEST(poll_interval_base);
     RUN_TEST(poll_interval_scaling);
@@ -1558,6 +1732,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_detects_git_commit);
     RUN_TEST(watcher_detects_dirty_worktree);
     RUN_TEST(watcher_detects_new_file);
+    RUN_TEST(watcher_reindexes_clean_reset_and_retries_failure);
     RUN_TEST(watcher_no_change_no_reindex);
     RUN_TEST(watcher_multiple_projects);
 

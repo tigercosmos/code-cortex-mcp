@@ -1,0 +1,30 @@
+{
+  "captured_utc": "2026-09-09T05:26:52Z",
+  "policy": "read-only inputs retained at their original paths; all resumed evidence uses new paths",
+  "inputs": [
+    {
+      "path": "../task-context-20/doc-draft-01/RESULTS-DRAFT.md",
+      "bytes": 2001,
+      "mtime_epoch": 1788925279,
+      "sha256": "5aad2b5d88ddc0ef3521363f40af0a89250246c7a191a89b2cf3828b19127fad"
+    },
+    {
+      "path": "../task-context-20/analysis-02/report.json",
+      "bytes": 237492,
+      "mtime_epoch": 1788925164,
+      "sha256": "0cf38e7df11c2011ab3248da7360c447d05bf868ddb675ecaddb38a918475725"
+    },
+    {
+      "path": "../task-context-20/trace-gap-01/production-validation-02/test-stop.json",
+      "bytes": 683,
+      "mtime_epoch": 1788925241,
+      "sha256": "d6fe09960e9fc6dd7077b5d66079671762488fb678c8f205b0818b61ac93b20c"
+    },
+    {
+      "path": "../task-context-20/trace-gap-01/production-validation-02/disk-audit.json",
+      "bytes": 4014,
+      "mtime_epoch": 1788925306,
+      "sha256": "01f27b7efbbc375581dedca21908a0d781fd21f3fac2e08e2a04ab3b7d977c42"
+    }
+  ]
+}

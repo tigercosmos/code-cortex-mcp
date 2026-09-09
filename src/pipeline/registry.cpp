@@ -515,6 +515,9 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
     if (!r || !qualified_name || !label) {
         return;
     }
+    // Name-only resolution can identify a family, not an individual overload.
+    // Type-aware resolution uses its separate registry and retains these QNs.
+    if (strstr(qualified_name, "@overload_")) return;
 
     /* Check for duplicate */
     if (cbm_ht_get(r->exact, qualified_name)) {

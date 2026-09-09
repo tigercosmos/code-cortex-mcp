@@ -7,10 +7,625 @@
  */
 #include "test_framework.h"
 #include "cbm.h"
+#include "preprocessor.h"
+#include "vendored/simplecpp/simplecpp.h"
+#include "../src/pipeline/result_snapshot.h"
+#include "../src/pipeline/result_store.h"
+#include "../src/pipeline/pass_lsp_cross.h"
+#include "../src/pipeline/pipeline.h"
+#include "test_helpers.h"
+#include <sqlite3.h>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <initializer_list>
+#include <set>
+#include <string>
 #include "../src/foundation/compat.h"    /* cbm_tmpdir, cbm_mkdtemp */
 #include "../src/foundation/compat_fs.h" /* cbm_fopen, cbm_unlink, cbm_rmdir */
 
+
+
+
+
+TEST(registry_summary_owns_definition_and_infrastructure_strings) {
+    CBMFileResult original={}; cbm_arena_init(&original.arena);
+    auto copy=[&](const char *s){ return cbm_arena_strdup(&original.arena,s); };
+    original.module_qn=copy("p.file"); original.namespace_name=copy("sample");
+    CBMDefinition definition={}; definition.name=copy("run"); definition.qualified_name=copy("p.Widget.run");
+    definition.label=copy("Method"); definition.parent_class=copy("p.Widget");
+    definition.return_type=copy("int"); definition.body_tokens=copy("large transient body");
+    definition.declaration_key=copy("Widget.run(int)");
+    const char *params[]={copy("int"),nullptr}; definition.param_types=params;
+    const char *bases[]={copy("Parent"),nullptr}; definition.base_classes=bases;
+    original.defs={&definition,1,1};
+    CBMImport import={copy("Alias"),copy("other.module")}; original.imports={&import,1,1};
+    CBMInfraBinding infra={copy("events"),copy("https://example.test"),copy("pubsub")};
+    original.infra_bindings={&infra,1,1};
+    CBMStringRef ref={copy("https://example.test"),copy("p.file"),copy("push_endpoint"),CBM_STRREF_URL};
+    original.string_refs={&ref,1,1};
+    CBMChannel channel={copy("events"),copy("event_emitter"),copy("p.Widget.run"),CBM_CHANNEL_EMIT};
+    original.channels={&channel,1,1};
+    CBMEnvAccess env={copy("CONFIG"),copy("p.Widget.run")}; original.env_accesses={&env,1,1};
+    std::string error;
+    auto *summary=cbm::make_registry_summary(original,1024*1024,error); ASSERT_NOT_NULL(summary);
+    ASSERT_EQ(summary->arena.block_sizes[0],4096u);
+    cbm_arena_destroy(&original.arena);
+    ASSERT_STR_EQ(summary->defs.items[0].qualified_name,"p.Widget.run");
+    ASSERT_STR_EQ(summary->defs.items[0].parent_class,"p.Widget");
+    ASSERT_STR_EQ(summary->defs.items[0].declaration_key,"Widget.run(int)");
+    ASSERT_STR_EQ(summary->defs.items[0].param_types[0],"int");
+    ASSERT_STR_EQ(summary->defs.items[0].base_classes[0],"Parent");
+    ASSERT(summary->defs.items[0].body_tokens==nullptr);
+    ASSERT_STR_EQ(summary->imports.items[0].local_name,"Alias");
+    ASSERT_STR_EQ(summary->infra_bindings.items[0].broker,"pubsub");
+    ASSERT_STR_EQ(summary->string_refs.items[0].key_path,"push_endpoint");
+    ASSERT_STR_EQ(summary->channels.items[0].enclosing_func_qn,"p.Widget.run");
+    ASSERT_STR_EQ(summary->env_accesses.items[0].env_key,"CONFIG");
+    char file_path[]="src/main/java/sample/Widget.java";
+    cbm_file_info_t file={}; file.rel_path=file_path; file.language=CBM_LANG_JAVA;
+    CBMFileResult *cache[]={summary}; char *modules[]={nullptr}; int count=0;
+    auto *defs=cbm_pxc_collect_all_defs(cache,&file,1,"p",modules,&count);
+    ASSERT_NOT_NULL(defs); ASSERT_EQ(count,1);
+    ASSERT_STR_EQ(defs[0].qualified_name,"sample.Widget.run");
+    ASSERT_STR_EQ(defs[0].receiver_type,"sample.Widget");
+    ASSERT_STR_EQ(defs[0].return_types,"int");
+    ASSERT_STR_EQ(defs[0].embedded_types,"Parent");
+    free(defs); free(modules[0]); cbm_free_result(summary); PASS();
+}
+
+TEST(result_store_releases_leases_and_preserves_versions) {
+    std::string error;
+    auto store=cbm::ResultStore::create({1024*1024,1024*1024,1,4*1024*1024},error);
+    ASSERT_NOT_NULL(store.get());
+    CBMFileResult result={}; result.module_qn="original";
+    ASSERT(store->put(7,result,error));
+    auto first=store->acquire(7,error); ASSERT(first);
+    ASSERT_STR_EQ(first.get()->module_qn,"original");
+    ASSERT(!store->acquire(7,error)); ASSERT_EQ(store->stats().live_leases,1u);
+    result.module_qn="replacement"; ASSERT(store->put(7,result,error));
+    ASSERT_STR_EQ(first.get()->module_qn,"original");
+    auto moved=std::move(first); ASSERT(!first); ASSERT(moved);
+    moved={}; ASSERT_EQ(store->stats().live_leases,0u);
+    auto replacement=store->acquire(7,error); ASSERT(replacement);
+    ASSERT_STR_EQ(replacement.get()->module_qn,"replacement");
+    store.reset(); // The live lease owns its result and keeps its shared state alive.
+    ASSERT_STR_EQ(replacement.get()->module_qn,"replacement");
+    replacement={}; PASS();
+}
+
+TEST(result_store_limits_preserve_published_records) {
+    CBMArena arena; cbm_arena_init(&arena);
+    auto *first=static_cast<char *>(cbm_arena_alloc_bounded(&arena,16,65536));
+    ASSERT_NOT_NULL(first); strcpy(first,"stable");
+    ASSERT_NOT_NULL(cbm_arena_grow_buffer(&arena,nullptr,1024));
+    ASSERT(cbm_arena_alloc_bounded(&arena,16,65536)==nullptr);
+    ASSERT(cbm_arena_alloc_bounded(&arena,SIZE_MAX,SIZE_MAX)==nullptr);
+    ASSERT(cbm_arena_alloc_bounded(&arena,65536,65536+1024+131072-1)==nullptr);
+    ASSERT_NOT_NULL(cbm_arena_alloc_bounded(&arena,65536,65536+1024+131072));
+    ASSERT_STR_EQ(first,"stable"); cbm_arena_destroy(&arena);
+    std::string error; CBMFileResult result={}; result.module_qn="original";
+    std::vector<std::byte> record; ASSERT(cbm::encode_result_snapshot(result,record,4096,error));
+    auto store=cbm::ResultStore::create({4096,65536,1,record.size()},error);
+    ASSERT_NOT_NULL(store.get()); ASSERT(store->put(1,result,error));
+    result.module_qn="replacement"; ASSERT(!store->put(1,result,error));
+    auto lease=store->acquire(1,error); ASSERT(lease); ASSERT_STR_EQ(lease.get()->module_qn,"original");
+    ASSERT_EQ(store->stats().records,1u); lease={};
+    ASSERT(!store->acquire(99,error)); ASSERT_EQ(store->stats().live_leases,0u);
+    // An encoded record can fit the disk limit but exceed the decoded arena limit.
+    auto small=cbm::ResultStore::create({1024*1024,65536,1,2*1024*1024},error);
+    std::string large(70000,'x'); result.module_qn=large.c_str();
+    ASSERT(small->put(1,result,error)); ASSERT(!small->acquire(1,error));
+    ASSERT_EQ(small->stats().live_leases,0u);
+    result.module_qn="small"; ASSERT(small->put(2,result,error));
+    ASSERT(small->acquire(2,error)); PASS();
+}
+
+TEST(result_store_rejects_truncated_storage_and_failed_publication) {
+    std::string error;
+    FILE *backing=tmpfile(); ASSERT_NOT_NULL(backing);
+    auto store=cbm::ResultStore::adopt(backing,{4096,65536,1,1024*1024},error);
+    ASSERT_NOT_NULL(store.get()); CBMFileResult result={}; result.module_qn="original";
+    ASSERT(store->put(1,result,error));
+#ifdef _WIN32
+    ASSERT_EQ(_chsize(_fileno(backing),8),0);
+#else
+    ASSERT_EQ(ftruncate(fileno(backing),8),0);
+#endif
+    ASSERT(!store->acquire(1,error)); ASSERT_EQ(store->stats().live_leases,0u);
+    store.reset();
+    // A read-only stream can seek, but publishing must fail without installing an ID.
+    FILE *readonly=fopen(__FILE__,"rb"); ASSERT_NOT_NULL(readonly);
+    auto failed=cbm::ResultStore::adopt(readonly,{4096,65536,1,1024*1024},error);
+    ASSERT_NOT_NULL(failed.get());
+    ASSERT(!failed->put(1,result,error)); ASSERT(failed->stats().writes_failed);
+    ASSERT_EQ(failed->stats().records,0u); ASSERT(!failed->acquire(1,error));
+    ASSERT(!failed->put(2,result,error)); PASS();
+}
+
+TEST(result_store_serializes_concurrent_publishers) {
+    std::string error;
+    auto store=cbm::ResultStore::create({4096,65536,2,1024*1024},error);
+    ASSERT_NOT_NULL(store.get());
+    std::atomic<int> failures=0;
+    std::vector<std::thread> threads;
+    for (int worker=0;worker<4;++worker) threads.emplace_back([&,worker]{
+        for (int i=0;i<12;++i) {
+            std::string name=std::to_string(worker)+":"+std::to_string(i), local_error;
+            CBMFileResult result={}; result.module_qn=name.c_str();
+            if (!store->put(worker*12+i,result,local_error)) ++failures;
+        }
+    });
+    for (auto &thread:threads) thread.join();
+    ASSERT_EQ(failures.load(),0); ASSERT_EQ(store->stats().records,48u);
+    for (int worker=0;worker<4;++worker) for (int i=0;i<12;++i) {
+        auto lease=store->acquire(worker*12+i,error); ASSERT(lease);
+        std::string expected=std::to_string(worker)+":"+std::to_string(i);
+        ASSERT_STR_EQ(lease.get()->module_qn,expected.c_str());
+    }
+    ASSERT_EQ(store->stats().live_leases,0u); PASS();
+}
+
+TEST(result_snapshot_survives_original_arena_release) {
+    struct Fixture { CBMLanguage language; const char *source; } fixtures[] = {
+        {CBM_LANG_CPP, "#define BUMP(x) ((x)+1)\nstruct Box{int value; Box operator+(const Box&) const;}; Box f(Box a,Box b){return a+b;}\nint leaf(int); int g(int v){return leaf(BUMP(v));}"},
+        {CBM_LANG_PYTHON, "import os\nclass Parent: pass\nclass Child(Parent):\n    @staticmethod\n    def run(x: int) -> str:\n        return str(x)\n"},
+        {CBM_LANG_GO, "package p\nimport \"fmt\"\nfunc Run(v int) { fmt.Println(v) }\n"},
+        {CBM_LANG_TYPESCRIPT, "import {x} from './x'; export class C { f(){ bus.emit('ready', x()); } }"},
+        {CBM_LANG_RUST, "trait Run { fn run(&self); } struct Work; impl Run for Work { fn run(&self) {} }"},
+        {CBM_LANG_YAML, "topic: events\nendpoint: https://example.test/receive\n"},
+    };
+    for (const auto &fixture:fixtures) {
+        CBMExtractOptions options={.defer_cpp_operators=true,.deduplicate_usages=true};
+        auto *original=cbm_extract_file_with_options(fixture.source,(int)strlen(fixture.source),
+            fixture.language,"snapshot","fixture",0,nullptr,nullptr,&options);
+        ASSERT_NOT_NULL(original);
+        cbm_free_tree(original);
+        original->source=cbm_arena_strdup(&original->arena,fixture.source);
+        original->source_len=(int)strlen(fixture.source);
+        std::vector<std::byte> encoded,again;
+        std::string error;
+        ASSERT(cbm::encode_result_snapshot(*original,encoded,1024*1024,error));
+        int definitions=original->defs.count, calls=original->calls.count;
+        cbm_free_result(original);
+        auto *restored=cbm::decode_result_snapshot(encoded,1024*1024,error);
+        ASSERT_NOT_NULL(restored);
+        ASSERT_EQ(restored->defs.count,definitions);
+        ASSERT_EQ(restored->calls.count,calls);
+        ASSERT_STR_EQ(restored->source,fixture.source);
+        ASSERT(cbm::encode_result_snapshot(*restored,again,1024*1024,error));
+        ASSERT(encoded==again);
+        cbm_free_result(restored);
+    }
+    PASS();
+}
+
+TEST(result_snapshot_preserves_sparse_metadata_and_binary_source) {
+    CBMFileResult original={};
+    const char *empty[]={nullptr};
+    const char *parameters[]={"first","",nullptr};
+    uint32_t fingerprint[]={0,UINT32_MAX,42};
+    CBMDefinition definition={};
+    definition.name="function"; definition.qualified_name="p.function";
+    definition.declaration_key="scope:int"; definition.definition_offset=1234;
+    definition.fingerprint=fingerprint; definition.fingerprint_k=3;
+    definition.param_names=parameters; definition.decorators=empty;
+    definition.base_classes=nullptr; definition.is_test=true; definition.recursion_in_loop=true;
+    definition.structural_profile="profile"; definition.body_tokens="a b";
+    definition.start_line=12; definition.end_line=24;
+    original.defs={&definition,1,8};
+    CBMCallArg argument={"expr","value","keyword",7};
+    CBMCall call={}; call.callee_name="target"; call.enclosing_func_qn="p.function";
+    call.args=&argument; call.arg_count=1; call.source_byte=87; call.requires_typed_resolution=true;
+    original.calls={&call,1,8};
+    CBMResolvedCall resolved={"p.function","p.target","lsp_type_dispatch",0.95f,"reason",87,12};
+    original.resolved_calls={&resolved,1,8};
+    CBMOverload overload={44,"p.overload"}; original.overloads=&overload; original.overload_count=1;
+    CBMInfraBinding infra={"topic","https://example.test","pubsub"}; original.infra_bindings={&infra,1,1};
+    CBMChannel channel={"topic","event_emitter","p.function",CBM_CHANNEL_LISTEN}; original.channels={&channel,1,1};
+    original.deferred_cpp_operator_count=3; original.pending_cpp_operator_count=1;
+    original.parse_incomplete=true; original.error_ranges="4-9"; original.error_region_count=1;
+    original.exports=empty; original.global_vars=parameters;
+    original.source="a\0b"; original.source_len=3;
+    std::vector<std::byte> encoded; std::string error;
+    ASSERT(cbm::encode_result_snapshot(original,encoded,1024*1024,error));
+    auto *r=cbm::decode_result_snapshot(encoded,1024*1024,error);
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(r->defs.cap,1); ASSERT_STR_EQ(r->defs.items[0].declaration_key,"scope:int");
+    ASSERT_EQ(r->defs.items[0].definition_offset,1234u);
+    ASSERT_EQ(r->defs.items[0].fingerprint[1],UINT32_MAX);
+    ASSERT_NOT_NULL(r->defs.items[0].decorators); ASSERT(r->defs.items[0].decorators[0]==nullptr);
+    ASSERT(r->defs.items[0].base_classes==nullptr);
+    ASSERT_STR_EQ(r->defs.items[0].param_names[1],"");
+    ASSERT_STR_EQ(r->calls.items[0].args[0].keyword,"keyword");
+    ASSERT_EQ(r->calls.items[0].args[0].index,7); ASSERT(r->calls.items[0].requires_typed_resolution);
+    ASSERT_EQ(r->resolved_calls.items[0].binary_operator_line,12u);
+    ASSERT_EQ(r->resolved_calls.items[0].source_byte,87u);
+    ASSERT_STR_EQ(r->infra_bindings.items[0].broker,"pubsub");
+    ASSERT_EQ(r->channels.items[0].direction,CBM_CHANNEL_LISTEN);
+    ASSERT_EQ(r->overloads[0].byte_offset,44u);
+    ASSERT_EQ(r->pending_cpp_operator_count,1); ASSERT(r->parse_incomplete);
+    ASSERT_STR_EQ(r->error_ranges,"4-9");
+    ASSERT_EQ(r->source_len,3); ASSERT(memcmp(r->source,"a\0b",3)==0);
+    CBMCall appended={}; appended.callee_name="later";
+    cbm_calls_push(&r->calls,&r->arena,appended);
+    ASSERT_EQ(r->calls.count,2);
+    ASSERT_STR_EQ(r->calls.items[0].args[0].keyword,"keyword");
+    ASSERT_STR_EQ(r->calls.items[1].callee_name,"later");
+    cbm_free_result(r); PASS();
+}
+
+TEST(result_snapshot_rejects_truncation_corruption_and_limits) {
+    CBMFileResult original={}; original.module_qn="module";
+    std::vector<std::byte> encoded; std::string error;
+    ASSERT(cbm::encode_result_snapshot(original,encoded,4096,error));
+    for (size_t length=0;length<encoded.size();++length) {
+        ASSERT(cbm::decode_result_snapshot(std::span(encoded).first(length),4096,error)==nullptr);
+        ASSERT(!error.empty());
+    }
+    for (size_t i=0;i<encoded.size();++i) {
+        auto corrupt=encoded; corrupt[i]^=std::byte{1};
+        ASSERT(cbm::decode_result_snapshot(corrupt,4096,error)==nullptr);
+    }
+    ASSERT(cbm::decode_result_snapshot(encoded,encoded.size()-1,error)==nullptr);
+    ASSERT(!cbm::encode_result_snapshot(original,encoded,8,error)); ASSERT(encoded.empty());
+    original.cpp_operator_tracker=&original;
+    ASSERT(!cbm::encode_result_snapshot(original,encoded,4096,error));
+    original.cpp_operator_tracker=nullptr; original.calls.count=-1;
+    ASSERT(!cbm::encode_result_snapshot(original,encoded,4096,error));
+    PASS();
+}
+
 /* ── Helpers ───────────────────────────────────────────────────── */
+
+TEST(usage_dedup_preserves_scope_pairs_and_default_inventory) {
+    struct Fixture { CBMLanguage language; const char *source; } fixtures[] = {
+        {CBM_LANG_CPP, "#define VALUE shared\nint shared;\nint one(){VALUE; shared; return 0;}\nint two(){shared; shared; return 0;}\n"},
+        {CBM_LANG_PYTHON, "shared = 1\ndef one():\n    shared\n    shared\n    return 0\ndef two():\n    shared\n    shared\n    return 0\n"},
+        {CBM_LANG_GO, "package p\nvar shared int\nfunc one() int { _ = shared; _ = shared; return 0 }\nfunc two() int { _ = shared; _ = shared; return 0 }\n"},
+    };
+    for (const auto &fixture : fixtures) {
+        auto *normal = cbm_extract_file(fixture.source, (int)strlen(fixture.source), fixture.language,
+                                       "probe", "usage.cpp", 0, nullptr, nullptr);
+        CBMExtractOptions options = {.deduplicate_usages = true};
+        auto *dedup = cbm_extract_file_with_options(fixture.source, (int)strlen(fixture.source),
+                                       fixture.language, "probe", "usage.cpp", 0, nullptr, nullptr, &options);
+        ASSERT_NOT_NULL(normal);
+        ASSERT_NOT_NULL(dedup);
+        std::set<std::pair<std::string, std::string>> expected, actual;
+        for (int i = 0; i < normal->usages.count; ++i) {
+            const auto &u = normal->usages.items[i];
+            expected.emplace(u.enclosing_func_qn ? u.enclosing_func_qn : "", u.ref_name);
+        }
+        for (int i = 0; i < dedup->usages.count; ++i) {
+            const auto &u = dedup->usages.items[i];
+            ASSERT(actual.emplace(u.enclosing_func_qn ? u.enclosing_func_qn : "", u.ref_name).second);
+        }
+        ASSERT(expected == actual);
+        ASSERT_GT(normal->usages.count, dedup->usages.count);
+        int distinct_callers = 0;
+        for (const auto &[scope, name] : actual)
+            if (name == "shared" && (scope.ends_with(".one") || scope.ends_with(".two")))
+                ++distinct_callers;
+        ASSERT_EQ(distinct_callers, 2);
+        cbm_free_result(normal);
+        cbm_free_result(dedup);
+    }
+    PASS();
+}
+
+TEST(cpp_operator_deferral_preserves_pending_sites_and_typed_results) {
+    const char *source =
+        "struct Box { Box operator+(const Box&) const; };\n"
+        "int primitive(int value) { return (value ^ 3) + 1; }\n"
+        "Box combine(Box left, Box right) { return left + right; }\n"
+        "int invoke() { return primitive(2); }\n";
+    for (CBMLanguage language : {CBM_LANG_CPP, CBM_LANG_CUDA}) {
+        CBMExtractOptions options = {.defer_cpp_operators = true};
+        auto *normal = cbm_extract_file(source, (int)strlen(source), language,
+                                       "probe", "operators.cpp", 0, nullptr, nullptr);
+        auto *deferred = cbm_extract_file_with_options(source, (int)strlen(source), language,
+                                       "probe", "operators.cpp", 0, nullptr, nullptr, &options);
+        ASSERT_NOT_NULL(normal);
+        ASSERT_NOT_NULL(deferred);
+        ASSERT_EQ(normal->deferred_cpp_operator_count, 0);
+        ASSERT_EQ(deferred->deferred_cpp_operator_count, 3);
+        ASSERT_EQ(normal->pending_cpp_operator_count, 0);
+        ASSERT_EQ(deferred->pending_cpp_operator_count, 1);
+        ASSERT(deferred->cpp_operator_tracker == nullptr);
+        ASSERT_EQ(normal->calls.count, 4);
+        ASSERT_EQ(deferred->calls.count, 1);
+        ASSERT_STR_EQ(deferred->calls.items[0].callee_name, "primitive");
+        ASSERT_EQ(normal->resolved_calls.count, deferred->resolved_calls.count);
+        int operators = 0;
+        for (int i = 0; i < deferred->resolved_calls.count; ++i) {
+            const auto &call = deferred->resolved_calls.items[i];
+            if (call.strategy && strcmp(call.strategy, "lsp_operator") == 0) {
+                ASSERT(strstr(call.callee_qn, "operator+") != nullptr);
+                ASSERT_GT(call.source_byte, 0);
+                ASSERT_EQ(call.binary_operator_line, 3);
+                ASSERT_EQ(call.source_byte, (uint32_t)(strstr(source, "left + right") - source + 1));
+                ++operators;
+            } else {
+                ASSERT_EQ(call.binary_operator_line, 0);
+            }
+        }
+        ASSERT_EQ(operators, 1);
+        ASSERT_EQ(cbm_materialize_deferred_cpp_operators(normal), 0);
+        ASSERT_EQ(normal->calls.count, 4);
+        ASSERT_EQ(cbm_materialize_deferred_cpp_operators(deferred), 1);
+        ASSERT_EQ(deferred->calls.count, 2);
+        ASSERT_STR_EQ(deferred->calls.items[1].callee_name, "operator+");
+        ASSERT_EQ(deferred->calls.items[1].start_line, 3);
+        ASSERT(deferred->calls.items[1].requires_typed_resolution);
+        ASSERT_EQ(cbm_materialize_deferred_cpp_operators(deferred), 0);
+        ASSERT_EQ(deferred->calls.count, 2);
+        cbm_free_result(normal);
+        cbm_free_result(deferred);
+    }
+    PASS();
+}
+
+TEST(cpp_deferred_operator_metadata_distinguishes_expression_kinds) {
+    const char *source =
+        "struct Box { Box operator+(const Box&) const; Box& operator+=(const Box&); };\n"
+        "Box combine(Box left, Box right) {\n"
+        "  left += right;\n"
+        "  left.operator+(right);\n"
+        "  return left + right;\n"
+        "}\n";
+    CBMExtractOptions options = {.defer_cpp_operators = true};
+    auto *result = cbm_extract_file_with_options(source, (int)strlen(source), CBM_LANG_CPP,
+                                    "probe", "kinds.cpp", 0, nullptr, nullptr, &options);
+    ASSERT_NOT_NULL(result);
+    int binary = 0, assignment = 0, explicit_operator = 0;
+    for (int i = 0; i < result->resolved_calls.count; ++i) {
+        const auto &call = result->resolved_calls.items[i];
+        if (call.binary_operator_line) {
+            ASSERT_EQ(call.binary_operator_line, 5);
+            ASSERT_EQ(call.source_byte, (uint32_t)(strstr(source, "left + right") - source + 1));
+            ASSERT_STR_EQ(call.strategy, "lsp_operator");
+            ++binary;
+        } else if (strstr(call.callee_qn, "operator+=")) {
+            ++assignment;
+        } else if (strstr(call.callee_qn, "operator+")) {
+            ++explicit_operator;
+        }
+    }
+    ASSERT_EQ(binary, 1);
+    ASSERT_EQ(assignment, 1);
+    ASSERT_EQ(explicit_operator, 1);
+    int calls_before = result->calls.count;
+    ASSERT_EQ(cbm_materialize_deferred_cpp_operators(result), 1);
+    ASSERT_EQ(result->calls.count, calls_before + 1);
+    ASSERT_EQ(cbm_materialize_deferred_cpp_operators(result), 0);
+    cbm_free_result(result);
+    PASS();
+}
+
+TEST(cpp_operator_recursion_requires_resolved_self_call) {
+    const char *source =
+        "#define ENABLE_OPERATORS 1\n"
+        "struct Value { int n; Value operator+(const Value &rhs) const { return {n + rhs.n}; } };\n"
+        "struct Recursive { Recursive operator+(const Recursive &rhs) const { return rhs + rhs; } };\n";
+    for (bool defer : {false, true}) {
+        CBMExtractOptions options = {.defer_cpp_operators = defer};
+        auto *result = cbm_extract_file_with_options(source, (int)strlen(source), CBM_LANG_CPP,
+                                        "probe", "recursion.cpp", 0, nullptr, nullptr, &options);
+        ASSERT_NOT_NULL(result);
+        int checked = 0;
+        for (int i = 0; i < result->defs.count; ++i) {
+            const auto &def = result->defs.items[i];
+            if (!def.name || strcmp(def.name, "operator+") != 0) continue;
+            bool recursive = strstr(def.qualified_name, ".Recursive.") != nullptr;
+            ASSERT_EQ(def.is_recursive, recursive);
+            ASSERT_EQ(def.unguarded_recursion, recursive);
+            ++checked;
+        }
+        ASSERT_EQ(checked, 2);
+        int resolved_self = 0;
+        for (int i = 0; i < result->resolved_calls.count; ++i) {
+            const auto &call = result->resolved_calls.items[i];
+            if (!call.binary_operator_line || !strstr(call.callee_qn, ".Recursive.")) continue;
+            ASSERT_STR_EQ(call.caller_qn, call.callee_qn);
+            ++resolved_self;
+        }
+        ASSERT_GT(resolved_self, 0);
+        cbm_free_result(result);
+    }
+    PASS();
+}
+
+TEST(cpp_operator_deferral_keeps_unresolved_cross_file_work_pending) {
+    const char *source = "Unknown combine(Unknown a, Unknown b) { return a + b; }\n";
+    CBMExtractOptions options = {.defer_cpp_operators = true};
+    auto *result = cbm_extract_file_with_options(source, (int)strlen(source), CBM_LANG_CPP,
+                                    "probe", "pending.cpp", 0, nullptr, nullptr, &options);
+    ASSERT_NOT_NULL(result);
+    ASSERT_EQ(result->calls.count, 0);
+    ASSERT_EQ(result->deferred_cpp_operator_count, 1);
+    ASSERT_EQ(result->pending_cpp_operator_count, 1);
+    ASSERT_EQ(cbm_materialize_deferred_cpp_operators(result), 0);
+    cbm_free_result(result);
+    PASS();
+}
+
+TEST(cpp_binary_operand_is_not_a_function_call) {
+    const char *source =
+        "struct Box { Box operator+(const Box&) const; };\n"
+        "int value();\n"
+        "int primitive(int value) { return (value ^ 3) + 1; }\n"
+        "Box combine(Box left, Box right) { return left + right; }\n"
+        "int invoke() { return value(); }\n";
+    for (CBMLanguage language : {CBM_LANG_CPP, CBM_LANG_CUDA}) {
+        CBMFileResult *result = cbm_extract_file(source, (int)strlen(source), language,
+                                                "probe", "operators.cpp", 0, nullptr, nullptr);
+        ASSERT_NOT_NULL(result);
+        int actual_calls = 0, plus = 0, bitwise = 0;
+        for (int i = 0; i < result->calls.count; i++) {
+            const char *name = result->calls.items[i].callee_name;
+            ASSERT_NOT_NULL(name);
+            ASSERT(strcmp(name, "left") != 0);
+            ASSERT(strcmp(name, "right") != 0);
+            actual_calls += strcmp(name, "value") == 0;
+            plus += strcmp(name, "operator+") == 0;
+            bitwise += strcmp(name, "operator^") == 0;
+            const auto &call = result->calls.items[i];
+            if (strncmp(name, "operator", 8) == 0) {
+                ASSERT(call.requires_typed_resolution);
+                ASSERT_GT(call.source_byte, 0);
+            } else {
+                ASSERT(!call.requires_typed_resolution);
+            }
+        }
+        ASSERT_EQ(actual_calls, 1);
+        ASSERT_EQ(plus, 2);
+        ASSERT_EQ(bitwise, 1);
+        cbm_free_result(result);
+    }
+    PASS();
+}
+
+TEST(call_arguments_preserve_values_and_capture_limit) {
+    const char *source =
+        "void run() { zero(); one(42); many(0,1,2,3,4,5,6,7,8,9); }\n";
+    CBMFileResult *r = cbm_extract_file(source, (int)strlen(source), CBM_LANG_CPP,
+                                       "test", "args.cpp", 0, nullptr, nullptr);
+    ASSERT_NOT_NULL(r);
+    int found = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall &call = r->calls.items[i];
+        if (strcmp(call.callee_name, "zero") == 0) {
+            ASSERT_EQ(call.arg_count, 0);
+            ASSERT_NULL(call.args);
+            found++;
+        } else if (strcmp(call.callee_name, "one") == 0) {
+            ASSERT_EQ(call.arg_count, 1);
+            ASSERT(cbm_arena_contains(&r->arena, call.args));
+            ASSERT_STR_EQ(call.args[0].expr, "42");
+            ASSERT_EQ(call.args[0].index, 0);
+            found++;
+        } else if (strcmp(call.callee_name, "many") == 0) {
+            ASSERT_EQ(call.arg_count, CBM_MAX_CALL_ARGS);
+            ASSERT(cbm_arena_contains(&r->arena, call.args));
+            for (int a = 0; a < call.arg_count; a++) {
+                char value[8];
+                snprintf(value, sizeof(value), "%d", a);
+                ASSERT_STR_EQ(call.args[a].expr, value);
+                ASSERT_EQ(call.args[a].index, a);
+            }
+            found++;
+        }
+    }
+    ASSERT_EQ(found, 3);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(call_arguments_preserve_keywords_after_spreads) {
+    const char *source =
+        "def run():\n"
+        "    send(*items, url='/route', timeout=3, **options)\n"
+        "    spread(*items, **options)\n";
+    CBMFileResult *r = cbm_extract_file(source, (int)strlen(source), CBM_LANG_PYTHON,
+                                       "test", "args.py", 0, nullptr, nullptr);
+    ASSERT_NOT_NULL(r);
+    int found = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall &call = r->calls.items[i];
+        if (strcmp(call.callee_name, "send") == 0) {
+            ASSERT_EQ(call.arg_count, 2);
+            ASSERT_STR_EQ(call.args[0].keyword, "url");
+            ASSERT_STR_EQ(call.args[0].value, "/route");
+            ASSERT_EQ(call.args[0].index, 1);
+            ASSERT_STR_EQ(call.args[1].keyword, "timeout");
+            ASSERT_STR_EQ(call.args[1].expr, "3");
+            ASSERT_EQ(call.args[1].index, 2);
+            found++;
+        } else if (strcmp(call.callee_name, "spread") == 0) {
+            ASSERT_EQ(call.arg_count, 0);
+            ASSERT_NULL(call.args);
+            found++;
+        }
+    }
+    ASSERT_EQ(found, 2);
+    cbm_free_result(r);
+    PASS();
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+TEST(call_arguments_survive_scratch_reclamation) {
+    CBMArena durable, scratch;
+    cbm_arena_init(&durable);
+    cbm_arena_init(&scratch);
+    CBMCall call = {};
+    call.callee_name = cbm_arena_strdup(&scratch, "send");
+    call.arg_count = 1;
+    call.args = (CBMCallArg *)cbm_arena_alloc(&scratch, sizeof(CBMCallArg));
+    ASSERT_NOT_NULL(call.args);
+    call.args[0] = {cbm_arena_strdup(&scratch, "ROUTE"),
+                    cbm_arena_strdup(&scratch, "/route"),
+                    cbm_arena_strdup(&scratch, "url"), 3};
+    cbm_test_relocate_call(&durable, &scratch, &call);
+    ASSERT(cbm_arena_contains(&durable, call.args));
+    ASSERT(cbm_arena_contains(&durable, call.args[0].expr));
+    ASSERT(cbm_arena_contains(&durable, call.args[0].value));
+    ASSERT(cbm_arena_contains(&durable, call.args[0].keyword));
+    cbm_arena_destroy(&scratch);
+    ASSERT_STR_EQ(call.callee_name, "send");
+    ASSERT_STR_EQ(call.args[0].expr, "ROUTE");
+    ASSERT_STR_EQ(call.args[0].value, "/route");
+    ASSERT_STR_EQ(call.args[0].keyword, "url");
+    ASSERT_EQ(call.args[0].index, 3);
+    cbm_arena_destroy(&durable);
+    PASS();
+}
+#endif
+
+TEST(call_array_growth_preserves_records_without_old_buffers) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMCallArray calls = {};
+    const char *callee = cbm_arena_strdup(&arena, "callee");
+    size_t string_bytes = arena.total_alloc;
+    for (int i = 0; i < 4097; i++) {
+        CBMCall call = {};
+        call.callee_name = callee;
+        call.start_line = i + 1;
+        cbm_calls_push(&calls, &arena, call);
+    }
+    ASSERT_EQ(calls.count, 4097);
+    ASSERT_EQ(arena.total_alloc, string_bytes + (size_t)calls.cap * sizeof(CBMCall));
+    for (int i = 0; i < calls.count; i++) {
+        ASSERT_STR_EQ(calls.items[i].callee_name, "callee");
+        ASSERT_EQ(calls.items[i].start_line, i + 1);
+    }
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
+TEST(call_array_growth_across_scratch_arenas) {
+    CBMArena durable, scratch;
+    cbm_arena_init(&durable);
+    cbm_arena_init(&scratch);
+    CBMCallArray calls = {};
+    for (int i = 0; i < 65; i++) {
+        CBMCall call = {};
+        call.callee_name = "target";
+        call.start_line = i + 1;
+        cbm_calls_push(&calls, i < 32 ? &durable : &scratch, call);
+    }
+    ASSERT_EQ(calls.count, 65);
+    ASSERT(cbm_arena_contains(&scratch, calls.items));
+    ASSERT(!cbm_arena_contains(&durable, calls.items));
+    for (int i = 0; i < calls.count; i++) {
+        ASSERT_EQ(calls.items[i].start_line, i + 1);
+        ASSERT_STR_EQ(calls.items[i].callee_name, "target");
+    }
+    cbm_arena_destroy(&scratch);
+    cbm_arena_destroy(&durable);
+    PASS();
+}
 
 /* Check if any definition with the given label has the given name. */
 static int has_def(CBMFileResult *r, const char *label, const char *name) {
@@ -86,6 +701,269 @@ static CBMFileResult *extract(const char *src, CBMLanguage lang, const char *pro
                               const char *path) {
     CBMFileResult *r = cbm_extract_file(src, (int)strlen(src), lang, proj, path, 0, NULL, NULL);
     return r;
+}
+
+static const CBMDefinition *declaration_test_find(CBMFileResult *r, const char *label,
+                                                  const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].label, label) == 0 &&
+            strcmp(r->defs.items[i].name, name) == 0) {
+            return &r->defs.items[i];
+        }
+    }
+    return nullptr;
+}
+
+TEST(extract_c_prototypes_are_declarations) {
+    CBMFileResult *r = extract("int\nfirst\n(int value);\nint second(int), third(int);\n"
+                               "int (*callback)(int); typedef int (*Callback)(int);\n"
+                               "int *pointer(int value); int (*factory(int value))(double);\n"
+                               "// int fake(int value);\nvoid body(void) { int local(int); }\n",
+                               CBM_LANG_C, "t", "api.h");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(count_defs_with_label(r, "Declaration"), 5);
+    for (const char *name : {"first", "second", "third", "pointer", "factory"}) {
+        const CBMDefinition *def = declaration_test_find(r, "Declaration", name);
+        ASSERT_NOT_NULL(def);
+        ASSERT_NOT_NULL(def->declaration_key);
+        ASSERT_EQ(strlen(def->declaration_key), 64);
+    }
+    ASSERT_EQ(declaration_test_find(r, "Declaration", "first")->start_line, 1);
+    ASSERT(!has_def(r, "Declaration", "callback"));
+    ASSERT(!has_def(r, "Declaration", "local"));
+    ASSERT(!has_def(r, "Declaration", "fake"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_declaration_keys_match_definitions) {
+    CBMFileResult *header =
+        extract("extern \"C\" { int f(int renamed, const char *text); }\n"
+                "int *pointer(int x); int (*factory(int x))(double); void empty(void);\n",
+                CBM_LANG_CPP, "t", "api/Public.hpp");
+    CBMFileResult *source =
+        extract("int f(int n, const char *s) {return n;}\n"
+                "int *pointer(int n) {return 0;} int (*factory(int n))(double) {return 0;}\n"
+                "void empty() {}\n",
+                CBM_LANG_CPP, "t", "engine/other.cpp");
+    ASSERT_NOT_NULL(header);
+    ASSERT_NOT_NULL(source);
+    for (const char *name : {"f", "pointer", "factory", "empty"}) {
+        const CBMDefinition *decl = declaration_test_find(header, "Declaration", name);
+        const CBMDefinition *def = declaration_test_find(source, "Function", name);
+        ASSERT_NOT_NULL(decl);
+        ASSERT_NOT_NULL(def);
+        ASSERT_NOT_NULL(decl->declaration_key);
+        ASSERT_NOT_NULL(def->declaration_key);
+        ASSERT_STR_EQ(decl->declaration_key, def->declaration_key);
+    }
+    cbm_free_result(header);
+    cbm_free_result(source);
+    PASS();
+}
+
+TEST(extract_declaration_keys_preserve_scope_and_overloads) {
+    CBMFileResult *r =
+        extract("namespace left { int f(int renamed = 7); }\n"
+                "namespace right { int f(int renamed); }\n"
+                "namespace left { int f(double renamed); int f(int first, int second); }\n"
+                "namespace left { int f(int value) {return value;} }\n",
+                CBM_LANG_CPP, "t", "scoped.cpp");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *def = declaration_test_find(r, "Function", "f");
+    ASSERT_NOT_NULL(def);
+    int matched = 0;
+    int declarations = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *decl = &r->defs.items[i];
+        if (strcmp(decl->label, "Declaration") != 0) {
+            continue;
+        }
+        declarations++;
+        ASSERT_NOT_NULL(decl->declaration_key);
+        if (strcmp(decl->declaration_key, def->declaration_key) == 0) {
+            matched++;
+            ASSERT_EQ(decl->start_line, 1);
+        }
+    }
+    ASSERT_EQ(declarations, 4);
+    ASSERT_EQ(matched, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_declaration_keys_ignore_reference_parameter_names) {
+    CBMFileResult *header = extract(
+        "void f(int & /* comment */ x, int && y, int (&arr)[3], int (&cb)(double));",
+        CBM_LANG_CPP, "t", "api/A.hpp");
+    CBMFileResult *source = extract(
+        "void f(int & a, int && b, int (&values)[3], int (&callback)(double)) {}",
+        CBM_LANG_CPP, "t", "src/A.cpp");
+    ASSERT_NOT_NULL(header);
+    ASSERT_NOT_NULL(source);
+    const CBMDefinition *decl = declaration_test_find(header, "Declaration", "f");
+    const CBMDefinition *def = declaration_test_find(source, "Function", "f");
+    ASSERT_NOT_NULL(decl);
+    ASSERT_NOT_NULL(def);
+    ASSERT_NOT_NULL(decl->declaration_key);
+    ASSERT_NOT_NULL(def->declaration_key);
+    ASSERT_STR_EQ(decl->declaration_key, def->declaration_key);
+    cbm_free_result(header);
+    cbm_free_result(source);
+    PASS();
+}
+
+TEST(extract_declaration_keys_match_class_template_members) {
+    CBMFileResult *header = extract(
+        "namespace ns { template<class T> class View { public:\n"
+        "void convert(T x, T & out) const; }; }\n",
+        CBM_LANG_CPP, "t", "api/View.hpp");
+    CBMFileResult *source = extract(
+        "namespace ns { template<typename U>\n"
+        "void View<U>::convert(U renamed, U & result) const {result = renamed;} }\n",
+        CBM_LANG_CPP, "t", "engine/View.cpp");
+    ASSERT_NOT_NULL(header);
+    ASSERT_NOT_NULL(source);
+    const CBMDefinition *decl = declaration_test_find(header, "Declaration", "convert");
+    const CBMDefinition *def = declaration_test_find(source, "Function", "convert");
+    ASSERT_NOT_NULL(decl);
+    ASSERT_NOT_NULL(def);
+    ASSERT_NOT_NULL(decl->declaration_key);
+    ASSERT_NOT_NULL(def->declaration_key);
+    ASSERT_STR_EQ(decl->declaration_key, def->declaration_key);
+    cbm_free_result(header);
+    cbm_free_result(source);
+    PASS();
+}
+
+TEST(extract_declaration_keys_class_template_identity_boundaries) {
+    struct Case { const char *header; const char *source; bool matches; };
+    const Case cases[] = {
+        {"template<class T, typename V> struct A { void f(T x, V y) const; };",
+         "template<typename U, class W> void A<U, W>::f(U a, W b) const {}", true},
+        {"template<class T, class V> struct A { void f(T x, V y); };",
+         "template<class U, class W> void A<U,W>::f(W a, U b) {}", false},
+        {"template<class T> struct A { void f(T x) const; };",
+         "template<class U> void A<U>::f(U a) {}", false},
+        {"template<class T> struct A { void f(Library::T x); };",
+         "template<class U> void A<U>::f(Library::U a) {}", false},
+        {"namespace T { template<class T> struct A { void f(T x); }; }",
+         "namespace U { template<class U> void A<U>::f(U a) {} }", false},
+        {"template<class T, class V> struct A { void f(T x); };",
+         "template<class U> void A<U>::f(U a) {}", false},
+    };
+    for (const auto &item : cases) {
+        CBMFileResult *header = extract(item.header, CBM_LANG_CPP, "t", "api/A.hpp");
+        CBMFileResult *source = extract(item.source, CBM_LANG_CPP, "t", "src/A.cpp");
+        ASSERT_NOT_NULL(header);
+        ASSERT_NOT_NULL(source);
+        const CBMDefinition *decl = declaration_test_find(header, "Declaration", "f");
+        const CBMDefinition *def = declaration_test_find(source, "Function", "f");
+        ASSERT_NOT_NULL(decl);
+        ASSERT_NOT_NULL(def);
+        ASSERT_NOT_NULL(decl->declaration_key);
+        ASSERT_NOT_NULL(def->declaration_key);
+        ASSERT_EQ(strcmp(decl->declaration_key, def->declaration_key) == 0, item.matches);
+        cbm_free_result(header);
+        cbm_free_result(source);
+    }
+    PASS();
+}
+
+TEST(extract_declaration_keys_unsupported_templates_remain_unkeyed) {
+    for (const char *text : {
+             "template<int N> struct A { void f(int value); };",
+             "template<class... Ts> struct A { void f(int value); };",
+             "template<class T> requires Ready<T> struct A { void f(T value); };",
+             "template<class T> struct A { template<class U> void f(U value); };",
+             "template<class T> struct A<T*> { void f(T value); };",
+             "struct A { template<class T> void f(T value); };",
+             "template<class T = int> struct A { void f(T value); };",
+         }) {
+        CBMFileResult *header = extract(text, CBM_LANG_CPP, "t", "api/A.hpp");
+        ASSERT_NOT_NULL(header);
+        const CBMDefinition *decl = declaration_test_find(header, "Declaration", "f");
+        ASSERT_NOT_NULL(decl);
+        ASSERT(decl->declaration_key == nullptr);
+        cbm_free_result(header);
+    }
+    PASS();
+}
+
+TEST(extract_declaration_keys_match_member_qualifiers) {
+    CBMFileResult *header =
+        extract("namespace ns { class A { int f(int value = 0) const;\n"
+                "int f(int value); int g(int value) const {return value;} }; }\n",
+                CBM_LANG_CPP, "t", "A.hpp");
+    CBMFileResult *source =
+        extract("namespace ns { int A::f(int renamed) const {return renamed;} }\n", CBM_LANG_CPP,
+                "t", "A.cpp");
+    ASSERT_NOT_NULL(header);
+    ASSERT_NOT_NULL(source);
+    const CBMDefinition *decl = declaration_test_find(header, "Declaration", "f");
+    const CBMDefinition *def = declaration_test_find(source, "Method", "f");
+    ASSERT_NOT_NULL(decl);
+    ASSERT_NOT_NULL(def);
+    ASSERT_NOT_NULL(decl->declaration_key);
+    ASSERT_NOT_NULL(def->declaration_key);
+    ASSERT_STR_EQ(decl->declaration_key, def->declaration_key);
+    ASSERT_NOT_NULL(declaration_test_find(header, "Method", "g")->declaration_key);
+    int matches = 0;
+    for (int i = 0; i < header->defs.count; i++) {
+        const CBMDefinition *candidate = &header->defs.items[i];
+        if (strcmp(candidate->label, "Declaration") == 0 && candidate->declaration_key &&
+            strcmp(candidate->declaration_key, def->declaration_key) == 0) {
+            matches++;
+        }
+    }
+    ASSERT_EQ(matches, 1);
+    cbm_free_result(header);
+    cbm_free_result(source);
+    PASS();
+}
+
+TEST(extract_declaration_identity_and_static_scope) {
+    CBMFileResult *header =
+        extract("int f(int x); static int local(int x);\n", CBM_LANG_C, "t", "same.h");
+    CBMFileResult *source = extract("int f(int x); static int local(int x) {return x;}\n"
+                                    "int f(int x) {return x;}\n",
+                                    CBM_LANG_C, "t", "same.c");
+    const CBMDefinition *a = declaration_test_find(header, "Declaration", "f");
+    const CBMDefinition *b = declaration_test_find(source, "Declaration", "f");
+    const CBMDefinition *c = declaration_test_find(source, "Function", "f");
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(b);
+    ASSERT_NOT_NULL(c);
+    ASSERT(strcmp(a->qualified_name, b->qualified_name) != 0);
+    ASSERT(strcmp(a->qualified_name, c->qualified_name) != 0);
+    ASSERT_STR_EQ(a->declaration_key, c->declaration_key);
+    a = declaration_test_find(header, "Declaration", "local");
+    b = declaration_test_find(source, "Function", "local");
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(b);
+    ASSERT(strcmp(a->declaration_key, b->declaration_key) != 0);
+    cbm_free_result(header);
+    cbm_free_result(source);
+    PASS();
+}
+
+TEST(extract_declaration_keys_preserve_token_boundaries) {
+    CBMFileResult *r = extract("typedef int unsignedint; int f(unsigned int); int f(unsignedint);\n"
+                               "int f(unsigned int renamed) {return renamed;}\n",
+                               CBM_LANG_C, "t", "types.c");
+    const CBMDefinition *def = declaration_test_find(r, "Function", "f");
+    ASSERT_NOT_NULL(def);
+    int matches = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *decl = &r->defs.items[i];
+        if (strcmp(decl->label, "Declaration") == 0 && decl->declaration_key &&
+            strcmp(decl->declaration_key, def->declaration_key) == 0) {
+            matches++;
+        }
+    }
+    ASSERT_EQ(matches, 1);
+    cbm_free_result(r);
+    PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -3321,8 +4199,10 @@ TEST(extract_large_ts_has_functions_issue213) {
 /* Return the first definition with the given name, or NULL. */
 static const CBMDefinition *find_def(CBMFileResult *r, const char *name) {
     for (int i = 0; i < r->defs.count; i++) {
-        if (strcmp(r->defs.items[i].name, name) == 0)
+        if (strcmp(r->defs.items[i].name, name) == 0 &&
+            strcmp(r->defs.items[i].label, "Declaration") != 0) {
             return &r->defs.items[i];
+        }
     }
     return NULL;
 }
@@ -3467,6 +4347,287 @@ TEST(complexity_access_depth_and_params) {
     ASSERT_GT(d->max_access_depth, 2); /* x.alpha.beta.gamma.delta */
     ASSERT_GTE(d->param_count, 3);     /* x, a, b, c (grouping may vary) */
     cbm_free_result(r);
+    PASS();
+}
+
+/* A macro parse error elsewhere in a C++ header must not rename existing
+ * inline methods when the preprocessed definition-recovery pass runs. */
+TEST(extract_cpp_recovery_preserves_inline_call_identities) {
+    const char *source =
+        "#define PICK(ID) case ID: return ID; break;\n"
+        "inline int select(int id) {\n"
+        "    switch (id) {\n"
+        "        PICK(0)\n"
+        "        PICK(1)\n"
+        "        default: return -1;\n"
+        "    }\n"
+        "}\n"
+        "class StaticMesh {\n"
+        "public:\n"
+        "    void build_interior(bool do_metric, bool do_edge = true) {\n"
+        "        build_faces_from_cells();\n"
+        "        if (do_metric) calc_metric();\n"
+        "        if (do_edge) build_edge();\n"
+        "    }\n"
+        "private:\n"
+        "    void build_faces_from_cells() {}\n"
+        "    void calc_metric() {}\n"
+        "    void build_edge() {}\n"
+        "};\n";
+    CBMFileResult *r = extract(source, CBM_LANG_CPP, "t", "StaticMesh.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *caller = find_def(r, "build_interior");
+    ASSERT_NOT_NULL(caller);
+    ASSERT_STR_EQ(caller->qualified_name, "t.StaticMesh.StaticMesh.build_interior");
+    ASSERT_EQ(r->overload_count, 0);
+    for (const char *name : {"build_faces_from_cells", "calc_metric", "build_edge"}) {
+        const CBMDefinition *target = find_def(r, name);
+        ASSERT_NOT_NULL(target);
+        ASSERT_NULL(strstr(target->qualified_name, "@overload_"));
+        bool found = false;
+        for (int i = 0; i < r->calls.count; i++) {
+            const CBMCall &call = r->calls.items[i];
+            if (call.callee_name && strcmp(call.callee_name, name) == 0 &&
+                call.enclosing_func_qn &&
+                strcmp(call.enclosing_func_qn, caller->qualified_name) == 0) {
+                found = true;
+            }
+        }
+        ASSERT_TRUE(found);
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Recovery must preserve real overload IDs and the raw byte-offset lookup. */
+TEST(extract_cpp_recovery_preserves_real_overloads) {
+    const char *source =
+        "#define PICK(ID) case ID: return ID; break;\n"
+        "inline int select(int id) {\n"
+        "    switch (id) {\n"
+        "        PICK(0)\n"
+        "        PICK(1)\n"
+        "        default: return -1;\n"
+        "    }\n"
+        "}\n"
+        "int integer_helper(int x) { return x; }\n"
+        "double floating_helper(double x) { return x; }\n"
+        "struct Box {\n"
+        "    int blend(int x) { return integer_helper(x); }\n"
+        "    double blend(double x) { return floating_helper(x); }\n"
+        "};\n";
+    CBMFileResult *r = extract(source, CBM_LANG_CPP, "t", "overloads.hpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(r->overload_count, 2);
+    int definitions = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition &def = r->defs.items[i];
+        if (strcmp(def.name, "blend") != 0 || strcmp(def.label, "Method") != 0) continue;
+        definitions++;
+        ASSERT_NOT_NULL(strstr(def.qualified_name, "@overload_"));
+        ASSERT_LT(def.definition_offset, strlen(source));
+        const char *helper = strncmp(source + def.definition_offset, "double", 6) == 0
+                                 ? "floating_helper" : "integer_helper";
+        bool mapped = false, textual = false, resolved = false;
+        for (int j = 0; j < r->overload_count; j++) {
+            if (r->overloads[j].byte_offset == def.definition_offset &&
+                strcmp(r->overloads[j].qualified_name, def.qualified_name) == 0) mapped = true;
+        }
+        for (int j = 0; j < r->calls.count; j++) {
+            const CBMCall &call = r->calls.items[j];
+            if (call.enclosing_func_qn && strcmp(call.enclosing_func_qn, def.qualified_name) == 0 &&
+                call.callee_name && strcmp(call.callee_name, helper) == 0) textual = true;
+        }
+        for (int j = 0; j < r->resolved_calls.count; j++) {
+            const CBMResolvedCall &call = r->resolved_calls.items[j];
+            if (call.caller_qn && strcmp(call.caller_qn, def.qualified_name) == 0 &&
+                call.callee_qn && strstr(call.callee_qn, helper)) resolved = true;
+        }
+        ASSERT_TRUE(mapped);
+        ASSERT_TRUE(textual);
+        ASSERT_TRUE(resolved);
+    }
+    ASSERT_EQ(definitions, 2);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Conditional signature recovery must not duplicate a surviving overload or
+ * collapse it with a distinct same-name definition. Keys include the owner and
+ * signature; matching the remapped span keeps separate definitions separate. */
+TEST(extract_cpp_recovery_deduplicates_overloads_by_source_identity) {
+    const char *source =
+        "int integer_helper(int x) { return x; }\n"
+        "double floating_helper(double x) { return x; }\n"
+        "int blend(int x) { return integer_helper(x); }\n"
+        "#ifdef VARIANT\n"
+        "double blend(double x, int ignored) {\n"
+        "#else\n"
+        "double blend(double x) {\n"
+        "#endif\n"
+        "    return floating_helper(x);\n"
+        "}\n"
+        "int use_integer() { return blend(1); }\n"
+        "double use_floating() { return blend(1.0); }\n";
+    CBMFileResult *r = extract(source, CBM_LANG_CPP, "t", "overloads.cpp");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *integer = nullptr, *floating = nullptr;
+    int definitions = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition &def = r->defs.items[i];
+        if (strcmp(def.name, "blend") != 0 || strcmp(def.label, "Function") != 0) continue;
+        definitions++;
+        if (def.start_line == 3) integer = &def;
+        if (def.start_line == 7) floating = &def;
+    }
+    ASSERT_EQ(definitions, 2);
+    ASSERT_NOT_NULL(integer);
+    ASSERT_NOT_NULL(floating);
+    ASSERT_NOT_NULL(integer->declaration_key);
+    ASSERT_NOT_NULL(floating->declaration_key);
+    ASSERT_NEQ(strcmp(integer->declaration_key, floating->declaration_key), 0);
+    ASSERT_NEQ(strcmp(integer->qualified_name, floating->qualified_name), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_cpp_delete_operands_require_typed_destructor_resolution) {
+    const char *source = R"CPP(using Size = decltype(sizeof(0));
+void *allocate(Size) { return nullptr; }
+void release(void *) {}
+void callback() {}
+struct Resource {
+    Resource() {}
+    ~Resource() {}
+    static void *operator new(Size n) { return allocate(n); }
+    static void *operator new[](Size n) { return allocate(n); }
+    static void operator delete(void *p) { release(p); }
+    static void operator delete[](void *p) { release(p); }
+};
+Resource *make_resource() { return new Resource; }
+struct Holder {
+    unsigned char *bytes;
+    Resource *resource;
+    void (*hook)();
+    void delete_scalar() { delete bytes; }
+    void delete_array() { delete[] bytes; }
+    void destroy_scalar() { delete resource; }
+    void destroy_array() { delete[] resource; }
+    void invoke() { hook(); callback(); }
+    void destroy_returned() { delete make_resource(); }
+    void explicit_operators() {
+        Resource::operator delete(bytes);
+        Resource::operator delete[](bytes);
+        Resource::operator new(8);
+        Resource::operator new[](8);
+    }
+    void construct() { Resource *one = new Resource; Resource *many = new Resource[2]; }
+};
+)CPP";
+    for (CBMLanguage language : {CBM_LANG_CPP, CBM_LANG_CUDA}) {
+        CBMExtractOptions options = {.defer_cpp_operators = true, .deduplicate_usages = true};
+        CBMFileResult *r = cbm_extract_file_with_options(source, (int)strlen(source), language,
+                                                        "t", "delete.cpp", 0, nullptr, nullptr,
+                                                        &options);
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(r->has_error);
+        int deleted_operands = 0, constructions = 0;
+        std::set<std::string> ordinary_calls, destructor_callers;
+        for (int i = 0; i < r->calls.count; ++i) {
+            const CBMCall &call = r->calls.items[i];
+            if (call.source_byte == 0 && call.start_line >= 18 && call.start_line <= 23) {
+                ASSERT_TRUE(call.requires_typed_resolution);
+                ++deleted_operands;
+            }
+            if (call.source_byte > 0) {
+                // Real invocations, including nested delete operands and explicit
+                // allocation operators, keep their ordinary resolution path.
+                ASSERT_FALSE(call.requires_typed_resolution);
+                ordinary_calls.insert(call.callee_name);
+                constructions += strcmp(call.callee_name, "Resource") == 0;
+            }
+        }
+        ASSERT_EQ(deleted_operands, 5);
+        ASSERT_EQ(constructions, 3);
+        for (const char *callee : {"hook", "callback", "make_resource", "allocate", "release",
+                                   "Resource::operator delete", "Resource::operator delete[]",
+                                   "Resource::operator new", "Resource::operator new[]"}) {
+            ASSERT_TRUE(ordinary_calls.count(callee) > 0);
+        }
+        for (int i = 0; i < r->resolved_calls.count; ++i) {
+            const CBMResolvedCall &call = r->resolved_calls.items[i];
+            if (call.strategy && strcmp(call.strategy, "lsp_destructor") == 0 &&
+                call.callee_qn && strstr(call.callee_qn, "Resource.~Resource")) {
+                destructor_callers.insert(call.caller_qn);
+            }
+        }
+        ASSERT_EQ(destructor_callers.size(), 3u);
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
+TEST(extract_cpp_field_reads_are_not_call_candidates) {
+    const char *source =
+        "struct Target { void hit() {} };\n"
+        "struct Smart { Target* operator->(); };\n"
+        "struct Holder { Target* target; void (*callback)(); };\n"
+        "Target* read(Holder& holder) { return holder.target; }\n"
+        "void invoke(Holder& holder, Target* pointer, Smart& smart) {\n"
+        "    holder.callback();\n"
+        "    pointer->hit();\n"
+        "    smart->hit();\n"
+        "    smart.operator->()->hit();\n"
+        "}\n";
+    for (CBMLanguage language : {CBM_LANG_CPP, CBM_LANG_CUDA}) {
+        CBMFileResult *r = extract(source, language, "t", "calls.cpp");
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(r->has_error);
+        std::set<std::string> calls;
+        for (int i = 0; i < r->calls.count; i++) {
+            const CBMCall &call = r->calls.items[i];
+            if (!call.callee_name) continue;
+            ASSERT_NEQ(strcmp(call.callee_name, "holder"), 0);
+            ASSERT_NEQ(strcmp(call.callee_name, "pointer"), 0);
+            ASSERT_NEQ(strcmp(call.callee_name, "smart"), 0);
+            calls.insert(call.callee_name);
+        }
+        for (const char *callee : {"holder.callback", "pointer->hit", "smart->hit",
+                                   "smart.operator->", "smart.operator->()->hit"}) {
+            ASSERT_TRUE(calls.count(callee) > 0);
+        }
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
+TEST(extract_cpp_pointer_and_reference_bindings_do_not_construct_objects) {
+    const char *source =
+        "struct Widget { Widget(const Widget&); };\n"
+        "void bind(Widget& original, Widget* original_pointer) {\n"
+        "    Widget* pointer = original_pointer;\n"
+        "    Widget& reference = original;\n"
+        "    Widget copy = original;\n"
+        "    Widget (parenthesized_copy) = original;\n"
+        "    Widget direct(original);\n"
+        "    auto* allocated = new Widget(original);\n"
+        "}\n";
+    for (CBMLanguage language : {CBM_LANG_CPP, CBM_LANG_CUDA}) {
+        CBMFileResult *r = extract(source, language, "t", "bindings.cpp");
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(r->has_error);
+        std::set<int> construction_lines;
+        for (int i = 0; i < r->calls.count; i++) {
+            const CBMCall &call = r->calls.items[i];
+            if (!call.callee_name || strcmp(call.callee_name, "Widget") != 0) continue;
+            ASSERT_TRUE(call.start_line < 3 || call.start_line > 4);
+            construction_lines.insert(call.start_line);
+        }
+        // Copy initialization and new-expression candidates remain available.
+        for (int line : {5, 6, 8}) ASSERT_TRUE(construction_lines.count(line) > 0);
+        cbm_free_result(r);
+    }
     PASS();
 }
 
@@ -4025,6 +5186,318 @@ TEST(extract_c_ifdef_split_brace_after_include_remapped_issue949) {
     PASS();
 }
 
+TEST(extract_preprocessed_call_lines_stay_in_original_file) {
+    char tmpdir[512];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cbm_call_map_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+    char header_path[512];
+    snprintf(header_path, sizeof(header_path), "%s/padding.h", tmpdir);
+    FILE *header = cbm_fopen(header_path, "wb");
+    ASSERT_NOT_NULL(header);
+    ASSERT_GTE(fprintf(header, "int target(int x);\n"), 0);
+    for (int i = 0; i < 40; ++i) {
+        ASSERT_GTE(fprintf(header, "typedef int pad_%d;\n", i), 0);
+    }
+    ASSERT_GTE(fprintf(header, "static int header_caller(int x) { return target(x); }\n"), 0);
+    ASSERT_EQ(fclose(header), 0);
+    const char *includes[] = {tmpdir, NULL};
+    const char *source = "#define CALL_TARGET(x) target(x)\n"
+                         "#include \"padding.h\"\n"
+                         "int first(int x) {\n"
+                         "    x = target(x);\n"
+                         "    x += CALL_TARGET(x);\n"
+                         "    return x;\n"
+                         "}\n"
+                         "int second(int x) {\n"
+                         "    return target(x);\n"
+                         "}\n";
+    for (CBMLanguage language : {CBM_LANG_C, CBM_LANG_CPP, CBM_LANG_CUDA}) {
+        CBMFileResult *r = cbm_extract_file(source, (int)strlen(source), language,
+                                           "t", "calls.c", 0, NULL, includes);
+        ASSERT_NOT_NULL(r);
+        bool line4 = false, line5 = false, line9 = false;
+        for (int i = 0; i < r->calls.count; ++i) {
+            const CBMCall *call = &r->calls.items[i];
+            ASSERT_FALSE(call->enclosing_func_qn && strstr(call->enclosing_func_qn, "header_caller"));
+            if (!call->callee_name || strcmp(call->callee_name, "target")) {
+                continue;
+            }
+            ASSERT(call->start_line == 4 || call->start_line == 5 || call->start_line == 9);
+            if (call->start_line == 4) {
+                line4 = true;
+            }
+            if (call->start_line == 5) {
+                line5 = true;
+            }
+            if (call->start_line == 9) {
+                line9 = true;
+            }
+        }
+        ASSERT(line4 && line5 && line9);
+        cbm_free_result(r);
+    }
+    cbm_unlink(header_path);
+    cbm_rmdir(tmpdir);
+    PASS();
+}
+
+TEST(preprocess_authored_line_control_preserves_expansion_without_map) {
+    const char *source = "#define CALL_TARGET(x) target(x)\n"
+                         "#line 1 \"calls.c\"\n"
+                         "int target(int);\n"
+                         "int caller(int x) { return CALL_TARGET(x); }\n";
+    CBMPreprocessedSource *pp = cbm_preprocess_with_map(
+        source, (int)strlen(source), "calls.c", NULL, NULL, 0);
+    ASSERT_NOT_NULL(pp);
+    ASSERT_NOT_NULL(pp->source);
+    ASSERT_NOT_NULL(strstr(pp->source, "target"));
+    ASSERT_NULL(strstr(pp->source, "CALL_TARGET"));
+    for (int i = 1; i <= pp->expanded_line_count; ++i) {
+        ASSERT_EQ(pp->original_line_by_expanded_line[i], 0u);
+        ASSERT_EQ(pp->belongs_to_main_file[i], 0);
+    }
+    char *expanded = cbm_preprocess(source, (int)strlen(source), "calls.c", NULL, NULL, 0);
+    ASSERT_NOT_NULL(expanded);
+    ASSERT_STR_EQ(expanded, pp->source);
+    cbm_preprocess_free(expanded);
+    cbm_preprocessed_source_free(pp);
+    PASS();
+}
+
+TEST(preprocess_line_control_provenance_survives_token_lifecycle) {
+    std::vector<std::string> files;
+    simplecpp::TokenList original("#line 1 \"calls.c\"\nint x;\n", files, "calls.c");
+    ASSERT_TRUE(original.hasLineControl());
+    simplecpp::TokenList copied(original);
+    ASSERT_TRUE(copied.hasLineControl());
+    ASSERT_TRUE(original.hasLineControl());
+    simplecpp::TokenList moved(std::move(copied));
+    ASSERT_TRUE(moved.hasLineControl());
+    ASSERT_FALSE(copied.hasLineControl());
+    ASSERT_TRUE(copied.empty());
+    simplecpp::TokenList assigned(files);
+    ASSERT_FALSE(assigned.hasLineControl());
+    assigned = original;
+    ASSERT_TRUE(assigned.hasLineControl());
+    simplecpp::TokenList move_assigned(files);
+    move_assigned = std::move(assigned);
+    ASSERT_TRUE(move_assigned.hasLineControl());
+    ASSERT_FALSE(assigned.hasLineControl());
+    ASSERT_TRUE(assigned.empty());
+    move_assigned.clear();
+    ASSERT_FALSE(move_assigned.hasLineControl());
+    ASSERT_TRUE(move_assigned.empty());
+
+    simplecpp::TokenList receiver("int y;\n", files, "calls.c");
+    receiver.takeTokens(moved);
+    ASSERT_TRUE(receiver.hasLineControl());
+    ASSERT_FALSE(moved.hasLineControl());
+    ASSERT_TRUE(moved.empty());
+    simplecpp::TokenList plain("int z;\n", files, "calls.c");
+    receiver.takeTokens(plain);
+    ASSERT_TRUE(receiver.hasLineControl());
+    ASSERT_TRUE(plain.empty());
+    receiver = plain;
+    ASSERT_FALSE(receiver.hasLineControl());
+
+    // Token removal need not erase provenance: takeTokens must transfer the
+    // flag even if an earlier phase consumed every directive/source token.
+    while (original.front()) {
+        original.deleteToken(original.front());
+    }
+    ASSERT_TRUE(original.hasLineControl());
+    receiver.takeTokens(original);
+    ASSERT_TRUE(receiver.hasLineControl());
+    ASSERT_FALSE(original.hasLineControl());
+    receiver.clear();
+    ASSERT_FALSE(receiver.hasLineControl());
+    PASS();
+}
+
+TEST(preprocess_header_line_spoof_invalidates_map_and_keeps_raw_calls) {
+    char tmpdir[512];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cbm_header_line_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+    char header_path[512];
+    snprintf(header_path, sizeof(header_path), "%s/spoof.h", tmpdir);
+    FILE *header = cbm_fopen(header_path, "wb");
+    ASSERT_NOT_NULL(header);
+    ASSERT_GTE(fprintf(header, "#line 1 \"calls.c\"\n"
+                              "int target(int);\n"
+                              "static int header_caller(int x) { return target(x); }\n"), 0);
+    ASSERT_EQ(fclose(header), 0);
+    const char *includes[] = {tmpdir, NULL};
+    const char *source = "#define CALL_TARGET(x) target(x)\n"
+                         "#include \"spoof.h\"\n"
+                         "int target(int);\n"
+                         "int caller(int x) { return target(x) + CALL_TARGET(x); }\n";
+    for (int cpp_mode : {0, 1}) {
+        CBMPreprocessedSource *pp = cbm_preprocess_with_map(
+            source, (int)strlen(source), "calls.c", NULL, includes, cpp_mode);
+        ASSERT_NOT_NULL(pp);
+        ASSERT_NOT_NULL(pp->source);
+        ASSERT_NOT_NULL(strstr(pp->source, "header_caller"));
+        ASSERT_NOT_NULL(strstr(pp->source, "target"));
+        ASSERT_NULL(strstr(pp->source, "CALL_TARGET"));
+        for (int i = 1; i <= pp->expanded_line_count; ++i) {
+            ASSERT_EQ(pp->original_line_by_expanded_line[i], 0u);
+            ASSERT_EQ(pp->belongs_to_main_file[i], 0);
+        }
+        char *expanded = cbm_preprocess(
+            source, (int)strlen(source), "calls.c", NULL, includes, cpp_mode);
+        ASSERT_NOT_NULL(expanded);
+        ASSERT_STR_EQ(expanded, pp->source);
+        cbm_preprocess_free(expanded);
+        cbm_preprocessed_source_free(pp);
+    }
+    for (CBMLanguage language : {CBM_LANG_C, CBM_LANG_CPP, CBM_LANG_CUDA}) {
+        CBMFileResult *r = cbm_extract_file(source, (int)strlen(source), language,
+                                           "t", "calls.c", 0, NULL, includes);
+        ASSERT_NOT_NULL(r);
+        int calls = 0;
+        for (int i = 0; i < r->calls.count; ++i) {
+            const CBMCall *call = &r->calls.items[i];
+            ASSERT_FALSE(call->enclosing_func_qn && strstr(call->enclosing_func_qn, "header_caller"));
+            if (call->callee_name && strcmp(call->callee_name, "target") == 0) {
+                ASSERT_EQ(call->start_line, 4);
+                ++calls;
+            }
+        }
+        ASSERT_GTE(calls, 1);
+        cbm_free_result(r);
+    }
+    cbm_unlink(header_path);
+    cbm_rmdir(tmpdir);
+    PASS();
+}
+
+TEST(preprocess_line_control_tracks_parser_newline_variants) {
+    // simplecpp normalizes bare CR to newline and accepts whitespace after
+    // the backslash token before joining lines. These bypass a LF-only scan.
+    for (const char *directive : {"#\\\rline 1 \"calls.c\"\n",
+                                  "#\\\v\nline 1 \"calls.c\"\n"}) {
+        std::string source = "#define CALL_TARGET(x) target(x)\n";
+        source += directive;
+        source += "int target(int);\nint caller(int x) { return CALL_TARGET(x); }\n";
+        for (int cpp_mode : {0, 1}) {
+            CBMPreprocessedSource *pp = cbm_preprocess_with_map(
+                source.data(), (int)source.size(), "calls.c", NULL, NULL, cpp_mode);
+            ASSERT_NOT_NULL(pp);
+            ASSERT_NOT_NULL(pp->source);
+            ASSERT_NOT_NULL(strstr(pp->source, "caller"));
+            ASSERT_NOT_NULL(strstr(pp->source, "target"));
+            ASSERT_NULL(strstr(pp->source, "CALL_TARGET"));
+            for (int i = 1; i <= pp->expanded_line_count; ++i) {
+                ASSERT_EQ(pp->original_line_by_expanded_line[i], 0u);
+                ASSERT_EQ(pp->belongs_to_main_file[i], 0);
+            }
+            char *expanded = cbm_preprocess(
+                source.data(), (int)source.size(), "calls.c", NULL, NULL, cpp_mode);
+            ASSERT_NOT_NULL(expanded);
+            ASSERT_STR_EQ(expanded, pp->source);
+            cbm_preprocess_free(expanded);
+            cbm_preprocessed_source_free(pp);
+        }
+    }
+    PASS();
+}
+
+TEST(preprocess_line_control_text_is_not_directive_provenance) {
+    const char *source = "#define CALL_TARGET(x) target(x)\n"
+                         "const char *hint = \"#line 1 \\\"calls.c\\\"\";\n"
+                         "/* # 1 \"calls.c\" */\n"
+                         "int target(int);\n"
+                         "int caller(int x) { return CALL_TARGET(x); }\n";
+    for (int cpp_mode : {0, 1}) {
+        CBMPreprocessedSource *pp = cbm_preprocess_with_map(
+            source, (int)strlen(source), "calls.c", NULL, NULL, cpp_mode);
+        ASSERT_NOT_NULL(pp);
+        bool physical_caller = false;
+        for (int i = 1; i <= pp->expanded_line_count; ++i) {
+            if (pp->belongs_to_main_file[i] && pp->original_line_by_expanded_line[i] == 5u) {
+                physical_caller = true;
+            }
+        }
+        ASSERT_TRUE(physical_caller);
+        cbm_preprocessed_source_free(pp);
+    }
+    for (CBMLanguage language : {CBM_LANG_C, CBM_LANG_CPP, CBM_LANG_CUDA}) {
+        CBMFileResult *r = cbm_extract_file(source, (int)strlen(source), language,
+                                           "t", "calls.c", 0, NULL, NULL);
+        ASSERT_NOT_NULL(r);
+        int calls = 0;
+        for (int i = 0; i < r->calls.count; ++i) {
+            const CBMCall *call = &r->calls.items[i];
+            if (call->callee_name && strcmp(call->callee_name, "target") == 0) {
+                ASSERT_EQ(call->start_line, 5);
+                ++calls;
+            }
+        }
+        ASSERT_GTE(calls, 1);
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
+TEST(extract_preprocessed_call_rejects_authored_logical_lines) {
+    const char *directives[] = {
+        "#line 1 \"calls.c\"\n", "#line 1\n", "# line 1 \"calls.c\"\n",
+        "#/**/line 1 \"calls.c\"\n", "# 1 \"calls.c\"\n",
+        "#/**/1 \"calls.c\"\n", "#l\\\nine 1 \"calls.c\"\n",
+        "#\\\n line 1 \"calls.c\"\n",
+        "/* leading comment */ #line 1 \"calls.c\"\n"
+    };
+    for (const char *directive : directives) {
+        std::string source = "#define ENABLE 1\n";
+        source += directive;
+        source += "int target(int);\n";
+        int physical_line = 1;
+        for (char c : source) {
+            if (c == '\n') {
+                ++physical_line;
+            }
+        }
+        source += "int caller(int x) { return target(x); }\n";
+        for (CBMLanguage language : {CBM_LANG_C, CBM_LANG_CPP, CBM_LANG_CUDA}) {
+            CBMFileResult *r = cbm_extract_file(source.data(), (int)source.size(), language,
+                                               "t", "calls.c", 0, NULL, NULL);
+            ASSERT_NOT_NULL(r);
+            int calls = 0;
+            for (int i = 0; i < r->calls.count; ++i) {
+                const CBMCall *call = &r->calls.items[i];
+                if (call->callee_name && strcmp(call->callee_name, "target") == 0) {
+                    ASSERT_EQ(call->start_line, physical_line);
+                    ++calls;
+                }
+            }
+            ASSERT_GTE(calls, 1);
+            cbm_free_result(r);
+        }
+    }
+    PASS();
+}
+
+TEST(extract_preprocessed_call_rejects_out_of_range_line_directive) {
+    const char *source = "#define PASS(x) x\n"
+                         "#line 4000 \"calls.c\"\n"
+                         "int target(int x);\n"
+                         "int caller(int x) { return target(x); }\n";
+    CBMFileResult *r = cbm_extract_file(source, (int)strlen(source), CBM_LANG_C,
+                                       "t", "calls.c", 0, NULL, NULL);
+    ASSERT_NOT_NULL(r);
+    int target_calls = 0;
+    for (int i = 0; i < r->calls.count; ++i) {
+        const CBMCall *call = &r->calls.items[i];
+        if (call->callee_name && strcmp(call->callee_name, "target") == 0) {
+            ASSERT_EQ(call->start_line, 4);
+            ++target_calls;
+        }
+    }
+    ASSERT_GTE(target_calls, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* #961 inverse guard: a clean C file must not gain duplicate or phantom
  * defs from the recovery path (it only engages on raw-parse ERROR regions). */
 TEST(extract_c_clean_file_no_recovery_duplicates_issue961) {
@@ -4055,6 +5528,14 @@ SUITE(extraction) {
     cbm_init();
 
     /* R box-module imports + member calls */
+    RUN_TEST(registry_summary_owns_definition_and_infrastructure_strings);
+    RUN_TEST(result_store_releases_leases_and_preserves_versions);
+    RUN_TEST(result_store_limits_preserve_published_records);
+    RUN_TEST(result_store_rejects_truncated_storage_and_failed_publication);
+    RUN_TEST(result_store_serializes_concurrent_publishers);
+    RUN_TEST(result_snapshot_survives_original_arena_release);
+    RUN_TEST(result_snapshot_preserves_sparse_metadata_and_binary_source);
+    RUN_TEST(result_snapshot_rejects_truncation_corruption_and_limits);
     RUN_TEST(extract_r_box_use_imports_issue218);
     RUN_TEST(extract_r_dollar_call_issue219);
     RUN_TEST(extract_ts_factory_object_methods_issue341);
@@ -4062,10 +5543,24 @@ SUITE(extraction) {
     RUN_TEST(extract_cpp_macros_issue375);
     RUN_TEST(extract_cpp_functionlike_macro_type_arg_no_false_parse_partial_issue1071);
     RUN_TEST(extract_cpp_real_in_body_error_still_flagged_issue1071);
+    RUN_TEST(extract_cpp_recovery_preserves_inline_call_identities);
+    RUN_TEST(extract_cpp_recovery_preserves_real_overloads);
+    RUN_TEST(extract_cpp_recovery_deduplicates_overloads_by_source_identity);
+    RUN_TEST(extract_cpp_delete_operands_require_typed_destructor_resolution);
+    RUN_TEST(extract_cpp_field_reads_are_not_call_candidates);
+    RUN_TEST(extract_cpp_pointer_and_reference_bindings_do_not_construct_objects);
     RUN_TEST(extract_c_ifdef_split_brace_fn_recovered_issue961);
     RUN_TEST(extract_cpp_preproc_signature_gap_issue946);
     RUN_TEST(extract_cpp_preproc_macro_generated_callable_skipped_issue949);
     RUN_TEST(extract_c_ifdef_split_brace_after_include_remapped_issue949);
+    RUN_TEST(extract_preprocessed_call_lines_stay_in_original_file);
+    RUN_TEST(preprocess_authored_line_control_preserves_expansion_without_map);
+    RUN_TEST(preprocess_line_control_provenance_survives_token_lifecycle);
+    RUN_TEST(preprocess_header_line_spoof_invalidates_map_and_keeps_raw_calls);
+    RUN_TEST(preprocess_line_control_tracks_parser_newline_variants);
+    RUN_TEST(preprocess_line_control_text_is_not_directive_provenance);
+    RUN_TEST(extract_preprocessed_call_rejects_authored_logical_lines);
+    RUN_TEST(extract_preprocessed_call_rejects_out_of_range_line_directive);
     RUN_TEST(extract_c_clean_file_no_recovery_duplicates_issue961);
     RUN_TEST(extract_gdscript_issue186);
     RUN_TEST(extract_powershell_issue35);
@@ -4319,7 +5814,30 @@ SUITE(extraction) {
     RUN_TEST(complexity_recursion_in_loop_unguarded);
     RUN_TEST(complexity_guarded_recursion);
     RUN_TEST(complexity_access_depth_and_params);
+    RUN_TEST(extract_c_prototypes_are_declarations);
+    RUN_TEST(extract_declaration_keys_match_definitions);
+    RUN_TEST(extract_declaration_keys_preserve_scope_and_overloads);
+    RUN_TEST(extract_declaration_keys_ignore_reference_parameter_names);
+    RUN_TEST(extract_declaration_keys_match_class_template_members);
+    RUN_TEST(extract_declaration_keys_class_template_identity_boundaries);
+    RUN_TEST(extract_declaration_keys_unsupported_templates_remain_unkeyed);
+    RUN_TEST(extract_declaration_keys_match_member_qualifiers);
+    RUN_TEST(extract_declaration_identity_and_static_scope);
+    RUN_TEST(extract_declaration_keys_preserve_token_boundaries);
     RUN_TEST(extract_cpp_statement_macro_does_not_hide_later_classes);
+    RUN_TEST(cpp_binary_operand_is_not_a_function_call);
+    RUN_TEST(cpp_operator_deferral_preserves_pending_sites_and_typed_results);
+    RUN_TEST(usage_dedup_preserves_scope_pairs_and_default_inventory);
+    RUN_TEST(cpp_deferred_operator_metadata_distinguishes_expression_kinds);
+    RUN_TEST(cpp_operator_recursion_requires_resolved_self_call);
+    RUN_TEST(cpp_operator_deferral_keeps_unresolved_cross_file_work_pending);
+    RUN_TEST(call_arguments_preserve_values_and_capture_limit);
+    RUN_TEST(call_arguments_preserve_keywords_after_spreads);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(call_arguments_survive_scratch_reclamation);
+#endif
+    RUN_TEST(call_array_growth_preserves_records_without_old_buffers);
+    RUN_TEST(call_array_growth_across_scratch_arenas);
 
     cbm_shutdown();
 }

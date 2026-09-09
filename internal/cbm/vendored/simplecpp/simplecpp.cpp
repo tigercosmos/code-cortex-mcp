@@ -518,6 +518,7 @@ simplecpp::TokenList &simplecpp::TokenList::operator=(const TokenList &other)
         for (const Token *tok = other.cfront(); tok; tok = tok->next)
             push_back(new Token(*tok));
         sizeOfType = other.sizeOfType;
+        mHasLineControl = other.mHasLineControl;
     }
     return *this;
 }
@@ -532,6 +533,8 @@ simplecpp::TokenList &simplecpp::TokenList::operator=(TokenList &&other)
         other.backToken = nullptr;
         files = other.files;
         sizeOfType = std::move(other.sizeOfType);
+        mHasLineControl = other.mHasLineControl;
+        other.mHasLineControl = false;
     }
     return *this;
 }
@@ -545,6 +548,7 @@ void simplecpp::TokenList::clear()
         frontToken = next;
     }
     sizeOfType.clear();
+    mHasLineControl = false;
 }
 
 void simplecpp::TokenList::push_back(Token *tok)
@@ -637,6 +641,7 @@ static bool isStringLiteralPrefix(const std::string &str)
 
 void simplecpp::TokenList::lineDirective(unsigned int fileIndex, unsigned int line, Location &location)
 {
+    mHasLineControl = true;
     if (fileIndex != location.fileIndex || line >= location.line) {
         location.fileIndex = fileIndex;
         location.line = line;
@@ -710,6 +715,7 @@ void simplecpp::TokenList::readfile(Stream &stream, const std::string &filename,
                         const Token *strtok = cback();
                         while (strtok->comment)
                             strtok = strtok->previous;
+                        mHasLineControl = true;
                         loc.push(location);
                         location.fileIndex = fileIndex(strtok->str().substr(1U, strtok->str().size() - 2U));
                         location.line = 1U;
@@ -746,6 +752,7 @@ void simplecpp::TokenList::readfile(Stream &stream, const std::string &filename,
                 // #endfile
                 else if (llNextToken->str() == "endfile" && !loc.empty())
                 {
+                    mHasLineControl = true;
                     location = loc.top();
                     loc.pop();
                 }

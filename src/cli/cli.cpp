@@ -476,28 +476,35 @@ int cbm_replace_binary(const char *path, const unsigned char *data, int len, int
 static const char skill_content[] =
     "---\n"
     "name: code-cortex\n"
-    "description: Use the codebase knowledge graph for structural questions a text search cannot answer. Triggers on: who calls this function, find callers of, what does X call, trace the call chain, impact of changing X, which files must I edit, blast radius, which tests cover X, cross-language callers, pybind or FFI binding users, direct subclasses, class hierarchy, most-called functions, architecture overview, dead code, high fan-in or fan-out, Cypher query examples, how to use inspect_symbol or trace_path.\n"
+    "description: >-\n"
+    "  Use Code Cortex when one focused graph query can resolve a missing code\n"
+    "  relationship at lower total cost than repeated source searches. Default to\n"
+    "  shell search for simple lookups and routine edits. Also use for explicit\n"
+    "  graph requests and graph-tool help.\n"
     "---\n"
     "\n"
     "# Code Cortex — when the graph beats grep\n"
     "\n"
-    "The graph does not replace text search. Plain grep already answers \"where is\n"
-    "`X` defined\" and \"which files mention `Y`\" well. Reach for the graph when the\n"
-    "answer needs relationships, and let the reply carry the evidence (file:line,\n"
-    "confidence, coverage) so you rarely need to re-check with grep.\n"
+    "Default to shell search and direct source reads.\n"
+    "Use one bounded graph query when it can resolve a required relationship more efficiently than repeated source searches.\n"
+    "Include discovery, indexing, retrieval, and verification costs.\n"
+    "Task labels and repository size alone do not justify graph use.\n"
+    "An explicit graph request remains a reason to use the relevant tool.\n"
+    "Use sufficient current-source excerpts directly; inspect files only where evidence leaves a gap.\n"
+    "Routine edits do not require inspect_symbol, detect_changes, or automatic graph context.\n"
     "\n"
-    "## Use the graph for\n"
+    "## Choose a query after applying the decision above\n"
     "\n"
     "| Question | Call |\n"
     "|----------|------|\n"
     "| Who calls `X`? With file:line, tests separated, cross-language callers | `inspect_symbol(symbol=\"X\")` |\n"
-    "| Which files must I edit if I change `X`'s signature? | `inspect_symbol(symbol=\"X\")` → `caller_files` (complete, never paged) |\n"
+    "| Which indirect callers remain unresolved before an edit? | `inspect_symbol(symbol=\"X\")` → `caller_files` (graph matches, never paged) |\n"
     "| Which tests exercise `X`? | `inspect_symbol(symbol=\"X\")` → `related_tests` |\n"
     "| Multi-hop call chain to/from `X` | `trace_path(function_name=\"X\", direction=\"inbound\"\\|\"outbound\"\\|\"both\", depth=3)` |\n"
     "| Blast radius of my uncommitted edits | `detect_changes()` |\n"
     "| Direct subclasses / implementations of a class | `inspect_symbol(symbol=\"Base\")` → `subclasses` |\n"
     "| Most-called functions, module sizes, languages | `get_architecture()` |\n"
-    "| Dead code | `search_graph(max_degree=0, exclude_entry_points=true, label=\"Function\")` |\n"
+    "| Candidates for unused-code source review | `search_graph(max_degree=0, exclude_entry_points=true, label=\"Function\")` |\n"
     "| Anything else structural | `query_graph(query=\"MATCH ... RETURN ...\")` |\n"
     "\n"
     "## Leave to grep / Read\n"
@@ -513,7 +520,8 @@ static const char skill_content[] =
     "  line to verify. `confidence` + `strategy` say how the edge was resolved;\n"
     "  `heuristic: true` marks a pattern-only match.\n"
     "- `callers_total`, `related_tests_total`, `subclasses_total` are exact even\n"
-    "  when the list is paged; `caller_files` is always complete.\n"
+    "  when the list is paged. These totals and `caller_files` describe graph matches, not complete source coverage.\n"
+    "  A missing edge does not prove that code is unused or unaffected.\n"
     "- `index.file_modified_after_index` / `freshness_note`: the file changed since\n"
     "  indexing — re-run `index_repository` if it matters.\n"
     "- `truncated` + `continuation`: the reply hit its byte budget; page with\n"
@@ -546,28 +554,32 @@ static const char skill_content[] =
     "\n"
     "1. `query_graph` caps at 200 rows; use `inspect_symbol` totals or\n"
     "   `search_graph` degree filters for counts.\n"
-    "2. Header-only prototypes and macros are not graph nodes: a signature change\n"
-    "   still needs the declaring header — grep for it.\n"
-    "3. C++ class extraction can miss classes in some headers (`coverage_note`\n"
-    "   flags the file); treat class sets as lower bounds and cross-check.\n"
+    "2. Graph coverage can omit declarations, macros, or unresolved receiver calls. A signature change\n"
+    "   needs current declarations and relevant call expressions; use supplied source when sufficient.\n"
+    "3. Coverage can be incomplete even without a coverage_note flag.\n"
+    "   Treat class sets as graph matches; confirm required relationships from current source.\n"
     "4. `trace_path` follows CALLS only by default; pass `edge_types` for others.\n";
 
 static const char codex_instructions_content[] =
-    "# Codebase Knowledge Graph\n"
+    "# Codebase Knowledge Graph (code-cortex-mcp)\n"
     "\n"
-    "This project is indexed by code-cortex-mcp. In Codex its tools appear as\n"
-    "`mcp__code_cortex_mcp__<tool>` (for example `mcp__code_cortex_mcp__inspect_symbol`).\n"
+    "Default to shell search and direct source reads.\n"
+    "Use the graph when one bounded query can resolve a required relationship more efficiently than repeated source searches.\n"
+    "Include discovery, indexing, retrieval, and verification costs. Repository size and task labels alone do not justify graph use.\n"
+    "An explicit graph request remains a reason to use the relevant tool.\n"
     "\n"
-    "Use the graph when the question is about relationships:\n"
-    "- `inspect_symbol` — direct callers with call-site lines, related tests, callers from\n"
-    "  other languages, subclasses; `caller_files` is the complete edit list for a signature change\n"
-    "- `trace_path` — multi-hop call chains (direction inbound/outbound/both, depth)\n"
-    "- `detect_changes` — blast radius of uncommitted edits\n"
-    "- `get_architecture` — modules, languages, most-called functions\n"
+    "Consider `trace_path` for a chain between known endpoints.\n"
+    "Consider `inspect_symbol` for unresolved callers, bindings, or indirect tests.\n"
+    "Use structural queries when they address a specific missing relationship.\n"
+    "Routine edits do not require inspect_symbol, detect_changes, or automatic graph context.\n"
     "\n"
-    "Plain shell search is fine for text, config values and exact identifiers.\n"
-    "The `project` argument is optional inside this repository. Replies include\n"
-    "file:line evidence and confidence, so verify from the reply rather than re-searching.\n";
+    "Use supplied current-source excerpts when sufficient; read files only for missing, stale, ambiguous, or incomplete evidence.\n"
+    "`caller_files` and graph totals describe indexed relationships, not complete source coverage.\n"
+    "Coverage can be incomplete even without a coverage_note flag.\n"
+    "An absent edge does not prove that code is unused or unaffected.\n"
+    "Bound the query and continue with shell search if it adds no useful evidence.\n"
+    "\n"
+    "In Codex, graph tool names start with `mcp__code_cortex_mcp__`.\n";
 
 /* Old skill names — cleaned up during install to remove stale directories. */
 static const char *old_skill_names[] = {
@@ -1284,26 +1296,21 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
 static const char agent_instructions_content[] =
     "# Codebase Knowledge Graph (code-cortex-mcp)\n"
     "\n"
-    "This repository is indexed by code-cortex-mcp. Use the graph for questions a\n"
-    "text search cannot answer; keep grep for text and exact identifiers.\n"
+    "Default to shell search and direct source reads.\n"
+    "Use the graph when one bounded query can resolve a required relationship more efficiently than repeated source searches.\n"
+    "Include discovery, indexing, retrieval, and verification costs. Repository size and task labels alone do not justify graph use.\n"
+    "An explicit graph request remains a reason to use the relevant tool.\n"
     "\n"
-    "## Use the graph for\n"
-    "- Callers of a symbol with call-site lines, related tests, callers from other\n"
-    "  languages: `inspect_symbol(symbol=\"X\")` (`caller_files` lists every file to edit)\n"
-    "- Multi-hop call chains: `trace_path(function_name=\"X\", direction=\"inbound\", depth=3)`\n"
-    "- Blast radius of uncommitted edits: `detect_changes()`\n"
-    "- Direct subclasses, most-called functions, module map: `inspect_symbol`, `get_architecture()`\n"
+    "Consider `trace_path` for a chain between known endpoints.\n"
+    "Consider `inspect_symbol` for unresolved callers, bindings, or indirect tests.\n"
+    "Use structural queries when they address a specific missing relationship.\n"
+    "Routine edits do not require inspect_symbol, detect_changes, or automatic graph context.\n"
     "\n"
-    "## Keep using grep / file reads for\n"
-    "- String literals, config values, error messages, non-code files\n"
-    "- Exact identifier lookups you can already spell\n"
-    "- Files a reply flags with `coverage_note` (partially parsed — graph is a lower bound)\n"
-    "\n"
-    "## Notes\n"
-    "- `project` is optional inside this repository (inferred from the working directory).\n"
-    "- Names may be bare (`parse`), scoped (`Packet::addLayer`) or fully qualified.\n"
-    "- Replies carry file:line evidence, resolver confidence and freshness flags; verify\n"
-    "  from those instead of re-searching.\n";
+    "Use supplied current-source excerpts when sufficient; read files only for missing, stale, ambiguous, or incomplete evidence.\n"
+    "`caller_files` and graph totals describe indexed relationships, not complete source coverage.\n"
+    "Coverage can be incomplete even without a coverage_note flag.\n"
+    "An absent edge does not prove that code is unused or unaffected.\n"
+    "Bound the query and continue with shell search if it adds no useful evidence.\n";
 
 const char *cbm_get_agent_instructions(void) {
     return agent_instructions_content;
@@ -2879,8 +2886,7 @@ int cbm_list_indexes(const char *home_dir) {
     return count;
 }
 
-int cbm_remove_indexes(const char *home_dir) {
-    const char *cache_dir = get_cache_dir(home_dir);
+static int remove_indexes_in_dir(const char *cache_dir) {
     if (!cache_dir) {
         return 0;
     }
@@ -2897,17 +2903,33 @@ int cbm_remove_indexes(const char *home_dir) {
         if (len > DB_EXT_LEN && strcmp(ent->name + len - DB_EXT_LEN, ".db") == 0) {
             char path[CLI_BUF_1K];
             snprintf(path, sizeof(path), "%s/%s", cache_dir, ent->name);
-            /* Also remove .db.tmp if present */
+            cbm_db_lease_t *lease = NULL;
+            int claim_rc = cbm_db_lease_try_acquire(path, &lease);
+            if (claim_rc != 0) {
+                fprintf(stderr, "Keeping index %s: %s.\n", path,
+                        claim_rc == CBM_INDEX_BUSY ? "database busy" : "cannot acquire lease");
+                continue;
+            }
+            // Lock the referent, but remove only the requested cache entry and
+            // its sidecars; a symlink must not broaden deletion outside cache.
+            const char *target = path;
+            /* Also remove the old temporary generation, under the same lease. */
             char tmp_path[CLI_FIELD_1040];
-            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
-            cbm_unlink(tmp_path);
-            if (cbm_unlink(path) == 0) {
+            snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target);
+            if (cbm_unlink(target) == 0) {
+                cbm_unlink(tmp_path);
+                cbm_remove_db_sidecars(target);
                 count++;
             }
+            cbm_db_lease_release(lease);
         }
     }
     cbm_closedir(d);
     return count;
+}
+
+int cbm_remove_indexes(const char *home_dir) {
+    return remove_indexes_in_dir(get_cache_dir(home_dir));
 }
 
 /* ── Config store (persistent key-value in _config.db) ─────────── */
@@ -4023,11 +4045,15 @@ int cbm_migrate_legacy_install(const char *home, bool dry_run) {
     snprintf(old_cache, sizeof(old_cache), "%s/.cache/codebase-memory-mcp", home);
     if (stat(old_cache, &st) == 0) {
         if (dry_run) {
-            printf("Would remove legacy cache dir: %s\n", old_cache);
+            printf("Would remove idle legacy indexes (retain metadata and leases): %s\n", old_cache);
             migrated++;
-        } else if (rmdir_recursive(old_cache) == 0) {
-            printf("Removed legacy cache dir: %s\n", old_cache);
-            migrated++;
+        } else {
+            int removed = remove_indexes_in_dir(old_cache);
+            printf("Removed %d legacy indexes from %s; retained cache directory, "
+                   "metadata, and lease files.\n", removed, old_cache);
+            if (removed > 0) {
+                migrated++;
+            }
         }
     }
 
@@ -5043,13 +5069,41 @@ static char *doctor_read_file(const char *path) {
     return buf;
 }
 
-static int doctor_count_substr(const char *hay, const char *needle) {
-    int n = 0;
-    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle)) {
-        n++;
+/* Count protocol entries, not nested input-schema fields or description text. */
+static int doctor_catalog_stats(const char *json, bool *has_inspect, bool *has_cursor) {
+    *has_inspect = false;
+    *has_cursor = false;
+    yyjson_doc *doc = json ? yyjson_read(json, strlen(json), 0) : nullptr;
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *tools = yyjson_obj_get(root, "tools");
+    yyjson_val *cursor = yyjson_obj_get(root, "nextCursor");
+    *has_cursor = cursor && !yyjson_is_null(cursor);
+    int count = -1;
+    if (yyjson_is_arr(tools)) {
+        count = 0;
+        size_t index, maximum;
+        yyjson_val *entry;
+        yyjson_arr_foreach(tools, index, maximum, entry) {
+            const char *name = yyjson_get_str(yyjson_obj_get(entry, "name"));
+            if (!name || !name[0]) {
+                count = -1;
+                break;
+            }
+            count++;
+            if (strcmp(name, "inspect_symbol") == 0) {
+                *has_inspect = true;
+            }
+        }
     }
-    return n;
+    yyjson_doc_free(doc);
+    return count;
 }
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+int cbm_cli_doctor_catalog_for_testing(const char *json, bool *has_inspect, bool *has_cursor) {
+    return doctor_catalog_stats(json, has_inspect, has_cursor);
+}
+#endif
 
 /* Value of "<key>": in an escaped-JSON tool envelope (index_status text). */
 static int doctor_json_int(const char *res, const char *key) {
@@ -5069,15 +5123,16 @@ int cbm_cmd_doctor(const char *version) {
     /* Tool catalog: one page must hold every tool (Codex never follows the
      * cursor). */
     char *tools = cbm_mcp_tools_list();
-    int tool_count = tools ? doctor_count_substr(tools, "\"name\":") : 0;
-    bool has_inspect = tools && strstr(tools, "\"inspect_symbol\"") != NULL;
+    bool has_inspect = false;
+    bool has_cursor = false;
+    int tool_count = doctor_catalog_stats(tools, &has_inspect, &has_cursor);
     free(tools);
-    if (tool_count >= 15 && has_inspect) {
+    if (tool_count >= 15 && has_inspect && !has_cursor) {
         printf("  OK   tools/list: %d tools on one page (inspect_symbol present)\n", tool_count);
     } else {
-        printf("  FAIL tools/list: %d tools, inspect_symbol %s — this binary predates the "
-               "single-page catalog fix\n",
-               tool_count, has_inspect ? "present" : "missing");
+        printf("  FAIL tools/list: %d tools, inspect_symbol %s, nextCursor %s — "
+               "the complete catalog must fit on one page\n",
+               tool_count, has_inspect ? "present" : "missing", has_cursor ? "present" : "absent");
         failures++;
     }
 

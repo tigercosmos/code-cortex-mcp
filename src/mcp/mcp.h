@@ -60,6 +60,8 @@ char *cbm_mcp_text_result(const char *text, bool is_error);
 
 /* Validate a complete MCP tool result and optionally return its isError flag. */
 bool cbm_mcp_tool_result_valid(const char *json, bool *is_error);
+/* Typed nonerror contention response; never a successful completed index. */
+bool cbm_mcp_result_is_index_busy(const char *json);
 
 /* Return true when notifications/cancelled params target the active request. */
 bool cbm_mcp_cancel_request_matches(const char *params_json, int64_t active_id,

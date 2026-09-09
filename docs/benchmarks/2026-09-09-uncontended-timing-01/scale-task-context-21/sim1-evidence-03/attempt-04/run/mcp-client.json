@@ -1,0 +1,12 @@
+{
+  "binary": "/home/anchi/code-cortex-mcp-goal-20260909/repo/build/c/code-cortex-mcp",
+  "binary_sha256": "bbfeb274225eaabeea8fac20ccb183647cae33b46f28bf9bd01dfa25307f2e60",
+  "initialized_before_timed_schedule": true,
+  "pid": 2742336,
+  "tools_list_sha256": "3a3899d3946223b18849f560a89735372b4c268409e638347d1ced42c822dbc4",
+  "trace_path_required_fields": [
+    "from_function",
+    "max_work"
+  ],
+  "transport": "stdio_jsonrpc"
+}

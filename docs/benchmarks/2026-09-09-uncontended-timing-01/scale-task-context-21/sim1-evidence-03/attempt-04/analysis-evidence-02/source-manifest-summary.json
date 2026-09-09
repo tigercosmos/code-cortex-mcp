@@ -1,0 +1,30 @@
+{
+  "analyzer_primary_passed": true,
+  "protocol_sha256": "77466510867bd0974400eac50326e6d15ab472715fc94d2db88cf43f9027d027",
+  "setup_sha256": "a02e9ce371c718f1501208dd5094c519cc9e69c93d22e38b27ff96a6dd4e4b7d",
+  "source_audit_unchanged": true,
+  "source_manifest_projects": {
+    "100m": {
+      "actual_files": 100000,
+      "checked_files": 100000,
+      "expected_files": 100000,
+      "failures": 0,
+      "unchanged": true
+    },
+    "10k": {
+      "actual_files": 10,
+      "checked_files": 10,
+      "expected_files": 10,
+      "failures": 0,
+      "unchanged": true
+    },
+    "1m": {
+      "actual_files": 1000,
+      "checked_files": 1000,
+      "expected_files": 1000,
+      "failures": 0,
+      "unchanged": true
+    }
+  },
+  "source_oracle_sha256": "390df6795a46eafe35cdab0205a51902e8c9927520a85eb0d963bb9f5266311c"
+}

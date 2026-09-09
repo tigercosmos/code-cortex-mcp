@@ -598,6 +598,8 @@ int cbm_exec_no_shell(const char *const *argv) {
 /* ── POSIX implementation ─────────────────────────────────────── */
 
 #include <dirent.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -777,4 +779,264 @@ void cbm_remove_db_sidecars(const char *db_path) {
     if (n > 0 && (size_t)n < sizeof(side)) {
         (void)cbm_unlink(side);
     }
+}
+
+/* The lock file names the DATABASE, not its current SQLite generation. Never
+ * unlink it: a second inode would admit another writer while the first is held.
+ * OS handles release on process death; no PID files or stale-lock timeout. */
+struct cbm_db_lease {
+    char *target;
+#ifdef _WIN32
+    HANDLE handle;
+#else
+    int fd;
+#endif
+};
+
+enum { DB_LEASE_PATH_MAX = 4096 };
+
+/* Resolve existing symlinks and parent aliases before choosing the lock name.
+ * Multiple hard links to a SQLite file are unsupported: SQLite sidecars already
+ * require one filename. Fail closed rather than give them independent leases. */
+#ifdef _WIN32
+/* Ordinary Win32 paths trim terminal dots/spaces. A distinct sibling lock for
+ * such a spelling would protect the wrong database. Check input and the final
+ * handle path before stripping its extended prefix; resolved parents matter. */
+template <typename Char>
+static bool db_lease_windows_components_safe(const Char *path, bool allow_navigation) {
+    if (!path || !*path) {
+        return false;
+    }
+    const Char *part = path;
+    for (const Char *p = path;; ++p) {
+        if (*p && *p != '/' && *p != '\\') {
+            continue;
+        }
+        size_t count = (size_t)(p - part);
+        if (count) {
+            bool navigation = allow_navigation && part[0] == '.' &&
+                (count == 1 || (count == 2 && part[1] == '.'));
+            if (!navigation && (part[count - 1] == '.' || part[count - 1] == ' ')) {
+                return false;
+            }
+        }
+        if (!*p) {
+            return true;
+        }
+        part = p + 1;
+    }
+}
+#endif
+
+static char *db_lease_real_path(const char *path, bool *missing) {
+    *missing = false;
+#ifdef _WIN32
+    wchar_t *wide = cbm_utf8_to_wide(path);
+    if (!wide) {
+        return NULL;
+    }
+    HANDLE h = CreateFileW(wide, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    DWORD open_error = h == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    DWORD attributes = h == INVALID_HANDLE_VALUE ? GetFileAttributesW(wide) : 0;
+    free(wide);
+    if (h == INVALID_HANDLE_VALUE) {
+        *missing = (open_error == ERROR_FILE_NOT_FOUND || open_error == ERROR_PATH_NOT_FOUND) &&
+                   (attributes == INVALID_FILE_ATTRIBUTES ||
+                    !(attributes & FILE_ATTRIBUTE_REPARSE_POINT));
+        return NULL;
+    }
+    BY_HANDLE_FILE_INFORMATION info;
+    wchar_t final_path[DB_LEASE_PATH_MAX];
+    DWORD n = GetFinalPathNameByHandleW(h, final_path, DB_LEASE_PATH_MAX, FILE_NAME_NORMALIZED);
+    bool valid = GetFileInformationByHandle(h, &info) &&
+                 ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || info.nNumberOfLinks == 1);
+    CloseHandle(h);
+    if (!valid || n == 0 || n >= DB_LEASE_PATH_MAX) {
+        return NULL;
+    }
+    if (!db_lease_windows_components_safe(final_path, false)) {
+        return NULL;
+    }
+    // Return ordinary normalized UTF-8 paths for the pipeline's existing path
+    // helpers. They append '/' components, which extended-length paths forbid.
+    const wchar_t *plain = final_path;
+    if (wcsncmp(plain, L"\\\\?\\UNC\\", 8) == 0) {
+        final_path[6] = L'\\';
+        plain = final_path + 6;
+    } else if (wcsncmp(plain, L"\\\\?\\", 4) == 0) {
+        plain += 4;
+    }
+    char *utf8 = cbm_wide_to_utf8(plain);
+    if (utf8) {
+        for (char *p = utf8; *p; ++p) {
+            if (*p == '\\') {
+                *p = '/';
+            }
+        }
+    }
+    return utf8;
+#else
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        *missing = errno == ENOENT;
+        return NULL;
+    }
+    char *result = realpath(path, NULL);
+    if (!result) {
+        return NULL; // Includes dangling final symlinks: do not choose an alias lock.
+    }
+    if (stat(result, &st) != 0 || (S_ISREG(st.st_mode) && st.st_nlink != 1)) {
+        free(result);
+        return NULL;
+    }
+    return result;
+#endif
+}
+
+static char *db_lease_canonical_target(const char *path) {
+    if (!path || !path[0] || strlen(path) >= DB_LEASE_PATH_MAX - 32) {
+        return NULL;
+    }
+#ifdef _WIN32
+    if (!db_lease_windows_components_safe(path, true)) {
+        return NULL;
+    }
+#endif
+    bool missing = false;
+    char *canonical = db_lease_real_path(path, &missing);
+    if (canonical || !missing) {
+        return canonical;
+    }
+    char parent[DB_LEASE_PATH_MAX];
+    snprintf(parent, sizeof(parent), "%s", path);
+    char *slash = strrchr(parent, '/');
+#ifdef _WIN32
+    char *backslash = strrchr(parent, '\\');
+    if (backslash && (!slash || backslash > slash)) {
+        slash = backslash;
+    }
+    // A drive-relative filename (C:foo) is not a stable cache identity.
+    if (!slash && strchr(parent, ':')) {
+        return NULL;
+    }
+#endif
+    const char *basename = slash ? slash + 1 : path;
+    if (!basename[0] || strcmp(basename, ".") == 0 || strcmp(basename, "..") == 0) {
+        return NULL;
+    }
+    char leaf[DB_LEASE_PATH_MAX];
+    snprintf(leaf, sizeof(leaf), "%s", basename);
+    if (slash) {
+        // Preserve the root separator, including a Windows drive root.
+#ifdef _WIN32
+        if (slash == parent + 2 && parent[1] == ':') {
+            slash[1] = '\0';
+        } else
+#endif
+        if (slash == parent) {
+            slash[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+    } else {
+        snprintf(parent, sizeof(parent), ".");
+    }
+    if (!cbm_mkdir_p(parent, 0755)) {
+        return NULL;
+    }
+    char *real_parent = db_lease_real_path(parent, &missing);
+    if (!real_parent) {
+        return NULL;
+    }
+    char target[DB_LEASE_PATH_MAX];
+    int n = snprintf(target, sizeof(target), "%s/%s", real_parent, leaf);
+    free(real_parent);
+    if (n <= 0 || (size_t)n >= sizeof(target) - 32) {
+        return NULL;
+    }
+    // Recheck after parent creation: another participant may have installed a
+    // DB or final symlink in the meantime. An error other than missing is fatal.
+    canonical = db_lease_real_path(target, &missing);
+    return canonical ? canonical : (missing ? strdup(target) : NULL);
+}
+
+int cbm_db_lease_try_acquire(const char *db_path, cbm_db_lease_t **out) {
+    if (!out) {
+        return CBM_NOT_FOUND;
+    }
+    *out = NULL;
+    char *target = db_lease_canonical_target(db_path);
+    // All existing pipeline DB/sidecar buffers are CBM_PATH_MAX. Do not admit
+    // a canonical target that those consumers would silently truncate.
+    if (!target || strlen(target) >= CBM_PATH_MAX - 32) {
+        free(target);
+        return CBM_NOT_FOUND;
+    }
+    char lock_path[DB_LEASE_PATH_MAX];
+    int n = snprintf(lock_path, sizeof(lock_path), "%s.index.lock", target);
+    if (n <= 0 || (size_t)n >= sizeof(lock_path)) {
+        free(target);
+        return CBM_NOT_FOUND;
+    }
+    cbm_db_lease_t *lease = (cbm_db_lease_t *)calloc(1, sizeof(*lease));
+    if (!lease) {
+        free(target);
+        return CBM_NOT_FOUND;
+    }
+    lease->target = target;
+#ifdef _WIN32
+    wchar_t *wide = cbm_utf8_to_wide(lock_path);
+    lease->handle = wide ? CreateFileW(wide, GENERIC_READ | GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+    free(wide);
+    if (lease->handle == INVALID_HANDLE_VALUE) {
+        cbm_db_lease_release(lease);
+        return CBM_NOT_FOUND;
+    }
+    OVERLAPPED overlap = {};
+    if (!LockFileEx(lease->handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0, 1, 0, &overlap)) {
+        DWORD error = GetLastError();
+        cbm_db_lease_release(lease);
+        return error == ERROR_LOCK_VIOLATION ? CBM_INDEX_BUSY : CBM_NOT_FOUND;
+    }
+#else
+    // A distinct open description also excludes concurrent callers in this
+    // process. CLOEXEC keeps unrelated subprocesses from retaining the lease.
+    lease->fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (lease->fd < 0) {
+        cbm_db_lease_release(lease);
+        return CBM_NOT_FOUND;
+    }
+    if (flock(lease->fd, LOCK_EX | LOCK_NB) != 0) {
+        int error = errno;
+        cbm_db_lease_release(lease);
+        return error == EWOULDBLOCK || error == EAGAIN ? CBM_INDEX_BUSY : CBM_NOT_FOUND;
+    }
+#endif
+    *out = lease;
+    return 0;
+}
+
+const char *cbm_db_lease_target(const cbm_db_lease_t *lease) {
+    return lease ? lease->target : NULL;
+}
+
+void cbm_db_lease_release(cbm_db_lease_t *lease) {
+    if (!lease) {
+        return;
+    }
+#ifdef _WIN32
+    if (lease->handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(lease->handle);
+    }
+#else
+    if (lease->fd >= 0) {
+        close(lease->fd);
+    }
+#endif
+    free(lease->target);
+    free(lease);
 }

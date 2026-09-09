@@ -97,6 +97,7 @@ typedef struct {
      * and pass_calls/usages/semantic reuse cached results instead of re-extracting.
      * Indexed by file position in the files[] array. Owned by pipeline.c. */
     CBMFileResult **result_cache;
+    void *result_store; // Optional run-local cbm::ResultStore; cache holds owned summaries.
 
     /* Build-tool path aliases (tsconfig/jsconfig today; webpack/vite-style
      * configs are an easy follow-on). NULL when no usable configs were found.
@@ -668,6 +669,12 @@ int cbm_scan_project_env_urls_excluded(const char *root_path, cbm_env_binding_t 
  * files, merges into disk DB. Returns 0 on success. */
 int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
                                  int file_count);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* One-shot callback after classification, for concurrent source-edit tests. */
+void cbm_pipeline_test_after_classify(void (*callback)(void *), void *data);
+void cbm_pipeline_test_after_extract(void (*callback)(void *), void *data);
+#endif
 
 /* Pipeline accessors for incremental use */
 const char *cbm_pipeline_repo_path(const cbm_pipeline_t *p);

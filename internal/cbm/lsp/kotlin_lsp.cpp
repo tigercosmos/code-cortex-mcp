@@ -311,13 +311,12 @@ static void kt_emit_resolved(KotlinLSPContext *ctx, const char *callee_qn, const
         arr->items = new_items;
         arr->cap = new_cap;
     }
-    CBMResolvedCall *rc = &arr->items[arr->count];
-    memset(rc, 0, sizeof(CBMResolvedCall));
-    rc->caller_qn = ctx->enclosing_func_qn;
-    rc->callee_qn = cbm_arena_strdup(ctx->arena, callee_qn);
-    rc->strategy = strategy;
-    rc->confidence = confidence;
-    arr->count++;
+    CBMResolvedCall rc = {};
+    rc.caller_qn = ctx->enclosing_func_qn;
+    rc.callee_qn = cbm_arena_strdup(ctx->arena, callee_qn);
+    rc.strategy = strategy;
+    rc.confidence = confidence;
+    arr->items[arr->count++] = rc;
 }
 
 /* Detect a function_declaration's extension receiver type. The

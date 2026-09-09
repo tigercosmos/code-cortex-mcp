@@ -555,6 +555,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         }
     }
 
+    if (call->requires_typed_resolution) return 0;
+
     /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the service
      * signal lives in the callee_name. The registry can mis-resolve such a call
      * to a spurious builtin short-name match (e.g. `requests.get` ->
@@ -722,6 +724,7 @@ int cbm_pipeline_pass_calls(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
             continue;
         }
 
+        cbm_materialize_deferred_cpp_operators(result);
         if (result->calls.count == 0) {
             if (result_owned) {
                 cbm_free_result(result);

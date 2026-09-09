@@ -1514,6 +1514,10 @@ int cbm_store_find_nodes_by_name_any(cbm_store_t *s, const char *name, cbm_node_
         *count = 0;
         return CBM_STORE_ERR;
     }
+    if (n == 0) {
+        free(arr);
+        arr = NULL;
+    }
     *out = arr;
     *count = n;
     return CBM_STORE_OK;
@@ -1585,6 +1589,10 @@ static int find_nodes_generic(cbm_store_t *s, sqlite3_stmt **slot, const char *s
         return CBM_STORE_ERR;
     }
 
+    if (n == 0) {
+        free(arr);
+        arr = NULL;
+    }
     *out = arr;
     *count = n;
     return CBM_STORE_OK;
@@ -2561,6 +2569,10 @@ int cbm_store_find_nodes_by_qn_suffix(cbm_store_t *s, const char *project, const
         return CBM_STORE_ERR;
     }
     sqlite3_finalize(stmt);
+    if (n == 0) {
+        free(nodes);
+        nodes = NULL;
+    }
     *out = nodes;
     *count = n;
     return CBM_STORE_OK;
@@ -3439,38 +3451,47 @@ static int bfs_collect_edges(cbm_store_t *s, int64_t start_id, const cbm_node_ho
                              int visited_count, const char *types_clause, const char **edge_types,
                              int edge_type_count, cbm_edge_info_t **out_edges,
                              int *out_edge_count) {
-    /* Build ID set: root + all visited */
-    char id_set[CBM_SZ_4K];
-    int ilen = snprintf(id_set, sizeof(id_set), "%lld", (long long)start_id);
-    if (ilen >= (int)sizeof(id_set)) {
-        ilen = (int)sizeof(id_set) - SKIP_ONE;
+    /* Bind the ID set as JSON instead of interpolating it into a fixed SQL
+     * buffer. A legitimate bounded traversal can contain thousands of nodes;
+     * truncating their comma-separated IDs produced malformed SQL and turned
+     * a successful traversal into CBM_STORE_ERR during edge collection. */
+    size_t id_cap = ((size_t)visited_count + SKIP_ONE) * 24 + CBM_SZ_2;
+    char *id_set = (char *)malloc(id_cap);
+    if (!id_set) {
+        *out_edges = NULL;
+        *out_edge_count = 0;
+        return CBM_STORE_ERR;
     }
+    size_t ilen = (size_t)snprintf(id_set, id_cap, "[%lld", (long long)start_id);
     for (int i = 0; i < visited_count; i++) {
-        ilen += snprintf(id_set + ilen, sizeof(id_set) - (size_t)ilen, ",%lld",
-                         (long long)visited[i].node.id);
-        if (ilen >= (int)sizeof(id_set)) {
-            ilen = (int)sizeof(id_set) - SKIP_ONE;
-        }
+        ilen += (size_t)snprintf(id_set + ilen, id_cap - ilen, ",%lld",
+                                 (long long)visited[i].node.id);
     }
+    snprintf(id_set + ilen, id_cap - ilen, "]");
 
     char edge_sql[ST_SQL_BUF];
+    int id_param = (edge_type_count > 0 ? edge_type_count : SKIP_ONE) + SKIP_ONE;
     snprintf(edge_sql, sizeof(edge_sql),
+             "WITH ids(id) AS (SELECT CAST(value AS INTEGER) FROM json_each(?%d)) "
              "SELECT n1.name, n2.name, e.type, e.source_id, e.target_id, e.properties, "
              "CASE WHEN json_valid(e.properties) THEN "
              "COALESCE(json_extract(e.properties, '$.confidence'), 1.0) ELSE 1.0 END "
              "FROM edges e "
              "JOIN nodes n1 ON n1.id = e.source_id "
              "JOIN nodes n2 ON n2.id = e.target_id "
-             "WHERE e.source_id IN (%s) AND e.target_id IN (%s) "
+             "WHERE e.source_id IN (SELECT id FROM ids) "
+             "AND e.target_id IN (SELECT id FROM ids) "
              "AND e.type IN (%s)",
-             id_set, id_set, types_clause);
+             id_param, types_clause);
 
     sqlite3_stmt *estmt = NULL;
     int rc = sqlite3_prepare_v2(s->db, edge_sql, CBM_NOT_FOUND, &estmt, NULL);
     if (rc != SQLITE_OK) {
+        store_set_error_sqlite(s, "bfs edge prepare");
+        free(id_set);
         *out_edges = NULL;
         *out_edge_count = 0;
-        return CBM_STORE_OK;
+        return CBM_STORE_ERR;
     }
 
     if (edge_type_count > 0) {
@@ -3480,6 +3501,8 @@ static int bfs_collect_edges(cbm_store_t *s, int64_t start_id, const cbm_node_ho
     } else {
         bind_text(estmt, SKIP_ONE, "CALLS");
     }
+    bind_text(estmt, id_param, id_set);
+    free(id_set);
 
     int ecap = ST_INIT_CAP_8;
     int en = 0;
@@ -3566,7 +3589,8 @@ static int bfs_cte_row_limit_for_depth(int max_results, int max_depth) {
 
 static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
                      const char **edge_types, int edge_type_count, int min_depth, int max_depth,
-                     int max_results, bool trail, cbm_traverse_result_t *out) {
+                     int max_results, bool trail, int max_examined, cbm_bfs_file_filter_fn filter,
+                     void *filter_context, cbm_traverse_result_t *out) {
     memset(out, 0, sizeof(*out));
 
     cbm_node_t root = {0};
@@ -3593,6 +3617,11 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
         next_id = "e.target_id";
     }
 
+    /* Keep a separate examined-row cap regardless of the predicate: excluded files cannot
+     * consume accepted slots, but cannot cause an unbounded result scan either.
+     * Reachability/grouping work retains the existing depth-bounded CTE. */
+    int sql_limit = max_examined > 0 ? max_examined + 1 :
+        (max_results >= 0 && max_results < INT32_MAX ? max_results + 1 : max_results);
     int cte_row_limit = 0;
     if (trail) {
         cte_row_limit = bfs_cte_row_limit_for_depth(max_results, max_depth);
@@ -3632,7 +3661,7 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
                   * dropping the deep matches that were actually asked for. */
                  "WHERE bfs.hop >= %d ORDER BY bfs.hop, n.id LIMIT %d;",
                  (long long)start_id, next_id, join_cond, types_clause, max_depth,
-                 cte_row_limit + SKIP_ONE, min_depth > 0 ? min_depth : SKIP_ONE, max_results);
+                 cte_row_limit + SKIP_ONE, min_depth > 0 ? min_depth : SKIP_ONE, sql_limit);
     } else {
         snprintf(sql, sizeof(sql),
                  /* SHORTEST-PATH semantics: the UNION dedupes (node, hop) pairs.
@@ -3657,7 +3686,7 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
                   * watermarks and reproducible trace output depend on it. */
                  "ORDER BY hop, n.id "
                  "LIMIT %d;",
-                 (long long)start_id, next_id, join_cond, types_clause, max_depth, max_results);
+                 (long long)start_id, next_id, join_cond, types_clause, max_depth, sql_limit);
     }
 
     sqlite3_stmt *stmt = NULL;
@@ -3682,19 +3711,35 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
     cbm_node_hop_t *visited = (cbm_node_hop_t *)malloc(cap * sizeof(cbm_node_hop_t));
 
     int scan_rc15;
+    bool result_limited = false;
+    int examined = 0;
     while ((scan_rc15 = sqlite3_step(stmt)) == SQLITE_ROW) {
+        if (trail) {
+            cte_rows = sqlite3_column_int(stmt, ST_COL_10);
+        }
+        if (max_examined > 0 && examined++ == max_examined) {
+            result_limited = true;
+            out->truncated = true;
+            break;
+        }
+        const char *file_path = (const char *)sqlite3_column_text(stmt, ST_COL_5);
+        if (filter && !filter(file_path, filter_context)) {
+            continue;
+        }
+        if (max_results >= 0 && n == max_results) {
+            result_limited = true;
+            out->truncated = true;
+            break;
+        }
         if (n >= cap) {
             cap *= ST_GROWTH;
             visited = (__typeof__(visited))safe_realloc(visited, cap * sizeof(cbm_node_hop_t));
         }
         scan_node(stmt, &visited[n].node);
         visited[n].hop = sqlite3_column_int(stmt, ST_COL_9);
-        if (trail) {
-            cte_rows = sqlite3_column_int(stmt, ST_COL_10);
-        }
         n++;
     }
-    if (scan_rc15 != SQLITE_DONE) { /* SCANCHK:15:stmt */
+    if (scan_rc15 != SQLITE_DONE && !result_limited) { /* SCANCHK:15:stmt */
         store_set_error_sqlite(s, "row scan aborted");
         sqlite3_finalize(stmt);
         out->visited = visited;
@@ -3704,23 +3749,8 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
 
     sqlite3_finalize(stmt);
 
-    /* KNOWN GAP (inherited from upstream, deliberately not fixed): this reports
-     * only the CTE budget, never the outer `LIMIT max_results`. cte_rows counts
-     * rows the RECURSION produced; a result trimmed purely by the outer limit
-     * leaves cte_rows under the cap, so truncated stays false and the caller
-     * emits no warning. A query with 200 genuine depth-2 endpoints and a budget
-     * of 100 returns 100 rows and reports itself complete.
-     *
-     * Distinct from the min_depth defect fixed in ac7187bc: there the budget
-     * was SPENT ON ROWS THAT COULD NEVER MATCH, so correct answers were lost.
-     * Here every returned row is correct and the truncation is legitimate —
-     * only the disclosure is missing.
-     *
-     * Not a one-line fix: n == max_results cannot distinguish "exactly
-     * max_results existed" from "more existed", so honest detection needs
-     * LIMIT max_results + 1 and a trim, which touches the shared
-     * cbm_store_bfs path and its pagination-watermark ordering. Wants its own
-     * commit and guard. */
+    /* An extra accepted row or examined candidate proves truncation above.
+     * Trail traversal also has an independent recursive-row budget. */
     if (trail && cte_rows > cte_row_limit) {
         out->truncated = true;
         char limit_buf[ST_BUF_16];
@@ -3733,8 +3763,11 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
 
     /* Collect edges between visited nodes (including root) */
     if (n > 0) {
-        bfs_collect_edges(s, start_id, out->visited, n, types_clause, edge_types, edge_type_count,
-                          &out->edges, &out->edge_count);
+        rc = bfs_collect_edges(s, start_id, out->visited, n, types_clause, edge_types,
+                               edge_type_count, &out->edges, &out->edge_count);
+        if (rc != CBM_STORE_OK) {
+            return rc;
+        }
     } else {
         out->edges = NULL;
         out->edge_count = 0;
@@ -3746,14 +3779,26 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
 int cbm_store_bfs(cbm_store_t *s, int64_t start_id, const char *direction, const char **edge_types,
                   int edge_type_count, int max_depth, int max_results, cbm_traverse_result_t *out) {
     return store_bfs(s, start_id, direction, edge_types, edge_type_count, SKIP_ONE, max_depth,
-                     max_results, false, out);
+                     max_results, false, 0, nullptr, nullptr, out);
+}
+
+int cbm_store_bfs_filtered(cbm_store_t *s, int64_t start_id, const char *direction,
+                           const char **edge_types, int edge_type_count, int max_depth,
+                           int max_results, int max_examined, cbm_bfs_file_filter_fn filter,
+                           void *context, cbm_traverse_result_t *out) {
+    if (max_examined <= 0 || max_examined >= INT32_MAX) {
+        memset(out, 0, sizeof(*out));
+        return CBM_STORE_ERR;
+    }
+    return store_bfs(s, start_id, direction, edge_types, edge_type_count, SKIP_ONE, max_depth,
+                     max_results, false, max_examined, filter, context, out);
 }
 
 int cbm_store_bfs_trail(cbm_store_t *s, int64_t start_id, const char *direction,
                         const char **edge_types, int edge_type_count, int min_depth, int max_depth,
                         int max_results, cbm_traverse_result_t *out) {
     return store_bfs(s, start_id, direction, edge_types, edge_type_count, min_depth, max_depth,
-                     max_results, true, out);
+                     max_results, true, 0, nullptr, nullptr, out);
 }
 
 /* Multi-source BFS: one recursive CTE anchored on ALL seeds (via a temp

@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "cmake",
+    "-S",
+    ".",
+    "-B",
+    "build/nosan",
+    "-DCBM_SANITIZE=OFF",
+    "-DCBM_TEST_SEAMS=ON"
+  ],
+  "cwd": "/Users/tigercosmos/code-cortex-mcp",
+  "started_epoch": 1788925148.38877,
+  "timeout_seconds": 120
+}

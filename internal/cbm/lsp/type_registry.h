@@ -35,6 +35,9 @@ typedef struct {
     int flags;                     // CBM_FUNC_FLAG_* bitfield (Python decorator info; 0 elsewhere)
     const char **decorator_qns;    // NULL-terminated decorator QNs (Python only); used for
                                    // user-decorator return-type substitution.
+    // Optional overload-family name for lookup; qualified_name remains the
+    // distinct graph identity returned after overload selection.
+    const char *lookup_qn;
 } CBMRegisteredFunc;
 
 // Registered type with fields and method names.
@@ -91,9 +94,9 @@ typedef struct CBMTypeRegistry {
     // Hash indexes (built lazily by cbm_registry_finalize, NULL until then).
     // Lookups fall back to linear scan when these are NULL.
     int *func_qn_buckets; // bucket → first entry index in func_qn_entries; -1 = empty
-    CBMRegistryHashEntry *func_qn_entries; // entries indexed by linear order
+    CBMRegistryHashEntry *func_qn_entries; // graph-identity and optional family-name entries
     int func_qn_bucket_count;
-    int func_qn_entry_count;
+    int func_qn_entry_count; // Number of indexed function payloads, excluding extra alias entries.
 
     int *type_qn_buckets;
     CBMRegistryHashEntry *type_qn_entries;

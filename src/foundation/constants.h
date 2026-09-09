@@ -68,6 +68,7 @@ enum { TS_LINE_OFFSET = 1 };
 
 /* ── Sentinel values ─────────────────────────────────────────── */
 enum {
+    CBM_INDEX_BUSY = -2, /* another process owns this database indexing lease */
     CBM_NOT_FOUND = -1, /* search miss, invalid index */
     CBM_INIT_DONE = 1,  /* initialization flag */
 };

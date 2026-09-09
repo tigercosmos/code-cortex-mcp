@@ -226,6 +226,9 @@ static const char *compute_gotemplate_func_qn(CBMExtractCtx *ctx, TSNode node) {
 // Compute function QN for scope tracking (mirrors cbm_enclosing_func_qn logic).
 static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
                                    WalkState *state) {
+    if (const char *overload = cbm_overload_at(ctx->result, ts_node_start_byte(node))) {
+        return overload;
+    }
     (void)spec;
     if (ctx->language == CBM_LANG_WOLFRAM) {
         return compute_wolfram_func_qn(ctx, node);
@@ -1450,6 +1453,7 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
         return;
     }
 
+    bool owns_usage_dedup = cbm_usage_dedup_begin(ctx);
     TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
     WalkState state;
     memset(&state, 0, sizeof(state));
@@ -1498,4 +1502,5 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
     }
 
     ts_tree_cursor_delete(&cursor);
+    cbm_usage_dedup_end(ctx, owns_usage_dedup);
 }

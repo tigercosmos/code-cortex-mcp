@@ -1,0 +1,5 @@
+phase=version_smoke
+return_code=0
+start_ns=1788940866632168911
+end_ns=1788940866635918616
+wall_ns=3749705

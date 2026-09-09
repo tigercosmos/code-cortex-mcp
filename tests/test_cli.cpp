@@ -580,6 +580,29 @@ TEST(cli_skill_files_content) {
     PASS();
 }
 
+TEST(cli_guidance_preserves_optional_graph_and_source_limits) {
+    const char *contents[] = {cbm_get_skills()[0].content,
+                             cbm_get_codex_instructions(), cbm_get_agent_instructions()};
+    for (const char *content : contents) {
+        ASSERT_NOT_NULL(content);
+        // Routing must include cost and a shell default, not task-label triggers.
+        ASSERT_NOT_NULL(strstr(content, "Default to shell search"));
+        ASSERT_NOT_NULL(strstr(content, "indexing"));
+        ASSERT_NOT_NULL(strstr(content, "explicit graph request"));
+        ASSERT_NOT_NULL(strstr(content, "Routine edits do not require"));
+        // Sufficient source excerpts remain reusable; flags are not exhaustive.
+        ASSERT_NOT_NULL(strstr(content, "current-source excerpts"));
+        ASSERT_NOT_NULL(strstr(content, "not complete source coverage"));
+        ASSERT_NOT_NULL(strstr(content, "even without a coverage_note flag"));
+        ASSERT(strstr(content, "complete edit list") == NULL);
+        ASSERT(strstr(content, "lists every file to edit") == NULL);
+        ASSERT(strstr(content, "rather than re-searching") == NULL);
+        ASSERT(strstr(content, "instead of re-searching") == NULL);
+        ASSERT(strstr(content, "ALWAYS") == NULL);
+    }
+    PASS();
+}
+
 TEST(cli_codex_instructions) {
     /* Port of TestCodexInstructionsCreation */
     const char *instr = cbm_get_codex_instructions();
@@ -917,12 +940,16 @@ TEST(cli_migrate_legacy_install) {
     struct stat st;
     ASSERT(stat(old_bin, &st) == 0);
 
-    /* Real run removes all three */
+    /* Real run removes the binary, legacy indexes, and old skill. */
     int migrated = cbm_migrate_legacy_install(tmpdir, false);
     ASSERT_EQ(migrated, 3);
     ASSERT(stat(old_bin, &st) != 0);
     snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp", tmpdir);
+    ASSERT(stat(path, &st) == 0);
+    snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp/proj.db", tmpdir);
     ASSERT(stat(path, &st) != 0);
+    snprintf(path, sizeof(path), "%s/.cache/codebase-memory-mcp/proj.db.index.lock", tmpdir);
+    ASSERT(stat(path, &st) == 0);
     snprintf(path, sizeof(path), "%s/.claude/skills/codebase-memory", tmpdir);
     ASSERT(stat(path, &st) != 0);
 
@@ -2406,13 +2433,11 @@ TEST(cli_remove_instructions) {
 TEST(cli_agent_instructions_content) {
     const char *instr = cbm_get_agent_instructions();
     ASSERT_NOT_NULL(instr);
-    /* Guidance is scoped to what the graph does better than grep — callers
-     * with evidence, call chains, blast radius — and names grep's territory
-     * explicitly. No blanket "ALWAYS prefer" directive. */
+    /* Keep useful tool names while making source search the default. */
     ASSERT(strstr(instr, "inspect_symbol") != NULL);
     ASSERT(strstr(instr, "trace_path") != NULL);
     ASSERT(strstr(instr, "detect_changes") != NULL);
-    ASSERT(strstr(instr, "grep") != NULL);
+    ASSERT(strstr(instr, "Default to shell search") != NULL);
     ASSERT(strstr(instr, "ALWAYS") == NULL);
     PASS();
 }
@@ -2558,6 +2583,218 @@ TEST(cli_upsert_claude_hook_preserves_others) {
  * extractor must read one unambiguous pattern out of the command line and
  * FAIL CLOSED on anything else — a wrong pattern would augment with symbols
  * the agent never asked about. It never executes or rewrites the command. */
+TEST(cli_doctor_counts_catalog_entries) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    bool inspect = false, cursor = false;
+    int count = cbm_cli_doctor_catalog_for_testing(
+        "{\"tools\":[{\"name\":\"inspect_symbol\",\"inputSchema\":{\"properties\":{"
+        "\"name\":{\"type\":\"string\"}}}},{\"name\":\"list_projects\"}]}",
+        &inspect, &cursor);
+    ASSERT_EQ(count, 2);
+    ASSERT_TRUE(inspect);
+    ASSERT_FALSE(cursor);
+    count =
+        cbm_cli_doctor_catalog_for_testing("{\"tools\":[{\"name\":\"search_graph\",\"description\":"
+                                           "\"inspect_symbol\"}],\"nextCursor\":\"8\"}",
+                                           &inspect, &cursor);
+    ASSERT_EQ(count, 1);
+    ASSERT_FALSE(inspect);
+    ASSERT_TRUE(cursor);
+    ASSERT_EQ(cbm_cli_doctor_catalog_for_testing("{\"tools\":[{}]}", &inspect, &cursor), -1);
+    ASSERT_EQ(cbm_cli_doctor_catalog_for_testing("not json", &inspect, &cursor), -1);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_request_context_selects_only_unambiguous_symbols) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *requests[] = {"Find the definition of `target`.",
+                              "Find `target`; its definition is also named `target`.",
+                              "Find the definition of class `ns::Widget`.",
+                              "Find the definition of `method` in class template `ns::Widget`.",
+                              "Read only; do not edit. Find the definition of `update`."};
+    const char *expected[] = {"target", "target", "ns::Widget", "Widget.method", "update"};
+    for (size_t i = 0; i < sizeof(requests) / sizeof(requests[0]); ++i) {
+        char *symbol = cbm_request_symbol_for_testing(requests[i], true);
+        ASSERT_NOT_NULL(symbol);
+        ASSERT_STR_EQ(symbol, expected[i]);
+        free(symbol);
+    }
+    const char *skipped[] = {"Find definitions of `first` and `second`.",
+                             "Find the definition of `target` and update it.",
+                             "Find callers and the definition of `target`.",
+                             "Find the definition of `target`. ```example```",
+                             "Find the definition of ``target``.",
+                             "Find the definition of `unfinished",
+                             "Find definitions in class `A` and class `B` for `method`.",
+                             "Find the definition of `target|.*`.",
+                             "Rename `target`.", "Find the definition of target."};
+    for (const char *request : skipped) {
+        ASSERT_NULL(cbm_request_symbol_for_testing(request, true));
+    }
+    char *symbol = cbm_request_symbol_for_testing("Explain `target`.", false);
+    ASSERT_NOT_NULL(symbol);
+    ASSERT_STR_EQ(symbol, "target");
+    free(symbol);
+    ASSERT_NULL(cbm_request_symbol_for_testing(nullptr, true));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_task_context_preserves_source_and_budget) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *payload = R"({"symbol":{"file":"a.cpp","start_line":7},"source":"int f() { return 1; }","source_end_line":7,"source_clipped":false,"coverage_note":"partial","index":{"file_modified_after_index":false},"callers":[{"name":"unneeded"}]})";
+    char *text = cbm_task_context_for_testing(payload, 6000);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "int f() { return 1; }"));
+    ASSERT_NOT_NULL(strstr(text, "\"start_line\":7"));
+    ASSERT_NOT_NULL(strstr(text, "\"coverage_note\":\"partial\""));
+    ASSERT_NULL(strstr(text, "unneeded"));
+    const size_t bytes = strlen(text);
+    free(text);
+    ASSERT_NULL(cbm_task_context_for_testing(payload, bytes));
+    text = cbm_task_context_for_testing(payload, bytes + 1);
+    ASSERT_NOT_NULL(text);
+    free(text);
+    ASSERT_NULL(cbm_task_context_for_testing(
+        R"({"symbol":{},"source":"old","index":{"file_modified_after_index":true}})", 6000));
+    ASSERT_NULL(cbm_task_context_for_testing(R"({"symbol":{},"source":""})", 6000));
+    ASSERT_NULL(cbm_task_context_for_testing(R"({"suggestions":["a","b"]})", 6000));
+    ASSERT_NULL(cbm_task_context_for_testing("invalid", 6000));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_request_chain_requires_explicit_read_only_endpoints) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *positive[] = {
+        "Show the call chain from `Entry` to `Target`.",
+        "Read only; do not edit. Trace the call chain from `Entry` to `Target`.",
+        "FIND THE CALL CHAIN FROM `Entry` TO `Target`."
+    };
+    for (const char *request : positive) {
+        char *result = cbm_request_chain_for_testing(request);
+        ASSERT_NOT_NULL(result);
+        ASSERT_STR_EQ(result, "Entry -> Target");
+        free(result);
+    }
+    const char *negative[] = {
+        "Do NOT show the call chain from `Entry` to `Target`.",
+        "Show the call chain from `Entry` to `Target` and modify it.",
+        "Show the call chain from `Entry` to `Target`. Find the call chain from `Other` to `Target`.",
+        "```Show the call chain from `Entry` to `Target`.```",
+        "Show the call chain from `Entry|Other` to `Target`.",
+        "Show the call chain from Entry to Target.",
+        "Show the call chain from `Entry` to",
+        "Show the call chain from `Entry` t",
+        "Show the call chain from `Entry`",
+        "Show the call chain from",
+        "Who calls `Entry`?"
+    };
+    for (const char *request : negative) {
+        ASSERT_NULL(cbm_request_chain_for_testing(request));
+    }
+    ASSERT_NULL(cbm_request_chain_for_testing(nullptr));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_definition_context_prioritizes_qualified_matches) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *events =
+        "{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"noise.cpp\"},\"line_number\":1,"
+        "\"lines\":{\"text\":\"// Earlier unrelated context must not crowd out a signature.\\n\"}}}\n"
+        "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"other.cpp\"},\"line_number\":2,"
+        "\"lines\":{\"text\":\"int OtherWidget::target() {\\n\"}}}\n"
+        "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"widget.cpp\"},\"line_number\":99,"
+        "\"lines\":{\"text\":\"int Widget::target() {\\n\"}}}\n";
+    char *text = cbm_definition_context_for_testing(events, "Widget.target", 460);
+    ASSERT_NOT_NULL(text);
+    ASSERT_TRUE(strlen(text) + 1 <= 460);
+    ASSERT_NOT_NULL(strstr(text, "\"file\":\"widget.cpp\",\"line\":99"));
+    ASSERT_NULL(strstr(text, "noise.cpp"));
+    ASSERT_NOT_NULL(strstr(text, "\"selection\":\"definition_candidates\""));
+    ASSERT_NOT_NULL(strstr(text, "\"truncated\":true"));
+    free(text);
+    ASSERT_NULL(cbm_definition_context_for_testing(events, "Widget.target", 1));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_source_context_preserves_interleaved_paths) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *events =
+        "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"a.cpp\"},\"line_number\":4,"
+        "\"lines\":{\"text\":\"int target() {\\n\"}}}\n"
+        "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"b.cpp\"},\"line_number\":9,"
+        "\"lines\":{\"text\":\"target();\\n\"}}}\n"
+        "{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"a.cpp\"},\"line_number\":5,"
+        "\"lines\":{\"text\":\"return 0;\\n\"}}}\n";
+    char *text = cbm_source_context_for_testing(events, 6000, true);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"file\":\"a.cpp\",\"line\":4"));
+    ASSERT_NOT_NULL(strstr(text, "\"file\":\"b.cpp\",\"line\":9"));
+    ASSERT_NOT_NULL(strstr(text, "\"file\":\"a.cpp\",\"line\":5"));
+    ASSERT_NOT_NULL(strstr(text, "\"scan_complete\":true"));
+    ASSERT_NOT_NULL(strstr(text, "\"truncated\":false"));
+    size_t bytes = strlen(text);
+    free(text);
+    text = cbm_source_context_for_testing(events, bytes, true);
+    ASSERT_NOT_NULL(text);
+    ASSERT_TRUE(strlen(text) + 1 <= bytes);
+    ASSERT_NOT_NULL(strstr(text, "\"truncated\":true"));
+    free(text);
+    text = cbm_source_context_for_testing(events, 6000, false);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"scan_complete\":false"));
+    ASSERT_NOT_NULL(strstr(text, "\"truncated\":true"));
+    free(text);
+    ASSERT_NULL(cbm_source_context_for_testing(events, 1, true));
+    ASSERT_NULL(cbm_source_context_for_testing("{\"partial\":", 6000, false));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_hook_brief_uses_exact_file_total) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char *text = cbm_hook_symbol_brief_for_testing("{\"symbol\":{\"label\":\"Function\",\"file\":"
+                                                   "\"target.c\",\"start_line\":2,\"end_line\":4},"
+                                                   "\"callers_total\":301,\"caller_files_total\":"
+                                                   "301,\"caller_files\":[{\"file\":\"first.c\"}]}",
+                                                   "target");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "defined at target.c:2-4"));
+    ASSERT_NOT_NULL(strstr(text, "301 direct caller(s) in 301 file(s)"));
+    ASSERT_NOT_NULL(strstr(text, "further pages"));
+    free(text);
+    text = cbm_hook_symbol_brief_for_testing("{\"symbol\":{\"label\":\"Declaration\",\"file\":"
+                                             "\"api.h\",\"start_line\":1,\"end_line\":1},"
+                                             "\"callers_total\":0,\"caller_files\":[]}",
+                                             "api_only");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "Declaration declared at api.h:1-1"));
+    ASSERT_NULL(strstr(text, "defined at"));
+    free(text);
+    ASSERT_NULL(cbm_hook_symbol_brief_for_testing(
+        "{\"symbol\":{\"label\":\"Function\",\"id\":1},\"metadata_omitted\":true}", "long"));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
 TEST(cli_hook_augment_bash_pattern_extractor) {
     char out[256];
 
@@ -2789,10 +3026,14 @@ TEST(cli_remove_gemini_hooks) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 TEST(cli_skill_descriptions_directive) {
-    /* Verify skill description has trigger phrases for agent matching */
+    /* The folded description scopes implicit selection without broad task triggers. */
     const cbm_skill_t *sk = cbm_get_skills();
     for (int i = 0; i < CBM_SKILL_COUNT; i++) {
-        ASSERT(strstr(sk[i].content, "Triggers on:") != NULL);
+        ASSERT(strstr(sk[i].content, "description: >-\n") != NULL);
+        ASSERT(strstr(sk[i].content, "lower total cost") != NULL);
+        ASSERT(strstr(sk[i].content, "Default to") != NULL);
+        ASSERT(strstr(sk[i].content, "explicit") != NULL);
+        ASSERT(strstr(sk[i].content, "Triggers on:") == NULL);
         ASSERT(strstr(sk[i].content, "search_graph") != NULL);
     }
     PASS();
@@ -3025,7 +3266,65 @@ TEST(replace_binary_creates_new_file) {
  *  Suite definition
  * ═══════════════════════════════════════════════════════════════════ */
 
+#include <string>
+struct cleanup_lease_env {
+    char *old = getenv("CBM_CACHE_DIR") ? strdup(getenv("CBM_CACHE_DIR")) : NULL;
+    explicit cleanup_lease_env(const char *path) { cbm_setenv("CBM_CACHE_DIR", path, 1); }
+    ~cleanup_lease_env() {
+        if (old) { cbm_setenv("CBM_CACHE_DIR", old, 1); free(old); }
+        else { cbm_unsetenv("CBM_CACHE_DIR"); }
+    }
+};
+static bool cleanup_bytes_equal(const std::string& path, const char *expected) {
+    FILE *f = cbm_fopen(path.c_str(), "rb");
+    if (!f) { return false; }
+    char bytes[64] = {};
+    size_t n = fread(bytes, 1, sizeof(bytes), f);
+    fclose(f);
+    return n == strlen(expected) && memcmp(bytes, expected, n) == 0;
+}
+TEST(cli_remove_indexes_respects_lease) {
+    char root[256] = "/tmp/cbm_cleanup_lease_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    cleanup_lease_env cache(root);
+    std::string db = std::string(root) + "/busy.db";
+    std::string idle = std::string(root) + "/idle.db";
+    const char *suffixes[] = {"", "-wal", "-shm", ".tmp"};
+    const char *values[] = {"keep db", "keep wal", "keep shm", "keep tmp"};
+    for (int i = 0; i < 4; ++i) { ASSERT_EQ(th_write_file((db + suffixes[i]).c_str(), values[i]), 0); }
+    ASSERT_EQ(th_write_file(idle.c_str(), "idle db"), 0);
+    cbm_db_lease_t *lease = NULL;
+    ASSERT_EQ(cbm_db_lease_try_acquire(db.c_str(), &lease), 0);
+    ASSERT_EQ(cbm_remove_indexes(root), 1);
+    ASSERT(!cbm_is_regular_file(idle.c_str()));
+    for (int i = 0; i < 4; ++i) { ASSERT(cleanup_bytes_equal(db + suffixes[i], values[i])); }
+    cbm_db_lease_release(lease);
+    ASSERT_EQ(cbm_remove_indexes(root), 1);
+    for (const char *suffix : suffixes) { ASSERT(!cbm_is_regular_file((db + suffix).c_str())); }
+    ASSERT(cbm_is_regular_file((db + ".index.lock").c_str()));
+    ASSERT(cbm_is_regular_file((idle + ".index.lock").c_str()));
+    // Legacy migration must use the same protocol, never recursively remove
+    // live lock inodes or their directory, even if the current cache is elsewhere.
+    std::string legacy = std::string(root) + "/.cache/codebase-memory-mcp";
+    std::string legacy_db = legacy + "/project.db";
+    ASSERT_EQ(th_write_file(legacy_db.c_str(), "legacy graph"), 0);
+    ASSERT_EQ(th_write_file((legacy + "/retained-metadata").c_str(), "metadata"), 0);
+    ASSERT_EQ(cbm_db_lease_try_acquire(legacy_db.c_str(), &lease), 0);
+    ASSERT_EQ(cbm_migrate_legacy_install(root, false), 0);
+    ASSERT(cleanup_bytes_equal(legacy_db, "legacy graph"));
+    ASSERT(cbm_is_regular_file((legacy_db + ".index.lock").c_str()));
+    cbm_db_lease_release(lease);
+    ASSERT_EQ(cbm_migrate_legacy_install(root, false), 1);
+    ASSERT(!cbm_is_regular_file(legacy_db.c_str()));
+    ASSERT(cbm_is_regular_file((legacy_db + ".index.lock").c_str()));
+    ASSERT(cleanup_bytes_equal(legacy + "/retained-metadata", "metadata"));
+    th_rmtree(root);
+    PASS();
+}
+
 SUITE(cli) {
+    RUN_TEST(cli_remove_indexes_respects_lease);
+
     /* Version (2 tests — selfupdate_test.go) */
     RUN_TEST(cli_compare_versions);
     RUN_TEST(cli_version_get_set);
@@ -3053,6 +3352,7 @@ SUITE(cli) {
     RUN_TEST(cli_remove_old_monolithic_skill);
     RUN_TEST(cli_skill_files_content);
     RUN_TEST(cli_codex_instructions);
+    RUN_TEST(cli_guidance_preserves_optional_graph_and_source_limits);
 
     /* Editor MCP: Cursor/Windsurf/Gemini (5 tests — install_test.go) */
     RUN_TEST(cli_editor_mcp_install);
@@ -3160,6 +3460,13 @@ SUITE(cli) {
     RUN_TEST(cli_upsert_claude_hook_existing);
     RUN_TEST(cli_upsert_claude_hook_replace);
     RUN_TEST(cli_upsert_claude_hook_preserves_others);
+    RUN_TEST(cli_doctor_counts_catalog_entries);
+    RUN_TEST(cli_hook_brief_uses_exact_file_total);
+    RUN_TEST(cli_task_context_preserves_source_and_budget);
+    RUN_TEST(cli_request_context_selects_only_unambiguous_symbols);
+    RUN_TEST(cli_definition_context_prioritizes_qualified_matches);
+    RUN_TEST(cli_request_chain_requires_explicit_read_only_endpoints);
+    RUN_TEST(cli_source_context_preserves_interleaved_paths);
     RUN_TEST(cli_hook_augment_bash_pattern_extractor);
     RUN_TEST(cli_remove_claude_hooks);
 

@@ -11,12 +11,16 @@
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "store/store.h"
+#include "foundation/subprocess.h"
+#include "foundation/constants.h"
+#include "mcp/mcp.h"
 #include "git/git_context.h"
 #include <yyjson/yyjson.h> // properties-JSON validity (oversized-props regression)
 #include <sqlite3.h>       // json_valid()/quick_check over every dumped row
 
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include "../src/foundation/cbm_atomic.h"
 #include "foundation/compat_thread.h"
 #include <fcntl.h>
@@ -25,7 +29,313 @@
 #include "graph_buffer/graph_buffer.h"
 #include "yyjson/yyjson.h"
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" bool cbm_test_cpp_sites_need_cross(const CBMFileResult *result);
+TEST(pipeline_cpp_cross_gate_uses_sites_not_entry_count) {
+    CBMCall calls[2] = {};
+    calls[0].enclosing_func_qn = "p.run"; calls[0].callee_name = "known"; calls[0].source_byte = 10;
+    calls[1].enclosing_func_qn = "p.run"; calls[1].callee_name = "remote"; calls[1].source_byte = 20;
+    CBMResolvedCall resolutions[3] = {};
+    resolutions[0].caller_qn = "p.run"; resolutions[0].callee_qn = "p.known";
+    resolutions[0].strategy = "lsp_direct"; resolutions[0].confidence = 0.95f; resolutions[0].source_byte = 10;
+    resolutions[1] = resolutions[0]; // Duplicate success must not cover remote().
+    CBMFileResult result = {};
+    result.calls = {calls, 2, 2}; result.resolved_calls = {resolutions, 2, 3};
+    ASSERT(cbm_test_cpp_sites_need_cross(&result));
+    resolutions[1].callee_qn = "p.remote"; resolutions[1].source_byte = 20;
+    ASSERT(!cbm_test_cpp_sites_need_cross(&result));
+    resolutions[2].caller_qn = "p.run"; resolutions[2].callee_qn = "unknown.call";
+    resolutions[2].strategy = "lsp_unresolved"; resolutions[2].source_byte = 30;
+    result.resolved_calls.count = 3;
+    ASSERT(cbm_test_cpp_sites_need_cross(&result));
+    PASS();
+}
+extern "C" void cbm_test_guard_ambiguous_cpp_receivers(CBMFileResult *result, int first_new_record);
+TEST(pipeline_cpp_receiver_guard_uses_current_pass_and_leaf) {
+    CBMCall calls[4] = {};
+    const char *names[] = {"freeCall", "factory()->act", "factory", "other"};
+    const uint32_t offsets[] = {10, 20, 20, 30};
+    for (int i = 0; i < 4; ++i) {
+        calls[i].enclosing_func_qn = "p.run";
+        calls[i].callee_name = names[i]; calls[i].source_byte = offsets[i];
+    }
+    CBMResolvedCall diagnostics[4] = {};
+    for (auto& diagnostic : diagnostics) {
+        diagnostic.caller_qn = "p.run";
+        diagnostic.strategy = "lsp_unresolved";
+        diagnostic.reason = "unknown_receiver_type";
+    }
+    // A stale preprocessed diagnostic has the same key as an authored free call.
+    diagnostics[0].callee_qn = "old.freeCall"; diagnostics[0].source_byte = 10;
+    diagnostics[1].callee_qn = "freeCall"; diagnostics[1].source_byte = 10;
+    diagnostics[1].reason = "function_not_in_registry";
+    // factory() and factory()->act() share caller and start byte, but not leaf.
+    diagnostics[2].callee_qn = "factory().act"; diagnostics[2].source_byte = 20;
+    diagnostics[3].callee_qn = "value.other"; diagnostics[3].source_byte = 30;
+    diagnostics[3].caller_qn = "p.differentCaller";
+    CBMFileResult result = {};
+    result.calls = {calls, 4, 4}; result.resolved_calls = {diagnostics, 4, 4};
+    cbm_test_guard_ambiguous_cpp_receivers(&result, 1);
+    ASSERT(!calls[0].requires_typed_resolution);
+    ASSERT(calls[1].requires_typed_resolution);
+    ASSERT(!calls[2].requires_typed_resolution);
+    ASSERT(!calls[3].requires_typed_resolution);
+    PASS();
+}
+
+#endif
+
+TEST(pipeline_cpp_pointer_members_match_in_memory_and_store) {
+    struct SavedEnv {
+        const char *name; std::string value; bool present;
+        explicit SavedEnv(const char *key)
+            : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+        ~SavedEnv() {
+            if (present) cbm_setenv(name, value.c_str(), 1);
+            else cbm_unsetenv(name);
+        }
+    } store_env("CBM_RESULT_STORE"), single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
+    char root[] = "/tmp/cbm_cpp_fields_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    std::string repo = std::string(root) + "/source";
+    ASSERT_EQ(th_write_file((repo + "/header/RawPacket.h").c_str(),
+        "#pragma once\nnamespace pcpp {\n"
+        "struct RawPacket { virtual void reallocateData(int); };\n"
+        "struct MBufRawPacket : RawPacket { void reallocateData(int) override; }; }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/src/RawPacket.cpp").c_str(),
+        "#include \"RawPacket.h\"\nnamespace pcpp {\n"
+        "void RawPacket::reallocateData(int) {}\n"
+        "void MBufRawPacket::reallocateData(int) {} }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/header/Packet.h").c_str(),
+        "#pragma once\n#include \"RawPacket.h\"\nnamespace pcpp {\n"
+        "struct Packet { RawPacket *m_RawPacket;\n"
+        "RawPacket *getPacket() { return m_RawPacket; }\n"
+        "void grow(); void explicitGrow(); void typedGrow(); void getterGrow(); void shadow(MBufRawPacket *m_RawPacket); }; }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/src/Packet.cpp").c_str(),
+        "#include \"Packet.h\"\nnamespace pcpp {\n"
+        "void Packet::grow() { m_RawPacket->reallocateData(1); }\n"
+        "void Packet::explicitGrow() { this->m_RawPacket->reallocateData(1); }\n"
+        "void Packet::typedGrow() { RawPacket *receiver = m_RawPacket; receiver->reallocateData(1); }\n"
+        "void Packet::getterGrow() { getPacket()->reallocateData(1); }\n"
+        "void Packet::shadow(MBufRawPacket *m_RawPacket) { m_RawPacket->reallocateData(1); } }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/header/Distractor.h").c_str(),
+        "#pragma once\nnamespace unrelated { struct RawPacket { void reallocateData(int); }; }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/src/Distractor.cpp").c_str(),
+        "#include \"Distractor.h\"\nnamespace unrelated { void RawPacket::reallocateData(int) {} }\n"), 0);
+    for (int i = 0; i < 55; ++i)
+        ASSERT_EQ(th_write_file((repo + "/padding" + std::to_string(i) + ".cpp").c_str(), "// padding\n"), 0);
+    for (int mode = 0; mode < 3; ++mode) {
+        cbm_setenv("CBM_WORKERS", "2", 1);
+        cbm_setenv("CBM_RESULT_STORE", mode == 2 ? "1" : "0", 1);
+        if (mode == 0) cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+        else cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+        std::string path = std::string(root) + "/graph" + std::to_string(mode) + ".db";
+        auto *pipeline = cbm_pipeline_new(repo.c_str(), path.c_str(), CBM_MODE_FAST);
+        ASSERT_NOT_NULL(pipeline);
+        int rc = cbm_pipeline_run(pipeline);
+        cbm_pipeline_free(pipeline);
+        ASSERT_EQ(rc, 0);
+        sqlite3 *db = nullptr;
+        ASSERT_EQ(sqlite3_open(path.c_str(), &db), SQLITE_OK);
+        sqlite3_stmt *stmt = nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(db,
+            "SELECT s.name,t.qualified_name,json_extract(e.properties,'$.strategy'),t.label "
+            "FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id "
+            "WHERE e.type='CALLS' AND s.file_path='src/Packet.cpp' AND t.name='reallocateData' "
+            "ORDER BY s.name", -1, &stmt, nullptr), SQLITE_OK);
+        int count = 0, seen = 0;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *caller = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
+            const char *target = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+            const char *strategy = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+            ASSERT_STR_EQ(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3)), "Method");
+            int bit = strcmp(caller, "grow") == 0 ? 1 : strcmp(caller, "explicitGrow") == 0 ? 2 : strcmp(caller, "shadow") == 0 ? 4 : strcmp(caller, "typedGrow") == 0 ? 8 : strcmp(caller, "getterGrow") == 0 ? 16 : 0;
+            ASSERT(bit != 0);
+            ASSERT_EQ(seen & bit, 0);
+            seen |= bit;
+            const char *owner = strcmp(caller, "shadow") == 0 ? ".src.RawPacket.MBufRawPacket.reallocateData" : ".src.RawPacket.RawPacket.reallocateData";
+            ASSERT_NOT_NULL(strstr(target, owner));
+            ASSERT_NOT_NULL(strategy);
+            ASSERT_EQ(strncmp(strategy, "lsp_", 4), 0);
+            ++count;
+        }
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        ASSERT_EQ(count, 5);
+        ASSERT_EQ(seen, 31);
+    }
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(pipeline_cpp_ambiguous_include_keeps_local_calls) {
+    struct SavedEnv {
+        const char *name; std::string value; bool present;
+        explicit SavedEnv(const char *key) : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+        ~SavedEnv() { if (present) cbm_setenv(name, value.c_str(), 1); else cbm_unsetenv(name); }
+    } store_env("CBM_RESULT_STORE"), single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
+    char root[] = "/tmp/cbm_cpp_ambiguous_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    std::string repo = std::string(root) + "/source";
+    ASSERT_EQ(th_write_file((repo + "/left/Widget.h").c_str(),
+        "namespace left { struct Widget { void act(); }; }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/right/Widget.h").c_str(),
+        "namespace right { struct Widget { void act(); }; }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/src/Left.cpp").c_str(),
+        "#include \"../left/Widget.h\"\nnamespace left { void Widget::act() {} }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/src/Right.cpp").c_str(),
+        "#include \"../right/Widget.h\"\nnamespace right { void Widget::act() {} }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/header/Utility.h").c_str(),
+        "void external(); namespace api { void externalQualified(); }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/src/Utility.cpp").c_str(),
+        "#include \"Utility.h\"\nvoid external() {} namespace api { void externalQualified() {} }\n"), 0);
+    ASSERT_EQ(th_write_file((repo + "/src/Client.cpp").c_str(),
+        "#include \"Widget.h\"\n#include \"../header/Utility.h\"\nvoid known() {}\n"
+        "void invoke(Widget *value) { known(); external(); api::externalQualified(); value->act(); }\n"), 0);
+    for (int i = 0; i < 55; ++i)
+        ASSERT_EQ(th_write_file((repo + "/padding" + std::to_string(i) + ".cpp").c_str(), "// padding\n"), 0);
+    for (int mode = 0; mode < 3; ++mode) {
+        cbm_setenv("CBM_WORKERS", "2", 1);
+        cbm_setenv("CBM_RESULT_STORE", mode == 2 ? "1" : "0", 1);
+        if (mode == 0) cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+        else cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+        std::string path = std::string(root) + "/graph" + std::to_string(mode) + ".db";
+        auto *pipeline = cbm_pipeline_new(repo.c_str(), path.c_str(), CBM_MODE_FAST);
+        ASSERT_NOT_NULL(pipeline);
+        int rc = cbm_pipeline_run(pipeline);
+        cbm_pipeline_free(pipeline);
+        ASSERT_EQ(rc, 0);
+        sqlite3 *db = nullptr;
+        ASSERT_EQ(sqlite3_open(path.c_str(), &db), SQLITE_OK);
+        sqlite3_stmt *stmt = nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(db,
+            "SELECT t.name,t.file_path,json_extract(e.properties,'$.strategy') "
+            "FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id "
+            "WHERE e.type='CALLS' AND s.file_path='src/Client.cpp' AND s.name='invoke' ORDER BY t.name",
+            -1, &stmt, nullptr), SQLITE_OK);
+        for (const char *name : {"external", "externalQualified"}) {
+            ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+            ASSERT_STR_EQ(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0)), name);
+            ASSERT_STR_EQ(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1)), "src/Utility.cpp");
+        }
+        ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+        ASSERT_STR_EQ(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0)), "known");
+        ASSERT_STR_EQ(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1)), "src/Client.cpp");
+        const char *strategy = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+        ASSERT_NOT_NULL(strategy);
+        ASSERT_EQ(strncmp(strategy, "lsp_", 4), 0);
+        ASSERT_EQ(sqlite3_step(stmt), SQLITE_DONE); // No declaration or guessed Method target.
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+    }
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(parallel_store_preserves_kotlin_to_java_method_call) {
+    struct Env {
+        const char *name; std::string value; bool present;
+        explicit Env(const char *key):name(key),value(getenv(key)?getenv(key):""),present(getenv(key)!=nullptr){}
+        ~Env(){ if(present) cbm_setenv(name,value.c_str(),1); else cbm_unsetenv(name); }
+    } store_env("CBM_RESULT_STORE"), single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
+    cbm_unsetenv("CBM_INDEX_SINGLE_THREAD"); cbm_setenv("CBM_WORKERS","2",1);
+    char root[]="/tmp/cbm_store_jvm_XXXXXX"; ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    std::string repo=std::string(root)+"/source";
+    ASSERT_EQ(th_write_file((repo+"/src/main/java/demo/Base.java").c_str(),
+        "package demo; public class Base { public int value(){return 7;} }\n"),0);
+    ASSERT_EQ(th_write_file((repo+"/src/main/kotlin/demo/Wrapper.kt").c_str(),
+        "package demo\nclass Wrapper { fun run(): Int { return Base().value() } }\n"),0);
+    ASSERT_EQ(th_write_file((repo+"/noise.cpp").c_str(),
+        "struct Noise { int value(){return 1;} };\n"),0);
+    for(int i=0;i<55;++i) ASSERT_EQ(th_write_file((repo+"/padding"+std::to_string(i)+".cpp").c_str(),"// padding\n"),0);
+    for(int spill=0;spill<2;++spill){
+        cbm_setenv("CBM_RESULT_STORE",spill?"1":"0",1);
+        std::string path=std::string(root)+"/graph"+std::to_string(spill)+".db";
+        auto *pipeline=cbm_pipeline_new(repo.c_str(),path.c_str(),CBM_MODE_FAST); ASSERT_NOT_NULL(pipeline);
+        int rc=cbm_pipeline_run(pipeline); cbm_pipeline_free(pipeline); ASSERT_EQ(rc,0);
+        sqlite3 *db=nullptr; ASSERT_EQ(sqlite3_open(path.c_str(),&db),SQLITE_OK);
+        sqlite3_stmt *stmt=nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(db,"SELECT count(*) FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id WHERE e.type='CALLS' AND s.name='run' AND t.name='value' AND json_extract(e.properties,'$.strategy')='lsp_kt_method'",-1,&stmt,nullptr),SQLITE_OK);
+        ASSERT_EQ(sqlite3_step(stmt),SQLITE_ROW); int calls=sqlite3_column_int(stmt,0);
+        sqlite3_finalize(stmt); sqlite3_close(db); ASSERT_EQ(calls,1);
+    }
+    th_rmtree(root); PASS();
+}
+
+
 /* ── Helper: create temp test repo with known layout ───────────── */
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+static void append_concurrent_function(void *path) {
+    th_append_file(static_cast<const char *>(path), "\nint concurrent_added() { return 9; }\n");
+}
+
+TEST(pipeline_incremental_preserves_classified_version) {
+    char root[] = "/tmp/cbm_version_race_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    char dbpath[512], target[512], trigger[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/graph.db", root);
+    snprintf(target, sizeof(target), "%s/target.cpp", root);
+    snprintf(trigger, sizeof(trigger), "%s/trigger.cpp", root);
+    th_write_file(target, "int original() { return 1; }\n");
+    th_write_file(trigger, "int trigger() { return 2; }\n");
+    for (int run = 0; run < 3; run++) {
+        if (run == 1) {
+            th_append_file(trigger, "// changed\n");
+            cbm_pipeline_test_after_classify(append_concurrent_function, target);
+        }
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(root, dbpath, CBM_MODE_FAST);
+        ASSERT_NOT_NULL(pipeline);
+        int rc = cbm_pipeline_run(pipeline);
+        cbm_pipeline_free(pipeline);
+        cbm_pipeline_test_after_classify(nullptr, nullptr);
+        ASSERT_EQ(rc, 0);
+    }
+    sqlite3 *db = nullptr;
+    ASSERT_EQ(sqlite3_open(dbpath, &db), SQLITE_OK);
+    sqlite3_stmt *stmt = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db, "SELECT count(*) FROM nodes WHERE name='concurrent_added'", -1, &stmt, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+    int count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    th_rmtree(root);
+    ASSERT_EQ(count, 1);
+    PASS();
+}
+TEST(pipeline_initial_preserves_extracted_version) {
+    char root[] = "/tmp/cbm_version_race_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    char dbpath[512], target[512], trigger[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/graph.db", root);
+    snprintf(target, sizeof(target), "%s/target.cpp", root);
+    snprintf(trigger, sizeof(trigger), "%s/trigger.cpp", root);
+    th_write_file(target, "int original() { return 1; }\n");
+    th_write_file(trigger, "int trigger() { return 2; }\n");
+    for (int run = 0; run < 2; run++) {
+        if (run == 0) {
+            cbm_pipeline_test_after_extract(append_concurrent_function, target);
+        }
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(root, dbpath, CBM_MODE_FAST);
+        ASSERT_NOT_NULL(pipeline);
+        int rc = cbm_pipeline_run(pipeline);
+        cbm_pipeline_free(pipeline);
+        cbm_pipeline_test_after_extract(nullptr, nullptr);
+        ASSERT_EQ(rc, 0);
+    }
+    sqlite3 *db = nullptr;
+    ASSERT_EQ(sqlite3_open(dbpath, &db), SQLITE_OK);
+    sqlite3_stmt *stmt = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db, "SELECT count(*) FROM nodes WHERE name='concurrent_added'", -1, &stmt, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+    int count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    th_rmtree(root);
+    ASSERT_EQ(count, 1);
+    PASS();
+}
+#endif
 
 static char g_tmpdir[256];
 
@@ -1723,6 +2033,61 @@ static void teardown_lang_repo(void) {
     if (g_lang_tmpdir[0])
         rm_rf(g_lang_tmpdir);
     g_lang_tmpdir[0] = '\0';
+}
+
+TEST(pipeline_cpp_implicit_operators_require_types) {
+    const char *files[56], *contents[56];
+    char names[55][32];
+    files[0] = "operators.cpp";
+    contents[0] =
+        "#include \"remote.h\"\n"
+        "struct Box { int value; bool operator<(const Box &rhs) const { return value < rhs.value; } };\n"
+        "bool numeric(int a, int b) { return a < b; }\n"
+        "bool remote(Remote a, Remote b) { return a < b; }\n"
+        "bool mixed(Box a, Box b, int x, int y) { bool real = a < b; bool builtin = x < y; return real && builtin; }\n";
+    for (int i = 1; i < 56; i++) {
+        snprintf(names[i - 1], sizeof(names[i - 1]), "padding%d.cpp", i);
+        files[i] = names[i - 1];
+        contents[i] = "// Enough files to exercise the parallel resolver.\n";
+    }
+    files[1] = "remote.h";
+    contents[1] = "struct Remote { bool operator<(const Remote &rhs) const { return false; } };\n";
+    ASSERT_EQ(setup_lang_repo(files, contents, 56), 0);
+    const char *old = getenv("CBM_INDEX_SINGLE_THREAD");
+    char *saved = old ? strdup(old) : nullptr;
+    for (int mode = 0; mode < 2; mode++) {
+        char db[512];
+        snprintf(db, sizeof(db), "%s/operators%d.db", g_lang_tmpdir, mode);
+        if (mode == 0) cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+        else cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FAST);
+        ASSERT_NOT_NULL(pipeline);
+        int result = cbm_pipeline_run(pipeline);
+        if (saved) cbm_setenv("CBM_INDEX_SINGLE_THREAD", saved, 1);
+        else cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+        ASSERT_EQ(result, 0);
+        sqlite3 *sql = nullptr;
+        ASSERT_EQ(sqlite3_open_v2(db, &sql, SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+        sqlite3_stmt *statement = nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(sql,
+            "SELECT s.name,t.name,e.properties FROM edges e "
+            "JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id "
+            "WHERE e.type='CALLS'", -1, &statement, nullptr), SQLITE_OK);
+        int calls = 0;
+        while (sqlite3_step(statement) == SQLITE_ROW) {
+            const char *caller = (const char *)sqlite3_column_text(statement, 0);
+            ASSERT(strcmp(caller, "mixed") == 0 || strcmp(caller, "remote") == 0);
+            ASSERT_STR_EQ((const char *)sqlite3_column_text(statement, 1), "operator<");
+            calls++;
+        }
+        ASSERT_EQ(calls, 2);
+        sqlite3_finalize(statement);
+        sqlite3_close(sql);
+        cbm_pipeline_free(pipeline);
+    }
+    free(saved);
+    teardown_lang_repo();
+    PASS();
 }
 
 TEST(pipeline_python_project) {
@@ -5321,6 +5686,77 @@ TEST(incremental_full_then_noop) {
     PASS();
 }
 
+TEST(incremental_format_two_rebuilds_template_declarations_once) {
+    const char *files[] = {"View.hpp", "View.cpp"};
+    const char *contents[] = {
+        "template<class T> struct View { void convert(T value, T & output) const; };\n",
+        "template<class U> void View<U>::convert(U renamed, U & result) const {}\n"};
+    ASSERT_EQ(setup_lang_repo(files, contents, 2), 0);
+    char db[512];
+    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FAST);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    char *project = strdup(cbm_pipeline_project_name(p));
+    cbm_pipeline_free(p);
+
+    // Format 2 lacked keys for these template members. Keep source hashes intact.
+    cbm_store_t *store = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(store);
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(store, project, "convert", &nodes, &count),
+              CBM_STORE_OK);
+    ASSERT_EQ(count, 2);
+    for (int i = 0; i < count; i++) {
+        cbm_node_t old = nodes[i];
+        old.properties_json = "{}";
+        ASSERT_GT(cbm_store_upsert_node(store, &old), 0);
+    }
+    cbm_store_free_nodes(nodes, count);
+    ASSERT_EQ(cbm_store_set_format_version(store, 2), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_adr_store(store, project, "Keep this project decision."), CBM_STORE_OK);
+    cbm_store_close(store);
+
+    for (int run = 0; run < 2; run++) {
+        p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FAST);
+        ASSERT_NOT_NULL(p);
+        ASSERT_EQ(cbm_pipeline_run(p), 0);
+        ASSERT_EQ(cbm_pipeline_had_format_migration(p), run == 0);
+        cbm_pipeline_free(p);
+        store = cbm_store_open_path(db);
+        ASSERT_NOT_NULL(store);
+        int format = 0;
+        ASSERT_EQ(cbm_store_get_format_version(store, &format), CBM_STORE_OK);
+        ASSERT_EQ(format, CBM_INDEX_FORMAT_VERSION);
+        ASSERT_EQ(cbm_store_find_nodes_by_name(store, project, "convert", &nodes, &count),
+                  CBM_STORE_OK);
+        ASSERT_EQ(count, 2);
+        yyjson_doc *a = yyjson_read(nodes[0].properties_json,
+                                   strlen(nodes[0].properties_json), 0);
+        yyjson_doc *b = yyjson_read(nodes[1].properties_json,
+                                   strlen(nodes[1].properties_json), 0);
+        ASSERT_NOT_NULL(a);
+        ASSERT_NOT_NULL(b);
+        const char *key_a = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(a), "declaration_key"));
+        const char *key_b = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(b), "declaration_key"));
+        ASSERT_NOT_NULL(key_a);
+        ASSERT_NOT_NULL(key_b);
+        ASSERT_STR_EQ(key_a, key_b);
+        yyjson_doc_free(a);
+        yyjson_doc_free(b);
+        cbm_store_free_nodes(nodes, count);
+        cbm_adr_t adr = {};
+        ASSERT_EQ(cbm_store_adr_get(store, project, &adr), CBM_STORE_OK);
+        ASSERT_STR_EQ(adr.content, "Keep this project decision.");
+        cbm_store_adr_free(&adr);
+        cbm_store_close(store);
+    }
+    free(project);
+    teardown_lang_repo();
+    PASS();
+}
+
 TEST(incremental_detects_changed_file) {
     /* Full index, modify one file, re-index → changed file re-parsed */
     if (setup_incremental_repo() != 0) {
@@ -6815,8 +7251,244 @@ TEST(pipeline_sql_lineage_and_relation_isolation) {
     PASS();
 }
 
+/* Independent exec, bounded by the common POSIX/Windows subprocess helper.
+ * Exit 73 is typed contention; 79 is deliberate exit without C++ cleanup. */
+static int lease_probe(const char *mode, const char *path) {
+    char self[4096];
+    if (!cbm_resolve_self_exe_path(NULL, self, sizeof(self))) {
+        return -1;
+    }
+    const char *argv[] = {self, "--index-lease-probe", mode, path, NULL};
+    cbm_proc_opts_t opts = {};
+    opts.bin = self;
+    opts.argv = argv;
+    opts.total_timeout_ms = 10000;
+    opts.poll_cap_ms = 10;
+    cbm_proc_result_t result = {};
+    if (cbm_subprocess_run(&opts, &result) != 0 ||
+        (result.outcome != CBM_PROC_CLEAN && result.outcome != CBM_PROC_EXIT_NONZERO)) {
+        return -1;
+    }
+    return result.exit_code;
+}
+
+TEST(pipeline_lease_independent_processes) {
+    char root[256] = "/tmp/cbm_lease_proc_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    std::string db = std::string(root) + "/cache/project.db";
+    std::string other = std::string(root) + "/cache/other.db";
+    cbm_pipeline_t *p = cbm_pipeline_new(root, db.c_str(), CBM_MODE_FAST);
+    ASSERT(p);
+    ASSERT_EQ(cbm_pipeline_claim_index(p), 0);
+    ASSERT_EQ(cbm_pipeline_claim_index(p), 0); // Same object owns the existing claim.
+    ASSERT(!cbm_pipeline_set_project_name(p, "changed_target"));
+    ASSERT_EQ(lease_probe("claim", db.c_str()), 73);
+    ASSERT_EQ(lease_probe("claim", other.c_str()), 0); // No global cross-DB exclusion.
+    ASSERT_EQ(th_write_file(db.c_str(), "generation one"), 0);
+    ASSERT_EQ(cbm_unlink(db.c_str()), 0);
+    ASSERT_EQ(th_write_file(db.c_str(), "generation two"), 0);
+    ASSERT_EQ(lease_probe("claim", db.c_str()), 73); // DB inode replacement is irrelevant.
+    cbm_pipeline_free(p);
+    ASSERT_EQ(lease_probe("claim", db.c_str()), 0);
+    ASSERT(cbm_is_regular_file((db + ".index.lock").c_str())); // Stable file must survive.
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(pipeline_lease_canonical_aliases) {
+    char root[256] = "/tmp/cbm_lease_alias_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    std::string db = std::string(root) + "/target.db";
+    std::string dot = std::string(root) + "/./target.db";
+    ASSERT_EQ(th_write_file(db.c_str(), "database"), 0);
+    cbm_db_lease_t *lease = NULL;
+    ASSERT_EQ(cbm_db_lease_try_acquire(db.c_str(), &lease), 0);
+    ASSERT_EQ(lease_probe("claim", dot.c_str()), 73);
+#ifndef _WIN32
+    std::string alias = std::string(root) + "/alias.db";
+    ASSERT_EQ(symlink("target.db", alias.c_str()), 0);
+    ASSERT_EQ(lease_probe("claim", alias.c_str()), 73);
+    std::string alias_dir = std::string(root) + "/alias-dir";
+    ASSERT_EQ(symlink(root, alias_dir.c_str()), 0);
+    ASSERT_EQ(lease_probe("claim", (alias_dir + "/target.db").c_str()), 73);
+    ASSERT_EQ(cbm_unlink(alias_dir.c_str()), 0); // Do not traverse a directory link at cleanup.
+#endif
+    cbm_db_lease_release(lease);
+#ifndef _WIN32
+    std::string hard = std::string(root) + "/hard.db";
+    ASSERT_EQ(link(db.c_str(), hard.c_str()), 0);
+    ASSERT_EQ(cbm_db_lease_try_acquire(db.c_str(), &lease), CBM_NOT_FOUND);
+    ASSERT(!lease); // Unsupported alternate sidecar names fail closed.
+#endif
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(pipeline_lease_crash_release) {
+    char root[256] = "/tmp/cbm_lease_exit_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    std::string db = std::string(root) + "/project.db";
+    ASSERT_EQ(lease_probe("abandon", db.c_str()), 79);
+    ASSERT_EQ(lease_probe("claim", db.c_str()), 0);
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(pipeline_lease_run_busy_is_nondestructive) {
+    char root[256] = "/tmp/cbm_lease_busy_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    std::string db = std::string(root) + "/project.db";
+    ASSERT_EQ(th_write_file(db.c_str(), "keep db"), 0);
+    ASSERT_EQ(th_write_file((db + "-wal").c_str(), "keep wal"), 0);
+    ASSERT_EQ(th_write_file((db + "-shm").c_str(), "keep shm"), 0);
+    cbm_db_lease_t *lease = NULL;
+    ASSERT_EQ(cbm_db_lease_try_acquire(db.c_str(), &lease), 0);
+    ASSERT_EQ(lease_probe("run", db.c_str()), 73);
+    const char *suffixes[] = {"", "-wal", "-shm"};
+    const char *expected[] = {"keep db", "keep wal", "keep shm"};
+    for (int i = 0; i < 3; ++i) {
+        FILE *file = cbm_fopen((db + suffixes[i]).c_str(), "rb");
+        ASSERT(file);
+        char contents[32] = {};
+        size_t n = fread(contents, 1, sizeof(contents) - 1, file);
+        fclose(file);
+        ASSERT_EQ(n, strlen(expected[i]));
+        ASSERT_STR_EQ(contents, expected[i]);
+    }
+    cbm_db_lease_release(lease);
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(pipeline_lease_error_exit_releases) {
+    char root[256] = "/tmp/cbm_lease_error_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    std::string db = std::string(root) + "/project.db";
+    cbm_pipeline_t *p = cbm_pipeline_new((std::string(root) + "/missing").c_str(),
+                                        db.c_str(), CBM_MODE_FAST);
+    ASSERT(p);
+    ASSERT_EQ(cbm_pipeline_claim_index(p), 0);
+    ASSERT_EQ(cbm_pipeline_run(p), CBM_NOT_FOUND);
+    ASSERT_EQ(lease_probe("claim", db.c_str()), 0); // Released before p is freed.
+    cbm_pipeline_free(p);
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(pipeline_lease_busy_result_contract) {
+    char *busy = cbm_mcp_text_result("{\"status\":\"busy\",\"code\":\"index_busy\"}", false);
+    ASSERT(busy);
+    bool error = true;
+    ASSERT(cbm_mcp_tool_result_valid(busy, &error));
+    ASSERT(!error); // A supervised worker must exit cleanly, without quarantine.
+    ASSERT(cbm_mcp_result_is_index_busy(busy));
+    free(busy);
+    char *done = cbm_mcp_text_result("{\"status\":\"indexed\",\"code\":\"index_busy\"}", false);
+    ASSERT(!cbm_mcp_result_is_index_busy(done));
+    free(done);
+    char *failed = cbm_mcp_text_result("{\"status\":\"busy\",\"code\":\"index_busy\"}", true);
+    ASSERT(!cbm_mcp_result_is_index_busy(failed));
+    free(failed);
+    ASSERT(!cbm_mcp_result_is_index_busy(NULL));
+    ASSERT(!cbm_mcp_result_is_index_busy("not json"));
+    PASS();
+}
+
+#ifdef _WIN32
+#include "foundation/win_utf8.h"
+#include <string>
+TEST(pipeline_lease_windows_ambiguous_missing_and_replaced_names) {
+    char root[256] = "/tmp/cbm_lease_win_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    std::string db = std::string(root) + "/target.db";
+    cbm_db_lease_t *lease = NULL;
+    cbm_db_lease_t *rejected = NULL;
+    const char *suffixes[] = {".", " "};
+    // No original file exists: the fallback path must not invent alias locks.
+    for (const char *suffix : suffixes) {
+        ASSERT_EQ(cbm_db_lease_try_acquire((db + suffix).c_str(), &rejected), CBM_NOT_FOUND);
+        ASSERT(!rejected);
+    }
+    ASSERT_EQ(cbm_db_lease_try_acquire((std::string(root) + "/cache./target.db").c_str(), &rejected), CBM_NOT_FOUND);
+    ASSERT(!rejected);
+    ASSERT_EQ(cbm_db_lease_try_acquire(db.c_str(), &lease), 0);
+    ASSERT_EQ(th_write_file(db.c_str(), "generation"), 0);
+    ASSERT_EQ(cbm_unlink(db.c_str()), 0); // Exact full-rebuild gap: the lease survives.
+    for (const char *suffix : suffixes) {
+        ASSERT_EQ(cbm_db_lease_try_acquire((db + suffix).c_str(), &rejected), CBM_NOT_FOUND);
+        ASSERT(!rejected);
+    }
+    ASSERT_EQ(lease_probe("claim", (std::string(root) + "/./target.db").c_str()), 73);
+    ASSERT_EQ(th_write_file(db.c_str(), "replacement"), 0);
+    ASSERT_EQ(lease_probe("claim", db.c_str()), 73);
+    cbm_db_lease_release(lease);
+    ASSERT_EQ(lease_probe("claim", db.c_str()), 0);
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(pipeline_lease_windows_extended_component_is_not_retargeted) {
+    char root[256] = "/tmp/cbm_lease_extended_XXXXXX";
+    ASSERT(cbm_mkdtemp(root));
+    std::string ordinary = std::string(root) + "/target.db";
+    ASSERT_EQ(th_write_file(ordinary.c_str(), "ordinary"), 0);
+    wchar_t *input = cbm_utf8_to_wide(ordinary.c_str());
+    ASSERT(input);
+    wchar_t absolute[4096];
+    DWORD n = GetFullPathNameW(input, 4096, absolute, NULL);
+    free(input);
+    ASSERT(n && n < 4096);
+    std::wstring extended = L"\\\\?\\";
+    extended += absolute;
+    extended += L".";
+    HANDLE h = CreateFileW(extended.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    ASSERT(h != INVALID_HANDLE_VALUE);
+    DWORD written = 0;
+    ASSERT(WriteFile(h, "extended", 8, &written, NULL));
+    ASSERT_EQ(written, 8);
+    CloseHandle(h);
+    char *extended_utf8 = cbm_wide_to_utf8(extended.c_str());
+    ASSERT(extended_utf8);
+    cbm_db_lease_t *rejected = NULL;
+    ASSERT_EQ(cbm_db_lease_try_acquire(extended_utf8, &rejected), CBM_NOT_FOUND);
+    ASSERT(!rejected);
+    free(extended_utf8);
+    // Resolved reparse-point aliases require a separate native Windows control;
+    // this mandatory test covers direct extended-path spelling without privileges.
+    FILE *normal = cbm_fopen(ordinary.c_str(), "rb");
+    ASSERT(normal);
+    char bytes[16] = {};
+    size_t count = fread(bytes, 1, sizeof(bytes), normal);
+    fclose(normal);
+    ASSERT_EQ(count, 8);
+    ASSERT(memcmp(bytes, "ordinary", 8) == 0);
+    ASSERT(DeleteFileW(extended.c_str()));
+    th_rmtree(root);
+    PASS();
+}
+#endif
+
 SUITE(pipeline) {
+#ifdef _WIN32
+    RUN_TEST(pipeline_lease_windows_ambiguous_missing_and_replaced_names);
+    RUN_TEST(pipeline_lease_windows_extended_component_is_not_retargeted);
+#endif
+    RUN_TEST(pipeline_lease_independent_processes);
+    RUN_TEST(pipeline_lease_canonical_aliases);
+    RUN_TEST(pipeline_lease_crash_release);
+    RUN_TEST(pipeline_lease_run_busy_is_nondestructive);
+    RUN_TEST(pipeline_lease_error_exit_releases);
+    RUN_TEST(pipeline_lease_busy_result_contract);
+
     /* Index lock */
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(pipeline_cpp_cross_gate_uses_sites_not_entry_count);
+    RUN_TEST(pipeline_cpp_receiver_guard_uses_current_pass_and_leaf);
+#endif
+    RUN_TEST(pipeline_cpp_pointer_members_match_in_memory_and_store);
+    RUN_TEST(pipeline_cpp_ambiguous_include_keeps_local_calls);
+    RUN_TEST(parallel_store_preserves_kotlin_to_java_method_call);
     RUN_TEST(pipeline_lock_try_acquire);
     RUN_TEST(pipeline_lock_blocking);
     RUN_TEST(pipeline_lock_contention);
@@ -7010,6 +7682,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_fastapi_depends_edges);
     /* Incremental */
     RUN_TEST(incremental_full_then_noop);
+    RUN_TEST(incremental_format_two_rebuilds_template_declarations_once);
     RUN_TEST(incremental_detects_changed_file);
     RUN_TEST(incremental_detects_deleted_file);
     RUN_TEST(incremental_new_file_added);
@@ -7089,4 +7762,9 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_cross_language_same_name_does_not_share_calls_issue725);
     RUN_TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
+    RUN_TEST(pipeline_cpp_implicit_operators_require_types);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(pipeline_incremental_preserves_classified_version);
+    RUN_TEST(pipeline_initial_preserves_extracted_version);
+#endif
 }

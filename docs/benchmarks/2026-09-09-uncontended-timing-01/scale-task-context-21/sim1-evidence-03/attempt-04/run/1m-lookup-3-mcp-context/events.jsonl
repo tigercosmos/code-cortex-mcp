@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a08573-6cf9-7352-a5ac-721ac60b806d"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"part_0000/unit_000049.cpp:351"}}
+{"type":"turn.completed","usage":{"input_tokens":9572,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":15,"reasoning_output_tokens":0}}

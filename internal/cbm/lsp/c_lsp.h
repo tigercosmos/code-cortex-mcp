@@ -47,6 +47,8 @@ typedef struct {
 
     // Current context
     const char *enclosing_func_qn;
+    uint32_t call_source_byte;
+    CBMFileResult *local_result; // Optional local-only pending-operator accounting.
     const char *enclosing_class_qn; // for implicit `this` resolution
     const char *module_qn;
     size_t module_qn_len; // cached strlen(module_qn); for stack-buffer QN building

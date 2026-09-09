@@ -1,3 +1,5 @@
+#include "pipeline/result_store.h"
+#include <vector>
 /*
  * pipeline.c — Indexing pipeline orchestrator.
  *
@@ -49,7 +51,8 @@ static inline void *intptr_to_ptr(intptr_t v) {
 }
 
 /* ── Global index lock ─────────────────────────────────────────── */
-/* Prevents concurrent pipeline runs on the same DB file.
+/* Serializes process-local extraction state. The separate DB lease below
+ * excludes independent processes writing the same canonical database.
  * Atomic spinlock: 0 = free, 1 = locked. */
 static atomic_int g_pipeline_busy = 0;
 
@@ -75,6 +78,8 @@ void cbm_pipeline_unlock(void) {
 struct cbm_pipeline {
     char *repo_path;
     char *db_path;
+    bool default_db_path;
+    cbm_db_lease_t *index_lease;
     char *project_name;
     cbm_git_context_t git_ctx;
     char *branch_qn;
@@ -190,7 +195,7 @@ static const char *mb_buf(size_t bytes) {
  * the same include guard and cbm.h pulls it in first, so only the subset API
  * it declares is visible in this translation unit. */
 static size_t result_arena_resident(const CBMArena *a) {
-    size_t total = 0;
+    size_t total = a->resizable_bytes;
     for (int i = 0; i < a->nblocks; i++) {
         total += a->block_sizes[i];
     }
@@ -246,6 +251,9 @@ void cbm_pipeline_mem_profile(const char *phase, const cbm_gbuf_t *gbuf,
             }
             n_defs += r->defs.count;
             n_calls += r->calls.count;
+            for (int ci = 0; ci < r->calls.count; ci++) {
+                records += (size_t)r->calls.items[ci].arg_count * sizeof(CBMCallArg);
+            }
             n_usages += r->usages.count;
             n_typerefs += r->type_refs.count;
             records += ((size_t)r->defs.cap * sizeof(*r->defs.items)) +
@@ -336,6 +344,7 @@ cbm_pipeline_t *cbm_pipeline_new(const char *repo_path, const char *db_path,
 
     p->repo_path = strdup(repo_path);
     p->db_path = db_path ? strdup(db_path) : NULL;
+    p->default_db_path = db_path == NULL;
     p->project_name = cbm_project_name_from_path(repo_path);
     (void)cbm_git_context_resolve(repo_path, &p->git_ctx);
     p->branch_qn = cbm_git_context_branch_qn(p->project_name, &p->git_ctx);
@@ -355,7 +364,7 @@ void cbm_pipeline_set_persistence(cbm_pipeline_t *p, bool enabled) {
 }
 
 bool cbm_pipeline_set_project_name(cbm_pipeline_t *p, const char *name) {
-    if (!p || !name || !name[0]) {
+    if (!p || p->index_lease || !name || !name[0]) {
         return false;
     }
 
@@ -379,6 +388,7 @@ void cbm_pipeline_free(cbm_pipeline_t *p) {
     if (!p) {
         return;
     }
+    cbm_db_lease_release(p->index_lease);
     free(p->repo_path);
     free(p->db_path);
     free(p->project_name);
@@ -533,17 +543,60 @@ static int effective_worker_count(bool initial) {
 
 /* Resolve the DB path for this pipeline. Caller must free(). */
 static char *resolve_db_path(const cbm_pipeline_t *p) {
-    char *path = (char *)malloc(CBM_SZ_1K);
-    if (!path) {
+    if (p->db_path) {
+        return strdup(p->db_path);
+    }
+    const char *cache = cbm_resolve_cache_dir();
+    if (!cache || !p->project_name) {
         return NULL;
     }
-    if (p->db_path) {
-        snprintf(path, 1024, "%s", p->db_path);
-    } else {
-        snprintf(path, 1024, "%s/%s.db", cbm_resolve_cache_dir(), p->project_name);
+    size_t len = strlen(cache) + strlen(p->project_name) + 5;
+    if (len > CBM_PATH_MAX) {
+        return NULL;
+    }
+    char *path = (char *)malloc(len);
+    if (path) {
+        snprintf(path, len, "%s/%s.db", cache, p->project_name);
     }
     return path;
 }
+
+int cbm_pipeline_claim_index(cbm_pipeline_t *p) {
+    if (!p) {
+        return CBM_NOT_FOUND;
+    }
+    if (p->index_lease) {
+        return 0;
+    }
+    char *path = resolve_db_path(p);
+    cbm_db_lease_t *lease = NULL;
+    int rc = cbm_db_lease_try_acquire(path, &lease);
+    free(path);
+    if (rc != 0) {
+        return rc;
+    }
+    char *canonical = strdup(cbm_db_lease_target(lease));
+    if (!canonical) {
+        cbm_db_lease_release(lease);
+        return CBM_NOT_FOUND;
+    }
+    free(p->db_path);
+    p->db_path = canonical;
+    p->index_lease = lease;
+    return 0;
+}
+
+struct pipeline_lease_scope {
+    cbm_pipeline_t *p;
+    ~pipeline_lease_scope() {
+        cbm_db_lease_release(p->index_lease);
+        p->index_lease = NULL;
+        if (p->default_db_path) {
+            free(p->db_path);
+            p->db_path = NULL;
+        }
+    }
+};
 
 static int check_cancel(const cbm_pipeline_t *p) {
     return atomic_load(&p->cancelled) ? CBM_NOT_FOUND : 0;
@@ -1065,11 +1118,31 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         cbm_log_error("pipeline.err", "phase", "cache_alloc");
         return CBM_NOT_FOUND;
     }
+    std::unique_ptr<cbm::ResultStore> result_store;
+    char store_env[16];
+    const char *store_setting = cbm_safe_getenv("CBM_RESULT_STORE", store_env, sizeof(store_env), nullptr);
+    if (store_setting && strcmp(store_setting, "1") == 0) {
+        std::string error;
+        result_store = cbm::ResultStore::create({256ULL * 1024 * 1024, 512ULL * 1024 * 1024,
+                                                (size_t)worker_count, 64ULL * 1024 * 1024 * 1024}, error);
+        if (!result_store) {
+            cbm_log_error("result_store.create_failed", "reason", error.c_str());
+            free(cache);
+            return CBM_NOT_FOUND;
+        }
+        cbm_log_info("result_store.enabled", "mode", "owned_registry_summaries");
+    }
+    ctx->result_store = result_store.get();
+    struct StoreContextReset {
+        cbm_pipeline_ctx_t *ctx;
+        ~StoreContextReset() { ctx->result_store = nullptr; }
+    } reset_store_context{ctx};
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
     int rc = cbm_parallel_extract(ctx, files, file_count, cache, &shared_ids, worker_count);
     cbm_log_info("pass.timing", "pass", "parallel_extract", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)));
     if (rc != 0 || check_cancel(p)) {
+        for (int i = 0; i < file_count; ++i) cbm_free_result(cache[i]);
         free(cache);
         return rc != 0 ? rc : CBM_NOT_FOUND;
     }
@@ -1196,6 +1269,12 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         }
     }
     free(cache);
+    if (result_store) {
+        auto stats = result_store->stats();
+        cbm_log_info("result_store.released", "records", n_buf(stats.records),
+                     "published_bytes", n_buf(stats.published_bytes),
+                     "live_leases", n_buf(stats.live_leases));
+    }
     /* The extraction results are the bulk of the process (rocksdb: 2.5 GB of a
      * 3.0 GB peak). Freeing them only returns the pages to the allocator, so
      * without this collect the dump's transient arrays are allocated on top of
@@ -1295,7 +1374,7 @@ static int64_t stat_mtime_ns(const struct stat *fst) {
 
 /* Dump graph to SQLite and persist file hashes for incremental indexing. */
 static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *files, int file_count,
-                                   struct timespec *t) {
+                                   struct timespec *t, const cbm_file_hash_t *versions) {
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
     char db_path[CBM_SZ_1K];
     if (p->db_path) {
@@ -1360,35 +1439,9 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
          * (project, rel_path, sha256="", mtime_ns, size) tuples, same replace
          * semantics — only the transaction boundary changes. */
         CBM_PROF_START(t_fh);
-        cbm_file_hash_t *fhashes = (cbm_file_hash_t *)malloc(
-            (size_t)(file_count > 0 ? file_count : 1) * sizeof(cbm_file_hash_t));
-        if (fhashes) {
-            int fh_n = 0;
-            for (int i = 0; i < file_count; i++) {
-                struct stat fst;
-                if (stat(files[i].path, &fst) == 0) {
-                    fhashes[fh_n].project = p->project_name;
-                    fhashes[fh_n].rel_path = files[i].rel_path;
-                    fhashes[fh_n].sha256 = "";
-                    fhashes[fh_n].mtime_ns = stat_mtime_ns(&fst);
-                    fhashes[fh_n].size = fst.st_size;
-                    fh_n++;
-                }
-            }
-            if (cbm_store_upsert_file_hash_batch(hash_store, fhashes, fh_n) != CBM_STORE_OK) {
-                cbm_log_error("pipeline.err", "phase", "persist_file_hashes", "project",
-                              p->project_name);
-            }
-            free(fhashes);
-        } else {
-            /* OOM fallback: the original per-file path (identical result, slower). */
-            for (int i = 0; i < file_count; i++) {
-                struct stat fst;
-                if (stat(files[i].path, &fst) == 0) {
-                    cbm_store_upsert_file_hash(hash_store, p->project_name, files[i].rel_path, "",
-                                               stat_mtime_ns(&fst), fst.st_size);
-                }
-            }
+        if (cbm_store_upsert_file_hash_batch(hash_store, versions, file_count) != CBM_STORE_OK) {
+            cbm_log_error("pipeline.err", "phase", "persist_file_hashes", "project",
+                          p->project_name);
         }
         CBM_PROF_END_N("persist", "4_file_hashes", t_fh, file_count);
 
@@ -1547,9 +1600,19 @@ static int run_tests_and_history(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     return rc;
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+static thread_local void (*after_extract_callback)(void *);
+static thread_local void *after_extract_data;
+void cbm_pipeline_test_after_extract(void (*callback)(void *), void *data) {
+    after_extract_callback = callback;
+    after_extract_data = data;
+}
+#endif
+
 /* Run tests, git history, predump passes, and dump+persist. */
 static int run_post_extraction(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                               const cbm_file_info_t *files, int file_count) {
+                               const cbm_file_info_t *files, int file_count,
+                               const cbm_file_hash_t *versions) {
     int rc = run_tests_and_history(p, ctx, files, file_count);
     if (rc != 0) {
         return rc;
@@ -1562,7 +1625,7 @@ static int run_post_extraction(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     if (!check_cancel(p)) {
         struct timespec t;
         CBM_PROF_START(t_dump);
-        rc = dump_and_persist_hashes(p, files, file_count, &t);
+        rc = dump_and_persist_hashes(p, files, file_count, &t, versions);
         CBM_PROF_END("pipeline", "4_dump_and_persist", t_dump);
     }
     return rc;
@@ -1599,6 +1662,13 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     if (!p) {
         return CBM_NOT_FOUND;
     }
+    int claim_rc = cbm_pipeline_claim_index(p);
+    if (claim_rc != 0) {
+        return claim_rc;
+    }
+    // Includes incremental/no-op exits, destructive full rebuild, and artifact
+    // export. MCP may already own this lease before artifact bootstrap.
+    pipeline_lease_scope lease_scope{p};
 
     CBM_PROF_START(t_pipeline_total);
     struct timespec t0;
@@ -1610,6 +1680,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
      * trivial POD struct. The earlier `goto cleanup` at the discover
      * step would otherwise jump past ctx's init below. */
     cbm_pipeline_ctx_t ctx;
+    std::vector<cbm_file_hash_t> file_versions;
 
     /* C/C++ #define Macro nodes (#375) dominate extraction on macro-dense repos
      * (≈49% of nodes on the Linux kernel), so gate them to full mode — moderate
@@ -1679,6 +1750,24 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     }
     cbm_log_info("pipeline.route", "path", "full");
 
+    /* Capture source versions before extraction. Changes after this snapshot
+     * must remain visible to the next incremental run, even if extraction
+     * happens to read a newer version of a file. */
+    file_versions.resize((size_t)file_count);
+    for (int i = 0; i < file_count; i++) {
+        auto &version = file_versions[(size_t)i];
+        version.project = p->project_name;
+        version.rel_path = files[i].rel_path;
+        version.sha256 = "";
+        version.size = -1;
+        struct stat st;
+        if (stat(files[i].path, &st) == 0) {
+            version.mtime_ns = stat_mtime_ns(&st);
+            version.size = st.st_size;
+        }
+    }
+
+
     /* Phase 2: Create graph buffer and registry */
     p->gbuf = cbm_gbuf_new(p->project_name, p->repo_path);
     p->registry = cbm_registry_new();
@@ -1712,7 +1801,15 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         goto cleanup;
     }
 
-    rc = run_post_extraction(p, &ctx, files, file_count);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (after_extract_callback) {
+        auto callback = after_extract_callback;
+        after_extract_callback = nullptr;
+        callback(after_extract_data);
+    }
+#endif
+
+    rc = run_post_extraction(p, &ctx, files, file_count, file_versions.data());
     if (rc != 0) {
         goto cleanup;
     }

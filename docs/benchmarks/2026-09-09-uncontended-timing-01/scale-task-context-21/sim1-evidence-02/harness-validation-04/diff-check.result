@@ -1,0 +1,5 @@
+phase=diff-check
+return_code=0
+start_ns=1788941275242200442
+end_ns=1788941275282593020
+wall_ns=40392578

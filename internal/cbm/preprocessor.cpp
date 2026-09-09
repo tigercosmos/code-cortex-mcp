@@ -178,6 +178,13 @@ CBMPreprocessedSource *cbm_preprocess_with_map(const char *source, int source_le
 
         std::string result = output.stringify();
 
+        // Tokenization applies authored line controls, including in headers.
+        // Those logical coordinates cannot prove physical source ownership.
+        bool authored_line_control = rawtokens.hasLineControl();
+        for (const auto &file : filedata) {
+            authored_line_control = authored_line_control || file->tokens.hasLineControl();
+        }
+
         // Clean up loaded file data
         simplecpp::cleanup(filedata);
 
@@ -196,7 +203,10 @@ CBMPreprocessedSource *cbm_preprocess_with_map(const char *source, int source_le
             return NULL;
         }
         memcpy(pp->source, result.c_str(), result.size() + 1);
-        if (!build_line_map(result, files[0], pp->original_line_by_expanded_line,
+        // Authored controls make simplecpp locations logical. Keep expanded text
+        // for callers, but expose no unproven physical coordinates or ownership.
+        if (!authored_line_control &&
+            !build_line_map(result, files[0], pp->original_line_by_expanded_line,
                             pp->belongs_to_main_file)) {
             cbm_preprocessed_source_free(pp);
             return NULL;

@@ -217,7 +217,14 @@ typedef struct {
     bool is_entry_point;
     const char *structural_profile; // AST structural profile (arena-allocated) or NULL
     const char *body_tokens; // space-separated raw identifier tokens from body (arena) or NULL
+    const char *declaration_key; // C/C++ scope and parameter-token identity, or NULL
+    uint32_t definition_offset; // Original source byte offset for C-family callable identity.
 } CBMDefinition;
+
+typedef struct {
+    uint32_t byte_offset;
+    const char *qualified_name;
+} CBMOverload;
 
 /* Argument captured from a call expression */
 typedef struct {
@@ -234,11 +241,13 @@ typedef struct {
     const char *enclosing_func_qn;      // QN of enclosing function (or module QN)
     const char *first_string_arg;       // first string literal argument (URL, topic, key) or NULL
     const char *second_arg_name;        // second argument identifier (handler ref) or NULL
-    CBMCallArg args[CBM_MAX_CALL_ARGS]; // first N arguments with expressions
+    CBMCallArg *args;                  // arena-owned captured arguments; NULL when arg_count is zero
     int arg_count;                      // number of captured arguments
     int loop_depth;                     // enclosing loop nesting at the call site
     int branch_depth;                   // enclosing branch nesting at the call site
     int start_line;                     // 1-based source line of the call (for def range-match)
+    uint32_t source_byte; // Source byte offset plus one, or zero when unavailable.
+    bool requires_typed_resolution;     // Implicit operator candidates must not use name-only fallback.
     bool is_method;                     // method/member call with a non-self receiver. Perl:
                                         // arrow/method call ($obj->m). TS/JS/TSX: member call
                                         // x.foo() whose receiver is not this/super. Default false.
@@ -329,12 +338,20 @@ typedef struct {
 } CBMImplTrait;
 
 // LSP-resolved call: high-confidence type-aware call resolution
-typedef struct {
+typedef struct CBMResolvedCall {
     const char *caller_qn; // enclosing function QN
     const char *callee_qn; // resolved target QN (fully qualified)
     const char *strategy;  // "lsp_type_dispatch", "lsp_direct", etc.
     float confidence;      // 0.90-0.95
     const char *reason;    // diagnostic label for unresolved calls (NULL if resolved)
+#ifdef __cplusplus
+    uint32_t source_byte;
+    // Nonzero only for a resolved binary operator; used to materialize deferred sites.
+    uint32_t binary_operator_line;
+#else
+    uint32_t source_byte;
+    uint32_t binary_operator_line;
+#endif
 } CBMResolvedCall;
 
 typedef struct {
@@ -427,7 +444,12 @@ typedef struct {
     CBMArena arena; // owns all string memory
 
     CBMDefArray defs;
+    CBMOverload *overloads; // Sparse source-offset map, sorted for call-scope lookup.
+    int overload_count;
     CBMCallArray calls;
+    int deferred_cpp_operator_count; // Binary expressions awaiting typed resolution.
+    int pending_cpp_operator_count; // Deferred expressions not proven to have builtin operands.
+    void *cpp_operator_tracker; // Temporary source-range tracker during local extraction.
     CBMImportArray imports;
     CBMUsageArray usages;
     CBMThrowArray throws;
@@ -515,6 +537,9 @@ typedef struct {
     EFCache ef_cache;                      // enclosing function cache
     const char *enclosing_class_qn;        // for nested class QN computation
     CBMStringConstantMap string_constants; // module-level NAME = "value" pairs
+    bool defer_cpp_operators; // Internal opt-in; preserve pending count without full call records.
+    bool deduplicate_usages;
+    void *usage_dedup; // Per-walk scratch set; never retained in the result.
 } CBMExtractCtx;
 
 // --- Public API ---
@@ -571,6 +596,25 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
                                 const char **include_paths  // NULL-terminated, or NULL
 );
 
+// Opt-in for consumers that materialize operator sites after typed resolution.
+// The default API preserves all textual operator candidates. Deferred results
+// are not a complete textual call inventory: consult deferred_cpp_operator_count.
+typedef struct {
+    bool defer_cpp_operators;
+    bool deduplicate_usages; // Keep one reference per enclosing scope, preserving first occurrence.
+} CBMExtractOptions;
+CBMFileResult *cbm_extract_file_with_options(
+    const char *source, int source_len, CBMLanguage language, const char *project,
+    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
+    const char **include_paths, const CBMExtractOptions *options);
+
+// Append resolved binary operator sites to a deferred result after local/cross-file
+// resolution. Repeated calls are safe and can consume newly appended resolutions.
+// Returns the number of call records added; pending count remains diagnostic.
+int cbm_materialize_deferred_cpp_operators(CBMFileResult *result);
+void cbm_track_deferred_cpp_operator(CBMFileResult *result, uint32_t start, uint32_t end);
+void cbm_discharge_builtin_cpp_operator(CBMFileResult *result, uint32_t start, uint32_t end);
+
 // Free all memory associated with a result.
 void cbm_free_result(CBMFileResult *result);
 
@@ -614,6 +658,9 @@ int cbm_macro_extraction_enabled(void);
 // Growable array push functions (arena-allocated, no individual free needed).
 void cbm_defs_push(CBMDefArray *arr, CBMArena *a, CBMDefinition def);
 void cbm_calls_push(CBMCallArray *arr, CBMArena *a, CBMCall call);
+#ifdef CBM_ENABLE_TEST_SEAMS
+void cbm_test_relocate_call(CBMArena *dst, const CBMArena *scratch, CBMCall *call);
+#endif
 void cbm_imports_push(CBMImportArray *arr, CBMArena *a, CBMImport imp);
 void cbm_usages_push(CBMUsageArray *arr, CBMArena *a, CBMUsage usage);
 void cbm_throws_push(CBMThrowArray *arr, CBMArena *a, CBMThrow thr);

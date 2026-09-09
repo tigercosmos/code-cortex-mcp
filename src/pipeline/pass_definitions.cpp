@@ -283,6 +283,7 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
         return;
     }
     size_t pos = (size_t)n;
+    append_json_string(buf, bufsize, &pos, "declaration_key", def->declaration_key);
     append_json_string(buf, bufsize, &pos, "docstring", def->docstring);
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
@@ -637,9 +638,12 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         }
 
         /* Extract */
-        CBMFileResult *result = cbm_extract_file(
+        const CBMExtractOptions extract_options = {.defer_cpp_operators = true,
+                                                   .deduplicate_usages = true};
+        CBMFileResult *result = cbm_extract_file_with_options(
             source, source_len, lang, ctx->project_name, rel, CBM_EXTRACT_BUDGET,
-            cbm_cc_index_defines(ctx->cc_index, rel), cbm_cc_index_includes(ctx->cc_index, rel));
+            cbm_cc_index_defines(ctx->cc_index, rel), cbm_cc_index_includes(ctx->cc_index, rel),
+            &extract_options);
         free(source);
 
         if (!result) {

@@ -1,0 +1,12 @@
+{
+  "reason": "Native full-suite runtime failure: ENOSPC during git init/temp creation. Stopped to preserve invalidated attempt; no production build/index launched.",
+  "pid": 97362,
+  "signal": "SIGTERM",
+  "utc_epoch": 1788925241.04703,
+  "free_bytes_at_observation": 10320273408,
+  "errors": [
+    "error: copy-fd: write returned: No space left on device",
+    "fatal: cannot copy '/Applications/Xcode-27.0.0-Beta.4.app/Contents/Developer/usr/share/git-core/templates/hooks/applypatch-msg.sample' to '/private/tmp/cbm_watcher_reset_s3xc90/.git/hooks/applypatch-msg.sample': No space left on device",
+    "/private/tmp/cbm_watcher_nochg_vWafwN/.git: No space left on device"
+  ]
+}

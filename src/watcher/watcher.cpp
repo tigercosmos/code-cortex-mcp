@@ -41,6 +41,8 @@ typedef struct {
     char last_head[CBM_SZ_64]; /* git HEAD hash */
     bool is_git;               /* false → skip polling */
     bool baseline_done;        /* true after first poll */
+    atomic_bool index_pending; /* autoindex deferred before any completed index */
+    bool needs_clean_reindex;  /* observed dirty source not yet followed by a clean reindex */
     int missing_root_count;    /* consecutive polls where root was missing (ENOENT/ENOTDIR) */
     uint64_t first_missing_ms; /* cbm_now_ms() of the streak's first miss (0 = no streak) */
     int file_count;            /* approximate, for interval calc */
@@ -247,6 +249,7 @@ static project_state_t *state_new(const char *name, const char *root_path) {
     s->project_name = strdup(name);
     s->root_path = strdup(root_path);
     s->interval_ms = POLL_BASE_MS;
+    atomic_init(&s->index_pending, false);
     return s;
 }
 
@@ -340,25 +343,34 @@ static const char *itoa_buf(int v) {
     return buf;
 }
 
-static void delete_cached_project_db(const char *project_name) {
+static int delete_cached_project_db(const char *project_name) {
     if (!cbm_validate_project_name(project_name)) {
-        return;
+        return CBM_NOT_FOUND;
     }
-
     const char *cache_dir = cbm_resolve_cache_dir();
     if (!cache_dir) {
-        return;
+        return CBM_NOT_FOUND;
     }
-
-    char path[CBM_SZ_1K];
-    char wal[CBM_SZ_1K];
-    char shm[CBM_SZ_1K];
-    snprintf(path, sizeof(path), "%s/%s.db", cache_dir, project_name);
-    snprintf(wal, sizeof(wal), "%s-wal", path);
-    snprintf(shm, sizeof(shm), "%s-shm", path);
-    (void)cbm_unlink(path);
-    (void)cbm_unlink(wal);
-    (void)cbm_unlink(shm);
+    char requested[CBM_SZ_1K];
+    int n = snprintf(requested, sizeof(requested), "%s/%s.db", cache_dir, project_name);
+    if (n < 0 || (size_t)n >= sizeof(requested)) {
+        return CBM_NOT_FOUND;
+    }
+    cbm_db_lease_t *lease = NULL;
+    int rc = cbm_db_lease_try_acquire(requested, &lease);
+    if (rc != 0) {
+        return rc;
+    }
+    // Preserve unlink's original symlink-entry semantics. The canonical target
+    // is only the shared lease identity, never an expanded deletion scope.
+    const char *path = requested;
+    if (cbm_unlink(path) != 0 && errno != ENOENT) {
+        cbm_db_lease_release(lease);
+        return CBM_NOT_FOUND;
+    }
+    cbm_remove_db_sidecars(path);
+    cbm_db_lease_release(lease);
+    return 0;
 }
 
 /* Hash table foreach callback to free state entries */
@@ -459,6 +471,19 @@ void cbm_watcher_unwatch(cbm_watcher_t *w, const char *project_name) {
     }
 }
 
+void cbm_watcher_mark_index_pending(cbm_watcher_t *w, const char *project_name) {
+    if (!w || !project_name) {
+        return;
+    }
+    cbm_mutex_lock(&w->projects_lock);
+    project_state_t *s = (project_state_t *)cbm_ht_get(w->projects, project_name);
+    if (s) {
+        atomic_store(&s->index_pending, true);
+        s->next_poll_ns = 0;
+    }
+    cbm_mutex_unlock(&w->projects_lock);
+}
+
 void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name) {
     if (!w || !project_name) {
         return;
@@ -500,6 +525,7 @@ static void init_baseline(project_state_t *s) {
 
     if (s->is_git) {
         git_head(s->root_path, s->last_head, sizeof(s->last_head));
+        s->needs_clean_reindex = git_is_dirty(s->root_path);
         s->file_count = git_file_count(s->root_path);
         s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
         cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "git", "files",
@@ -512,10 +538,15 @@ static void init_baseline(project_state_t *s) {
 }
 
 /* Check if a project has changes. Returns true if reindex needed. */
-static bool check_changes(project_state_t *s) {
+static bool check_changes(project_state_t *s, bool *dirty) {
     if (!s->is_git) {
         return false;
     }
+
+    /* Sample before indexing: a reset during the callback must remain visible
+     * on the next poll. Keep this pending across failed indexing attempts. */
+    *dirty = git_is_dirty(s->root_path);
+    s->needs_clean_reindex |= *dirty;
 
     /* Check HEAD movement */
     char head[CBM_SZ_64] = {0};
@@ -529,7 +560,7 @@ static bool check_changes(project_state_t *s) {
     }
 
     /* Check working tree */
-    return git_is_dirty(s->root_path);
+    return s->needs_clean_reindex;
 }
 
 /* Context for poll_once foreach callback */
@@ -554,9 +585,17 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
      * is referenced by the poll_once snapshot iterating us. On OOM the
      * watch stays registered and pruning retries on the next cycle. */
     if (current == s && defer_state_free(w, s)) {
-        delete_cached_project_db(project_name);
-        cbm_ht_delete(w->projects, project_name);
-        removed = true;
+        int rc = delete_cached_project_db(project_name);
+        if (rc == 0) {
+            cbm_ht_delete(w->projects, project_name);
+            removed = true;
+        } else {
+            // The just-appended state is still registered. Undo its deferred
+            // free while projects_lock excludes any other list modification.
+            w->pending_free_count--;
+            cbm_log_info("watcher.prune.deferred", "project", project_name, "reason",
+                         rc == CBM_INDEX_BUSY ? "index_busy" : "lease_or_delete_error");
+        }
     }
     cbm_mutex_unlock(&w->projects_lock);
 
@@ -614,11 +653,14 @@ static void poll_project(const char *key, void *val, void *ud) {
     /* Initialize baseline on first poll */
     if (!s->baseline_done) {
         init_baseline(s);
-        return;
+        if (!atomic_load(&s->index_pending)) {
+            return;
+        }
+        s->next_poll_ns = 0;
     }
 
-    /* Skip non-git projects */
-    if (!s->is_git) {
+    /* Explicit pending initial indexing also applies to non-git projects. */
+    if (!s->is_git && !atomic_load(&s->index_pending)) {
         return;
     }
 
@@ -628,7 +670,9 @@ static void poll_project(const char *key, void *val, void *ud) {
     }
 
     /* Check for changes */
-    bool changed = check_changes(s);
+    bool dirty = false;
+    bool changed = s->is_git && check_changes(s, &dirty);
+    changed = changed || atomic_load(&s->index_pending);
     if (!changed) {
         s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
         return;
@@ -637,15 +681,28 @@ static void poll_project(const char *key, void *val, void *ud) {
     /* Trigger reindex */
     cbm_log_info("watcher.changed", "project", s->project_name, "strategy", "git");
     if (ctx->w->index_fn) {
+        // Consume only the request this callback attempts. A new mark arriving
+        // during the callback must survive even when that callback succeeds.
+        bool consumed_pending = atomic_exchange(&s->index_pending, false);
         int rc = ctx->w->index_fn(s->project_name, s->root_path, ctx->w->user_data);
+        if (rc != 0 && consumed_pending) {
+            atomic_store(&s->index_pending, true);
+        }
         if (rc == 0) {
             s->index_failure_count = 0;
+            s->needs_clean_reindex = dirty;
             ctx->reindexed++;
             /* Update HEAD after successful reindex */
             git_head(s->root_path, s->last_head, sizeof(s->last_head));
             /* Refresh file count for interval */
             s->file_count = git_file_count(s->root_path);
             s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
+        } else if (rc == CBM_INDEX_BUSY) {
+            cbm_log_info("watcher.index.deferred", "project", s->project_name, "reason", "index_busy");
+            // Preserve pending dirty/HEAD state and the failure counter. This
+            // is mutual exclusion, not proof that this snapshot was indexed.
+            s->next_poll_ns = now_ns() + ((int64_t)s->interval_ms * US_PER_MS);
+            return;
         } else {
             s->index_failure_count++;
             int64_t backoff_ms = s->interval_ms;

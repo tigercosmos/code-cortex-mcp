@@ -10,6 +10,51 @@ enum { MAX_PARENT_DEPTH = 10 };
 #include <stdint.h> // uint32_t
 #include <string.h>
 #include <ctype.h>
+#include <string_view>
+#include <unordered_set>
+
+struct UsageKey {
+    std::string_view scope;
+    std::string_view name;
+    bool null_scope;
+    bool operator==(const UsageKey &) const = default;
+};
+struct UsageKeyHash {
+    size_t operator()(const UsageKey &key) const {
+        auto hash = std::hash<std::string_view>{};
+        return hash(key.scope) ^ (hash(key.name) << 1) ^ (size_t)key.null_scope;
+    }
+};
+using UsageSet = std::unordered_set<UsageKey, UsageKeyHash>;
+
+bool cbm_usage_dedup_begin(CBMExtractCtx *ctx) {
+    if (!ctx->deduplicate_usages || ctx->usage_dedup) return false;
+    auto *seen = new UsageSet;
+    // Seed the expanded-source walk from the raw-source inventory. Result
+    // strings outlive the walk; new keys borrow the current source buffer.
+    for (int i = 0; i < ctx->result->usages.count; ++i) {
+        const auto &usage = ctx->result->usages.items[i];
+        if (usage.ref_name)
+            seen->insert({usage.enclosing_func_qn ? usage.enclosing_func_qn : "",
+                          usage.ref_name, usage.enclosing_func_qn == nullptr});
+    }
+    ctx->usage_dedup = seen;
+    return true;
+}
+
+void cbm_usage_dedup_end(CBMExtractCtx *ctx, bool owned) {
+    if (!owned) return;
+    delete static_cast<UsageSet *>(ctx->usage_dedup);
+    ctx->usage_dedup = nullptr;
+}
+
+static bool duplicate_usage(CBMExtractCtx *ctx, TSNode node, const char *scope) {
+    if (!ctx->usage_dedup) return false;
+    uint32_t start = ts_node_start_byte(node), end = ts_node_end_byte(node);
+    UsageKey key{scope ? scope : "", std::string_view(ctx->source + start, end - start),
+                 scope == nullptr};
+    return !static_cast<UsageSet *>(ctx->usage_dedup)->insert(key).second;
+}
 
 // Forward declaration
 static void walk_usages(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec);
@@ -67,11 +112,13 @@ static void try_emit_usage(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
     if (is_definition_name(node)) {
         return;
     }
+    const char *scope = cbm_enclosing_func_qn_cached(ctx, node);
+    if (duplicate_usage(ctx, node, scope)) return;
     char *name = cbm_node_text(ctx->arena, node, ctx->source);
     if (name && name[0] && !cbm_is_keyword(name, ctx->language)) {
         CBMUsage usage;
         usage.ref_name = name;
-        usage.enclosing_func_qn = cbm_enclosing_func_qn_cached(ctx, node);
+        usage.enclosing_func_qn = scope;
         cbm_usages_push(&ctx->result->usages, ctx->arena, usage);
     }
 }
@@ -180,7 +227,9 @@ void cbm_extract_usages(CBMExtractCtx *ctx) {
         return;
     }
 
+    bool owns_usage_dedup = cbm_usage_dedup_begin(ctx);
     walk_usages(ctx, ctx->root, spec);
+    cbm_usage_dedup_end(ctx, owns_usage_dedup);
 }
 
 // --- Unified handler: called once per node by the cursor walk ---
@@ -212,6 +261,7 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
         }
     }
 
+    if (duplicate_usage(ctx, node, state->enclosing_func_qn)) return;
     char *name = cbm_node_text(ctx->arena, node, ctx->source);
     if (name && name[0] && !cbm_is_keyword(name, ctx->language)) {
         CBMUsage usage;

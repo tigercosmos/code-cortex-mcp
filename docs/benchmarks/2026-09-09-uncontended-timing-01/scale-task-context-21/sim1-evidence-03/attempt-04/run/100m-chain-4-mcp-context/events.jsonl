@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a08574-91ab-7e32-9e27-723032e731f8"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"capacity_function_1532376\ncapacity_function_1532375\ncapacity_function_1532374\ncapacity_function_1532373"}}
+{"type":"turn.completed","usage":{"input_tokens":10198,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":31,"reasoning_output_tokens":0}}

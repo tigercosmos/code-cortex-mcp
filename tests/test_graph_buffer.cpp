@@ -9,6 +9,7 @@
 #include "store/store.h"
 
 #include <string>
+#include <algorithm>
 
 /* ── Node operations ───────────────────────────────────────────── */
 
@@ -253,6 +254,67 @@ TEST(gbuf_edge_props_merge_keeps_existing_on_empty) {
     ASSERT_EQ(count, 1);
     ASSERT_TRUE(strstr(edges[0]->properties_json, "\"strategy\":\"lsp\"") != NULL);
 
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+TEST(gbuf_call_lines_survive_order_and_worker_merge) {
+    const char *props[] = {
+        "{\"confidence\":0.95,\"strategy\":\"lsp\",\"line\":3}",
+        "{\"confidence\":0.75,\"strategy\":\"unique_name\",\"line\":4}",
+        "{\"confidence\":0.95,\"strategy\":\"lsp\",\"line\":8}",
+    };
+    int order[] = {0, 1, 2};
+    std::string expected;
+    do {
+        for (bool partitioned : {false, true}) {
+            cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+            int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "a", "a.c", 1, 9, "{}");
+            int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "b", "a.c", 10, 11, "{}");
+            cbm_gbuf_insert_edge(gb, a, b, "CALLS", props[order[0]]);
+            if (partitioned) {
+                cbm_gbuf_t *worker = cbm_gbuf_new("test", "/tmp");
+                int64_t wa = cbm_gbuf_upsert_node(worker, "Function", "a", "a", "a.c", 1, 9, "{}");
+                int64_t wb = cbm_gbuf_upsert_node(worker, "Function", "b", "b", "a.c", 10, 11, "{}");
+                cbm_gbuf_insert_edge(worker, wa, wb, "CALLS", props[order[1]]);
+                cbm_gbuf_insert_edge(worker, wa, wb, "CALLS", props[order[2]]);
+                cbm_gbuf_merge(gb, worker);
+                cbm_gbuf_free(worker);
+            } else {
+                cbm_gbuf_insert_edge(gb, a, b, "CALLS", props[order[1]]);
+                cbm_gbuf_insert_edge(gb, a, b, "CALLS", props[order[2]]);
+            }
+            cbm_gbuf_insert_edge(gb, a, b, "CALLS", props[order[0]]);
+            cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
+            const cbm_gbuf_edge_t **edges = nullptr;
+            int count = 0;
+            cbm_gbuf_find_edges_by_type(gb, "CALLS", &edges, &count);
+            ASSERT_EQ(count, 1);
+            ASSERT_NOT_NULL(strstr(edges[0]->properties_json, "\"call_lines\":[3,4,8]"));
+            ASSERT_NOT_NULL(strstr(edges[0]->properties_json, "\"strategy\":\"lsp\""));
+            ASSERT_NOT_NULL(strstr(edges[0]->properties_json, "\"line\":8"));
+            if (expected.empty()) {
+                expected = edges[0]->properties_json;
+            }
+            ASSERT_STR_EQ(expected.c_str(), edges[0]->properties_json);
+            cbm_gbuf_free(gb);
+        }
+    } while (std::next_permutation(order, order + 3));
+    PASS();
+}
+
+TEST(gbuf_call_lines_keep_site_when_metadata_has_no_line) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    cbm_gbuf_insert_edge(gb, 1, 2, "CALLS", "{\"confidence\":0.75,\"line\":3}");
+    cbm_gbuf_insert_edge(gb, 1, 2, "CALLS", "{\"confidence\":0.95}");
+    cbm_gbuf_insert_edge(gb, 1, 2, "CALLS",
+                         "{\"call_lines\":[0,-1,3,3,4,4.5,\"5\",2147483648]}");
+    const cbm_gbuf_edge_t **edges = nullptr;
+    int count = 0;
+    cbm_gbuf_find_edges_by_type(gb, "CALLS", &edges, &count);
+    ASSERT_EQ(count, 1);
+    ASSERT_NOT_NULL(strstr(edges[0]->properties_json, "\"call_lines\":[3,4]"));
+    ASSERT_NOT_NULL(strstr(edges[0]->properties_json, "\"confidence\":0.95"));
     cbm_gbuf_free(gb);
     PASS();
 }
@@ -1107,9 +1169,55 @@ TEST(gbuf_canonicalize_null_safe) {
     PASS();
 }
 
+TEST(gbuf_secondary_indexes_grow_delete_and_reinsert) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t hub = cbm_gbuf_upsert_node(gb, "Class", "hub", "pkg.hub", "hub.cpp", 1, 2, "{}");
+    int64_t peers[17];
+    for (int i = 0; i < 17; ++i) {
+        std::string qn = "pkg.peer" + std::to_string(i);
+        std::string file = "peer" + std::to_string(i) + ".cpp";
+        peers[i] = cbm_gbuf_upsert_node(gb, "Function", "peer", qn.c_str(), file.c_str(), 1, 2, "{}");
+        cbm_gbuf_insert_edge(gb, hub, peers[i], "CALLS", "{}");
+        cbm_gbuf_insert_edge(gb, peers[i], hub, "CALLS", "{}");
+        const cbm_gbuf_node_t **nodes = nullptr;
+        const cbm_gbuf_edge_t **edges = nullptr;
+        int count = 0;
+        cbm_gbuf_find_by_name(gb, "peer", &nodes, &count);
+        ASSERT_EQ(count, i + 1);
+        for (int j = 0; j <= i; ++j) ASSERT_EQ(nodes[j]->id, peers[j]);
+        cbm_gbuf_find_edges_by_source_type(gb, hub, "CALLS", &edges, &count);
+        ASSERT_EQ(count, i + 1);
+        for (int j = 0; j <= i; ++j) ASSERT_EQ(edges[j]->target_id, peers[j]);
+        cbm_gbuf_find_edges_by_target_type(gb, hub, "CALLS", &edges, &count);
+        ASSERT_EQ(count, i + 1);
+        for (int j = 0; j <= i; ++j) ASSERT_EQ(edges[j]->source_id, peers[j]);
+    }
+    cbm_gbuf_delete_by_file(gb, "peer0.cpp");
+    const cbm_gbuf_node_t **nodes = nullptr;
+    const cbm_gbuf_edge_t **edges = nullptr;
+    int count = 0;
+    cbm_gbuf_find_by_name(gb, "peer", &nodes, &count);
+    ASSERT_EQ(count, 16);
+    for (int i = 0; i < count; ++i) ASSERT_NEQ(nodes[i]->id, peers[0]);
+    cbm_gbuf_find_edges_by_source_type(gb, hub, "CALLS", &edges, &count);
+    ASSERT_EQ(count, 16);
+    cbm_gbuf_find_edges_by_target_type(gb, hub, "CALLS", &edges, &count);
+    ASSERT_EQ(count, 16);
+    cbm_gbuf_delete_edges_by_type(gb, "CALLS");
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 0);
+    cbm_gbuf_insert_edge(gb, hub, peers[1], "CALLS", "{}");
+    cbm_gbuf_find_edges_by_type(gb, "CALLS", &edges, &count);
+    ASSERT_EQ(count, 1);
+    ASSERT_EQ(edges[0]->source_id, hub);
+    ASSERT_EQ(edges[0]->target_id, peers[1]);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(graph_buffer) {
+    RUN_TEST(gbuf_secondary_indexes_grow_delete_and_reinsert);
     /* Original tests */
     RUN_TEST(gbuf_create_free);
     RUN_TEST(gbuf_free_null);
@@ -1168,6 +1276,8 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_edge_props_merge_is_order_independent);
     RUN_TEST(gbuf_edge_props_merge_prefers_higher_confidence);
     RUN_TEST(gbuf_edge_props_merge_keeps_existing_on_empty);
+    RUN_TEST(gbuf_call_lines_survive_order_and_worker_merge);
+    RUN_TEST(gbuf_call_lines_keep_site_when_metadata_has_no_line);
 
     /* Canonical ordering */
     RUN_TEST(gbuf_canonicalize_erases_insertion_order);

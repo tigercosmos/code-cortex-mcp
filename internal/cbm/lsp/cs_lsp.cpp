@@ -1463,7 +1463,7 @@ static void cs_process_assignment(CSLSPContext *ctx, TSNode node) {
 static void cs_emit_resolved(CSLSPContext *ctx, const char *callee_qn, const char *strategy,
                               float confidence) {
     if (!ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn) return;
-    CBMResolvedCall rc;
+    CBMResolvedCall rc = {};
     rc.caller_qn = ctx->enclosing_func_qn;
     rc.callee_qn = callee_qn;
     rc.strategy = strategy;

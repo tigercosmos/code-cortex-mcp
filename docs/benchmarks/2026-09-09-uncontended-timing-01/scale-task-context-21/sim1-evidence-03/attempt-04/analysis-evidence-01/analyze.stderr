@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/home/anchi/code-cortex-mcp-goal-20260909/repo/docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/analyze.py", line 237, in <module>
+    main()
+  File "/home/anchi/code-cortex-mcp-goal-20260909/repo/docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/analyze.py", line 231, in main
+    save_new(args.output, report)
+  File "/home/anchi/code-cortex-mcp-goal-20260909/repo/docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/analyze.py", line 27, in save_new
+    with path.open("x") as stream:
+         ^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/analysis/report.json'

@@ -1,0 +1,22 @@
+code-cortex-mcp dev
+
+Usage:
+  code-cortex-mcp              Run MCP server on stdio
+  code-cortex-mcp cli <tool> [json]  Run a single tool
+  code-cortex-mcp install [-y|-n] [--force] [--dry-run]
+  code-cortex-mcp uninstall [-y|-n] [--dry-run]
+  code-cortex-mcp update [-y|-n]
+  code-cortex-mcp config <list|get|set|reset>
+  code-cortex-mcp doctor       Check install, hooks, and whether cwd is indexed
+  code-cortex-mcp task-context Read {project|repo_path,symbol|request,max_bytes?} JSON from stdin; emit optional source context
+  code-cortex-mcp --version    Print version
+  code-cortex-mcp --help       Print this help
+
+Supported agents (auto-detected):
+  Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode,
+  Antigravity, Aider, KiloCode, Kiro
+
+Tools: index_repository, search_graph, query_graph, trace_path,
+  get_code_snippet, get_graph_schema, get_architecture, search_code,
+  list_projects, delete_project, index_status, detect_changes,
+  manage_adr, ingest_traces

@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "./build/nosan/test-runner"
+  ],
+  "cwd": "/Users/tigercosmos/code-cortex-mcp",
+  "started_epoch": 1788925150.223655,
+  "timeout_seconds": 1200,
+  "returncode": -15,
+  "wall_seconds": 90.84764004126191,
+  "ended_epoch": 1788925241.073195,
+  "stdout_sha256": "b9b0c4f39990ac31a23aa2aa7df529adda7fa95d6d0bda7471ad52000da199a6",
+  "stderr_sha256": "5caa87c6d02fc28a5e2ff3997a335aea2a894fbb548e298e31305b00cf03e066"
+}

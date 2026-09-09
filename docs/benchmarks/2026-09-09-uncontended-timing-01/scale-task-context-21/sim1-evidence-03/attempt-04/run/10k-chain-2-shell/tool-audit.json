@@ -1,0 +1,12 @@
+{
+  "command_calls": 1,
+  "commands": [
+    "/bin/bash -lc \"rg -n --glob '*.{c,cc,cpp,h,hpp,rs,go,py,js,ts}' 'capacity_function_(58|55)|capacity_function_[0-9]+' .\""
+  ],
+  "item_types": [
+    "agent_message",
+    "command_execution",
+    "agent_message"
+  ],
+  "mcp_calls": 0
+}

@@ -1,0 +1,70 @@
+2026-09-09T17:01:08+09:00
+ Static hostname: t2-sim-1
+       Icon name: computer-desktop
+         Chassis: desktop 🖥️
+      Machine ID: 46a3df29a8314b6ca53fcd8249217d5c
+         Boot ID: 1f19fdb2456d4b8aa092fb229b9520a9
+Operating System: Ubuntu 24.04.3 LTS
+          Kernel: Linux 7.0.0-28-generic
+    Architecture: x86-64
+ Hardware Vendor: Gigabyte Technology Co., Ltd.
+  Hardware Model: B760 GAMING X DDR4 GEN5
+Firmware Version: F4
+   Firmware Date: Fri 2025-09-19
+    Firmware Age: 11month 2w 6d
+/home/anchi/code-cortex-mcp-goal-20260909/repo
+ 17:01:08 up 43 days,  3:51, 18 users,  load average: 6.39, 3.74, 3.22
+               total        used        free      shared  buff/cache   available
+Mem:            62Gi        25Gi        24Gi        25Mi        12Gi        36Gi
+Swap:           71Gi        27Gi        44Gi
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda2       7.3T  1.3T  5.6T  19% /
+/dev/sda2       7.3T  1.3T  5.6T  19% /
+/dev/sda2       7.3T  1.3T  5.6T  19% /
+Filesystem     Inodes IUsed IFree IUse% Mounted on
+/dev/sda2        233M   14M  220M    6% /
+/dev/sda2        233M   14M  220M    6% /
+/dev/sda2        233M   14M  220M    6% /
+492K	/home/anchi/code-cortex-mcp-goal-20260909/production-build-01
+16K	/home/anchi/code-cortex-mcp-goal-20260909/production-build-01-scratch
+    PID    PPID STAT %CPU %MEM     ELAPSED COMMAND         COMMAND
+3993310       1 Sl    4.4 23.8 14-23:32:20 windows-server- /usr/bin/qemu-system-x86_64 -name windows-server-2025,process=windows-server-2025,debug-threads=on -machine q35,hpet=off,smm=on,vmport=off,accel=kvm -global kvm-pit.lost_tick_policy=discard -global ICH9-LPC.disable_s3=1 -cpu host,+hypervisor,+invtsc,l3-cache=on,migratable=no,hv_passthrough -smp cores=4,threads=2,sockets=1 -m 16G -device virtio-balloon -pidfile windows-server-2025/windows-server-2025.pid -rtc base=localtime,clock=host,driftfix=slew -vga none -device qxl-vga,xres=1280,yres=800,ram_size=65536,vram_size=65536,vgamem_mb=64 -display none -spice disable-ticketing=on,unix=on,addr=windows-server-2025/windows-server-2025.sock -device virtio-serial-pci -chardev socket,id=agent0,path=windows-server-2025/windows-server-2025-agent.sock,server=on,wait=off -device virtserialport,chardev=agent0,name=org.qemu.guest_agent.0 -chardev spicevmc,id=vdagent0,name=vdagent -device virtserialport,chardev=vdagent0,name=com.redhat.spice.0 -chardev spiceport,id=webdav0,name=org.spice-space.webdav.0 -device virtserialport,chardev=webdav0,name=org.spice-space.webdav.0 -device virtio-rng-pci,rng=rng0 -object rng-random,id=rng0,filename=/dev/urandom -device qemu-xhci,id=spicepass -chardev spicevmc,id=usbredirchardev1,name=usbredir -device usb-redir,chardev=usbredirchardev1,id=usbredirdev1 -chardev spicevmc,id=usbredirchardev2,name=usbredir -device usb-redir,chardev=usbredirchardev2,id=usbredirdev2 -chardev spicevmc,id=usbredirchardev3,name=usbredir -device usb-redir,chardev=usbredirchardev3,id=usbredirdev3 -device pci-ohci,id=smartpass -device usb-ccid -chardev spicevmc,id=ccid,name=smartcard -device ccid-card-passthru,chardev=ccid -device usb-ehci,id=input -device usb-kbd,bus=input.0 -k en-us -device usb-tablet,bus=input.0 -audiodev spice,id=audio0 -device intel-hda -device hda-micro,audiodev=audio0 -device e1000,netdev=nic -netdev user,hostname=windows-server-2025,hostfwd=tcp::22220-:22,id=nic -global driver=cfi.pflash01,property=secure,value=on -drive if=pflash,format=raw,unit=0,file=/usr/share/OVMF/OVMF_CODE_4M.fd,readonly=on -drive if=pflash,format=raw,unit=1,file=windows-server-2025/OVMF_VARS.fd -drive media=cdrom,index=1,file=windows-server-2025/virtio-win.iso -device ide-hd,drive=SystemDisk -drive id=SystemDisk,if=none,format=qcow2,file=windows-server-2025/disk.qcow2,discard=unmap,detect-zeroes=unmap,cache=writeback,aio=threads -fsdev local,id=fsdev0,path=/home/anchi/Public,security_model=mapped-xattr -device virtio-9p-pci,fsdev=fsdev0,mount_tag=Public-anchi -chardev socket,id=chrtpm,path=windows-server-2025/windows-server-2025.swtpm-sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0 -monitor unix:windows-server-2025/windows-server-2025-monitor.socket,server,nowait -serial none
+    456       1 Sl    3.5  0.0 43-03:50:57 plymouthd       /usr/sbin/plymouthd --mode=boot --attach-to-session --pid-file=/run/plymouth/pid
+   1795       1 Ssl   3.3  0.8 43-03:49:31 k3s-server      /usr/local/bin/k3s server
+   2120    2095 Sl+   1.8  0.0 43-03:49:17 Xorg            /usr/lib/xorg/Xorg vt1 -displayfd 3 -auth /run/user/120/gdm/Xauthority -nolisten tcp -background none -noreset -keeptty -novtswitch -verbose 3
+3670246 3669605 Zs    0.7  0.0 17-13:06:00 java            [java] <defunct>
+3848831 3669605 Zs    0.6  0.0  8-02:14:09 java            [java] <defunct>
+4163239       1 Ssl   0.5  0.0 20-21:08:25 tailscaled      /usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock --port=41642
+4096998  894662 Sl+   0.4  0.5  1-13:00:12 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions
+ 371934  371100 Sl+   0.4  0.4 14-01:45:18 claude          claude --dangerously-skip-permissions
+ 401345  401125 Sl+   0.4  0.4  5-04:59:03 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions
+4162380 3974994 Sl+   0.4  0.4 20-21:08:57 claude          claude --dangerously-skip-permissions
+2193681 2192962 Sl+   0.4  0.4 11-23:27:12 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions
+2901989 2867816 Sl+   0.3  0.4 23-02:50:51 claude          claude --dangerously-skip-permissions --resume 1b7ba2a7-2857-4a12-b8f0-ec77592e81cb
+4117471 4115790 Sl+   0.3  0.4  8-00:22:06 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions --resume 02e80b38-0c6f-40be-94af-d2726adbf779
+   2307    1795 Sl    0.3  0.1 43-03:49:12 containerd      containerd 
+4117486 4116043 Sl+   0.3  0.3  8-00:22:06 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions --resume 0ff3eef3-b253-4729-9353-f5799e8312a2
+1420567 3669605 Zs    0.3  0.0  9-05:48:24 java            [java] <defunct>
+2342327 3669605 Zs    0.3  0.0  7-00:29:48 java            [java] <defunct>
+4117481 4115856 Sl+   0.2  0.3  8-00:22:06 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions --resume 879987f7-81a7-45a4-8fd0-918e04d83a22
+3811381 3766301 Sl+   0.2  0.4 21-02:45:57 claude          claude --dangerously-skip-permissions
+3757928 3669605 Zs    0.2  0.0  9-14:34:47 java            [java] <defunct>
+4117427 4116220 Sl+   0.2  0.3  8-00:22:07 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions --resume b032464a-1b4d-42f9-9dd6-9388fc54cc3a
+3129637 3127597 Sl+   0.2  0.3  6-19:58:13 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions --resume 879987f7-81a7-45a4-8fd0-918e04d83a22
+3129638 3127572 Sl+   0.2  0.3  6-19:58:13 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions --resume 02e80b38-0c6f-40be-94af-d2726adbf779
+1388386 1387948 Sl+   0.2  0.3 19-15:23:40 claude          claude --dangerously-skip-permissions --resume 3cb2e81f-3b07-4769-a997-71cf575be954
+3129639 3127600 Sl+   0.2  0.2  6-19:58:13 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions --resume 0ff3eef3-b253-4729-9353-f5799e8312a2
+ 206408  205997 Sl+   0.2  0.3 20-15:39:21 claude          claude --dangerously-skip-permissions --resume 3cb2e81f-3b07-4769-a997-71cf575be954
+ 596732  595961 Sl+   0.2  0.4 13-17:50:24 claude          claude --dangerously-skip-permissions --resume 879987f7-81a7-45a4-8fd0-918e04d83a22
+2663018       1 Ss    0.2  0.0       00:27 systemd-hostnam /usr/lib/systemd/systemd-hostnamed
+4082561 4043004 Sl+   0.2  0.4 21-00:12:25 claude          claude --dangerously-skip-permissions
+ 644922  644474 Ssl   0.1  0.0  7-16:56:58 metrics-server  /metrics-server --cert-dir=/tmp --secure-port=10250 --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname --kubelet-use-node-status-port --metric-resolution=15s --tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+ 884272       1 Sl    0.1  0.1  4-14:48:29 node-MainThread /home/anchi/.nvm/versions/node/v25.9.0/bin/node relay.js --detached --grace-time 0 --sock-path /home/anchi/.orca-remote/relay-0.1.0+8ea4ce15e4c7/relay-103b3a8c8617cbfe.sock --credential-file /home/anchi/.orca-remote/relay-0.1.0+8ea4ce15e4c7/relay-103b3a8c8617cbfe.sock.credential --log-file /home/anchi/.orca-remote/relay-0.1.0+8ea4ce15e4c7/relay.log
+    836       2 S     0.1  0.0 43-03:50:35 nvidia-modeset/ [nvidia-modeset/kthread_q]
+3129640 3127607 Sl+   0.1  0.3  6-19:58:13 claude          claude --permission-mode bypassPermissions --dangerously-skip-permissions --resume b032464a-1b4d-42f9-9dd6-9388fc54cc3a
+2857367 2856681 Sl+   0.1  0.3 16-05:02:30 claude          claude --dangerously-skip-permissions
+3477686 3477275 Sl+   0.1  0.4 21-20:45:32 claude          claude --dangerously-skip-permissions --resume 1b7ba2a7-2857-4a12-b8f0-ec77592e81cb
+    219       2 S     0.1  0.0 43-03:51:02 kcompactd0      [kcompactd0]
+3267496       1 Sl    0.0  0.0 18-02:52:21 node-MainThread /home/anchi/.nvm/versions/node/v25.9.0/bin/node relay.js --detached --grace-time 0 --sock-path /home/anchi/.orca-remote/relay-0.1.0+fde341afdf1d/relay-103b3a8c8617cbfe.sock --credential-file /home/anchi/.orca-remote/relay-0.1.0+fde341afdf1d/relay-103b3a8c8617cbfe.sock.credential --log-file /home/anchi/.orca-remote/relay-0.1.0+fde341afdf1d/relay.log
+3238659 3238658 S     0.0  0.0 15-16:22:37 Xvfb            Xvfb :1 -screen 0 1920x1080x24 -auth /root/.Xauthority -nolisten tcp -extension MIT-SHM +extension GLX +extension RANDR
+   1746       1 Ssl   0.0  0.0 43-03:49:36 containerd      /usr/bin/containerd

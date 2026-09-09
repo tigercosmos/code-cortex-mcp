@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "cmake",
+    "-S",
+    ".",
+    "-B",
+    "build/nosan",
+    "-DCBM_SANITIZE=OFF",
+    "-DCBM_TEST_SEAMS=ON"
+  ],
+  "cwd": "/Users/tigercosmos/code-cortex-mcp",
+  "started_epoch": 1788925148.38877,
+  "timeout_seconds": 120,
+  "returncode": 0,
+  "wall_seconds": 0.6705911243334413,
+  "ended_epoch": 1788925149.0593731,
+  "stdout_sha256": "7a4217b35d9e155d258488b06db1f47d15a63ec44b7041cb5aabeee7e373e41b",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

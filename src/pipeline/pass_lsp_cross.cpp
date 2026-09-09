@@ -15,6 +15,7 @@
  */
 #include "pipeline/pass_lsp_cross.h"
 #include "pipeline/pipeline_internal.h"
+#include "pipeline/lsp_resolve.h"
 #include "lsp/go_lsp.h"
 #include "lsp/c_lsp.h"
 #include "lsp/py_lsp.h"
@@ -30,9 +31,16 @@
 #include "foundation/log.h"
 #include "foundation/compat_fs.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
+#include <filesystem>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 /* ── Constants ─────────────────────────────────────────────────── */
 
@@ -240,6 +248,9 @@ static const char *pxc_infer_jvm_namespace(CBMArena *arena, const char *rel_path
 static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const char *module_qn,
                              const char *namespace_name, CBMLanguage lang, CBMLSPDef *dst) {
     const char *label = pxc_map_label(src->label);
+    if (!label && src->label && strcmp(src->label, "Declaration") == 0 &&
+        (lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA))
+        label = "Declaration";
     if (!label || !src->qualified_name || !src->name)
         return -1;
     memset(dst, 0, sizeof(*dst));
@@ -259,9 +270,240 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
      * for multi-return languages (Go); single-return languages just see one
      * piece, which is what's already stored. */
     dst->return_types = src->return_type;
+    if (lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA)
+        dst->parameter_types = src->param_types;
     dst->embedded_types = pxc_join_pipe(arena, src->base_classes);
     dst->lang = lang;
+    dst->cpp_declaration_key = src->declaration_key;
     return 0;
+}
+
+/* Carry C/C++ field types across the file-result -> cross-LSP boundary.
+ * Field nodes are not independent cross-LSP symbols; their exact parent QN
+ * owns the field_defs payload. Two linear passes avoid scanning every field
+ * once per class. Result-store summaries retain the same four source fields. */
+static void pxc_attach_cpp_fields(CBMFileResult *result, CBMLSPDef *defs, int count) {
+    struct FieldText { size_t size; size_t used; char *data; };
+    CBMHashTable *groups = NULL;
+    for (int i = 0; i < result->defs.count; ++i) {
+        const CBMDefinition *field = &result->defs.items[i];
+        if (!field->label || strcmp(field->label, "Field") != 0 || !field->parent_class ||
+            !field->name || !field->return_type || !field->return_type[0]) continue;
+        if (!groups) groups = cbm_ht_create(0);
+        if (!groups) return;
+        auto *group = static_cast<FieldText *>(cbm_ht_get(groups, field->parent_class));
+        if (!group) {
+            group = static_cast<FieldText *>(cbm_arena_alloc(&result->arena, sizeof(FieldText)));
+            if (!group) { cbm_ht_free(groups); return; }
+            memset(group, 0, sizeof(*group));
+            cbm_ht_set(groups, field->parent_class, group);
+        }
+        size_t name_size = strlen(field->name), type_size = strlen(field->return_type);
+        if (name_size > SIZE_MAX - type_size) { cbm_ht_free(groups); return; }
+        size_t text_size = name_size + type_size;
+        // Reserve separators and the final terminator without size_t wrap.
+        if (text_size > SIZE_MAX - 3 || group->size > SIZE_MAX - 3 - text_size) {
+            cbm_ht_free(groups); return;
+        }
+        group->size += text_size + 2;
+    }
+    if (!groups) return;
+    for (int i = 0; i < result->defs.count; ++i) {
+        const CBMDefinition *field = &result->defs.items[i];
+        if (!field->label || strcmp(field->label, "Field") != 0 || !field->parent_class ||
+            !field->name || !field->return_type || !field->return_type[0]) continue;
+        auto *group = static_cast<FieldText *>(cbm_ht_get(groups, field->parent_class));
+        if (!group) continue;
+        if (!group->data) {
+            group->data = static_cast<char *>(cbm_arena_alloc(&result->arena, group->size + 1));
+            if (!group->data) continue;
+        }
+        if (group->used) group->data[group->used++] = '|';
+        size_t n = strlen(field->name);
+        memcpy(group->data + group->used, field->name, n); group->used += n;
+        group->data[group->used++] = ':';
+        n = strlen(field->return_type);
+        memcpy(group->data + group->used, field->return_type, n); group->used += n;
+        group->data[group->used] = '\0';
+    }
+    for (int i = 0; i < count; ++i) {
+        if (!cbm_label_is_type_like(defs[i].label)) continue;
+        auto *group = static_cast<FieldText *>(cbm_ht_get(groups, defs[i].qualified_name));
+        if (group) defs[i].field_defs = group->data;
+    }
+    cbm_ht_free(groups);
+}
+
+/* C++ types are file-qualified in the graph. Join a method implementation to
+ * a declaring header only through an exact declaration key and include path.
+ * Keep all graph QNs unchanged; the C resolver receives lookup aliases only. */
+static void pxc_attach_cpp_identity(CBMFileResult **cache, const cbm_file_info_t *files,
+                                    int file_count, CBMLSPDef *defs, int def_count,
+                                    const std::vector<int>& def_files) {
+    struct Owner { std::string semantic; const char *qn; int file; };
+    std::vector<Owner> owners;
+    std::vector<std::vector<int>> owner_files(file_count);
+    std::unordered_map<std::string, std::vector<int>> declarations, implementations;
+    std::vector<std::vector<int>> classes(file_count), per_file(file_count);
+    bool has_declarations = false;
+    for (int i = 0; i < def_count; ++i) {
+        if (defs[i].lang != CBM_LANG_CPP && defs[i].lang != CBM_LANG_CUDA) continue;
+        per_file[def_files[i]].push_back(i);
+        if (cbm_label_is_type_like(defs[i].label)) classes[def_files[i]].push_back(i);
+        if (strcmp(defs[i].label, "Declaration") == 0) has_declarations = true;
+        if (strcmp(defs[i].label, "Method") == 0 && defs[i].cpp_declaration_key)
+            implementations[defs[i].cpp_declaration_key].push_back(i);
+    }
+    if (!has_declarations) return;
+    std::unordered_map<std::string, int> owner_ids;
+    std::unordered_map<std::string, std::string> owner_semantics;
+    std::unordered_set<std::string> ambiguous_owners;
+    for (int i = 0; i < def_count; ++i) {
+        auto& d = defs[i];
+        if (strcmp(d.label, "Declaration") != 0 || !d.cpp_declaration_key) continue;
+        const char *marker = strstr(d.qualified_name, ".__decl_");
+        const char *semantic = marker ? strchr(marker + 1, '.') : nullptr;
+        if (!semantic) continue;
+        ++semantic;
+        const char *method = strrchr(semantic, '.');
+        if (!method) continue; // A free function has no declaring class.
+        std::string owner_name(semantic, method);
+        auto dot = owner_name.rfind('.');
+        std::string leaf = owner_name.substr(dot == std::string::npos ? 0 : dot + 1);
+        const char *owner_qn = nullptr;
+        bool ambiguous = false;
+        for (int ci : classes[def_files[i]]) {
+            if (leaf != defs[ci].short_name) continue;
+            if (owner_qn && strcmp(owner_qn, defs[ci].qualified_name) != 0) ambiguous = true;
+            owner_qn = defs[ci].qualified_name;
+        }
+        if (!owner_qn || ambiguous) continue;
+        auto [semantic_it, new_owner] = owner_semantics.emplace(owner_qn, owner_name);
+        if (!new_owner && semantic_it->second != owner_name) ambiguous_owners.insert(owner_qn);
+        std::string key = std::to_string(def_files[i]) + ":" + owner_name;
+        auto [it, inserted] = owner_ids.emplace(key, (int)owners.size());
+        if (inserted) {
+            owner_files[def_files[i]].push_back((int)owners.size());
+            owners.push_back({owner_name, owner_qn, def_files[i]});
+        }
+        d.cpp_declaring_type = owner_qn;
+        declarations[d.cpp_declaration_key].push_back(i);
+    }
+    if (owners.empty()) return;
+
+    // Resolve source-authored includes: exact relative path first, then an
+    // unambiguous path suffix. Multiple suffix matches never select a winner.
+    std::unordered_map<std::string, int> paths;
+    std::unordered_map<std::string, std::vector<int>> suffixes;
+    for (int fi = 0; fi < file_count; ++fi) {
+        if (!cache[fi] || (files[fi].language != CBM_LANG_CPP && files[fi].language != CBM_LANG_CUDA)) continue;
+        std::string path = std::filesystem::path(files[fi].rel_path).lexically_normal().generic_string();
+        paths[path] = fi;
+        size_t start = 0;
+        for (int segments = 0; segments < 32; ++segments) {
+            suffixes[path.substr(start)].push_back(fi);
+            auto slash = path.find('/', start);
+            if (slash == std::string::npos) break;
+            start = slash + 1;
+        }
+    }
+    struct Visibility { std::vector<int> files; bool ambiguous = false; };
+    std::vector<Visibility> visible(file_count);
+    constexpr size_t max_headers = 256, max_bindings = 4096;
+    for (int fi = 0; fi < file_count; ++fi) {
+        if (per_file[fi].empty()) continue;
+        auto& v = visible[fi];
+        v.files.push_back(fi);
+        std::unordered_set<int> seen{fi};
+        for (size_t pos = 0; pos < v.files.size() && !v.ambiguous; ++pos) {
+            int from = v.files[pos];
+            for (int ii = 0; ii < cache[from]->imports.count; ++ii) {
+                const char *raw = cache[from]->imports.items[ii].module_path;
+                if (!raw || !raw[0]) continue;
+                std::filesystem::path include(raw);
+                if (include.is_absolute()) continue;
+                std::string relative = (std::filesystem::path(files[from].rel_path).parent_path() / include).lexically_normal().generic_string();
+                int target = -1;
+                if (auto exact = paths.find(relative); exact != paths.end()) target = exact->second;
+                else if (auto suffix = suffixes.find(include.lexically_normal().generic_string()); suffix != suffixes.end()) {
+                    if (suffix->second.size() != 1) { v.ambiguous = true; break; }
+                    target = suffix->second[0];
+                }
+                if (target < 0 || seen.count(target)) continue;
+                if (v.files.size() == max_headers) { v.ambiguous = true; break; }
+                seen.insert(target);
+                v.files.push_back(target);
+            }
+        }
+        std::unordered_map<std::string, const char *> names;
+        auto bind = [&](const std::string& name, const char *qn) {
+            if (v.ambiguous) return;
+            if (names.size() == max_bindings && !names.count(name)) {
+                v.ambiguous = true;
+                return;
+            }
+            auto [it, inserted] = names.emplace(name, qn);
+            if (!inserted && (!it->second || !qn || strcmp(it->second, qn) != 0)) it->second = nullptr;
+        };
+        for (int included : v.files) {
+            if (v.ambiguous) break;
+            for (int oi : owner_files[included]) {
+                if (v.ambiguous) break;
+                const auto& owner = owners[oi];
+                const char *target = ambiguous_owners.count(owner.qn) ? nullptr : owner.qn;
+                bind(owner.semantic, target);
+                auto dot = owner.semantic.rfind('.');
+                bind(owner.semantic.substr(dot == std::string::npos ? 0 : dot + 1), target);
+            }
+        }
+        // A file-level marker blocks the old short-name fallback even when
+        // the closure/name budget stops us before enumerating every type.
+        if (v.ambiguous) {
+            names.clear();
+            names.emplace("__blocked__", nullptr);
+        }
+        if (names.empty()) continue;
+        bool ambiguous_names = v.ambiguous;
+        for (const auto& [name, qn] : names) if (!qn) ambiguous_names = true;
+        if (ambiguous_names) {
+            // One additional control entry, beyond the bounded name payload.
+            names.emplace("__no_weak_receiver__", nullptr);
+        }
+        auto *bindings = static_cast<CBMCVisibleType *>(cbm_arena_alloc(&cache[fi]->arena, names.size() * sizeof(CBMCVisibleType)));
+        if (!bindings) continue;
+        int count = 0;
+        for (const auto& [name, qn] : names) {
+            bindings[count++] = {cbm_arena_sprintf(&cache[fi]->arena, "%s.__cpp_visible.%s",
+                                  defs[per_file[fi][0]].def_module_qn, name.c_str()),
+                                  v.ambiguous ? nullptr : qn};
+        }
+        defs[per_file[fi][0]].cpp_visible_types = bindings;
+        defs[per_file[fi][0]].cpp_visible_type_count = count;
+    }
+
+    for (const auto& [key, candidates] : implementations) {
+        auto found = declarations.find(key);
+        if (found == declarations.end()) continue;
+        // Multiple distinct definitions of the same semantic signature are
+        // ambiguous; do not choose one based on traversal or file order.
+        std::unordered_set<std::string> impl_qns;
+        for (int i : candidates) impl_qns.insert(defs[i].qualified_name);
+        if (impl_qns.size() != 1) continue;
+        for (int i : candidates) {
+            const auto& v = visible[def_files[i]];
+            if (v.ambiguous) continue;
+            const char *owner = nullptr;
+            bool ambiguous = false;
+            for (int di : found->second) {
+                if (std::find(v.files.begin(), v.files.end(), def_files[di]) == v.files.end()) continue;
+                const char *qn = defs[di].cpp_declaring_type;
+                if (ambiguous_owners.count(qn)) { ambiguous = true; continue; }
+                if (owner && strcmp(owner, qn) != 0) ambiguous = true;
+                owner = qn;
+            }
+            if (owner && !ambiguous) defs[i].cpp_declaring_type = owner;
+        }
+    }
 }
 
 /* Collect a project-wide CBMLSPDef[] from all cached results. Returns a
@@ -285,6 +527,8 @@ CBMLSPDef *cbm_pxc_collect_all_defs(CBMFileResult **cache, const cbm_file_info_t
         return NULL;
     }
     int idx = 0;
+    std::vector<int> def_files;
+    def_files.reserve(total);
     for (int fi = 0; fi < file_count; fi++) {
         if (!cache[fi])
             continue;
@@ -300,13 +544,19 @@ CBMLSPDef *cbm_pxc_collect_all_defs(CBMFileResult **cache, const cbm_file_info_t
                 cache[fi]->namespace_name = namespace_name;
             }
         }
+        int first_def = idx;
         for (int di = 0; di < cache[fi]->defs.count; di++) {
             if (pxc_build_lsp_def(&cache[fi]->arena, &cache[fi]->defs.items[di], def_modules[fi],
                                   namespace_name, files[fi].language, &defs[idx]) == 0) {
+                def_files.push_back(fi);
                 idx++;
             }
         }
+        if (files[fi].language == CBM_LANG_C || files[fi].language == CBM_LANG_CPP ||
+            files[fi].language == CBM_LANG_CUDA)
+            pxc_attach_cpp_fields(cache[fi], defs + first_def, idx - first_def);
     }
+    pxc_attach_cpp_identity(cache, files, file_count, defs, idx, def_files);
     *out_count = idx;
     return defs;
 }
@@ -461,8 +711,7 @@ static void pxc_append_results(CBMArena *dst_arena, CBMResolvedCallArray *dst_ca
         if (k) {
             cbm_ht_set(seen, k, (void *)(uintptr_t)1);
         }
-        CBMResolvedCall dst;
-        memset(&dst, 0, sizeof(dst));
+        CBMResolvedCall dst = {};
         dst.caller_qn = cbm_arena_strdup(dst_arena, src->caller_qn);
         dst.callee_qn = cbm_arena_strdup(dst_arena, src->callee_qn);
         dst.strategy = src->strategy ? cbm_arena_strdup(dst_arena, src->strategy) : NULL;
@@ -654,6 +903,49 @@ void cbm_pxc_filter_stats(uint64_t *defs_registered, uint64_t *build_files, uint
     }
 }
 
+// Ambiguity applies only to receiver diagnostics from this authored-source
+// dispatch. Older/preprocessed offsets can collide with unrelated raw sites.
+// Nested calls can also share an offset, so match caller AND callee leaf.
+static void pxc_guard_ambiguous_cpp_receivers(CBMFileResult *result, int first_new_record) {
+    constexpr size_t max_chunk_records = 4096;
+    std::unordered_multimap<uint32_t, const CBMResolvedCall *> unresolved_receivers;
+    auto apply_chunk = [&]() {
+        for (int ci = 0; ci < result->calls.count; ++ci) {
+            auto& call = result->calls.items[ci];
+            if (!call.enclosing_func_qn || !call.callee_name) continue;
+            auto range = unresolved_receivers.equal_range(call.source_byte);
+            for (auto it = range.first; it != range.second; ++it) {
+                const auto& diagnostic = *it->second;
+                if (strcmp(diagnostic.caller_qn, call.enclosing_func_qn) == 0 &&
+                    strcmp(cbm_lsp_bare_segment(diagnostic.callee_qn),
+                           cbm_lsp_bare_segment(call.callee_name)) == 0) {
+                    call.requires_typed_resolution = true;
+                    break;
+                }
+            }
+        }
+        unresolved_receivers.clear();
+    };
+    // Bound scratch independently of file size. Full chunks are applied before
+    // continuing; overflow never disables unrelated free-function fallback.
+    for (int ri = std::max(0, first_new_record); ri < result->resolved_calls.count; ++ri) {
+        const auto& call = result->resolved_calls.items[ri];
+        if (!call.source_byte || !call.caller_qn || !call.callee_qn || !call.strategy ||
+            strcmp(call.strategy, "lsp_unresolved") != 0 || !call.reason) continue;
+        if (strcmp(call.reason, "unknown_receiver_type") != 0 &&
+            strcmp(call.reason, "method_not_found") != 0) continue;
+        unresolved_receivers.emplace(call.source_byte, &call);
+        if (unresolved_receivers.size() == max_chunk_records) apply_chunk();
+    }
+    if (!unresolved_receivers.empty()) apply_chunk();
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" void cbm_test_guard_ambiguous_cpp_receivers(CBMFileResult *result, int first_new_record) {
+    pxc_guard_ambiguous_cpp_receivers(result, first_new_record);
+}
+#endif
+
 void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *source,
                            int source_len, const char *rel, const char *def_module,
                            const CBMCrossLspRegistries *cross_registries,
@@ -664,6 +956,7 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
     if (!result) {
         return;
     }
+    const int raw_cross_start = result->resolved_calls.count;
     bool used_prebuilt = false;
     CBMTypeRegistry *prebuilt =
         cross_registries ? cbm_pxc_registry_for_lang(cross_registries, lang) : NULL;
@@ -687,6 +980,12 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
             cbm_run_c_lsp_cross_with_registry(
                 &result->arena, source, source_len, def_module, (lang != CBM_LANG_C), prebuilt,
                 imp_keys, imp_vals, imp_count, result->cached_tree, &result->resolved_calls);
+            // Snapshot-backed workers load the original call records after
+            // registry construction, so apply the same ambiguity guard here.
+            if (cbm_registry_lookup_type(prebuilt, cbm_arena_sprintf(&result->arena,
+                    "%s.__cpp_visible.__no_weak_receiver__", def_module))) {
+                pxc_guard_ambiguous_cpp_receivers(result, raw_cross_start);
+            }
             used_prebuilt = true;
             break;
         case CBM_LANG_CSHARP:
@@ -795,6 +1094,20 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         cbm_pxc_run_one(lang, result, source, source_len, def_module, file_defs, file_def_count,
                         imp_keys, imp_vals, imp_count);
     }
+    if (lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) {
+        const char *marker = cbm_arena_sprintf(&result->arena,
+            "%s.__cpp_visible.__no_weak_receiver__", def_module);
+        bool ambiguous = false;
+        for (int di = 0; di < file_def_count && !ambiguous; ++di) {
+            for (int vi = 0; vi < file_defs[di].cpp_visible_type_count; ++vi) {
+                if (strcmp(file_defs[di].cpp_visible_types[vi].name, marker) == 0) {
+                    ambiguous = true;
+                    break;
+                }
+            }
+        }
+        if (ambiguous) pxc_guard_ambiguous_cpp_receivers(result, raw_cross_start);
+    }
     free(filtered);
 }
 
@@ -898,6 +1211,10 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
         if (!cache[i])
             continue;
         CBMLanguage lang = files[i].language;
+        if ((lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) &&
+            cbm_pipeline_cpp_primitives_complete(cache[i])) {
+            continue;
+        }
         if (!cbm_pxc_has_cross_lsp(lang)) {
             skipped_no_lsp++;
             continue;

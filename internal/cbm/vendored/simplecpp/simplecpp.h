@@ -309,6 +309,11 @@ namespace simplecpp {
         }
         void push_back(Token *tok);
 
+        /** Authored line/file controls make token locations logical, not physical. */
+        bool hasLineControl() const {
+            return mHasLineControl;
+        }
+
         void dump(bool linenrs = false) const;
         std::string stringify(bool linenrs = false) const;
 
@@ -354,6 +359,8 @@ namespace simplecpp {
         }
 
         void takeTokens(TokenList &other) {
+            mHasLineControl = mHasLineControl || other.mHasLineControl;
+            other.mHasLineControl = false;
             if (!other.frontToken)
                 return;
             if (!frontToken) {
@@ -403,6 +410,7 @@ namespace simplecpp {
 
         unsigned int fileIndex(const std::string &filename);
 
+        bool mHasLineControl = false;
         Token *frontToken;
         Token *backToken;
         std::vector<std::string> &files;

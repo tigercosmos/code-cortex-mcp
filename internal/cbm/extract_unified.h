@@ -41,6 +41,8 @@ typedef struct {
 // unified cursor walk, replacing the old recursive walk_* functions.
 void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state);
 void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state);
+bool cbm_usage_dedup_begin(CBMExtractCtx *ctx);
+void cbm_usage_dedup_end(CBMExtractCtx *ctx, bool owned);
 void handle_throws(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state);
 void handle_readwrites(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state);
 void handle_type_refs(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state);

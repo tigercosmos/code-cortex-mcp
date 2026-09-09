@@ -39,6 +39,13 @@
 extern "C" {
 #endif
 
+static inline int cbm_pipeline_lsp_key(char *buffer, size_t capacity, const char *caller,
+                                      const char *leaf, uint32_t source_byte) {
+    const char *suffix = strstr(leaf, "@overload_");
+    size_t length = suffix ? (size_t)(suffix - leaf) : strlen(leaf);
+    return snprintf(buffer, capacity, "%s|%.*s|%u", caller, (int)length, leaf, source_byte);
+}
+
 /* Bare last segment of a (possibly qualified) name, splitting on the LAST
  * member/scope separator. C++ textual callees carry `::` (Class::method,
  * Ns::f) and `->` (p->run), while the LSP records dotted internal QNs
@@ -178,6 +185,9 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
         if (strcmp(rc->caller_qn, call->enclosing_func_qn) != 0) {
             continue;
         }
+        if (rc->source_byte && call->source_byte && rc->source_byte != call->source_byte) {
+            continue;
+        }
         const char *short_name = cbm_lsp_bare_segment(rc->callee_qn);
         /* The call's callee_name is receiver-qualified for method/qualified
          * calls ("c.inc", "A.Helper", "Math::square", "p->run"); the LSP
@@ -188,7 +198,12 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
          * type-aware LSP strategy to the weaker textual registry. Free-function
          * calls (bare callee_name) are unaffected. */
         const char *call_short = cbm_lsp_bare_segment(call->callee_name);
-        if (strcmp(short_name, call_short) != 0) {
+        const char *overload_suffix = strstr(short_name, "@overload_");
+        bool same_name = overload_suffix
+                             ? strlen(call_short) == (size_t)(overload_suffix - short_name) &&
+                                   strncmp(short_name, call_short, overload_suffix - short_name) == 0
+                             : strcmp(short_name, call_short) == 0;
+        if (!same_name) {
             /* Indirect/implicit resolution: the textual callee differs from the
              * resolved callee_qn's short name. A function-pointer / DLL call's
              * callee is the pointer name (`fp`); a C++ destructor's only textual
@@ -201,7 +216,8 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
                 continue;
             }
         }
-        if (!best_exact || rc->confidence > best_exact->confidence) {
+        if (!best_exact || (rc->source_byte && !best_exact->source_byte) ||
+            ((rc->source_byte != 0) == (best_exact->source_byte != 0) && rc->confidence > best_exact->confidence)) {
             best_exact = rc;
         }
     }
@@ -320,5 +336,32 @@ static inline const cbm_gbuf_node_t *cbm_pipeline_lsp_target_node(const cbm_gbuf
 #ifdef __cplusplus
 }
 #endif
+
+// A bounded proof for the extra work formerly caused by primitive operator
+// candidates. Unknown/external/method calls and larger files keep the full pass.
+static inline bool cbm_pipeline_cpp_primitives_complete(const CBMFileResult *result) {
+    if (!result || result->deferred_cpp_operator_count == 0 ||
+        result->pending_cpp_operator_count != 0 || result->overload_count != 0 ||
+        result->calls.count > 128 || result->resolved_calls.count > 256 ||
+        result->defs.count > 512) return false;
+    for (int i = 0; i < result->calls.count; ++i) {
+        const CBMCall *call = &result->calls.items[i];
+        const CBMResolvedCall *resolved =
+            cbm_pipeline_find_lsp_resolution(&result->resolved_calls, call, false);
+        if (!resolved || !resolved->strategy || strcmp(resolved->strategy, "lsp_direct") != 0 ||
+            !resolved->callee_qn) return false;
+        bool local_definition = false;
+        for (int j = 0; j < result->defs.count; ++j) {
+            const CBMDefinition *def = &result->defs.items[j];
+            if (def->label && def->qualified_name && strcmp(def->label, "Function") == 0 &&
+                strcmp(def->qualified_name, resolved->callee_qn) == 0) {
+                local_definition = true;
+                break;
+            }
+        }
+        if (!local_definition) return false;
+    }
+    return true;
+}
 
 #endif /* CBM_PIPELINE_LSP_RESOLVE_H */

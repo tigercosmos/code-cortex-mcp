@@ -33,6 +33,16 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1
 #include <sys/stat.h>
 #include "foundation/cbm_atomic.h"
 #include <stdint.h>
+#include <vector>
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+static thread_local void (*after_classify_callback)(void *);
+static thread_local void *after_classify_data;
+void cbm_pipeline_test_after_classify(void (*callback)(void *), void *data) {
+    after_classify_callback = callback;
+    after_classify_data = data;
+}
+#endif
 
 /* ── Constants ───────────────────────────────────────────────────── */
 
@@ -73,11 +83,17 @@ static int64_t stat_mtime_ns(const struct stat *st) {
 
 /* ── File classification ─────────────────────────────────────────── */
 
+struct classified_version {
+    int64_t mtime_ns = 0;
+    int64_t size = -1; /* A failed stat must force another parse. */
+};
+
 /* Classify discovered files against stored hashes using mtime+size.
  * Returns a boolean array: changed[i] = true if files[i] needs re-parsing.
  * Caller must free the returned array. */
 static bool *classify_files(cbm_file_info_t *files, int file_count, cbm_file_hash_t *stored,
-                            int stored_count, int *out_changed, int *out_unchanged) {
+                            int stored_count, int *out_changed, int *out_unchanged,
+                            classified_version *versions) {
     bool *changed = (bool *)calloc((size_t)file_count, sizeof(bool));
     if (!changed) {
         return NULL;
@@ -94,16 +110,15 @@ static bool *classify_files(cbm_file_info_t *files, int file_count, cbm_file_has
     }
 
     for (int i = 0; i < file_count; i++) {
-        cbm_file_hash_t *h = (cbm_file_hash_t *)cbm_ht_get(ht, files[i].rel_path);
-        if (!h) {
-            /* New file */
+        struct stat st;
+        if (stat(files[i].path, &st) != 0) {
             changed[i] = true;
             n_changed++;
             continue;
         }
-
-        struct stat st;
-        if (stat(files[i].path, &st) != 0) {
+        versions[i] = {stat_mtime_ns(&st), st.st_size};
+        cbm_file_hash_t *h = (cbm_file_hash_t *)cbm_ht_get(ht, files[i].rel_path);
+        if (!h) {
             changed[i] = true;
             n_changed++;
             continue;
@@ -451,19 +466,16 @@ static void incr_free_edge_capture(cbm_edge_capture_t *cap) {
  * is the only signal that something went wrong. */
 static void persist_hashes(cbm_store_t *store, const char *project, cbm_file_info_t *files,
                            int file_count, const cbm_file_hash_t *mode_skipped,
-                           int mode_skipped_count) {
+                           int mode_skipped_count, const classified_version *versions) {
     int current_failed = 0;
     int ms_failed = 0;
 
-    /* Current discovery: re-stat to capture any mtime/size that changed
-     * during the run, and write fresh hash rows for visited files. */
+    /* Preserve the classified source version. A later edit must remain
+     * different from this row so the next run discovers it. Re-statting here
+     * would incorrectly acknowledge source that was never parsed. */
     for (int i = 0; i < file_count; i++) {
-        struct stat st;
-        if (stat(files[i].path, &st) != 0) {
-            continue;
-        }
         int rc = cbm_store_upsert_file_hash(store, project, files[i].rel_path, "",
-                                            stat_mtime_ns(&st), st.st_size);
+                                            versions[i].mtime_ns, versions[i].size);
         if (rc != CBM_STORE_OK) {
             cbm_log_warn("incremental.persist_hash_failed", "scope", "current", "rel_path",
                          files[i].rel_path, "rc", itoa_buf(rc));
@@ -631,7 +643,8 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
 static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *project,
                              cbm_file_info_t *files, int file_count,
                              const cbm_file_hash_t *mode_skipped, int mode_skipped_count,
-                             const char *repo_path, const cbm_coverage_row_t *cov, int cov_count) {
+                             const char *repo_path, const cbm_coverage_row_t *cov, int cov_count,
+                             const classified_version *versions) {
     struct timespec t;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
 
@@ -657,7 +670,7 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
             cbm_log_error("incremental.err", "msg", "format_version", "project", project);
         }
 
-        persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
+        persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count, versions);
 
         /* Coverage rows (#963): re-write the merged set into the rebuilt DB
          * (AFTER hashes, so the deleted-file prune sees the live file set). */
@@ -713,8 +726,9 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     /* Classify files */
     int n_changed = 0;
     int n_unchanged = 0;
+    std::vector<classified_version> versions((size_t)file_count);
     bool *is_changed =
-        classify_files(files, file_count, stored, stored_count, &n_changed, &n_unchanged);
+        classify_files(files, file_count, stored, stored_count, &n_changed, &n_unchanged, versions.data());
 
     /* Classify stored files absent from current discovery: truly-deleted
      * (purge) vs mode-skipped (preserve nodes AND hash rows). */
@@ -728,6 +742,14 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_log_info("incremental.classify", "changed", itoa_buf(n_changed), "unchanged",
                  itoa_buf(n_unchanged), "deleted", itoa_buf(deleted_count), "mode_skipped",
                  itoa_buf(mode_skipped_count));
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (after_classify_callback) {
+        auto callback = after_classify_callback;
+        after_classify_callback = nullptr;
+        callback(after_classify_data);
+    }
+#endif
 
     /* Fast path: nothing changed → skip. The on-disk DB is left untouched,
      * which means existing hash rows (including for any mode-skipped files
@@ -965,7 +987,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_pipeline_set_committed_counts(p, cbm_gbuf_node_count(existing),
                                       cbm_gbuf_edge_count(existing));
     dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
-                     mode_skipped_count, cbm_pipeline_repo_path(p), cov, cov_n);
+                     mode_skipped_count, cbm_pipeline_repo_path(p), cov, cov_n, versions.data());
     free(cov);
     cbm_store_free_coverage(old_cov, old_cov_count);
     free_mode_skipped(mode_skipped, mode_skipped_count);

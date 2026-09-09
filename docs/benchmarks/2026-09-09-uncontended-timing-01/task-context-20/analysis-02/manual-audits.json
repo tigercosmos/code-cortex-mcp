@@ -1,0 +1,1735 @@
+{
+  "gpt-6-astra-holdout_jansson_object_clear_release-adaptive-context-r2": {
+    "summary_sha256": "cb03c2b109324ff9c9abbe089a3505f6670384d9f7a1bbab7563f4adc409b90c",
+    "grade_sha256": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+    "session_report_sha256": "bd7bab3db3bfd4962d28b6c5d46e5bb2aeccff6076905ff4e91f5cd2dad26085",
+    "raw_tools_sha256": "4f7ebddf91ffe011293071ce7b10b13e0fbc0443cb6ca78af342ff73b0e9f7cc",
+    "exposure_sha256": "051e94179542603fa34bb68b76eb70e53f8da34ba4e5b9024bdbf95e7006c38d",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "source_check": {
+      "tracked_entries": 369,
+      "entire_saved_after_equals_setup_manifest": true,
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "source_ground_truth": [
+        {
+          "caller_definition": "src/value.c:181",
+          "call": "src/value.c:188",
+          "callee_definition": "src/hashtable.c:280"
+        },
+        {
+          "caller_definition": "src/hashtable.c:280",
+          "call": "src/hashtable.c:283",
+          "callee_definition": "src/hashtable.c:128"
+        },
+        {
+          "caller_definition": "src/hashtable.c:128",
+          "call": "src/hashtable.c:136",
+          "callee_definition": "src/memory.c:32"
+        }
+      ],
+      "definition_files_current_hashes": {
+        "src/value.c": {
+          "kind": "file",
+          "sha256": "f123895e32181f805df0ca182910d05e4552dc51533194e681ed1879f40b11c5",
+          "executable": false
+        },
+        "src/hashtable.c": {
+          "kind": "file",
+          "sha256": "8774983707ab6a41dc91868f75ec3330e85cc4fd49f11d0168a647a1608e3935",
+          "executable": false
+        },
+        "src/memory.c": {
+          "kind": "file",
+          "sha256": "8491373da9294fc5bd86f1bb3d2e8393d2a6ea3282ce3d6832726f643d035a09",
+          "executable": false
+        }
+      },
+      "shortest_chain_reason": "json_object_clear has only hashtable_clear as a non-macro repository call; hashtable_clear calls hashtable_do_clear, which directly calls jsonp_free. Its other list_init calls do not free memory."
+    },
+    "tool_counts": {
+      "outer_code_calls": 2,
+      "exec_command_invocations": 2,
+      "rg_commands": 1,
+      "sed_commands": 3,
+      "mcp_calls": 0
+    },
+    "phases": {
+      "smoke": {
+        "outer_code_calls": 2,
+        "exec_command_invocations": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "mcp_calls": 1,
+        "raw_tool_records": 4,
+        "native_action_items": 1,
+        "raw_outputs_equal_native": true,
+        "all_original_tool_records_selected": true,
+        "rollout_sha256": "de423afec8572fcdb58b4ee67a7c688748090f920079f9d095346a04b15608d5",
+        "selected_zero_based_ordinals": [
+          12,
+          14,
+          16,
+          19
+        ],
+        "record_inventory": [
+          {
+            "call_id": "call_CxZM0YvXANHUTIyhz0JieBoM",
+            "input": "const matches = ALL_TOOLS.filter(t => t.name === \"mcp__code_cortex_mcp__list_projects\" || t.name.endsWith(\"__list_projects\") && t.name.includes(\"code_cortex\"));\ntext(matches);\nstore(\"cortex_list_tool\", matches.length === 1 ? matches[0].name : null);\n",
+            "linked_output_payload_sha256": "6053ac05bae7155cde2753b56072f6ab60835f61dfb372c1bb1dde3eb26d6ecb"
+          },
+          {
+            "call_id": "call_KRFFlLnAMp6neoyYyWnYtxd1",
+            "input": "const result = await tools.mcp__code_cortex_mcp__list_projects({});\ntext(result);\n",
+            "linked_output_payload_sha256": "03f2e5efd1f4c2dfe3ac4e097bd37714b323ebb887aee63d01a481711c740c03"
+          }
+        ],
+        "native_commands": [],
+        "usage": {
+          "input_tokens": 34618,
+          "cached_input_tokens": 32000,
+          "output_tokens": 140,
+          "reasoning_output_tokens": 0
+        },
+        "bindings": {
+          "selected-raw-tool-events.jsonl": "cb38bb1f7d819c220b3dad176c85470b3c4e7290084686a5ce8c57c25ab70a58",
+          "rollout-source-receipt.json": "67d4c587f8e1cd67b85f5c137be964a01109ab89214e0cfcbb3b214ac7ebc645",
+          "native-events.jsonl": "0015df7d3e88c70df5dc9d8bb06f05320aafa6af88627f54869531ec85970a89",
+          "session-report.json": "233d8829e0e28708fc26a58c701d10a6859ac943bd210085b77f2c6f80f728e6",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "c66c799028cca9e238a6788e92b653a8d64d9abb84cf2658da4e5a66f7b35c4f",
+          "prompt.txt": "f90b459731462eeef3f4014d86d42bed9ecf96b537a3b3ce1dd8e7c2fe7e80c6",
+          "answer.md": "217c8a1f494ac8fcb074b9d4ba8b388f0f99e1a48bd2d8d14714746fd8f0f1a5"
+        }
+      },
+      "task": {
+        "outer_code_calls": 2,
+        "exec_command_invocations": 2,
+        "rg_commands": 1,
+        "sed_commands": 3,
+        "mcp_calls": 0,
+        "raw_tool_records": 4,
+        "native_action_items": 2,
+        "raw_outputs_equal_native": true,
+        "all_original_tool_records_selected": true,
+        "rollout_sha256": "b39786cec53ca52a25a4bc2c57a9f7f2aecdec233d850a3ecc5e629abae06da7",
+        "selected_zero_based_ordinals": [
+          12,
+          15,
+          17,
+          20
+        ],
+        "record_inventory": [
+          {
+            "call_id": "call_EvTy7F4N6OQ7ilogd5URxhcW",
+            "input": "text(await tools.exec_command({cmd:\"rg -n 'json_object_clear|hashtable_clear|jsonp_free|hashtable_do_clear|#define json_to_object|#define json_is_object' src/value.c src/hashtable.c src/hashtable.h src/jansson.h src/jansson_private.h src/memory.c\",\"max_output_tokens\":3000}));\n",
+            "linked_output_payload_sha256": "84b36bc22a0bb0d6030f8e8da6641904ed2b6e7f798b2c7a35549c08de9ef0e8"
+          },
+          {
+            "call_id": "call_SW5xRlT8UoJyUF1UL55jHa3K",
+            "input": "text(await tools.exec_command({cmd:\"sed -n '128,140p;280,295p' src/hashtable.c\\nsed -n '181,191p' src/value.c\\nsed -n '32,37p' src/memory.c\",\"max_output_tokens\":1500}));\n",
+            "linked_output_payload_sha256": "4b1a05dbad836871829ae3710a4877de31041fa95bae406b38f49d7dfdd4b848"
+          }
+        ],
+        "native_commands": [
+          "/bin/zsh -lc \"rg -n 'json_object_clear|hashtable_clear|jsonp_free|hashtable_do_clear|#define json_to_object|#define json_is_object' src/value.c src/hashtable.c src/hashtable.h src/jansson.h src/jansson_private.h src/memory.c\"",
+          "/bin/zsh -lc \"sed -n '128,140p;280,295p' src/hashtable.c\nsed -n '181,191p' src/value.c\nsed -n '32,37p' src/memory.c\""
+        ],
+        "usage": {
+          "input_tokens": 44906,
+          "cached_input_tokens": 37760,
+          "output_tokens": 199,
+          "reasoning_output_tokens": 0
+        },
+        "bindings": {
+          "selected-raw-tool-events.jsonl": "4f7ebddf91ffe011293071ce7b10b13e0fbc0443cb6ca78af342ff73b0e9f7cc",
+          "rollout-source-receipt.json": "863cbca779259c3f6df61f93e1bfa9ebe84ecf8f2e84b1cbdf2fd7ea0406b696",
+          "native-events.jsonl": "18e8dfebb911567f9210ff9563aa201cd40aea12aaadee973338b2f03ad48cc5",
+          "session-report.json": "bd7bab3db3bfd4962d28b6c5d46e5bb2aeccff6076905ff4e91f5cd2dad26085",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "252bdce01c4512addecc8eb33a2609664eb58d45d4bd13c0621243cfe7c44c7f",
+          "prompt.txt": "1f002cd2c0b39056b23fb7664e82fad88bd5a79a9f773feef21ecfcebeb363a5",
+          "answer.md": "8bb66a32540243116641c738e72669ff2d5ee7ac4e2651d9610481304b940704"
+        }
+      }
+    },
+    "retrieval": {
+      "backend": "graph+shell-recovery",
+      "truncated": true,
+      "fallback_required": true,
+      "context_bytes": 12000,
+      "errors": [],
+      "graph_cli_calls": 1,
+      "rg_commands": 2,
+      "result_sha256": "779ed5b05b9f8ce5592f5f50d6b508390856bff88db3ca79fb8910a5a6374f4b"
+    },
+    "limitations": [
+      "Contended execution; environment_admissible=false. No clean speed claim.",
+      "Protocol review covers saved CLI tool/native events and source manifests; no independent OS/network trace or HTTP request count.",
+      "Automatic client retrieval is separate from task agent tool counts. Adaptive graph reported no path; both prefetched contexts clipped at12000 bytes; follow-up source reads supplied the complete chain."
+    ],
+    "assessment": "Source-correct four-function chain; no observed prohibited network, edits, builds/tests, agents, graph or external-repository task commands. Exposure action valid."
+  },
+  "gpt-6-astra-holdout_jansson_object_clear_release-shell-prefetch-r2": {
+    "summary_sha256": "9493818b5c597e6a32652a2c8fd48dd6ca38d62526467e22c17f218aa30b9b02",
+    "grade_sha256": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+    "session_report_sha256": "dcd33d257becbfd355dc9c159940e201bf24d89b42118eae67395a5675a3ded1",
+    "raw_tools_sha256": "7c1dca7fcf62da58a0b42e6fac839ff5e6d663baf776626c1737f5b754ff8b1f",
+    "exposure_sha256": "64106bf674e368ba0e7fc4ce0c87b1e3b1ead8feaef55e216a0e4d5435fa1368",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "source_check": {
+      "tracked_entries": 369,
+      "entire_saved_after_equals_setup_manifest": true,
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "source_ground_truth": [
+        {
+          "caller_definition": "src/value.c:181",
+          "call": "src/value.c:188",
+          "callee_definition": "src/hashtable.c:280"
+        },
+        {
+          "caller_definition": "src/hashtable.c:280",
+          "call": "src/hashtable.c:283",
+          "callee_definition": "src/hashtable.c:128"
+        },
+        {
+          "caller_definition": "src/hashtable.c:128",
+          "call": "src/hashtable.c:136",
+          "callee_definition": "src/memory.c:32"
+        }
+      ],
+      "definition_files_current_hashes": {
+        "src/value.c": {
+          "kind": "file",
+          "sha256": "f123895e32181f805df0ca182910d05e4552dc51533194e681ed1879f40b11c5",
+          "executable": false
+        },
+        "src/hashtable.c": {
+          "kind": "file",
+          "sha256": "8774983707ab6a41dc91868f75ec3330e85cc4fd49f11d0168a647a1608e3935",
+          "executable": false
+        },
+        "src/memory.c": {
+          "kind": "file",
+          "sha256": "8491373da9294fc5bd86f1bb3d2e8393d2a6ea3282ce3d6832726f643d035a09",
+          "executable": false
+        }
+      },
+      "shortest_chain_reason": "json_object_clear has only hashtable_clear as a non-macro repository call; hashtable_clear calls hashtable_do_clear, which directly calls jsonp_free. Its other list_init calls do not free memory."
+    },
+    "tool_counts": {
+      "outer_code_calls": 1,
+      "exec_command_invocations": 1,
+      "rg_commands": 1,
+      "sed_commands": 0,
+      "mcp_calls": 0
+    },
+    "phases": {
+      "smoke": {
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "mcp_calls": 0,
+        "raw_tool_records": 2,
+        "native_action_items": 1,
+        "raw_outputs_equal_native": true,
+        "all_original_tool_records_selected": true,
+        "rollout_sha256": "08461fb8de44a11dca0f7ef248abb88fa685a1a8230ca28c2465d752fc6664b6",
+        "selected_zero_based_ordinals": [
+          12,
+          15
+        ],
+        "record_inventory": [
+          {
+            "call_id": "call_FUNKI1OISRVFPBhSD3WyBZBF",
+            "input": "text(await tools.exec_command({cmd:\"pwd\",max_output_tokens:100}));\n",
+            "linked_output_payload_sha256": "4c3fc1de61855c253c19a9636ec9b28f829dc430292e022c5bfd3f47fb1561ea"
+          }
+        ],
+        "native_commands": [
+          "/bin/zsh -lc pwd"
+        ],
+        "usage": {
+          "input_tokens": 21116,
+          "cached_input_tokens": 19072,
+          "output_tokens": 49,
+          "reasoning_output_tokens": 0
+        },
+        "bindings": {
+          "selected-raw-tool-events.jsonl": "44206101085d493fbcdb5d15335c22081b2b5aa6741fff4df96284d78d9beaa6",
+          "rollout-source-receipt.json": "2a219a1365ab724ff4e3c3364eb3d4dbfb3d2b7611cca0c8c090014c41ce4f1a",
+          "native-events.jsonl": "8cfa93f7f90fad023da3383e45bcb71b6b8884d80250ac7a581b172237016413",
+          "session-report.json": "3884fc62e668d39e8f4b32dd01d5d888a1cbf13c25318c59fe2ffe618721f3ef",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "2a1e1117802bde6e7a79c4870d38704d8050713f3d0c7203fd6cc49425bf7026",
+          "prompt.txt": "6f8a8873779a0bd45097c64d29ae136248bcb7162c84ad4c621c7d596a447a4a",
+          "answer.md": "58d9160d8ad217ee5e94f838328d459952e6e8bf89e9be7f8595b61cdbc7fabf"
+        }
+      },
+      "task": {
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "rg_commands": 1,
+        "sed_commands": 0,
+        "mcp_calls": 0,
+        "raw_tool_records": 2,
+        "native_action_items": 1,
+        "raw_outputs_equal_native": true,
+        "all_original_tool_records_selected": true,
+        "rollout_sha256": "b89064842458eba46cd8a98aeed95a80cfed03820763ad4c3f6be86ababc1732",
+        "selected_zero_based_ordinals": [
+          12,
+          15
+        ],
+        "record_inventory": [
+          {
+            "call_id": "call_0SAKcwlYLLVMW2cpxS8XZGky",
+            "input": "text(await tools.exec_command({cmd:\"rg -n -A 28 -B 5 'void hashtable_clear|static void hashtable_do_clear|int json_object_clear|void jsonp_free' src/hashtable.c src/value.c src/memory.c\",\"max_output_tokens\":2500}));\n",
+            "linked_output_payload_sha256": "27014a9cdfa0050a3ed7c4fe5addb720ec701faf82ea92fac67664ac5604c796"
+          }
+        ],
+        "native_commands": [
+          "/bin/zsh -lc \"rg -n -A 28 -B 5 'void hashtable_clear|static void hashtable_do_clear|int json_object_clear|void jsonp_free' src/hashtable.c src/value.c src/memory.c\""
+        ],
+        "usage": {
+          "input_tokens": 30993,
+          "cached_input_tokens": 22912,
+          "output_tokens": 115,
+          "reasoning_output_tokens": 0
+        },
+        "bindings": {
+          "selected-raw-tool-events.jsonl": "7c1dca7fcf62da58a0b42e6fac839ff5e6d663baf776626c1737f5b754ff8b1f",
+          "rollout-source-receipt.json": "90f6bdc0132c39dc0cc13cf6884362c94415d9a9ba36aaeed82d5dc8b33e994b",
+          "native-events.jsonl": "de958d5593a601f2ee7076c5de8a5b4f150a995166fa1d1bc92f970419a84bc2",
+          "session-report.json": "dcd33d257becbfd355dc9c159940e201bf24d89b42118eae67395a5675a3ded1",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "de80d616072239f9f0edd87e6faca6ec7eafd9dca78d71d2663e8b4f7b179251",
+          "prompt.txt": "ff2aabcbfa83cc43ae766e7613daaee73e8890d89e492e90d3cf165580386eab",
+          "answer.md": "8bb66a32540243116641c738e72669ff2d5ee7ac4e2651d9610481304b940704"
+        }
+      }
+    },
+    "retrieval": {
+      "backend": "shell",
+      "truncated": true,
+      "fallback_required": true,
+      "context_bytes": 12000,
+      "errors": [],
+      "graph_cli_calls": 0,
+      "rg_commands": 2,
+      "result_sha256": "313357f7d0c418dd2d511f3879b7d10b7f44359b48618d866996d473a8adf295"
+    },
+    "limitations": [
+      "Contended execution; environment_admissible=false. No clean speed claim.",
+      "Protocol review covers saved CLI tool/native events and source manifests; no independent OS/network trace or HTTP request count.",
+      "Automatic client retrieval is separate from task agent tool counts. Adaptive graph reported no path; both prefetched contexts clipped at12000 bytes; follow-up source reads supplied the complete chain."
+    ],
+    "assessment": "Source-correct four-function chain; no observed prohibited network, edits, builds/tests, agents, graph or external-repository task commands. Exposure action valid."
+  },
+  "gpt-6-astra-holdout_jansson_object_clear_release-raw-shell-r2": {
+    "summary_sha256": "a2ae881d1be7de1aca41835142aa4f769ed42f2f5f5cb331329d592144107202",
+    "grade_sha256": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+    "session_report_sha256": "e317c565bf16524063f235b0159241b7bce3beb878a87b0aa627623820a93db2",
+    "raw_tools_sha256": "e914cd20a1375fd15f3053e083c11e15a0759c26120436acf33b04852f8a7c3c",
+    "exposure_sha256": "1c19f88fe0608bfa816c300b0a31fbae18eb0b71c1485cea6c8656252ab60401",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "source_check": {
+      "tracked_entries": 369,
+      "entire_saved_after_equals_setup_manifest": true,
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "source_ground_truth": [
+        {
+          "caller_definition": "src/value.c:181",
+          "call": "src/value.c:188",
+          "callee_definition": "src/hashtable.c:280"
+        },
+        {
+          "caller_definition": "src/hashtable.c:280",
+          "call": "src/hashtable.c:283",
+          "callee_definition": "src/hashtable.c:128"
+        },
+        {
+          "caller_definition": "src/hashtable.c:128",
+          "call": "src/hashtable.c:136",
+          "callee_definition": "src/memory.c:32"
+        }
+      ],
+      "definition_files_current_hashes": {
+        "src/value.c": {
+          "kind": "file",
+          "sha256": "f123895e32181f805df0ca182910d05e4552dc51533194e681ed1879f40b11c5",
+          "executable": false
+        },
+        "src/hashtable.c": {
+          "kind": "file",
+          "sha256": "8774983707ab6a41dc91868f75ec3330e85cc4fd49f11d0168a647a1608e3935",
+          "executable": false
+        },
+        "src/memory.c": {
+          "kind": "file",
+          "sha256": "8491373da9294fc5bd86f1bb3d2e8393d2a6ea3282ce3d6832726f643d035a09",
+          "executable": false
+        }
+      },
+      "shortest_chain_reason": "json_object_clear has only hashtable_clear as a non-macro repository call; hashtable_clear calls hashtable_do_clear, which directly calls jsonp_free. Its other list_init calls do not free memory."
+    },
+    "tool_counts": {
+      "outer_code_calls": 2,
+      "exec_command_invocations": 2,
+      "rg_commands": 1,
+      "sed_commands": 4,
+      "mcp_calls": 0
+    },
+    "phases": {
+      "smoke": {
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "mcp_calls": 0,
+        "raw_tool_records": 2,
+        "native_action_items": 1,
+        "raw_outputs_equal_native": true,
+        "all_original_tool_records_selected": true,
+        "rollout_sha256": "ce662c7cc8317eaf477baf85abf8fd88710bec503caf8c8248819a357b1262c8",
+        "selected_zero_based_ordinals": [
+          12,
+          15
+        ],
+        "record_inventory": [
+          {
+            "call_id": "call_jPuFu9clhnNcQxBKnfVvFrd4",
+            "input": "text(await tools.exec_command({cmd:\"pwd\",max_output_tokens:100}));\n",
+            "linked_output_payload_sha256": "0b2be96485e197c752dbdcaa9aa0a6e6c78f79f093f7fedcd22709b891748b90"
+          }
+        ],
+        "native_commands": [
+          "/bin/zsh -lc pwd"
+        ],
+        "usage": {
+          "input_tokens": 21118,
+          "cached_input_tokens": 19072,
+          "output_tokens": 52,
+          "reasoning_output_tokens": 0
+        },
+        "bindings": {
+          "selected-raw-tool-events.jsonl": "ee4885d6cce6083507892b9ee4d7e9f324293f3aec292d3e3770aabb8ff48e17",
+          "rollout-source-receipt.json": "d2c7c999c2ef525a64b7c7a42f6c91f0f81df40f2a11da6d8feb42e444ea0038",
+          "native-events.jsonl": "2aa3abdbf8618543c77a5557d1015124420f4129fda4fe258604258284177212",
+          "session-report.json": "f9a3e77d8b143b6b4495f87c917d84a3f48f05256d87bbddcf425e83e2c4d3b1",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "aaf1af6ef57a678d68f6f1a3fca963e4ff8091a896b8a44706bcbcb145ee44f5",
+          "prompt.txt": "6f8a8873779a0bd45097c64d29ae136248bcb7162c84ad4c621c7d596a447a4a",
+          "answer.md": "58d9160d8ad217ee5e94f838328d459952e6e8bf89e9be7f8595b61cdbc7fabf"
+        }
+      },
+      "task": {
+        "outer_code_calls": 2,
+        "exec_command_invocations": 2,
+        "rg_commands": 1,
+        "sed_commands": 4,
+        "mcp_calls": 0,
+        "raw_tool_records": 4,
+        "native_action_items": 2,
+        "raw_outputs_equal_native": true,
+        "all_original_tool_records_selected": true,
+        "rollout_sha256": "9f9887b17d6e5d88b50b1abdadf1e2f49ba1b49f29997912222ea05818613f15",
+        "selected_zero_based_ordinals": [
+          12,
+          15,
+          17,
+          20
+        ],
+        "record_inventory": [
+          {
+            "call_id": "call_cGXk1eW7lCla7iYafVFavtOc",
+            "input": "text(await tools.exec_command({cmd:\"rg -n 'json_object_clear|jsonp_free|hashtable_clear' src\",\"max_output_tokens\":4000}));\n",
+            "linked_output_payload_sha256": "060439703fe92615602c8b6b0574d304ccd7b74869cf3ed87801cf16f089cd6b"
+          },
+          {
+            "call_id": "call_sVxysg89FW4Wt0ASbtkzFXSt",
+            "input": "text(await tools.exec_command({cmd:\"sed -n '175,192p' src/value.c\\nsed -n '124,142p' src/hashtable.c\\nsed -n '274,295p' src/hashtable.c\\nsed -n '25,40p' src/memory.c\",\"max_output_tokens\":2000}));\n",
+            "linked_output_payload_sha256": "8a9d8566bf5bc0623b8e6a7653e4fcddecb7e8f33027f7ab6ace7922ae752c00"
+          }
+        ],
+        "native_commands": [
+          "/bin/zsh -lc \"rg -n 'json_object_clear|jsonp_free|hashtable_clear' src\"",
+          "/bin/zsh -lc \"sed -n '175,192p' src/value.c\nsed -n '124,142p' src/hashtable.c\nsed -n '274,295p' src/hashtable.c\nsed -n '25,40p' src/memory.c\""
+        ],
+        "usage": {
+          "input_tokens": 34221,
+          "cached_input_tokens": 30464,
+          "output_tokens": 164,
+          "reasoning_output_tokens": 0
+        },
+        "bindings": {
+          "selected-raw-tool-events.jsonl": "e914cd20a1375fd15f3053e083c11e15a0759c26120436acf33b04852f8a7c3c",
+          "rollout-source-receipt.json": "a092b932a4f1672c2197f073f9afa49ebe1909ebb19193485d7c42b2489ac404",
+          "native-events.jsonl": "af4b9ceed2515527c08bdaf5d20e687683e3fe5fd9e5418dc7ff7195bcbb39f1",
+          "session-report.json": "e317c565bf16524063f235b0159241b7bce3beb878a87b0aa627623820a93db2",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "6f45899ed3e55fef996d8878b6c38dc437eefa6dadcd8a0f3e2e57ef75d992b9",
+          "prompt.txt": "794731d70b278c31d608d20cec8724653dcd50b5524fbe290966b11f394004bd",
+          "answer.md": "8bb66a32540243116641c738e72669ff2d5ee7ac4e2651d9610481304b940704"
+        }
+      }
+    },
+    "retrieval": {
+      "backend": "none",
+      "truncated": false,
+      "fallback_required": false,
+      "context_bytes": 0,
+      "errors": [],
+      "graph_cli_calls": 0,
+      "rg_commands": 0,
+      "result_sha256": "ee7a63f83fc17e97e133188c2cacdb54edc353baa843e0ead183bffe37d38d6a"
+    },
+    "limitations": [
+      "Contended execution; environment_admissible=false. No clean speed claim.",
+      "Protocol review covers saved CLI tool/native events and source manifests; no independent OS/network trace or HTTP request count.",
+      "Raw-shell received empty context."
+    ],
+    "assessment": "Source-correct four-function chain; no observed prohibited network, edits, builds/tests, agents, graph or external-repository task commands. Exposure action valid."
+  },
+  "gpt-5.6-sol-holdout_jansson_loadb_definition-adaptive-context-r2": {
+    "summary_sha256": "fc416417a6a893b7f3a382a9ed27b4e967f6367ecf28c18c5685e966e09b29fa",
+    "grade_sha256": "23fd0aa4c70e6706a94607b8fb2509ebab9c5ab06a78dbc498e88394a8409155",
+    "session_report_sha256": "195e3ed36c1569eb7698dd044f4d6e1e6503a66f95c9b7c3382fb37e94571f37",
+    "raw_tools_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "exposure_sha256": "b60142070d9d3689f06f97a19aef3ac115d3de5e8354d3ca0804c8117a87cbcc",
+    "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+    "rollout_receipt_sha256": "a559b19a5b4b9492d375357540be9a738b3468e3d145b69261fdd5cff4e7149d",
+    "smoke_tools_sha256": "89eb78003d276354889abf1ef3db2976e66f2621470b63b25035cd38d186e2d2",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "reviewer": "root",
+    "tool_counts": {
+      "orchestration_calls": 0,
+      "exec_command_invocations": 0,
+      "rg_commands": 0,
+      "mcp_calls": 0,
+      "patch_calls": 0,
+      "raw_tool_records": 0
+    },
+    "notes": [
+      "Every selected raw task and smoke call/output manually read. Raw-shell executes one defining-signature rg inside the exact repository; both context arms execute no task tools.",
+      "Native completed item inventory and full source manifest agree; exact source answer and settings/exposure pass.",
+      "No network, external repository, graph CLI/database, edits, or agents in task records. Historical environment inadmissible; no clean pair."
+    ]
+  },
+  "gpt-5.6-sol-holdout_jansson_loadb_definition-raw-shell-r2": {
+    "summary_sha256": "c9ce4327cea24652f1a4a574072cc58fa0102dab92f4cd82b496836227d6ece3",
+    "grade_sha256": "23fd0aa4c70e6706a94607b8fb2509ebab9c5ab06a78dbc498e88394a8409155",
+    "session_report_sha256": "f62d98b7762b5cb04d0baf82312bd16b46c5bc3500b183685b79050176181574",
+    "raw_tools_sha256": "90b6697724fa37baebae1f1e9e28953babcf8b1f789087eac975ce8de981206a",
+    "exposure_sha256": "677c416b06e10fe12ff987dc621f2b00f6300f2bff9f8b05f84769bc7b5f3e6b",
+    "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+    "rollout_receipt_sha256": "10a3379f0032f5267a17a6184a274b4f6356bee6bf2d35927c08ac80e2438790",
+    "smoke_tools_sha256": "c04e4c728d00f38d38697a0e26e397c23a48c7d3276d2878c5fa685cb9e3e5f4",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "reviewer": "root",
+    "tool_counts": {
+      "orchestration_calls": 1,
+      "exec_command_invocations": 1,
+      "rg_commands": 1,
+      "mcp_calls": 0,
+      "patch_calls": 0,
+      "raw_tool_records": 2
+    },
+    "notes": [
+      "Every selected raw task and smoke call/output manually read. Raw-shell executes one defining-signature rg inside the exact repository; both context arms execute no task tools.",
+      "Native completed item inventory and full source manifest agree; exact source answer and settings/exposure pass.",
+      "No network, external repository, graph CLI/database, edits, or agents in task records. Historical environment inadmissible; no clean pair."
+    ]
+  },
+  "gpt-5.6-sol-holdout_jansson_loadb_definition-shell-prefetch-r2": {
+    "summary_sha256": "c3781bf7e428f35c1fca00d99d1a0fa3315048dd0a6606ab9c332c28d525e3e7",
+    "grade_sha256": "23fd0aa4c70e6706a94607b8fb2509ebab9c5ab06a78dbc498e88394a8409155",
+    "session_report_sha256": "6360096866583b9525de786b2c13517caeafa1b2b291a1f6a8de98d787ea5634",
+    "raw_tools_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "exposure_sha256": "6870f961ce99d8fb6f200c92f1d09552299b97960e7584dc020ea9b683f615e6",
+    "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+    "rollout_receipt_sha256": "c5f5be2217824219656ac8cea929e6e50a3d63309ae034fcadab90bd8d3d0589",
+    "smoke_tools_sha256": "e72b0c8b923d8f727943a2972587e9f64f3f32992f284818fe7a70347165a002",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "reviewer": "root",
+    "tool_counts": {
+      "orchestration_calls": 0,
+      "exec_command_invocations": 0,
+      "rg_commands": 0,
+      "mcp_calls": 0,
+      "patch_calls": 0,
+      "raw_tool_records": 0
+    },
+    "notes": [
+      "Every selected raw task and smoke call/output manually read. Raw-shell executes one defining-signature rg inside the exact repository; both context arms execute no task tools.",
+      "Native completed item inventory and full source manifest agree; exact source answer and settings/exposure pass.",
+      "No network, external repository, graph CLI/database, edits, or agents in task records. Historical environment inadmissible; no clean pair."
+    ]
+  },
+  "gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1": {
+    "summary_sha256": "9a02210bc97dad3124661211c33bea8603aec3b432248d57604b79bd55818e4e",
+    "grade_sha256": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+    "session_report_sha256": "6847a0182fb342ecc2fbe2f67941651305ef7239a1ceeceff123f87ba8dd8375",
+    "raw_tools_sha256": "429f0e5149eb59f9cc7ff519c72d04d083946fe6cda7ae47824780dbf711dde2",
+    "exposure_sha256": "dad5ab22a6dcac7948e9e3af2a01bd5ef97d168eccf48ad49a49b754197bacd1",
+    "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+    "rollout_receipt_sha256": "8eeb6d8daabdee5f5ed98d7f08055db7e5320b3b3bc28ec5990e4efcd39e6bfc",
+    "smoke_tools_sha256": "742e565047e5e39b9c1672dbf6e66b05f1c06af1be9e17181999701dd39df9cc",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "reviewer": "pcap_chain_gap",
+    "tool_counts": {
+      "orchestration_calls": 2,
+      "exec_command_invocations": 2,
+      "rg_commands": 1,
+      "mcp_calls": 0,
+      "patch_calls": 0,
+      "raw_tool_records": 4
+    },
+    "phases": {
+      "smoke": {
+        "full_rollout_sha256_verified": true,
+        "selected_records_complete": true,
+        "raw_records": 2,
+        "native_action_count": 1,
+        "commands": [
+          "pwd"
+        ],
+        "native_output_equal_raw_output": true,
+        "usage_reconciled": true,
+        "usage": {
+          "input_tokens": 18625,
+          "cached_input_tokens": 16768,
+          "output_tokens": 82,
+          "reasoning_output_tokens": 0
+        },
+        "model_effort_sandbox_verified": true,
+        "observed_seconds_descriptive": 16.15814091730863
+      },
+      "attempt/task": {
+        "full_rollout_sha256_verified": true,
+        "selected_records_complete": true,
+        "raw_records": 4,
+        "native_action_count": 2,
+        "commands": [
+          "rg -n \"hashtable_clear|json_decref|json_delete|jsonp_free\" src --glob '*.[ch]'",
+          "sed -n '90,165p' src/hashtable.c; sed -n '265,300p' src/hashtable.c; sed -n '115,140p' src/jansson.h; sed -n '60,95p' src/value.c"
+        ],
+        "native_output_equal_raw_output": true,
+        "usage_reconciled": true,
+        "usage": {
+          "input_tokens": 44151,
+          "cached_input_tokens": 27520,
+          "output_tokens": 500,
+          "reasoning_output_tokens": 240
+        },
+        "model_effort_sandbox_verified": true,
+        "observed_seconds_descriptive": 37.39694116637111
+      }
+    },
+    "source_manifest": {
+      "matches_setup": true,
+      "paths": 369,
+      "setup_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008"
+    },
+    "reviewed_inputs_sha256": {
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/setup.json": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/selected-raw-tool-events.jsonl": "742e565047e5e39b9c1672dbf6e66b05f1c06af1be9e17181999701dd39df9cc",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/rollout-source-receipt.json": "e67f450805afa61b600bb21dc821daac633b077509b1b034b497a5c0c1a90477",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/session-report.json": "fc78dc948b1c64e284a9ec42d925e41bc1d94eddb1ff6a22e16981a215cfb119",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/native-events.jsonl": "7be86bfbfb7825ff11c4b6834c501efa8ddf585c84380e061b5389751af09d8b",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/observed-settings.json": "b9e70435a42cf80eb8151da4a704883d031558d043e5b4cbf998dba8479f4113",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/invocation.json": "486c3d6a220af3121800636f574c22b982821b5e561dbee764fea317f5db4a4c",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/prompt.txt": "6f8a8873779a0bd45097c64d29ae136248bcb7162c84ad4c621c7d596a447a4a",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/answer.md": "58d9160d8ad217ee5e94f838328d459952e6e8bf89e9be7f8595b61cdbc7fabf",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/terminal-status.json": "1f08fafbc7132cb3daa052ea0e19d009d2df74879a3d81820acb99903a2f62aa",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/public-messages.jsonl": "65feab88190371efcb821465b456f12f2379a85ad3bb186dd31bf836243a2e44",
+      "/Users/tigercosmos/tmp/cortex-task-context-20/homes/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/smoke/sessions/2026/09/09/rollout-2026-09-09T09-01-50-01a08378-8b48-7220-b218-d9a1cc7df91e.jsonl": "6dfdd4cf1803172558fd54a5b71feed640ebf369f3dff95063daa13ddeb0c262",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/selected-raw-tool-events.jsonl": "429f0e5149eb59f9cc7ff519c72d04d083946fe6cda7ae47824780dbf711dde2",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/rollout-source-receipt.json": "8eeb6d8daabdee5f5ed98d7f08055db7e5320b3b3bc28ec5990e4efcd39e6bfc",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/session-report.json": "6847a0182fb342ecc2fbe2f67941651305ef7239a1ceeceff123f87ba8dd8375",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/native-events.jsonl": "dff69315d78b1fff18ae4dc74bea250827ac3f2e96b5b6b15092776b6e38e302",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/observed-settings.json": "b9e70435a42cf80eb8151da4a704883d031558d043e5b4cbf998dba8479f4113",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/invocation.json": "46ed1b3d252645dba63c357b851ae6690186a930d1046443bae2756e5958bcec",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/prompt.txt": "ff2aabcbfa83cc43ae766e7613daaee73e8890d89e492e90d3cf165580386eab",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/answer.md": "8bb66a32540243116641c738e72669ff2d5ee7ac4e2651d9610481304b940704",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/terminal-status.json": "f0805ee33f1d4831545e70455ba8c0bb595842b47dcdf6fdd0a36827d118bd45",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/task/public-messages.jsonl": "1c85fd2f35a235c204841265f2351da9e9e64f68a7ad0a1023c966ddba371e79",
+      "/Users/tigercosmos/tmp/cortex-task-context-20/homes/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/task/sessions/2026/09/09/rollout-2026-09-09T09-02-14-01a08378-e704-7131-b427-82f3ea9add69.jsonl": "eca4de68788c04acc1c5e17c10294de456322eaecb64304ae80792294a48d846",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/summary.json": "9a02210bc97dad3124661211c33bea8603aec3b432248d57604b79bd55818e4e",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/grade.json": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/exposure.json": "dad5ab22a6dcac7948e9e3af2a01bd5ef97d168eccf48ad49a49b754197bacd1",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/source-after.json": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/retrieval-result.json": "4f845dca02e752b29e68aebe7c1a44bfbada8fcedfe9a7cf151ccb25d48ad051",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/retrieval-request.json": "2d672a5c11ebd5844272811e7a78c41a2f6c865775e897b8ea255a9a09ebd969",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-shell-prefetch-r1/attempt/prompt.txt": "ff2aabcbfa83cc43ae766e7613daaee73e8890d89e492e90d3cf165580386eab"
+    },
+    "answer": "json_object_clear\nhashtable_clear\nhashtable_do_clear\njsonp_free",
+    "task_wall_seconds_descriptive": 37.47184595745057,
+    "retrieval": {
+      "backend": "shell",
+      "calls": 2,
+      "context_bytes": 12000,
+      "truncated": true,
+      "fallback_required": true
+    },
+    "notes": [
+      "Every raw task and smoke call/output read; native action inventory/output and full rollout selected-record hashes reconciled.",
+      "Task commands are only rg and sed inside the pinned Jansson src tree; no network, external repositories, graph invocation, edits, build, tests, or other agents.",
+      "All three arms return the source-backed shortest direct chain: value.c188 -> hashtable.c283 -> hashtable.c136; jsonp_free definition memory.c32.",
+      "Adaptive task receives failed graph trace plus shell recovery, then performs two source shell reads; its only actual MCP call is the separate list_projects smoke.",
+      "Source-after exactly equals setup manifest369paths. Correctness/protocol pass; environment_admissible=false and no clean-pair speed claim."
+    ]
+  },
+  "gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1": {
+    "summary_sha256": "8c2a318ee18e8ae768854182f3802fa0b991e3b35be01f2200b580612077dc77",
+    "grade_sha256": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+    "session_report_sha256": "e9b3056d192d251d4ef0f42044f360767fe7d7a1f798f5ebd82a62ec91978240",
+    "raw_tools_sha256": "7007d43aff638d4066d5d291a033911115454a6291784b7ed7c6f25b0712e313",
+    "exposure_sha256": "7b1711603c4434f4795c7ad5abc4aa028a6f302d86baadd5d99154f9c07401f0",
+    "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+    "rollout_receipt_sha256": "39e8c6bf80ceed1f5544cc259261a66ca85457777158656093362c9c079e152f",
+    "smoke_tools_sha256": "b14f150fb03992a2d3b34bb424bf76e4fb41c026912b028ce95ab713be03ef94",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "reviewer": "pcap_chain_gap",
+    "tool_counts": {
+      "orchestration_calls": 2,
+      "exec_command_invocations": 2,
+      "rg_commands": 1,
+      "mcp_calls": 0,
+      "patch_calls": 0,
+      "raw_tool_records": 4
+    },
+    "phases": {
+      "smoke": {
+        "full_rollout_sha256_verified": true,
+        "selected_records_complete": true,
+        "raw_records": 2,
+        "native_action_count": 1,
+        "commands": [],
+        "native_output_equal_raw_output": true,
+        "usage_reconciled": true,
+        "usage": {
+          "input_tokens": 20430,
+          "cached_input_tokens": 13824,
+          "output_tokens": 136,
+          "reasoning_output_tokens": 37
+        },
+        "model_effort_sandbox_verified": true,
+        "observed_seconds_descriptive": 23.995815000496805
+      },
+      "attempt/task": {
+        "full_rollout_sha256_verified": true,
+        "selected_records_complete": true,
+        "raw_records": 4,
+        "native_action_count": 2,
+        "commands": [
+          "rg -n \"hashtable_clear|jsonp_free|json_decref|json_delete|hashtable_do_clear|hashtable_close|hashtable_del\" src",
+          "sed -n '105,145p' src/hashtable.c && sed -n '270,288p' src/hashtable.c && sed -n '178,191p' src/value.c"
+        ],
+        "native_output_equal_raw_output": true,
+        "usage_reconciled": true,
+        "usage": {
+          "input_tokens": 44038,
+          "cached_input_tokens": 35584,
+          "output_tokens": 356,
+          "reasoning_output_tokens": 98
+        },
+        "model_effort_sandbox_verified": true,
+        "observed_seconds_descriptive": 26.298596207983792
+      }
+    },
+    "source_manifest": {
+      "matches_setup": true,
+      "paths": 369,
+      "setup_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008"
+    },
+    "reviewed_inputs_sha256": {
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/setup.json": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/selected-raw-tool-events.jsonl": "b14f150fb03992a2d3b34bb424bf76e4fb41c026912b028ce95ab713be03ef94",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/rollout-source-receipt.json": "a38b127f3389f3b028af9ba80d3c11983704683025a9ed5c242e887fe16f42c7",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/session-report.json": "3f796b4ff74dc17cc9911a760e44209ff99a64747f84254d95027795d0b32d26",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/native-events.jsonl": "3e5cd3271afb2638dafb62592380cb352f9dc270c0b9da258dbef402dfe3d83c",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/observed-settings.json": "b9e70435a42cf80eb8151da4a704883d031558d043e5b4cbf998dba8479f4113",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/invocation.json": "7470b71a06d72fdd1e79fc3522c79acc2e9c711b7fee933ef1bbc567d04e8335",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/prompt.txt": "f90b459731462eeef3f4014d86d42bed9ecf96b537a3b3ce1dd8e7c2fe7e80c6",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/answer.md": "217c8a1f494ac8fcb074b9d4ba8b388f0f99e1a48bd2d8d14714746fd8f0f1a5",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/terminal-status.json": "78eb84f915a9de4fa183aecee3893809baa04ca7106a96c16d4272c3495522bc",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/public-messages.jsonl": "c905ba53cf02d3b4bea7bd1ff071c9cf9c9aaa7f79f2a4f00fb32d958194bb17",
+      "/Users/tigercosmos/tmp/cortex-task-context-20/homes/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/smoke/sessions/2026/09/09/rollout-2026-09-09T09-02-52-01a08379-7f39-7913-8f03-4f91963bb296.jsonl": "238e198d20591dc75dcab0c6301e1c21731b00686173f61067cb7b3464d722e9",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/selected-raw-tool-events.jsonl": "7007d43aff638d4066d5d291a033911115454a6291784b7ed7c6f25b0712e313",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/rollout-source-receipt.json": "39e8c6bf80ceed1f5544cc259261a66ca85457777158656093362c9c079e152f",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/session-report.json": "e9b3056d192d251d4ef0f42044f360767fe7d7a1f798f5ebd82a62ec91978240",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/native-events.jsonl": "bbf9c5b2a978abaec7ff1d248c50ade7ddf2fbfd037481ba0499c7d6efeb5413",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/observed-settings.json": "b9e70435a42cf80eb8151da4a704883d031558d043e5b4cbf998dba8479f4113",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/invocation.json": "f662b434137562f72a0041b44572acbf3cd016b5a0801621ec2e36faf118dd5f",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/prompt.txt": "1f002cd2c0b39056b23fb7664e82fad88bd5a79a9f773feef21ecfcebeb363a5",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/answer.md": "8bb66a32540243116641c738e72669ff2d5ee7ac4e2651d9610481304b940704",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/terminal-status.json": "6a5125e62556ef8682d59ec4595ed806dcbd6ee1bf4467773a05201a4cca4569",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/task/public-messages.jsonl": "cd3a7e45108b927fff3021ee0af34604e0976067b7976420d09e342c47224d19",
+      "/Users/tigercosmos/tmp/cortex-task-context-20/homes/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/task/sessions/2026/09/09/rollout-2026-09-09T09-03-09-01a08379-be8b-7581-9ed8-a97c3d4070e9.jsonl": "61da89355d3eb79e7e3db75002d48df865a32107fedcff7b3c5a0c3b68ed55f5",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/summary.json": "8c2a318ee18e8ae768854182f3802fa0b991e3b35be01f2200b580612077dc77",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/grade.json": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/exposure.json": "7b1711603c4434f4795c7ad5abc4aa028a6f302d86baadd5d99154f9c07401f0",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/source-after.json": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/retrieval-result.json": "cfbe676b4d4543766e4fefbb7818845eb7b63fa60fe1d5f76394e4a81d1f61e0",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/retrieval-request.json": "379e79dea9e60c82835d8f9cd07090fdc71c6874187e5fd40fb8ced821e2cd81",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-adaptive-context-r1/attempt/prompt.txt": "1f002cd2c0b39056b23fb7664e82fad88bd5a79a9f773feef21ecfcebeb363a5"
+    },
+    "answer": "json_object_clear\nhashtable_clear\nhashtable_do_clear\njsonp_free",
+    "task_wall_seconds_descriptive": 26.400446083396673,
+    "retrieval": {
+      "backend": "graph+shell-recovery",
+      "calls": 3,
+      "context_bytes": 12000,
+      "truncated": true,
+      "fallback_required": true
+    },
+    "notes": [
+      "Every raw task and smoke call/output read; native action inventory/output and full rollout selected-record hashes reconciled.",
+      "Task commands are only rg and sed inside the pinned Jansson src tree; no network, external repositories, graph invocation, edits, build, tests, or other agents.",
+      "All three arms return the source-backed shortest direct chain: value.c188 -> hashtable.c283 -> hashtable.c136; jsonp_free definition memory.c32.",
+      "Adaptive task receives failed graph trace plus shell recovery, then performs two source shell reads; its only actual MCP call is the separate list_projects smoke.",
+      "Source-after exactly equals setup manifest369paths. Correctness/protocol pass; environment_admissible=false and no clean-pair speed claim."
+    ]
+  },
+  "gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1": {
+    "summary_sha256": "9ef69c6d83afcbccd6384c643be06069db5882e3e6982ab99017d55b031c2dee",
+    "grade_sha256": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+    "session_report_sha256": "9742eba804fa1af888364d892b101ef27f1aa336df6a0bf99afab75d57df7d7d",
+    "raw_tools_sha256": "ad7e7c1a9c5602c6de5b545a1446cd50292346f22fe6bf638b906c824053f0c1",
+    "exposure_sha256": "af72b6ec3b95fa3d8cb1ace0e85fa9c4fe4c609b60b1c1eb1f981317fee632c8",
+    "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+    "rollout_receipt_sha256": "a772f88e5c8153860be92808887e59f3a2ad2ddadfb73e2215ce9d229e0e6540",
+    "smoke_tools_sha256": "1054de03b16d0673f443c213bb166ff9d51a9bf9e35444938c7767741c583777",
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "reviewer": "pcap_chain_gap",
+    "tool_counts": {
+      "orchestration_calls": 3,
+      "exec_command_invocations": 3,
+      "rg_commands": 3,
+      "mcp_calls": 0,
+      "patch_calls": 0,
+      "raw_tool_records": 6
+    },
+    "phases": {
+      "smoke": {
+        "full_rollout_sha256_verified": true,
+        "selected_records_complete": true,
+        "raw_records": 2,
+        "native_action_count": 1,
+        "commands": [
+          "pwd"
+        ],
+        "native_output_equal_raw_output": true,
+        "usage_reconciled": true,
+        "usage": {
+          "input_tokens": 18625,
+          "cached_input_tokens": 0,
+          "output_tokens": 82,
+          "reasoning_output_tokens": 0
+        },
+        "model_effort_sandbox_verified": true,
+        "observed_seconds_descriptive": 13.868680625222623
+      },
+      "attempt/task": {
+        "full_rollout_sha256_verified": true,
+        "selected_records_complete": true,
+        "raw_records": 6,
+        "native_action_count": 3,
+        "commands": [
+          "rg -n \"json_object_clear|jsonp_free\" src",
+          "sed -n '1,220p' src/value.c && sed -n '1,230p' src/hashtable.c && sed -n '1,70p' src/memory.c",
+          "rg -n -A18 -B4 \"void hashtable_clear|hashtable_clear\\(\" src/hashtable.c src/hashtable.h && rg -n \"#define json_decref|json_decref\\(\" src/jansson.h src/*.c"
+        ],
+        "native_output_equal_raw_output": true,
+        "usage_reconciled": true,
+        "usage": {
+          "input_tokens": 48287,
+          "cached_input_tokens": 32640,
+          "output_tokens": 469,
+          "reasoning_output_tokens": 142
+        },
+        "model_effort_sandbox_verified": true,
+        "observed_seconds_descriptive": 29.598366666585207
+      }
+    },
+    "source_manifest": {
+      "matches_setup": true,
+      "paths": 369,
+      "setup_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008"
+    },
+    "reviewed_inputs_sha256": {
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/setup.json": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/selected-raw-tool-events.jsonl": "1054de03b16d0673f443c213bb166ff9d51a9bf9e35444938c7767741c583777",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/rollout-source-receipt.json": "c0c73086d776cb3b43dd9401566c1fb55ebf5b417e82d015546d8285e22b89ac",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/session-report.json": "9848961eb9743155c36696fa9372f48821465515e6acc09707583bb683691b4e",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/native-events.jsonl": "b81cb9dc2b875bb3c586870040d455637702ba49383a6adfedb9a27c8b0ede7d",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/observed-settings.json": "b9e70435a42cf80eb8151da4a704883d031558d043e5b4cbf998dba8479f4113",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/invocation.json": "c937fb777186c56e1b6c0cbd20d041b2e89c3dbedd07408072fb1947587067e2",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/prompt.txt": "6f8a8873779a0bd45097c64d29ae136248bcb7162c84ad4c621c7d596a447a4a",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/answer.md": "58d9160d8ad217ee5e94f838328d459952e6e8bf89e9be7f8595b61cdbc7fabf",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/terminal-status.json": "92b841fc762851254579b2472343e2740530e58e641fea32dd910022210ce530",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/public-messages.jsonl": "22a773c5ac6c4e811547e6c087fc179e2927f8d0a5fab9b35fd1ac64573fb484",
+      "/Users/tigercosmos/tmp/cortex-task-context-20/homes/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/smoke/sessions/2026/09/09/rollout-2026-09-09T09-03-35-01a0837a-2475-7440-9b47-a6a57e4845ef.jsonl": "beecf4e84783571aa14fb90c30ea53429fc63ab9e1feeebe8d834a6e3270cae7",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/selected-raw-tool-events.jsonl": "ad7e7c1a9c5602c6de5b545a1446cd50292346f22fe6bf638b906c824053f0c1",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/rollout-source-receipt.json": "a772f88e5c8153860be92808887e59f3a2ad2ddadfb73e2215ce9d229e0e6540",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/session-report.json": "9742eba804fa1af888364d892b101ef27f1aa336df6a0bf99afab75d57df7d7d",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/native-events.jsonl": "e31091baeda32d68781b8aaf36180188e47b4c8c512fc8984c0252261d0936c7",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/observed-settings.json": "b9e70435a42cf80eb8151da4a704883d031558d043e5b4cbf998dba8479f4113",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/invocation.json": "eba7b2435de7c7f42add48bd36e963e64c38fbe12834848085c983e118e09c48",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/prompt.txt": "794731d70b278c31d608d20cec8724653dcd50b5524fbe290966b11f394004bd",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/answer.md": "8bb66a32540243116641c738e72669ff2d5ee7ac4e2651d9610481304b940704",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/terminal-status.json": "b7707d2981d880a2221ae2522e5456cffaa333539ca71b76a17f943a5d13fb24",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/task/public-messages.jsonl": "c2cf931a6a0ccabc2e81012af191883b1ca7c9bc59a2cb01f7203ff1c312c268",
+      "/Users/tigercosmos/tmp/cortex-task-context-20/homes/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/task/sessions/2026/09/09/rollout-2026-09-09T09-03-48-01a0837a-589e-71a0-937c-ea5044fae339.jsonl": "cf697e77355d86036597bb155e2a82889acb6a3e35b569748daf43a4d5694e6b",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/summary.json": "9ef69c6d83afcbccd6384c643be06069db5882e3e6982ab99017d55b031c2dee",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/grade.json": "aeef12a5dd93fbda541487739dd1cffdab9217cd7238241607f6e11e037b3597",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/exposure.json": "af72b6ec3b95fa3d8cb1ace0e85fa9c4fe4c609b60b1c1eb1f981317fee632c8",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/source-after.json": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/retrieval-result.json": "ebbf676dabeeb554e57d155a43ca5507d843e0281490838257de7b482a443b47",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/retrieval-request.json": "8c4812e0da8b9c874e3b88ee7c944d6aabfeee629ae460362aa72121aa76214e",
+      "docs/benchmarks/2026-09-09-uncontended-timing-01/task-context-20/evidence-01/gpt-5.6-sol-holdout_jansson_object_clear_release-raw-shell-r1/attempt/prompt.txt": "794731d70b278c31d608d20cec8724653dcd50b5524fbe290966b11f394004bd"
+    },
+    "answer": "json_object_clear\nhashtable_clear\nhashtable_do_clear\njsonp_free",
+    "task_wall_seconds_descriptive": 29.599035499617457,
+    "retrieval": {
+      "backend": "none",
+      "calls": 0,
+      "context_bytes": 0,
+      "truncated": false,
+      "fallback_required": false
+    },
+    "notes": [
+      "Every raw task and smoke call/output read; native action inventory/output and full rollout selected-record hashes reconciled.",
+      "Task commands are only rg and sed inside the pinned Jansson src tree; no network, external repositories, graph invocation, edits, build, tests, or other agents.",
+      "All three arms return the source-backed shortest direct chain: value.c188 -> hashtable.c283 -> hashtable.c136; jsonp_free definition memory.c32.",
+      "Adaptive task receives failed graph trace plus shell recovery, then performs two source shell reads; its only actual MCP call is the separate list_projects smoke.",
+      "Source-after exactly equals setup manifest369paths. Correctness/protocol pass; environment_admissible=false and no clean-pair speed claim."
+    ]
+  },
+  "gpt-5.6-sol-holdout_opencv_buildinfo_definition-raw-shell-r2": {
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "phases": {
+      "smoke": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "5cab202f4d0bb26aac538ce34f3ae02a720c6ee8ba0a2dd41372a616e49fd9f8",
+        "physical_ordinals_one_based": [
+          13,
+          16
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "2b042f08c375fd6796ce9342fd290c53b23e28b916f2b5436520e25adaa26cc7",
+          "rollout-source-receipt.json": "a47a5690e6c74c83f9311e18e953a77f3dc1305134a67dcda0b7c4140efab26d",
+          "selected-raw-tool-events.jsonl": "fc12d06b741e30dbf3bde0f10e727837411c4ee4fd9a0caea1637702e7183019",
+          "native-events.jsonl": "bc7a7aa635b727f570e3e131879132b9fd67f9378a83840cb1f3bdd5c5d24235",
+          "observed-settings.json": "43fbd1be6be02bb88d72d9a9d42e02e40d77c46d347b20f0edbe5d4ae3c8b406",
+          "invocation.json": "98b5c49c22ba907d6dcabc4fb98153aab23683d0a6a98ea8268cc26c4525d545",
+          "prompt.txt": "6f8a8873779a0bd45097c64d29ae136248bcb7162c84ad4c621c7d596a447a4a",
+          "terminal-status.json": "55b0e6b732f9250468e883fb04fb7c423917d488d54cbeba5e68ead50ae6d38e"
+        },
+        "usage": {
+          "input_tokens": 18625,
+          "cached_input_tokens": 9088,
+          "output_tokens": 82,
+          "reasoning_output_tokens": 0
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 22.79523583315313,
+        "record_inventory": [
+          {
+            "call_id": "call_1quneHPHkKFbEL8Rv6WI1Kvj",
+            "input": "const r = await tools.exec_command({\"cmd\":\"pwd\",\"workdir\":\"/Users/tigercosmos/tmp/cortex-task-context-20/opencv\",\"yield_time_ms\":10000,\"max_output_tokens\":1000}); text(r.output);\n",
+            "output_payload_sha256": "027fbc441d480978f465bb948d57e660e53bac49f315946043ef706f5f2ed0a6"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      },
+      "task": {
+        "raw_tool_records": 4,
+        "outer_code_calls": 2,
+        "exec_command_invocations": 2,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 1,
+        "sed_commands": 1,
+        "native_action_items": 2,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "6ea862c5680bc0936ab3245b290239343682b6be407a3cc1fd37b4fdf2e48dfd",
+        "physical_ordinals_one_based": [
+          15,
+          18,
+          22,
+          25
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "483302f66f4e8c71e1c1f268168a973128934178c8c4b7bbf0ae537fe6447ba0",
+          "rollout-source-receipt.json": "aa522a191b2128af0c0c92d7d026ada83fabd0f7b18af304de3fcfb8b8505bde",
+          "selected-raw-tool-events.jsonl": "9332290d36397952890b0e4e9b169b32d94344d9666454908816c4cd213bb40c",
+          "native-events.jsonl": "e718d0caee6c94a5b6fd7bfd1455e2bb97af02f071d131a0b89b939739990565",
+          "observed-settings.json": "43fbd1be6be02bb88d72d9a9d42e02e40d77c46d347b20f0edbe5d4ae3c8b406",
+          "invocation.json": "5d0ffd7669162fc4e1b23ae8ba795d1a3453cd4a87d6cdba5fb01f28986024df",
+          "prompt.txt": "bb764b0f94831ef1a0e8f172236a8b6ea5fc11a3f5b965a06cf781fb8899a582",
+          "terminal-status.json": "8b14a27a832d777ba193140fcbcf7ad62c840e136cba3bd0ad0a07feb0ace3af"
+        },
+        "usage": {
+          "input_tokens": 29201,
+          "cached_input_tokens": 9600,
+          "output_tokens": 262,
+          "reasoning_output_tokens": 67
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 29.33013612497598,
+        "record_inventory": [
+          {
+            "call_id": "call_rGqCwWc82PLkJTe9M81badyC",
+            "input": "const r = await tools.exec_command({\"cmd\":\"rg -n --glob '*.{cpp,cc,cxx,h,hpp}' 'getBuildInformation\\\\s*\\\\(' .\",\"workdir\":\"/Users/tigercosmos/tmp/cortex-task-context-20/opencv\",\"yield_time_ms\":10000,\"max_output_tokens\":2000});\ntext(r.output);\n",
+            "output_payload_sha256": "63503cd5a9f9b700078755d6234ca8a52d180acb783bbc4e0020e38fe9f8bc14"
+          },
+          {
+            "call_id": "call_s26oAhPSOvr3hZkn02x4NVMb",
+            "input": "const r = await tools.exec_command({\"cmd\":\"sed -n '1088,1110p' modules/core/src/system.cpp\",\"workdir\":\"/Users/tigercosmos/tmp/cortex-task-context-20/opencv\",\"yield_time_ms\":10000,\"max_output_tokens\":1000});\ntext(r.output);\n",
+            "output_payload_sha256": "ded00467fa3b4651f55eaedf1a2f2d8d6fd8dc3fb02fa5caad0921c601220fb9"
+          }
+        ],
+        "native_output_omissions": [
+          {
+            "native_item": "item_1",
+            "call_id": "call_rGqCwWc82PLkJTe9M81badyC",
+            "native_bytes": 0,
+            "raw_output_bytes": 814,
+            "assessment": "Native item omits nonempty rg output. Linked full-rollout tool output preserved; subsequent sed independently confirms definition. No protocol violation inferred."
+          }
+        ],
+        "usage_reconciled_against_native_and_terminal": true
+      }
+    },
+    "exposure_sha256": "1fcbc93e718c158f256e26f9297d3d4dc2f6bc85cb634c8a64da02af2e980af4",
+    "summary_sha256": "8c05e9596a77088f4f87917da1c334afdef323fa60c29f292e7da6b20503724a",
+    "grade_sha256": "90984d1467ac1e07747f4886de300a31b8cc028d70b27d88ca0077951fceb6e0",
+    "session_report_sha256": "483302f66f4e8c71e1c1f268168a973128934178c8c4b7bbf0ae537fe6447ba0",
+    "raw_tools_sha256": "9332290d36397952890b0e4e9b169b32d94344d9666454908816c4cd213bb40c",
+    "source_check": {
+      "after_equals_full_setup_manifest": true,
+      "entries": 7354,
+      "source_after_sha256": "1d377354b819cf2c2b48b52aea070ce6e963b85ebd06d4a25ef55c8e0a482f1d",
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "expected": "modules/core/src/system.cpp:1099",
+      "definition_file_sha256": "ae8d27bf414d94e119b799fe7d6da1b79b9527e922f239b19ffef33590faf959",
+      "source_excerpt": "const String& getBuildInformation()\n{\n    static String build_info =\n#include \"version_string.inc\"\n    ;\n    return build_info;\n}\n"
+    },
+    "retrieval": {
+      "backend": "none",
+      "truncated": false,
+      "fallback_required": false,
+      "context_bytes": 0,
+      "errors": [],
+      "result_sha256": "3ed6bc5c5d45942a054892497b75cdebc5737245bb38dffef19f46e7c1c8e75f",
+      "rg_commands": 0,
+      "graph_cli_calls": 0
+    },
+    "tool_counts": {
+      "raw_tool_records": 4,
+      "outer_code_calls": 2,
+      "exec_command_invocations": 2,
+      "rg_commands": 1,
+      "sed_commands": 1,
+      "mcp_calls": 0,
+      "patch_calls": 0
+    },
+    "limitations": [
+      "Contended run: timing not admissible.",
+      "Complete CLI tool records reviewed; no independent OS/network or HTTP-request tracing.",
+      "Context clipping does not remove the required definition in these lookup cases. No duplicate source read is required when delivered evidence suffices."
+    ]
+  },
+  "gpt-5.6-sol-holdout_opencv_buildinfo_definition-shell-prefetch-r2": {
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "phases": {
+      "smoke": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "14925dda853cecb8829fbcbf50055b8273952c3cffd31b56c0b607ee9c6db662",
+        "physical_ordinals_one_based": [
+          13,
+          16
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "2bf36e01e157b5bf7edc8a061d43484f271d3673d80533ddcbdbcf667cebd579",
+          "rollout-source-receipt.json": "1675cb4bc054cb39566c2ed15865432d8001e64900c9e21d22360ec48fa8a743",
+          "selected-raw-tool-events.jsonl": "710bd9b1a3ca978d853467025ccf50f25aca245a5730b5f00965ff9f6e7ee29f",
+          "native-events.jsonl": "4acf05ccef82fe447f2fe5c75527cbd72190dff92b66002b9439734c43324ee3",
+          "observed-settings.json": "43fbd1be6be02bb88d72d9a9d42e02e40d77c46d347b20f0edbe5d4ae3c8b406",
+          "invocation.json": "72c8ec8ee09c9be696c458f68e76134982efae997277960f4305fbd5c6f8ea1c",
+          "prompt.txt": "6f8a8873779a0bd45097c64d29ae136248bcb7162c84ad4c621c7d596a447a4a",
+          "terminal-status.json": "801478da2753777b7ce67c08031abd2ddcc3a71eae958139bca31caf291f7224"
+        },
+        "usage": {
+          "input_tokens": 18625,
+          "cached_input_tokens": 9088,
+          "output_tokens": 82,
+          "reasoning_output_tokens": 0
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 21.206069875508547,
+        "record_inventory": [
+          {
+            "call_id": "call_3jgsADeoHCm3nQLxqtXsIeCI",
+            "input": "const r = await tools.exec_command({\"cmd\":\"pwd\",\"workdir\":\"/Users/tigercosmos/tmp/cortex-task-context-20/opencv\",\"yield_time_ms\":10000,\"max_output_tokens\":1000}); text(r.output);\n",
+            "output_payload_sha256": "2adf7977910e4dc6f18c27786d4e1e78b9fc400b7e527ae56c8267593b2bc068"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      },
+      "task": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 1,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "7c66f8410bfa5d254b6e7544bea3c09ec1945ca74ed324104508561e9ed82bfa",
+        "physical_ordinals_one_based": [
+          13,
+          16
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "77f4f12f8834a30c49b82cf4c99045c11cbc574debf90529feca6a2e5ec21717",
+          "rollout-source-receipt.json": "40b368de6221b7d5bc4091f4c4bcad8d4d562e6abb5ea5d9da28a506c649bcf7",
+          "selected-raw-tool-events.jsonl": "60330eaf9d63fb9906148a6333ffd65954c656612b15e585166e56a12ca7fa8e",
+          "native-events.jsonl": "e68deaa80952bb38a93ca678636ffdc0e141b9ba8aa6c44cefccf04da3814fbb",
+          "observed-settings.json": "43fbd1be6be02bb88d72d9a9d42e02e40d77c46d347b20f0edbe5d4ae3c8b406",
+          "invocation.json": "bad34e609f27c2db8afcfceddab72282c73f3b04e7228b6a13f30e557c615afe",
+          "prompt.txt": "cbd6bd523566acb6b54381b44b82d75a36b8119dc0d365b293ca3eebee85d933",
+          "terminal-status.json": "1a81c19f9dd1ec20fd1d4c91abce64a3d640cc33461fe0991ad5a67ea94860b4"
+        },
+        "usage": {
+          "input_tokens": 25943,
+          "cached_input_tokens": 20352,
+          "output_tokens": 269,
+          "reasoning_output_tokens": 172
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 19.570401250384748,
+        "record_inventory": [
+          {
+            "call_id": "call_o2gdDZkICd1fV4j8LdjDHZaS",
+            "input": "const r = await tools.exec_command({\"cmd\":\"rg -n -U '^const String& getBuildInformation\\\\(\\\\)\\\\n\\\\{' modules/core/src/system.cpp\",\"workdir\":\"/Users/tigercosmos/tmp/cortex-task-context-20/opencv\",\"yield_time_ms\":10000,\"max_output_tokens\":1000}); text(r.output);\n",
+            "output_payload_sha256": "12115cc3b78968671d445d704dd073047c783691c7a8b3316c6ef73eeec78712"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      }
+    },
+    "exposure_sha256": "2a8d0a778ee8299c259b770240652cd96fb73634c74f13f59963f075d0813be7",
+    "summary_sha256": "b114f623d312629624cac1481c0053fcf657b1c9f92a0776d01a2bb0fd5ea5d7",
+    "grade_sha256": "90984d1467ac1e07747f4886de300a31b8cc028d70b27d88ca0077951fceb6e0",
+    "session_report_sha256": "77f4f12f8834a30c49b82cf4c99045c11cbc574debf90529feca6a2e5ec21717",
+    "raw_tools_sha256": "60330eaf9d63fb9906148a6333ffd65954c656612b15e585166e56a12ca7fa8e",
+    "source_check": {
+      "after_equals_full_setup_manifest": true,
+      "entries": 7354,
+      "source_after_sha256": "1d377354b819cf2c2b48b52aea070ce6e963b85ebd06d4a25ef55c8e0a482f1d",
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "expected": "modules/core/src/system.cpp:1099",
+      "definition_file_sha256": "ae8d27bf414d94e119b799fe7d6da1b79b9527e922f239b19ffef33590faf959",
+      "source_excerpt": "const String& getBuildInformation()\n{\n    static String build_info =\n#include \"version_string.inc\"\n    ;\n    return build_info;\n}\n"
+    },
+    "retrieval": {
+      "backend": "shell",
+      "truncated": true,
+      "fallback_required": true,
+      "context_bytes": 12000,
+      "errors": [],
+      "result_sha256": "596d49604c5d75fae66bc9b7dd0bd8d0ffe6fc14d81143cf3ed1004af5f473ad",
+      "rg_commands": 1,
+      "graph_cli_calls": 0
+    },
+    "tool_counts": {
+      "raw_tool_records": 2,
+      "outer_code_calls": 1,
+      "exec_command_invocations": 1,
+      "rg_commands": 1,
+      "sed_commands": 0,
+      "mcp_calls": 0,
+      "patch_calls": 0
+    },
+    "limitations": [
+      "Contended run: timing not admissible.",
+      "Complete CLI tool records reviewed; no independent OS/network or HTTP-request tracing.",
+      "Context clipping does not remove the required definition in these lookup cases. No duplicate source read is required when delivered evidence suffices."
+    ]
+  },
+  "gpt-5.6-sol-holdout_opencv_buildinfo_definition-adaptive-context-r2": {
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "phases": {
+      "smoke": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 0,
+        "mcp_calls": 1,
+        "patch_calls": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "8411aa28689ab0ac5f86ebc83a1063fa05cc64fd927a925556fb01f934e2647c",
+        "physical_ordinals_one_based": [
+          13,
+          16
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "5f75161d05837f2771c262cb21f404882c8801de6b67472589b4ebef4e965736",
+          "rollout-source-receipt.json": "cdb92c64567fd16e5b06222b1284692327df3d9f32413916422d92355d92263c",
+          "selected-raw-tool-events.jsonl": "c2db691b625be1ff45d0eed6b99f269571a2c08235717955b61adb228a886702",
+          "native-events.jsonl": "0f9c78f4841b8b884317d0938d1521da7665c0c001ddf226b3552f956736030e",
+          "observed-settings.json": "43fbd1be6be02bb88d72d9a9d42e02e40d77c46d347b20f0edbe5d4ae3c8b406",
+          "invocation.json": "54f992ea0ce19ab4d912f46d2843e8b55d5f3e67dd9622008d6e40f0a80aa04d",
+          "prompt.txt": "de960ebe69f1cab1436bf867152cf0f5abe1773b55b4a93962c595f0de688d61",
+          "terminal-status.json": "8f740b660b3d3f19a80734ede3a9721ae84d86c6c820665fb48ab0b46fc9ac8c"
+        },
+        "usage": {
+          "input_tokens": 20430,
+          "cached_input_tokens": 0,
+          "output_tokens": 136,
+          "reasoning_output_tokens": 51
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 23.45238766632974,
+        "record_inventory": [
+          {
+            "call_id": "call_qtd4ZqGCS7jDtbf6LXo768Na",
+            "input": "const hits = ALL_TOOLS.filter(x => x.name === \"mcp__code_cortex_mcp__list_projects\");\nif (hits.length !== 1) { text(JSON.stringify(hits)); exit(); }\nconst r = await tools.mcp__code_cortex_mcp__list_projects({});\ntext(JSON.stringify(r));\n",
+            "output_payload_sha256": "d8a0d9db6f6583f13957f9500f25604d8ba24db4b54f08ab6b0b2275f95b78af"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      },
+      "task": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 1,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "d86be842649d9c653487b756c1a878d722644c261b5ff8e671e9b4a6cf187e1e",
+        "physical_ordinals_one_based": [
+          15,
+          18
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "9861de62ad4b19604552df9c4f564db43c49021aff015ed5d201a6081b5dd831",
+          "rollout-source-receipt.json": "8caefa2c66a79fba879fd8cc2eba5fe8e18c84335b1d84a41dd6a563fa612a3d",
+          "selected-raw-tool-events.jsonl": "bde6b16064ec229bf5a9e4036d13e395a09b0961a9ac2a2024308d8976c9b612",
+          "native-events.jsonl": "ec885f5b10c74792611b26d0531fcc932d7e25896bb9862a8f9005de571e212a",
+          "observed-settings.json": "43fbd1be6be02bb88d72d9a9d42e02e40d77c46d347b20f0edbe5d4ae3c8b406",
+          "invocation.json": "57926f7097f735721fb0403ca13b3a634a7f1bf3873e405713ef7ea632231c47",
+          "prompt.txt": "cbd6bd523566acb6b54381b44b82d75a36b8119dc0d365b293ca3eebee85d933",
+          "terminal-status.json": "6e8600c4de76f6e5798d01c915422c2862265e5137955e35a4e4fac9e095d8b4"
+        },
+        "usage": {
+          "input_tokens": 25904,
+          "cached_input_tokens": 12672,
+          "output_tokens": 159,
+          "reasoning_output_tokens": 33
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 17.64111829176545,
+        "record_inventory": [
+          {
+            "call_id": "call_W64gru45J5JMYi0DjRsZjo4z",
+            "input": "const r = await tools.exec_command({\"cmd\":\"rg -n -B 8 -A 7 '^const String& getBuildInformation\\\\(\\\\)' modules/core/src/system.cpp\",\"workdir\":\"/Users/tigercosmos/tmp/cortex-task-context-20/opencv\",\"yield_time_ms\":10000,\"max_output_tokens\":2000}); text(r.output);\n",
+            "output_payload_sha256": "97277cadd9bc602d40eaa53367aad930105c8fc0a4955e52a784edc029c62da6"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      }
+    },
+    "exposure_sha256": "f2fdc29d287b498f8a7f1d1c5cbedbbb2ac7137cc47aaaa8a112fff5db79ced2",
+    "summary_sha256": "3a5161808f43a566a4f4df65baae4965c3d913d4dc5fd013eb7891dd9b991537",
+    "grade_sha256": "90984d1467ac1e07747f4886de300a31b8cc028d70b27d88ca0077951fceb6e0",
+    "session_report_sha256": "9861de62ad4b19604552df9c4f564db43c49021aff015ed5d201a6081b5dd831",
+    "raw_tools_sha256": "bde6b16064ec229bf5a9e4036d13e395a09b0961a9ac2a2024308d8976c9b612",
+    "source_check": {
+      "after_equals_full_setup_manifest": true,
+      "entries": 7354,
+      "source_after_sha256": "1d377354b819cf2c2b48b52aea070ce6e963b85ebd06d4a25ef55c8e0a482f1d",
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "expected": "modules/core/src/system.cpp:1099",
+      "definition_file_sha256": "ae8d27bf414d94e119b799fe7d6da1b79b9527e922f239b19ffef33590faf959",
+      "source_excerpt": "const String& getBuildInformation()\n{\n    static String build_info =\n#include \"version_string.inc\"\n    ;\n    return build_info;\n}\n"
+    },
+    "retrieval": {
+      "backend": "shell",
+      "truncated": true,
+      "fallback_required": true,
+      "context_bytes": 12000,
+      "errors": [],
+      "result_sha256": "dfb252977d115d31653891f509d0055ea14f10c8c0094368a4e957c9444890dc",
+      "rg_commands": 1,
+      "graph_cli_calls": 0
+    },
+    "tool_counts": {
+      "raw_tool_records": 2,
+      "outer_code_calls": 1,
+      "exec_command_invocations": 1,
+      "rg_commands": 1,
+      "sed_commands": 0,
+      "mcp_calls": 0,
+      "patch_calls": 0
+    },
+    "limitations": [
+      "Contended run: timing not admissible.",
+      "Complete CLI tool records reviewed; no independent OS/network or HTTP-request tracing.",
+      "Context clipping does not remove the required definition in these lookup cases. No duplicate source read is required when delivered evidence suffices."
+    ]
+  },
+  "gpt-6-astra-holdout_jansson_loadb_definition-shell-prefetch-r2": {
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "phases": {
+      "smoke": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "5c2b944979f96570c9c52ff34a2fbb78c712bbef3f391244d12fdcdbd850a130",
+        "physical_ordinals_one_based": [
+          13,
+          16
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "53e4952f97e931930daa0fd42bede345961382724eb4ab6966bdbbbc7c9ce19b",
+          "rollout-source-receipt.json": "77e4e4fc6a02df71e1b98384c5639bf566fff1d9f54131ecb4b967934b522aa6",
+          "selected-raw-tool-events.jsonl": "77bb06f99784b43615754b0aaf8f987ae09f8dc1752099d310a27df041742b55",
+          "native-events.jsonl": "c1afa42f528a64f1cc82b06c72b486c746450ce7a525a1ef4c1d0f690a75257a",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "3c820710ddb12c4e9d0e24b9057af5418a7a186ffafceb7efa47ff9bb7aff19d",
+          "prompt.txt": "6f8a8873779a0bd45097c64d29ae136248bcb7162c84ad4c621c7d596a447a4a",
+          "terminal-status.json": "60f1291ad59c1863f5d8d6f2fb2a8243f105e10d856c0c29e79e5d7db7d4a009"
+        },
+        "usage": {
+          "input_tokens": 21117,
+          "cached_input_tokens": 19072,
+          "output_tokens": 50,
+          "reasoning_output_tokens": 0
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 12.42725804168731,
+        "record_inventory": [
+          {
+            "call_id": "call_4wjzhnKxZi9eREw0o1kiFsft",
+            "input": "text(await tools.exec_command({cmd:\"pwd\",max_output_tokens:1000}));\n",
+            "output_payload_sha256": "5deae555bd4ced47c9961ce18e70e52ef224503f66c8528e04bda912695bb4c0"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      },
+      "task": {
+        "raw_tool_records": 0,
+        "outer_code_calls": 0,
+        "exec_command_invocations": 0,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "native_action_items": 0,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "1aef549711fcfa7f902afd14f20855e9e1887b699a00b837ec014001f94cca33",
+        "physical_ordinals_one_based": [],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "4064815a79b2ab88fde647d12d73c69686214541c8ffafa32ef8cb299d589e61",
+          "rollout-source-receipt.json": "c8b7ece2e7ea6d6e828848cdc9ddcbcbbfcc54e5a8de44c8d82e56852ad3ba5d",
+          "selected-raw-tool-events.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "native-events.jsonl": "d162d9cd9091a870038d6845c0dcb6fb0fab167196d51acb06c2cd00551f0baa",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "714ffd0a7f79a6907cf92006f718563c75e30a5e25a36029c11bad8bbd0fbd5e",
+          "prompt.txt": "9403413eafbbdef3f67a82e48f999a0d3d39552452dafe2593c774990422ddf9",
+          "terminal-status.json": "758f5849a91bb1bd32a40ae4f1488044fed2a92068c666c09b3e7a80fec5eee4"
+        },
+        "usage": {
+          "input_tokens": 14401,
+          "cached_input_tokens": 8704,
+          "output_tokens": 24,
+          "reasoning_output_tokens": 13
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 9.559597749263048,
+        "record_inventory": [],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      }
+    },
+    "exposure_sha256": "48245be7d895c6ed10d02206f9f8a9fdcd5f0d99e1a08dc1c24873e5a9eee3b9",
+    "summary_sha256": "144a1df1d4f2e324822492ed3214b2be55f81d79a88d1e72a8b56d4bf7b7681b",
+    "grade_sha256": "23fd0aa4c70e6706a94607b8fb2509ebab9c5ab06a78dbc498e88394a8409155",
+    "session_report_sha256": "4064815a79b2ab88fde647d12d73c69686214541c8ffafa32ef8cb299d589e61",
+    "raw_tools_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_check": {
+      "after_equals_full_setup_manifest": true,
+      "entries": 369,
+      "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "expected": "src/load.c:943",
+      "definition_file_sha256": "1b07a3467e5ddea6e798a5eb481cbd8efa49a033201922aae2ef125bc67b3c7b",
+      "source_excerpt": "json_t *json_loadb(const char *buffer, size_t buflen, size_t flags, json_error_t *error) {\n    lex_t lex;\n    json_t *result;\n    buffer_data_t stream_data;\n\n    jsonp_error_init(error, \"<buffer>\");\n\n    if (buffer == NULL) {"
+    },
+    "retrieval": {
+      "backend": "shell",
+      "truncated": true,
+      "fallback_required": true,
+      "context_bytes": 12000,
+      "errors": [],
+      "result_sha256": "397a716f98b0e4fdcd61cd7f754a4abcfea567d69d2554b5cec44d9aab7b3e3d",
+      "rg_commands": 1,
+      "graph_cli_calls": 0
+    },
+    "tool_counts": {
+      "raw_tool_records": 0,
+      "outer_code_calls": 0,
+      "exec_command_invocations": 0,
+      "rg_commands": 0,
+      "sed_commands": 0,
+      "mcp_calls": 0,
+      "patch_calls": 0
+    },
+    "limitations": [
+      "Contended run: timing not admissible.",
+      "Complete CLI tool records reviewed; no independent OS/network or HTTP-request tracing.",
+      "Context clipping does not remove the required definition in these lookup cases. No duplicate source read is required when delivered evidence suffices."
+    ]
+  },
+  "gpt-6-astra-holdout_jansson_loadb_definition-adaptive-context-r2": {
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "phases": {
+      "smoke": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 0,
+        "mcp_calls": 1,
+        "patch_calls": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "993302678b5b5a3b9e61cce81e2e7fa9e48d6c59f2cfc12a46ca2e4bca1ce785",
+        "physical_ordinals_one_based": [
+          13,
+          16
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "7f9b8c686ba6c10ce4d5027bdfd24569e122a479441c6cc9f5bcf98761d94c45",
+          "rollout-source-receipt.json": "40b042bee0ba85f6f8f19f24c2309e8f506734b43f2445318774f99acf69d7d9",
+          "selected-raw-tool-events.jsonl": "f52f5aeb4a3b2e0bff859903f077f7aa42854bdbf2d9d3c8de3dd24a2310c688",
+          "native-events.jsonl": "8cf88aaf6033841a3a184bd2694a3e6002de1a7edcdc4de7836d4fbe1d1d8cb8",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "8d15d24c9a73f7bd96034d0991c920331054b24b2345eddd64789d4a7a23f72f",
+          "prompt.txt": "f90b459731462eeef3f4014d86d42bed9ecf96b537a3b3ce1dd8e7c2fe7e80c6",
+          "terminal-status.json": "71c79e1133c6e27929437dd7a2459b65762907698376ce5c4bdc98c65e79cd99"
+        },
+        "usage": {
+          "input_tokens": 23010,
+          "cached_input_tokens": 11136,
+          "output_tokens": 110,
+          "reasoning_output_tokens": 0
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 13.825949790887535,
+        "record_inventory": [
+          {
+            "call_id": "call_4SM6gxmYNlmAxKgvUA80FyGY",
+            "input": "const matches = ALL_TOOLS.filter(t => /(^|__)code_cortex_mcp__list_projects$/.test(t.name) || t.name === \"mcp__code_cortex_mcp__list_projects\");\ntext(matches);\nif (matches.length === 1) text(await tools[matches[0].name]({}));\n",
+            "output_payload_sha256": "daa030a45b2e6bb33025c6cfa6912b15519ace55ed89ba147f8ce76b91f43ed5"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      },
+      "task": {
+        "raw_tool_records": 0,
+        "outer_code_calls": 0,
+        "exec_command_invocations": 0,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "native_action_items": 0,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "71f159cce01fb4c6e224b8797571fb9535bb56a1a740d94cd746484b7b25e2e0",
+        "physical_ordinals_one_based": [],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "99e79e130663360bb8dc334f71b17e5c693d25263c538106655af68fab028af5",
+          "rollout-source-receipt.json": "a8100e22d178457c140b28b9e9413f17ea3c3a172466a80493ac3ec552f03a78",
+          "selected-raw-tool-events.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "native-events.jsonl": "950f2e280f9fd8a1b5570f1cd1a617aa308bc87965331066b0d288a417f04f0b",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "327b0ae41064f3eca1fbfa297495d54ab3b35a2738619f194d9f6235694ea3b2",
+          "prompt.txt": "9403413eafbbdef3f67a82e48f999a0d3d39552452dafe2593c774990422ddf9",
+          "terminal-status.json": "05234ca549af86d8718ec9f730c42df7e5e4cb9fb196627f7879640a7bda63f1"
+        },
+        "usage": {
+          "input_tokens": 14401,
+          "cached_input_tokens": 0,
+          "output_tokens": 26,
+          "reasoning_output_tokens": 15
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 9.817793667316437,
+        "record_inventory": [],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      }
+    },
+    "exposure_sha256": "84d3d8c3b2161cdc866f2a801ff86cc358282cfd19cc9270d2f93aa511a11190",
+    "summary_sha256": "88529e24e6a7cb9163fd319664282797f9aadc43c4686944f4e99b06895aeb92",
+    "grade_sha256": "23fd0aa4c70e6706a94607b8fb2509ebab9c5ab06a78dbc498e88394a8409155",
+    "session_report_sha256": "99e79e130663360bb8dc334f71b17e5c693d25263c538106655af68fab028af5",
+    "raw_tools_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_check": {
+      "after_equals_full_setup_manifest": true,
+      "entries": 369,
+      "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "expected": "src/load.c:943",
+      "definition_file_sha256": "1b07a3467e5ddea6e798a5eb481cbd8efa49a033201922aae2ef125bc67b3c7b",
+      "source_excerpt": "json_t *json_loadb(const char *buffer, size_t buflen, size_t flags, json_error_t *error) {\n    lex_t lex;\n    json_t *result;\n    buffer_data_t stream_data;\n\n    jsonp_error_init(error, \"<buffer>\");\n\n    if (buffer == NULL) {"
+    },
+    "retrieval": {
+      "backend": "shell",
+      "truncated": true,
+      "fallback_required": true,
+      "context_bytes": 12000,
+      "errors": [],
+      "result_sha256": "ba9c3eb7663c2a343abc30280b929b67fea289a4ca2771defd352afb4133327a",
+      "rg_commands": 1,
+      "graph_cli_calls": 0
+    },
+    "tool_counts": {
+      "raw_tool_records": 0,
+      "outer_code_calls": 0,
+      "exec_command_invocations": 0,
+      "rg_commands": 0,
+      "sed_commands": 0,
+      "mcp_calls": 0,
+      "patch_calls": 0
+    },
+    "limitations": [
+      "Contended run: timing not admissible.",
+      "Complete CLI tool records reviewed; no independent OS/network or HTTP-request tracing.",
+      "Context clipping does not remove the required definition in these lookup cases. No duplicate source read is required when delivered evidence suffices."
+    ]
+  },
+  "gpt-6-astra-holdout_jansson_loadb_definition-raw-shell-r2": {
+    "manual_reviewed": true,
+    "compliant": true,
+    "environment_admissible": false,
+    "violations": [],
+    "phases": {
+      "smoke": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 0,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "72d42fed81769c4c44d28664cee34ae7ade940b1c2c8e7583038ba8a6660a2fa",
+        "physical_ordinals_one_based": [
+          13,
+          16
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "dffd190b9523fd92b56ad32cf8b3d7217a391ad2341e65eed5cacfb24079e669",
+          "rollout-source-receipt.json": "958364321ec176c69c1fdc3b9a90442fa252853c3f302ba572d87fa1d780c159",
+          "selected-raw-tool-events.jsonl": "c5287ce76fef88089def3ce926c51cd5af659aba6755cf1a4c1e6958a99957bc",
+          "native-events.jsonl": "ea2b935875fdd74aba7eb4cb7286b26b008847e84c896321893c4c5eb9533434",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "6ee60f39d5ec2eecedf468c2e0e247eab22c4311331ffb804b2a492ac335aea4",
+          "prompt.txt": "6f8a8873779a0bd45097c64d29ae136248bcb7162c84ad4c621c7d596a447a4a",
+          "terminal-status.json": "b0d073ab28dfd7ed50d30ccf1e81093f148234798bf0147997fb900ac8c5c181"
+        },
+        "usage": {
+          "input_tokens": 21115,
+          "cached_input_tokens": 19072,
+          "output_tokens": 50,
+          "reasoning_output_tokens": 0
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 13.788884374313056,
+        "record_inventory": [
+          {
+            "call_id": "call_jHcLVIgW3P9K0YMbMSMDsJFy",
+            "input": "text(await tools.exec_command({cmd:\"pwd\",max_output_tokens:1000}));\n",
+            "output_payload_sha256": "754aed54c731272c51f9499817533f59761c93d3ee52b0d4a92a33fce35efd0f"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      },
+      "task": {
+        "raw_tool_records": 2,
+        "outer_code_calls": 1,
+        "exec_command_invocations": 1,
+        "mcp_calls": 0,
+        "patch_calls": 0,
+        "rg_commands": 1,
+        "sed_commands": 0,
+        "native_action_items": 1,
+        "all_rollout_tool_records_retained": true,
+        "full_rollout_sha256": "5c57d39b17331242a810defb4e177aeaa74e1a3b36051612cc05e30851aa76b3",
+        "physical_ordinals_one_based": [
+          13,
+          16
+        ],
+        "settings_verified": true,
+        "bindings": {
+          "session-report.json": "dcd74d86ed2c5e6d53750cda1315d9aa85cf334191ea3b43cb4a9da94378227c",
+          "rollout-source-receipt.json": "c4d9ae006d60591b0c2630618b8a8191765c5b28134eacebd38ddf0f7db5ecd7",
+          "selected-raw-tool-events.jsonl": "86396a9605737543c7bc7b861ca636c31add4931cacdada1de6ec1733a8ba6a3",
+          "native-events.jsonl": "507c2bb4fbc2ee16c033e2a4943d18962e9f83393df438667f4bcd1e96f101c9",
+          "observed-settings.json": "4b53b5ba6f21f3340d4a1e805c9f19b95ed209121ea75fd23fad7289de58b5f2",
+          "invocation.json": "151e3a53d379ce4fbe007b680ddee6c7f22f0d3517b3f290c96977a621fdd822",
+          "prompt.txt": "23d89bd6b02ad554cadbe5ae1f35cb905730068c5a69be201d3b4425021ebdbe",
+          "terminal-status.json": "57f433c345c68b2b4903abe72cd86731d35e94212f48f1e9695756067b528141"
+        },
+        "usage": {
+          "input_tokens": 21907,
+          "cached_input_tokens": 10496,
+          "output_tokens": 67,
+          "reasoning_output_tokens": 0
+        },
+        "usage_status": "reconciled",
+        "observed_seconds": 14.013547458685935,
+        "record_inventory": [
+          {
+            "call_id": "call_F8YFYbv1nqTmT0wn1dxlnMLT",
+            "input": "text(await tools.exec_command({cmd:\"rg -n 'json_loadb\\\\s*\\\\(' .\",\"max_output_tokens\":2000}));\n",
+            "output_payload_sha256": "94af52a59a09c6a186543068c9cb8a0f7c3592440c731da3547c465f160cd5e6"
+          }
+        ],
+        "native_output_omissions": [],
+        "usage_reconciled_against_native_and_terminal": true
+      }
+    },
+    "exposure_sha256": "9217bc1264f145e4c75c1e134c6b1456843e5b504af7f999ee26966d86658887",
+    "summary_sha256": "35675e2a5a30b1ee0cf358d056d863aba4ff94693ff66fd2b3aab1a316573eb6",
+    "grade_sha256": "23fd0aa4c70e6706a94607b8fb2509ebab9c5ab06a78dbc498e88394a8409155",
+    "session_report_sha256": "dcd74d86ed2c5e6d53750cda1315d9aa85cf334191ea3b43cb4a9da94378227c",
+    "raw_tools_sha256": "86396a9605737543c7bc7b861ca636c31add4931cacdada1de6ec1733a8ba6a3",
+    "source_check": {
+      "after_equals_full_setup_manifest": true,
+      "entries": 369,
+      "source_after_sha256": "c7a80b837e15ec8fa6164e156b51a98566fd17455c40a6ee74539d803cdb06e9",
+      "setup_bound_sha256": "17f71d5f03dab5d117268fd40a5a9e57ce9bee119074dcb786736889ecf94008",
+      "expected": "src/load.c:943",
+      "definition_file_sha256": "1b07a3467e5ddea6e798a5eb481cbd8efa49a033201922aae2ef125bc67b3c7b",
+      "source_excerpt": "json_t *json_loadb(const char *buffer, size_t buflen, size_t flags, json_error_t *error) {\n    lex_t lex;\n    json_t *result;\n    buffer_data_t stream_data;\n\n    jsonp_error_init(error, \"<buffer>\");\n\n    if (buffer == NULL) {"
+    },
+    "retrieval": {
+      "backend": "none",
+      "truncated": false,
+      "fallback_required": false,
+      "context_bytes": 0,
+      "errors": [],
+      "result_sha256": "9227289a985e5c78bed2e0f4aa299f260d21d9a7f4baa21abf88a63649059044",
+      "rg_commands": 0,
+      "graph_cli_calls": 0
+    },
+    "tool_counts": {
+      "raw_tool_records": 2,
+      "outer_code_calls": 1,
+      "exec_command_invocations": 1,
+      "rg_commands": 1,
+      "sed_commands": 0,
+      "mcp_calls": 0,
+      "patch_calls": 0
+    },
+    "limitations": [
+      "Contended run: timing not admissible.",
+      "Complete CLI tool records reviewed; no independent OS/network or HTTP-request tracing.",
+      "Context clipping does not remove the required definition in these lookup cases. No duplicate source read is required when delivered evidence suffices."
+    ]
+  }
+}
