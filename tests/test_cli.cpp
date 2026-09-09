@@ -559,6 +559,18 @@ TEST(cli_skill_files_content) {
     /* Tracing capabilities */
     ASSERT(strstr(sk[0].content, "trace_path") != NULL);
     ASSERT(strstr(sk[0].content, "direction") != NULL);
+    ASSERT(strstr(sk[0].content, "from_function") != NULL);
+    ASSERT(strstr(sk[0].content, "max_work") != NULL);
+    ASSERT(strstr(sk[0].content,
+                  "trace_path(function_name=\"B\", from_function=\"A\", "
+                  "direction=\"inbound\", depth=3, max_work=10000)") != NULL);
+    ASSERT(strstr(sk[0].content, "path_found") != NULL);
+    ASSERT(strstr(sk[0].content, "traversal_truncated") != NULL);
+    ASSERT(strstr(sk[0].content, "bounded") != NULL);
+    ASSERT(strstr(sk[0].content, "query_graph") != NULL);
+    ASSERT(strstr(sk[0].content, "57.9%") != NULL);
+    ASSERT(strstr(sk[0].content, "22/24 eligible pairs") != NULL);
+    ASSERT(strstr(sk[0].content, "excluded without retry") != NULL);
     ASSERT(strstr(sk[0].content, "detect_changes") != NULL);
 
     /* Quality capabilities */
@@ -581,14 +593,17 @@ TEST(cli_skill_files_content) {
 }
 
 TEST(cli_guidance_preserves_optional_graph_and_source_limits) {
-    const char *contents[] = {cbm_get_skills()[0].content,
-                             cbm_get_codex_instructions(), cbm_get_agent_instructions()};
+    const char *contents[] = {cbm_get_codex_instructions(), cbm_get_agent_instructions()};
     for (const char *content : contents) {
         ASSERT_NOT_NULL(content);
         // Routing must include cost and a shell default, not task-label triggers.
         ASSERT_NOT_NULL(strstr(content, "Default to shell search"));
         ASSERT_NOT_NULL(strstr(content, "indexing"));
         ASSERT_NOT_NULL(strstr(content, "explicit graph request"));
+        ASSERT_NOT_NULL(strstr(
+            content,
+            "trace_path(function_name=\"B\", from_function=\"A\", "
+            "direction=\"inbound\", max_work=10000)"));
         ASSERT_NOT_NULL(strstr(content, "Routine edits do not require"));
         // Sufficient source excerpts remain reusable; flags are not exhaustive.
         ASSERT_NOT_NULL(strstr(content, "current-source excerpts"));
