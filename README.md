@@ -184,6 +184,8 @@ upstream completed 16/16. Upstream has no 100M timing: indexing exceeded both se
 the measured warm-index lookup and three-hop-chain tasks, not for edits, cold indexing, every
 language, or every task shape. See the [full results](docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md)
 and the [verification instructions](docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/README.md).
+Use the [complete reproduction kit](docs/benchmarks/complete-task-reproduction/README.md)
+to rebuild both MCPs, run the frozen 64-row schedule, and publish independently verifiable evidence.
 
 ### Full-index performance
 

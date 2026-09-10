@@ -1,0 +1,219 @@
+{
+  "schema": "code-cortex-complete-task-reproduction-v1",
+  "runner": {
+    "path": "reproduce.py",
+    "sha256": "2bdc6ee5770d63b037a769afc3d63caba46d59d9f880d281d8430c9b327ebba6"
+  },
+  "published_comparison": {
+    "candidate_commit": "0aa36e53d24d5f06eabae365ddcfc6c0a02474e2",
+    "upstream_commit": "1db8bace03140f5793ff9205e5281732e77c2bea",
+    "evidence": "../2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743",
+    "evidence_manifest_sha256": "144c027c3c90bee6a50e503278183ee37b8ac3d8189c0fa401a0e1e2a8aacb7f",
+    "metrics_sha256": "073022e1b0205aaf7907c6509b0833a730b0aedeaead8910e0684e1e3ed62ca1"
+  },
+  "backends": {
+    "candidate": {
+      "repository": "https://github.com/tigercosmos/code-cortex-mcp.git",
+      "revision": "0aa36e53d24d5f06eabae365ddcfc6c0a02474e2",
+      "build": ["bash", "scripts/build.sh"],
+      "build_arguments": [],
+      "build_environment": {},
+      "binary": "build/c/code-cortex-mcp",
+      "published_binary_sha256": "06d6157e04e8c45805f260ec78dbcadef23dd1c6a9e5c3e65ab16506d469978a",
+      "scales": ["10k", "1m", "100m"],
+      "environment": {
+        "CBM_INDEX_TOOL_TIMEOUT_S": "7200",
+        "CBM_INDEX_WORKER_TOTAL_TIMEOUT_S": "7200",
+        "CBM_MEM_BUDGET_MB": "4096",
+        "CBM_MEM_PROFILE": "1",
+        "CBM_RESULT_STORE": "1",
+        "CBM_UPDATE_CHECK": "0",
+        "CBM_WORKERS": "4"
+      }
+    },
+    "upstream": {
+      "repository": "https://github.com/DeusData/codebase-memory-mcp.git",
+      "revision": "1db8bace03140f5793ff9205e5281732e77c2bea",
+      "build": ["bash", "scripts/build.sh"],
+      "build_arguments": ["BUILD_DIR=build/benchmark-upstream"],
+      "build_environment": {},
+      "binary": "build/benchmark-upstream/codebase-memory-mcp",
+      "published_binary_sha256": "b4f6228736b3f95fa6b0a39f201b12154d200e4fb65e2570e236c707118c83bb",
+      "scales": ["10k", "1m"],
+      "environment": {
+        "CBM_INDEX_TOOL_TIMEOUT_S": "7200",
+        "CBM_INDEX_WORKER_TOTAL_TIMEOUT_S": "7200",
+        "CBM_MEM_BUDGET_MB": "4096",
+        "CBM_WORKERS": "4"
+      }
+    }
+  },
+  "fixtures": {
+    "generator": "../2026-09-09-uncontended-timing-01/scale-task-context-21/generate_fixture.py",
+    "protocol_tasks": "../2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/frozen/protocol/tasks.json",
+    "protocol_schedule": "../2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/frozen/protocol/schedule-v743.json",
+    "sha256": {
+      "generator": "c51e88d4e840ff8c3bbe359438c12e2c3cb370ec755f0ff87bc88dfc7b1d9240",
+      "protocol_schedule": "e0de552a2dd71afecad7a079f86dca681b60b21f8e1e77949114722968559176",
+      "protocol_tasks": "f215da6ef70a1bbc437f74a0e3d71a80af7ae0b4309abef3e700eddb900a7146"
+    },
+    "scales": {
+      "10k": 10000,
+      "1m": 1000000,
+      "100m": 100000000
+    }
+  },
+  "harness": {
+    "base_runner": {
+      "path": "../2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/frozen/harness/base-run-v743.py",
+      "sha256": "ab521c26570dd3f56f918ddc495923830cd999181e47b1fc9d93702f06a8f5f4"
+    },
+    "cache_integrity": {
+      "path": "../2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/frozen/harness/cache_integrity_v743.py",
+      "sha256": "aa2d705af8ddafe0877d1acd1c50267bb6ecc5392d9792d01db65c95ac985fbd"
+    },
+    "candidate_lifecycle": {
+      "path": "../2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/frozen/harness/candidate_lifecycle_v743.py",
+      "sha256": "8ad79a33254ce53f08c85fbbbb439de4115e4e9d1a29cef46fa2e0d913f64e7d"
+    },
+    "source_oracle": {
+      "path": "../2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/frozen/harness/source_oracle.py",
+      "sha256": "d00c42c5165153b117d22658b3ce4501756d481bb192ceb0eb2d692fbe87b074"
+    },
+    "triarm_adapter": {
+      "path": "../2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/frozen/harness/triarm_run_v743.py",
+      "sha256": "fe61feb042304580d55fe1481a2582b570eedacadbcfd9690da5fc46f6cd6020"
+    }
+  },
+  "model": {
+    "architecture": "x86_64-unknown-linux-musl",
+    "codex_executable": "codex",
+    "codex_sha256": "b82018241214a4a7c6b97b198585192d1dbc3aab1ddcdc640f04d8dee8c606f9",
+    "codex_version": "0.152.1",
+    "codexmon_executable": "codexmon",
+    "codexmon_archive_sha256": "8339ffe889bf8ed28feb54b95c55e97ce734ac27e2fe2a19fefa0276488591b3",
+    "codexmon_archive_url": "https://github.com/tigercosmos/codexmon/releases/download/v0.8.0/codexmon_0.8.0_linux_amd64.tar.gz",
+    "codexmon_sha256": "8cc2960e50e8b81e99daf1423fffb6fb694d6302c2efbfae2199b808bc9e6e98",
+    "codexmon_version": "0.8.0",
+    "effort": "medium",
+    "name": "gpt-5.6-sol",
+    "session_timeout_seconds": 300,
+    "codexmon_thresholds_seconds": {
+      "heartbeat": 10,
+      "idle": 120,
+      "slow": 30,
+      "stalled": 120,
+      "tool": 90,
+      "wall": 300
+    }
+  },
+  "toolchain": {
+    "c_compiler": {
+      "executable": "cc",
+      "package": "gcc-13-x86-64-linux-gnu",
+      "package_version": "13.3.0-6ubuntu2~24.04.1",
+      "sha256": "1b99826121ae6682a634e5efe09bd3e3df58ce58e0b28f849114ab5b89139c26",
+      "version_contains": "13.3.0"
+    },
+    "cmake": {
+      "executable": "cmake",
+      "package": "cmake",
+      "package_version": "4.3.4-0kitware3ubuntu24.04.1",
+      "sha256": "a52693f2d246cc136a2211fc1c812e9d66b86e8e22d5c18afbd9c513670a1783",
+      "version_contains": "4.3.4"
+    },
+    "cxx_compiler": {
+      "executable": "c++",
+      "package": "g++-13-x86-64-linux-gnu",
+      "package_version": "13.3.0-6ubuntu2~24.04.1",
+      "sha256": "1353e9bdd29a7295c7226bf6c63abccce056d8cac31f112e5cdbecc3f28c2769",
+      "version_contains": "13.3.0"
+    },
+    "make": {
+      "executable": "make",
+      "package": "make",
+      "package_version": "4.3-4.1build2",
+      "sha256": "d78b8f1d099fbcfb6f2f49ab87223b9b68fb3956642f92d6ec6de812e8afa965",
+      "version_contains": "4.3"
+    }
+  },
+  "toolchain_acquisition": {
+    "distribution": "Ubuntu 24.04 amd64",
+    "kitware_apt_repository": "https://apt.kitware.com/ubuntu/ noble main",
+    "packages": [
+      "gcc-13-x86-64-linux-gnu=13.3.0-6ubuntu2~24.04.1",
+      "g++-13-x86-64-linux-gnu=13.3.0-6ubuntu2~24.04.1",
+      "cmake=4.3.4-0kitware3ubuntu24.04.1",
+      "make=4.3-4.1build2"
+    ]
+  },
+  "retrieval": {
+    "context_budget_bytes": 6000,
+    "timeout_seconds": 120,
+    "candidate": {
+      "chain": {
+        "depth": 3,
+        "direction": "inbound",
+        "max_bytes": 6000,
+        "max_work": 128,
+        "mode": "calls",
+        "source_context": 1,
+        "tool": "trace_path"
+      },
+      "lookup": {
+        "callees_limit": 0,
+        "callers_limit": 0,
+        "max_bytes": 4000,
+        "source_lines": 2,
+        "tool": "inspect_symbol"
+      }
+    },
+    "upstream": {
+      "chain": {
+        "format": "json",
+        "max_rows": 2,
+        "tool": "query_graph"
+      },
+      "lookup": {
+        "format": "json",
+        "label": "Function",
+        "limit": 2,
+        "max_output_tokens": 128,
+        "tool": "search_graph"
+      }
+    }
+  },
+  "execution": {
+    "build_timeout_seconds": 1800,
+    "foreign_process_cpu_percent": 50.0,
+    "generation_timeout_seconds": 1800,
+    "index_timeout_seconds": 7500,
+    "logical_cpu_reference": 32,
+    "max_load_1m": 8.0,
+    "sample_count": 3,
+    "sample_interval_seconds": 1.0,
+    "serial": true,
+    "systemd_scope_unit_pattern": "cbm-v743-run-<32 lowercase hex>.service"
+  },
+  "host": {
+    "distribution": {
+      "id": "ubuntu",
+      "version_id": "24.04"
+    },
+    "minimum_free_disk_gib": 100,
+    "minimum_logical_cpus": 32,
+    "minimum_memory_gib": 60,
+    "operating_system": "Linux"
+  },
+  "analysis": {
+    "exclude_incorrect_pairs": true,
+    "impute_missing_times": false,
+    "minimum_candidate_shell_eligible_pairs": 22,
+    "minimum_candidate_upstream_eligible_pairs": 14,
+    "minimum_upstream_shell_eligible_pairs": 16,
+    "primary_geometric_ratio_at_most": 0.9,
+    "required_admitted_rows": 64,
+    "required_terminal_rows": 64,
+    "retry_failed_rows": false
+  }
+}

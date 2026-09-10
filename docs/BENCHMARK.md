@@ -3,6 +3,8 @@
 > **Historical record:** This report preserves the 2026-03-01 v0.3.0 tool names and results.
 > It measured 35 languages from a planned 63-language corpus. For current complete-task
 > performance, see the [v743 results](benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md).
+> Use the [complete reproduction kit](benchmarks/complete-task-reproduction/README.md)
+> to rerun the controlled Code Cortex, shell, and upstream comparison.
 
 ## Methodology
 
