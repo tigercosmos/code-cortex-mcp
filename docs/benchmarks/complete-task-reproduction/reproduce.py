@@ -950,8 +950,7 @@ def runtime_contention_report(path, related_root_pids=(), threshold=50.0):
     foreign = []
     related_high_cpu = []
     for sample in samples:
-        roots = {os.getpid(), *sample.get("related_root_pids", ()),
-                 *related_root_pids}
+        roots = {*sample.get("related_root_pids", ()), *related_root_pids}
         related = descendant_process_pids(sample, roots)
         for process in parse_processes(sample):
             if process["cpu_percent"] < threshold:
@@ -1017,10 +1016,10 @@ def require_completed_run(state, primary, errors, fatal_type, last_result=None):
                   (f"; {details}" if details else "")
     if not details:
         details = f"run ended with state: {state}"
-        if last_result:
-            details += f'; row: {last_result.get("run")}; ' \
-                       f'row state: {last_result.get("state")}; ' \
-                       f'error: {last_result.get("error")}'
+    if last_result and last_result.get("terminal_observed") is not True:
+        details += f'; row: {last_result.get("run")}; ' \
+                   f'row state: {last_result.get("state")}; ' \
+                   f'error: {last_result.get("error")}'
     raise RuntimeError(details) from primary
 
 

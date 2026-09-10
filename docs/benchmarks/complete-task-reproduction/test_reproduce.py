@@ -4,6 +4,7 @@
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -79,6 +80,7 @@ class ReproductionHarnessTests(unittest.TestCase):
                 "200 300 80.0 10 daemon-worker daemon-worker build",
                 "300 1 0.0 10 daemon daemon",
                 "400 1 80.0 10 foreign foreign build",
+                f"{os.getpid()} 1 80.0 10 analyzer analyzer offline",
             ],
             "related_root_pids": [100],
         }
@@ -88,14 +90,17 @@ class ReproductionHarnessTests(unittest.TestCase):
             report = REPRODUCE.runtime_contention_report(path)
         self.assertFalse(report["passed"])
         self.assertEqual(
-            [row["pid"] for row in report["foreign_processes"]], [200, 400])
+            [row["pid"] for row in report["foreign_processes"]],
+            [200, 400, os.getpid()])
 
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "contention-samples.jsonl"
             path.write_text(json.dumps(sample) + "\n")
             report = REPRODUCE.runtime_contention_report(path, (300,))
         self.assertFalse(report["passed"])
-        self.assertEqual([row["pid"] for row in report["foreign_processes"]], [400])
+        self.assertEqual(
+            [row["pid"] for row in report["foreign_processes"]],
+            [400, os.getpid()])
         self.assertEqual(
             [row["pid"] for row in report["related_processes_at_or_above_threshold"]],
             [101, 200])
@@ -162,6 +167,11 @@ class ReproductionHarnessTests(unittest.TestCase):
             REPRODUCE.require_completed_run(
                 "row_failure", None, [], FatalMonitor,
                 {"error": "model failed", "run": "row-17", "state": "controller_failure"})
+        with self.assertRaisesRegex(
+                RuntimeError, "cleanup failed.*row-17.*model failed"):
+            REPRODUCE.require_completed_run(
+                "cleanup_failure", None, ["cleanup failed"], FatalMonitor,
+                {"error": "model failed", "run": "row-17", "state": "row_failure"})
         REPRODUCE.require_completed_run("completed", None, [], FatalMonitor)
 
     def test_setup_requires_an_external_ready_hash(self):
