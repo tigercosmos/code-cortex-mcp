@@ -2,10 +2,12 @@
 """Tests for the public complete-task reproduction harness."""
 
 import importlib.util
+import io
 import json
 import pathlib
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -62,6 +64,48 @@ class ReproductionHarnessTests(unittest.TestCase):
             (root / "unlisted.txt").write_text("not sealed\n")
             with self.assertRaisesRegex(ValueError, "closed file tree"):
                 REPRODUCE.verify_hash_manifest(root)
+
+    def test_binary_hash_mismatch_is_recorded_as_reference_metadata(self):
+        receipt = REPRODUCE.binary_hash_receipt("new-path-hash", "published-hash")
+        self.assertEqual(receipt["binary_sha256"], "new-path-hash")
+        self.assertEqual(receipt["published_binary_sha256"], "published-hash")
+        self.assertFalse(receipt["binary_sha256_matches_published"])
+
+    def test_runtime_contention_uses_sample_related_roots(self):
+        sample = {
+            "processes": [
+                "100 1 0.0 10 worker worker",
+                "101 100 80.0 10 rg rg symbol",
+                "200 1 80.0 10 foreign foreign build",
+            ],
+            "related_root_pids": [100],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "contention-samples.jsonl"
+            path.write_text(json.dumps(sample) + "\n")
+            report = REPRODUCE.runtime_contention_report(path)
+        self.assertFalse(report["passed"])
+        self.assertEqual([row["pid"] for row in report["foreign_processes"]], [200])
+
+    def test_mcp_row_requires_retrieval(self):
+        with self.assertRaisesRegex(RuntimeError, "MCP arm skipped retrieval"):
+            REPRODUCE.require_mcp_retrieval({"arm": "candidate-mcp"}, {})
+        REPRODUCE.require_mcp_retrieval({"arm": "shell"}, {})
+
+    def test_admission_rejection_records_row_and_raises(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary)
+            row_output = output / "row-01"
+            row_output.mkdir()
+            rows = []
+            with self.assertRaisesRegex(RuntimeError, "contention admission rejected"):
+                with redirect_stdout(io.StringIO()):
+                    REPRODUCE.reject_admission(
+                        {"arm": "shell", "run": "row-01"}, row_output, output, rows)
+            self.assertEqual(rows[0]["state"], "admission_rejected")
+            self.assertEqual(json.loads((row_output / "summary.json").read_text()), rows[0])
+            self.assertEqual(
+                json.loads((output / "results.jsonl").read_text()), rows[0])
 
     def test_setup_requires_an_external_ready_hash(self):
         with tempfile.TemporaryDirectory() as temporary:

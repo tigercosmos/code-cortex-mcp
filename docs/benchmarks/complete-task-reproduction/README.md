@@ -79,6 +79,10 @@ The published binaries used these exact build-tool identities:
 The runner records and rechecks their resolved paths, modes, devices, inodes, versions, and hashes.
 Use a derived configuration if your distribution produces different executable hashes.
 
+Published binary hashes are reference receipts, not build gates.
+The candidate binary embeds absolute source paths, so a different checkout path changes its hash.
+The runner records each new hash and whether it matches the published reference.
+
 Install Codex CLI 0.152.1 for `x86_64-unknown-linux-musl`.
 Authenticate it before the run by following the
 [official Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
@@ -304,11 +308,12 @@ Report each host as a separate complete repetition.
 Copy `config.json` to a new named file.
 Change the candidate revision for a product comparison.
 Update the tool version and hash fields when the model toolchain changes.
-Set `published_binary_sha256` to `null` for the first build of a new revision.
-Record the resulting binary hash before independent repetitions.
+Keep `published_binary_sha256` as a reference when one exists.
+Use `null` only when the compared revision has no reference binary.
+Record each resulting binary hash before independent repetitions.
+
 Update compiler and build-tool identities when that toolchain changes.
-Clear both backend binary hashes when a compiler or build tool changes.
-Record both rebuilt binary hashes before independent repetitions.
+Keep both prior binary hashes as references when a compiler or build tool changes.
 Keep the frozen tasks, schedule, retrieval contract, and analysis rules unchanged.
 
 Commit the derived configuration beside its complete evidence summary.

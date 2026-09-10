@@ -68,6 +68,15 @@ def append_json(path, value):
         stream.write(json.dumps(value, sort_keys=True) + "\n")
 
 
+def binary_hash_receipt(actual, reference):
+    return {
+        "binary_sha256": actual,
+        "binary_sha256_matches_published": (
+            actual == reference if reference is not None else None),
+        "published_binary_sha256": reference,
+    }
+
+
 def resolve_config_path(config_path, value):
     path = pathlib.Path(value)
     return path if path.is_absolute() else (config_path.parent / path).resolve()
@@ -503,12 +512,9 @@ def clone_and_build(name, backend, runtime, evidence, timeout, toolchain):
     verify_toolchain(toolchain)
     binary = (repository / backend["binary"]).resolve(strict=True)
     binary_hash = sha256(binary)
-    expected_hash = backend.get("published_binary_sha256")
-    if expected_hash and binary_hash != expected_hash:
-        raise ValueError(f"{name} build differs from the published binary")
     return {
         "binary": str(binary),
-        "binary_sha256": binary_hash,
+        **binary_hash_receipt(binary_hash, backend.get("published_binary_sha256")),
         "commit": head,
         "repository": str(repository),
         "source_repository": backend["repository"],
@@ -925,9 +931,27 @@ def runtime_contention_report(path):
     if not path.is_file():
         return {"foreign_processes": [], "passed": False, "samples": 0}
     samples = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    foreign = TRI.foreign_cpu(samples)
+    foreign = []
+    for sample in samples:
+        foreign.extend(TRI.foreign_cpu(
+            [sample], sample.get("related_root_pids", ())))
     return {"foreign_processes": foreign, "passed": bool(samples) and not foreign,
             "samples": len(samples)}
+
+
+def require_mcp_retrieval(row, opened):
+    if row["arm"] != "shell" and not opened:
+        raise RuntimeError("MCP arm skipped retrieval")
+
+
+def reject_admission(row, row_output, output, results):
+    result = {**row, "answer_correct": False, "state": "admission_rejected",
+              "terminal_observed": False}
+    save_new(row_output / "summary.json", result)
+    results.append(result)
+    append_json(output / "results.jsonl", result)
+    print(json.dumps(result, sort_keys=True), flush=True)
+    raise RuntimeError(f'contention admission rejected: {row["run"]}')
 
 
 def remove_auth_link(setup, row):
@@ -963,6 +987,7 @@ def run_row(task, row, project, setup, output, codex, codexmon):
     try:
         result = BASE.run_session(task, bridged, project, setup, output,
                                   pathlib.Path(codex), pathlib.Path(codexmon), None)
+        require_mcp_retrieval(row, opened)
         result["arm"] = row["arm"]
         result["triarm_arm"] = row["arm"]
     except BaseException as exc:
@@ -1045,12 +1070,7 @@ def run_stage(config_path, config, work, setup_ready_sha256):
             save_new(row_output / "contention-admission-samples.json", samples)
             save_new(row_output / "contention-admission.json", admission)
             if not admission["admitted"]:
-                result = {**row, "answer_correct": False, "state": "admission_rejected",
-                          "terminal_observed": False}
-                save_new(row_output / "summary.json", result)
-                results.append(result)
-                append_json(output / "results.jsonl", result)
-                break
+                reject_admission(row, row_output, output, results)
             backend = {"candidate-mcp": "candidate",
                        "upstream-mcp": "upstream"}.get(row["arm"])
             project = (setup["backends"][backend]["projects"][tasks[row["task"]]["scale"]]
