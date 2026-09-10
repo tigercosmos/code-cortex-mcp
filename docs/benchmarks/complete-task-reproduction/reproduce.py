@@ -948,12 +948,20 @@ def runtime_contention_report(path, related_root_pids=()):
         return {"foreign_processes": [], "passed": False, "samples": 0}
     samples = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     foreign = []
+    mcp_high_cpu = []
     for sample in samples:
         roots = {*sample.get("related_root_pids", ()), *related_root_pids}
         foreign.extend(TRI.foreign_cpu(
             [sample], roots))
-    return {"foreign_processes": foreign, "passed": bool(samples) and not foreign,
-            "samples": len(samples)}
+        mcp_pids = descendant_process_pids(sample, related_root_pids)
+        mcp_high_cpu.extend({**process, "utc": sample.get("utc")}
+                            for process in parse_processes(sample)
+                            if process["pid"] in mcp_pids and
+                            process["cpu_percent"] >= 50.0)
+    return {"foreign_processes": foreign,
+            "mcp_processes_at_least_50_percent_cpu": mcp_high_cpu,
+            "mcp_related_root_pids": sorted(set(related_root_pids)),
+            "passed": bool(samples) and not foreign, "samples": len(samples)}
 
 
 def require_mcp_retrieval(row, opened):
@@ -961,12 +969,44 @@ def require_mcp_retrieval(row, opened):
         raise RuntimeError("MCP arm skipped retrieval")
 
 
-def mcp_related_root_pids(opened):
+def descendant_process_pids(sample, roots):
+    related = set(roots)
+    processes = parse_processes(sample)
+    changed = True
+    while changed:
+        changed = False
+        for process in processes:
+            if process["pid"] not in related and process["ppid"] in related:
+                related.add(process["pid"])
+                changed = True
+    return related
+
+
+def mcp_related_root_pids(opened, output):
     ownership = opened.get("ownership", {})
-    return sorted({
+    roots = {
         value for key, value in ownership.items()
         if key in {"daemon_pid", "foreground_client_pid"} and isinstance(value, int)
-    })
+    }
+    roots.update(item["pid"] for item in ownership.get("candidate_owned_active", [])
+                 if isinstance(item.get("pid"), int))
+    process_tree = pathlib.Path(output) / "foreground-process-tree.json"
+    if process_tree.is_file():
+        snapshot = json.loads(process_tree.read_text()).get("snapshot", {})
+        roots.update(descendant_process_pids(snapshot, roots))
+    return sorted(roots)
+
+
+def finalization_state(primary, errors, schedule_complete, fatal_type):
+    if errors:
+        return "cleanup_failure"
+    if isinstance(primary, fatal_type):
+        return "fatal_codexmon_survivor"
+    if isinstance(primary, AdmissionRejected):
+        return "admission_rejected"
+    if primary is not None:
+        return "controller_failure"
+    return "completed" if schedule_complete else "row_failure"
 
 
 def reject_admission(row, row_output, output, results):
@@ -1004,6 +1044,7 @@ def run_row(task, row, project, setup, output, codex, codexmon):
         if receipt.get("source_oracle_correct") is not True:
             raise RuntimeError("MCP retrieval did not pass the source oracle")
         opened["retrieval_complete"] = True
+        opened["runtime_related_root_pids"] = mcp_related_root_pids(opened, output)
         return context, receipt
 
     BASE.graph_context = supplied
@@ -1016,7 +1057,7 @@ def run_row(task, row, project, setup, output, codex, codexmon):
         result = BASE.run_session(task, bridged, project, setup, output,
                                   pathlib.Path(codex), pathlib.Path(codexmon), None)
         require_mcp_retrieval(row, opened)
-        result["mcp_related_root_pids"] = mcp_related_root_pids(opened)
+        result["mcp_related_root_pids"] = opened.get("runtime_related_root_pids", [])
         result["arm"] = row["arm"]
         result["triarm_arm"] = row["arm"]
     except BaseException as exc:
@@ -1172,13 +1213,16 @@ def run_stage(config_path, config, work, setup_ready_sha256):
             save_new(output / "cache-integrity-post.json", cache_post)
         except BaseException as exc:
             finalization_errors.append(f"cache integrity: {type(exc).__name__}: {exc}")
+        schedule_complete = (len(results) == len(schedule) and
+                             all(row.get("terminal_observed") is True for row in results))
+        state = finalization_state(
+            primary, finalization_errors, schedule_complete,
+            BASE.FatalCodexmonSurvivor)
         save_new(output / "run-finalization.json", {
             "errors": finalization_errors,
-            "passed": primary is None and not finalization_errors,
+            "passed": state == "completed",
             "primary": f"{type(primary).__name__}: {primary}" if primary else None,
-            "state": ("completed" if primary is None and not finalization_errors else
-                      "admission_rejected" if isinstance(primary, AdmissionRejected) else
-                      "cleanup_failure" if primary is None else "controller_failure"),
+            "state": state,
         })
     if primary is not None or finalization_errors:
         if isinstance(primary, BASE.FatalCodexmonSurvivor):

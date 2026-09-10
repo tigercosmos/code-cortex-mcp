@@ -2,7 +2,7 @@
   "schema": "code-cortex-complete-task-reproduction-v1",
   "runner": {
     "path": "reproduce.py",
-    "sha256": "b831d65912df18ecd32733d33670d6fe193e660eaa82884466b3fe8fa180d339"
+    "sha256": "4e150ae20030ed6a642ce4defed6db344c89b2715f522e2fa9f77341fa108cc3"
   },
   "published_comparison": {
     "candidate_commit": "0aa36e53d24d5f06eabae365ddcfc6c0a02474e2",

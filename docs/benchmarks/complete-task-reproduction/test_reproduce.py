@@ -76,7 +76,8 @@ class ReproductionHarnessTests(unittest.TestCase):
             "processes": [
                 "100 1 0.0 10 worker worker",
                 "101 100 80.0 10 rg rg symbol",
-                "200 1 80.0 10 foreign foreign build",
+                "200 300 80.0 10 daemon-worker daemon-worker build",
+                "300 1 0.0 10 daemon daemon",
             ],
             "related_root_pids": [100],
         }
@@ -90,9 +91,32 @@ class ReproductionHarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "contention-samples.jsonl"
             path.write_text(json.dumps(sample) + "\n")
-            report = REPRODUCE.runtime_contention_report(path, (200,))
+            report = REPRODUCE.runtime_contention_report(path, (300,))
         self.assertTrue(report["passed"])
         self.assertEqual(report["foreign_processes"], [])
+        self.assertEqual(
+            [row["pid"] for row in report["mcp_processes_at_least_50_percent_cpu"]],
+            [200])
+
+    def test_mcp_roots_include_owned_and_observed_descendants(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary)
+            REPRODUCE.save_new(output / "foreground-process-tree.json", {
+                "snapshot": {
+                    "processes": [
+                        "10 1 0.0 10 client client",
+                        "11 10 0.0 10 tool-server tool-server",
+                        "12 11 0.0 10 worker worker",
+                    ],
+                },
+            })
+            roots = REPRODUCE.mcp_related_root_pids({
+                "ownership": {
+                    "candidate_owned_active": [{"pid": 11}],
+                    "foreground_client_pid": 10,
+                },
+            }, output)
+        self.assertEqual(roots, [10, 11, 12])
 
     def test_mcp_row_requires_retrieval(self):
         with self.assertRaisesRegex(RuntimeError, "MCP arm skipped retrieval"):
@@ -116,6 +140,23 @@ class ReproductionHarnessTests(unittest.TestCase):
             self.assertEqual(json.loads((row_output / "summary.json").read_text()), rows[0])
             self.assertEqual(
                 json.loads((output / "results.jsonl").read_text()), rows[0])
+
+    def test_finalization_state_distinguishes_every_failure_class(self):
+        class FatalMonitor(RuntimeError):
+            pass
+
+        self.assertEqual(
+            REPRODUCE.finalization_state(None, [], True, FatalMonitor), "completed")
+        self.assertEqual(
+            REPRODUCE.finalization_state(None, [], False, FatalMonitor), "row_failure")
+        self.assertEqual(REPRODUCE.finalization_state(
+            REPRODUCE.AdmissionRejected(), [], False, FatalMonitor),
+            "admission_rejected")
+        self.assertEqual(REPRODUCE.finalization_state(
+            FatalMonitor(), [], False, FatalMonitor), "fatal_codexmon_survivor")
+        self.assertEqual(REPRODUCE.finalization_state(
+            REPRODUCE.AdmissionRejected(), ["cleanup"], False, FatalMonitor),
+            "cleanup_failure")
 
     def test_setup_requires_an_external_ready_hash(self):
         with tempfile.TemporaryDirectory() as temporary:
