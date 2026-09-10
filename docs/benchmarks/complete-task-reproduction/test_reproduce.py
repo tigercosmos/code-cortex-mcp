@@ -87,9 +87,18 @@ class ReproductionHarnessTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual([row["pid"] for row in report["foreign_processes"]], [200])
 
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "contention-samples.jsonl"
+            path.write_text(json.dumps(sample) + "\n")
+            report = REPRODUCE.runtime_contention_report(path, (200,))
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["foreign_processes"], [])
+
     def test_mcp_row_requires_retrieval(self):
         with self.assertRaisesRegex(RuntimeError, "MCP arm skipped retrieval"):
             REPRODUCE.require_mcp_retrieval({"arm": "candidate-mcp"}, {})
+        REPRODUCE.require_mcp_retrieval(
+            {"arm": "candidate-mcp"}, {"retrieval_complete": True})
         REPRODUCE.require_mcp_retrieval({"arm": "shell"}, {})
 
     def test_admission_rejection_records_row_and_raises(self):
@@ -98,7 +107,8 @@ class ReproductionHarnessTests(unittest.TestCase):
             row_output = output / "row-01"
             row_output.mkdir()
             rows = []
-            with self.assertRaisesRegex(RuntimeError, "contention admission rejected"):
+            with self.assertRaisesRegex(
+                    REPRODUCE.AdmissionRejected, "contention admission rejected"):
                 with redirect_stdout(io.StringIO()):
                     REPRODUCE.reject_admission(
                         {"arm": "shell", "run": "row-01"}, row_output, output, rows)
@@ -167,7 +177,22 @@ class ReproductionHarnessTests(unittest.TestCase):
             REPRODUCE.append_json(
                 output / "results.jsonl",
                 json.loads((directory / "summary.json").read_text()))
-        return {"protocol": str(protocol)}, output, rows
+        setup = {
+            "backends": {
+                "candidate": {
+                    "binary_sha256": "candidate-observed",
+                    "binary_sha256_matches_published": False,
+                    "published_binary_sha256": "candidate-reference",
+                },
+                "upstream": {
+                    "binary_sha256": "upstream-observed",
+                    "binary_sha256_matches_published": True,
+                    "published_binary_sha256": "upstream-reference",
+                },
+            },
+            "protocol": str(protocol),
+        }
+        return setup, output, rows
 
     def test_analysis_requires_complete_rows_and_minimum_exact_pairs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -175,6 +200,12 @@ class ReproductionHarnessTests(unittest.TestCase):
             setup, output, rows = self.make_run(root)
             report = REPRODUCE.analyze_data(self.config, setup, output)
             self.assertTrue(report["passed"])
+            self.assertFalse(
+                report["binaries"]["candidate"]["binary_sha256_matches_published"])
+            rendered = REPRODUCE.markdown_results(report)
+            self.assertIn("candidate-observed", rendered)
+            self.assertIn("candidate-reference", rendered)
+            self.assertIn("| false |", rendered)
             self.assertEqual(report["comparisons"]["candidate_to_shell"]["all"]
                              ["eligible_pairs"], 24)
             self.assertAlmostEqual(report["comparisons"]["candidate_to_shell"]["all"]

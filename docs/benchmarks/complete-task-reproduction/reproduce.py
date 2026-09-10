@@ -29,6 +29,10 @@ BASE = None
 SOURCE_ORACLE = None
 
 
+class AdmissionRejected(RuntimeError):
+    """The host failed the pre-row uncontended admission gate."""
+
+
 def load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
@@ -74,6 +78,18 @@ def binary_hash_receipt(actual, reference):
         "binary_sha256_matches_published": (
             actual == reference if reference is not None else None),
         "published_binary_sha256": reference,
+    }
+
+
+def binary_report(setup):
+    return {
+        name: {
+            "binary_sha256": item["binary_sha256"],
+            "binary_sha256_matches_published":
+                item.get("binary_sha256_matches_published"),
+            "published_binary_sha256": item.get("published_binary_sha256"),
+        }
+        for name, item in sorted(setup["backends"].items())
     }
 
 
@@ -926,22 +942,31 @@ def contention_admission(samples, config):
     }
 
 
-def runtime_contention_report(path):
+def runtime_contention_report(path, related_root_pids=()):
     path = pathlib.Path(path)
     if not path.is_file():
         return {"foreign_processes": [], "passed": False, "samples": 0}
     samples = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     foreign = []
     for sample in samples:
+        roots = {*sample.get("related_root_pids", ()), *related_root_pids}
         foreign.extend(TRI.foreign_cpu(
-            [sample], sample.get("related_root_pids", ())))
+            [sample], roots))
     return {"foreign_processes": foreign, "passed": bool(samples) and not foreign,
             "samples": len(samples)}
 
 
 def require_mcp_retrieval(row, opened):
-    if row["arm"] != "shell" and not opened:
+    if row["arm"] != "shell" and not opened.get("retrieval_complete"):
         raise RuntimeError("MCP arm skipped retrieval")
+
+
+def mcp_related_root_pids(opened):
+    ownership = opened.get("ownership", {})
+    return sorted({
+        value for key, value in ownership.items()
+        if key in {"daemon_pid", "foreground_client_pid"} and isinstance(value, int)
+    })
 
 
 def reject_admission(row, row_output, output, results):
@@ -951,7 +976,7 @@ def reject_admission(row, row_output, output, results):
     results.append(result)
     append_json(output / "results.jsonl", result)
     print(json.dumps(result, sort_keys=True), flush=True)
-    raise RuntimeError(f'contention admission rejected: {row["run"]}')
+    raise AdmissionRejected(f'contention admission rejected: {row["run"]}')
 
 
 def remove_auth_link(setup, row):
@@ -976,6 +1001,9 @@ def run_row(task, row, project, setup, output, codex, codexmon):
         context, receipt, _ = TRI.retrieve_then_scan(
             task, item["projects"][task["scale"]], client, backend, item,
             output, client.proc.pid)
+        if receipt.get("source_oracle_correct") is not True:
+            raise RuntimeError("MCP retrieval did not pass the source oracle")
+        opened["retrieval_complete"] = True
         return context, receipt
 
     BASE.graph_context = supplied
@@ -988,6 +1016,7 @@ def run_row(task, row, project, setup, output, codex, codexmon):
         result = BASE.run_session(task, bridged, project, setup, output,
                                   pathlib.Path(codex), pathlib.Path(codexmon), None)
         require_mcp_retrieval(row, opened)
+        result["mcp_related_root_pids"] = mcp_related_root_pids(opened)
         result["arm"] = row["arm"]
         result["triarm_arm"] = row["arm"]
     except BaseException as exc:
@@ -1094,7 +1123,8 @@ def run_stage(config_path, config, work, setup_ready_sha256):
                     summary_path.unlink()
                 save_new(summary_path, result)
             runtime_contention = runtime_contention_report(
-                row_output / "contention-samples.jsonl")
+                row_output / "contention-samples.jsonl",
+                result.get("mcp_related_root_pids", ()))
             save_new(row_output / "contention-runtime.json", runtime_contention)
             result["runtime_uncontended"] = runtime_contention["passed"]
             summary_path = row_output / "summary.json"
@@ -1146,6 +1176,9 @@ def run_stage(config_path, config, work, setup_ready_sha256):
             "errors": finalization_errors,
             "passed": primary is None and not finalization_errors,
             "primary": f"{type(primary).__name__}: {primary}" if primary else None,
+            "state": ("completed" if primary is None and not finalization_errors else
+                      "admission_rejected" if isinstance(primary, AdmissionRejected) else
+                      "cleanup_failure" if primary is None else "controller_failure"),
         })
     if primary is not None or finalization_errors:
         if isinstance(primary, BASE.FatalCodexmonSurvivor):
@@ -1297,13 +1330,24 @@ def analyze_data(config, setup, run_output):
                                      config["analysis"]["minimum_upstream_shell_eligible_pairs"],
     }
     passed = all(gates.values())
-    return {"comparisons": comparisons, "gates": gates, "passed": passed, "rows": rows,
+    return {"binaries": binary_report(setup), "comparisons": comparisons,
+            "gates": gates, "passed": passed, "rows": rows,
             "source_oracle_passed": source_ok,
             "rules": config["analysis"]}
 
 
 def markdown_results(report):
-    lines = ["# Complete-task reproduction results", ""]
+    lines = ["# Complete-task reproduction results", "",
+             "## Binary identities", "",
+             "| Backend | Observed SHA-256 | Published SHA-256 | Matches reference |",
+             "|---|---|---|---|"]
+    for name, row in report["binaries"].items():
+        reference = row["published_binary_sha256"] or "unavailable"
+        matches = ("unavailable" if row["binary_sha256_matches_published"] is None else
+                   str(row["binary_sha256_matches_published"]).lower())
+        lines.append(f'| {name} | `{row["binary_sha256"]}` | `{reference}` | {matches} |')
+    lines.extend(["", "A mismatch is informational because build paths can change binary bytes.",
+                  "Source, toolchain, and runtime seals remain required.", ""])
     labels = {
         "candidate_to_shell": "Code Cortex / shell",
         "candidate_to_upstream": "Code Cortex / upstream",

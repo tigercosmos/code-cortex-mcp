@@ -81,7 +81,7 @@ Use a derived configuration if your distribution produces different executable h
 
 Published binary hashes are reference receipts, not build gates.
 The candidate binary embeds absolute source paths, so a different checkout path changes its hash.
-The runner records each new hash and whether it matches the published reference.
+The analysis report and results table show each new hash and its reference match status.
 
 Install Codex CLI 0.152.1 for `x86_64-unknown-linux-musl`.
 Authenticate it before the run by following the
@@ -242,8 +242,10 @@ Each MCP arm receives one source-checked, answer-only JSON result.
 Before every row, the runner proves that both MCP backends have no surviving process.
 It takes three admission samples over two seconds.
 It also audits the one-second samples collected during the model session.
+Each runtime sample exempts the controller, monitor, agent, and active MCP process tree.
 Foreign in-task CPU activity makes that row ineligible.
 
+An admission rejection exits with an error and records a distinct finalization state.
 The runner does not retry a failed row.
 It does not replace missing times with estimates.
 Preserve a failed work directory and start a complete rerun at a new path.
