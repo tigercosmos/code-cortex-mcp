@@ -95,28 +95,25 @@ class ReproductionHarnessTests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(report["foreign_processes"], [])
         self.assertEqual(
-            [row["pid"] for row in report["mcp_processes_at_least_50_percent_cpu"]],
+            [row["pid"] for row in report["mcp_processes_at_or_above_threshold"]],
             [200])
+        self.assertEqual(report["threshold_percent_cpu"], 50.0)
 
-    def test_mcp_roots_include_owned_and_observed_descendants(self):
         with tempfile.TemporaryDirectory() as temporary:
-            output = pathlib.Path(temporary)
-            REPRODUCE.save_new(output / "foreground-process-tree.json", {
-                "snapshot": {
-                    "processes": [
-                        "10 1 0.0 10 client client",
-                        "11 10 0.0 10 tool-server tool-server",
-                        "12 11 0.0 10 worker worker",
-                    ],
-                },
-            })
-            roots = REPRODUCE.mcp_related_root_pids({
-                "ownership": {
-                    "candidate_owned_active": [{"pid": 11}],
-                    "foreground_client_pid": 10,
-                },
-            }, output)
-        self.assertEqual(roots, [10, 11, 12])
+            path = pathlib.Path(temporary) / "contention-samples.jsonl"
+            path.write_text(json.dumps(sample) + "\n")
+            report = REPRODUCE.runtime_contention_report(path, (300,), 90.0)
+        self.assertEqual(report["mcp_processes_at_or_above_threshold"], [])
+        self.assertEqual(report["threshold_percent_cpu"], 90.0)
+
+    def test_mcp_roots_include_owned_processes(self):
+        roots = REPRODUCE.mcp_related_root_pids({
+            "ownership": {
+                "candidate_owned_active": [{"pid": 11}],
+                "foreground_client_pid": 10,
+            },
+        })
+        self.assertEqual(roots, [10, 11])
 
     def test_mcp_row_requires_retrieval(self):
         with self.assertRaisesRegex(RuntimeError, "MCP arm skipped retrieval"):
@@ -156,7 +153,11 @@ class ReproductionHarnessTests(unittest.TestCase):
             FatalMonitor(), [], False, FatalMonitor), "fatal_codexmon_survivor")
         self.assertEqual(REPRODUCE.finalization_state(
             REPRODUCE.AdmissionRejected(), ["cleanup"], False, FatalMonitor),
-            "cleanup_failure")
+            "admission_rejected")
+        with self.assertRaisesRegex(RuntimeError, "run ended with state: row_failure"):
+            REPRODUCE.require_completed_run(
+                "row_failure", None, [], FatalMonitor)
+        REPRODUCE.require_completed_run("completed", None, [], FatalMonitor)
 
     def test_setup_requires_an_external_ready_hash(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -942,7 +942,7 @@ def contention_admission(samples, config):
     }
 
 
-def runtime_contention_report(path, related_root_pids=()):
+def runtime_contention_report(path, related_root_pids=(), threshold=50.0):
     path = pathlib.Path(path)
     if not path.is_file():
         return {"foreign_processes": [], "passed": False, "samples": 0}
@@ -957,11 +957,12 @@ def runtime_contention_report(path, related_root_pids=()):
         mcp_high_cpu.extend({**process, "utc": sample.get("utc")}
                             for process in parse_processes(sample)
                             if process["pid"] in mcp_pids and
-                            process["cpu_percent"] >= 50.0)
+                            process["cpu_percent"] >= threshold)
     return {"foreign_processes": foreign,
-            "mcp_processes_at_least_50_percent_cpu": mcp_high_cpu,
+            "mcp_processes_at_or_above_threshold": mcp_high_cpu,
             "mcp_related_root_pids": sorted(set(related_root_pids)),
-            "passed": bool(samples) and not foreign, "samples": len(samples)}
+            "passed": bool(samples) and not foreign, "samples": len(samples),
+            "threshold_percent_cpu": threshold}
 
 
 def require_mcp_retrieval(row, opened):
@@ -982,7 +983,7 @@ def descendant_process_pids(sample, roots):
     return related
 
 
-def mcp_related_root_pids(opened, output):
+def mcp_related_root_pids(opened):
     ownership = opened.get("ownership", {})
     roots = {
         value for key, value in ownership.items()
@@ -990,23 +991,33 @@ def mcp_related_root_pids(opened, output):
     }
     roots.update(item["pid"] for item in ownership.get("candidate_owned_active", [])
                  if isinstance(item.get("pid"), int))
-    process_tree = pathlib.Path(output) / "foreground-process-tree.json"
-    if process_tree.is_file():
-        snapshot = json.loads(process_tree.read_text()).get("snapshot", {})
-        roots.update(descendant_process_pids(snapshot, roots))
     return sorted(roots)
 
 
 def finalization_state(primary, errors, schedule_complete, fatal_type):
-    if errors:
-        return "cleanup_failure"
     if isinstance(primary, fatal_type):
         return "fatal_codexmon_survivor"
     if isinstance(primary, AdmissionRejected):
         return "admission_rejected"
     if primary is not None:
         return "controller_failure"
+    if errors:
+        return "cleanup_failure"
     return "completed" if schedule_complete else "row_failure"
+
+
+def require_completed_run(state, primary, errors, fatal_type):
+    if state == "completed":
+        return
+    if isinstance(primary, fatal_type):
+        raise primary
+    details = "; ".join(errors)
+    if primary is not None:
+        details = f"{type(primary).__name__}: {primary}" + \
+                  (f"; {details}" if details else "")
+    if not details:
+        details = f"run ended with state: {state}"
+    raise RuntimeError(details) from primary
 
 
 def reject_admission(row, row_output, output, results):
@@ -1044,7 +1055,7 @@ def run_row(task, row, project, setup, output, codex, codexmon):
         if receipt.get("source_oracle_correct") is not True:
             raise RuntimeError("MCP retrieval did not pass the source oracle")
         opened["retrieval_complete"] = True
-        opened["runtime_related_root_pids"] = mcp_related_root_pids(opened, output)
+        opened["runtime_related_root_pids"] = mcp_related_root_pids(opened)
         return context, receipt
 
     BASE.graph_context = supplied
@@ -1165,7 +1176,8 @@ def run_stage(config_path, config, work, setup_ready_sha256):
                 save_new(summary_path, result)
             runtime_contention = runtime_contention_report(
                 row_output / "contention-samples.jsonl",
-                result.get("mcp_related_root_pids", ()))
+                result.get("mcp_related_root_pids", ()),
+                config["execution"]["foreign_process_cpu_percent"])
             save_new(row_output / "contention-runtime.json", runtime_contention)
             result["runtime_uncontended"] = runtime_contention["passed"]
             summary_path = row_output / "summary.json"
@@ -1219,19 +1231,14 @@ def run_stage(config_path, config, work, setup_ready_sha256):
             primary, finalization_errors, schedule_complete,
             BASE.FatalCodexmonSurvivor)
         save_new(output / "run-finalization.json", {
+            "cleanup_failed": bool(finalization_errors),
             "errors": finalization_errors,
             "passed": state == "completed",
             "primary": f"{type(primary).__name__}: {primary}" if primary else None,
             "state": state,
         })
-    if primary is not None or finalization_errors:
-        if isinstance(primary, BASE.FatalCodexmonSurvivor):
-            raise primary
-        details = "; ".join(finalization_errors)
-        if primary is not None:
-            details = f"{type(primary).__name__}: {primary}" + \
-                      (f"; {details}" if details else "")
-        raise RuntimeError(details) from primary
+    require_completed_run(
+        state, primary, finalization_errors, BASE.FatalCodexmonSurvivor)
     save_new(output / "run-report.json", {
         "attempted": len(results),
         "correct": sum(row.get("answer_correct") is True for row in results),
