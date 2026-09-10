@@ -948,19 +948,19 @@ def runtime_contention_report(path, related_root_pids=(), threshold=50.0):
         return {"foreign_processes": [], "passed": False, "samples": 0}
     samples = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     foreign = []
-    mcp_high_cpu = []
+    related_high_cpu = []
     for sample in samples:
-        roots = {*sample.get("related_root_pids", ()), *related_root_pids}
-        foreign.extend(TRI.foreign_cpu(
-            [sample], roots))
-        mcp_pids = descendant_process_pids(sample, related_root_pids)
-        mcp_high_cpu.extend({**process, "utc": sample.get("utc")}
-                            for process in parse_processes(sample)
-                            if process["pid"] in mcp_pids and
-                            process["cpu_percent"] >= threshold)
+        roots = {os.getpid(), *sample.get("related_root_pids", ()),
+                 *related_root_pids}
+        related = descendant_process_pids(sample, roots)
+        for process in parse_processes(sample):
+            if process["cpu_percent"] < threshold:
+                continue
+            target = related_high_cpu if process["pid"] in related else foreign
+            target.append({**process, "utc": sample.get("utc")})
     return {"foreign_processes": foreign,
-            "mcp_processes_at_or_above_threshold": mcp_high_cpu,
-            "mcp_related_root_pids": sorted(set(related_root_pids)),
+            "related_processes_at_or_above_threshold": related_high_cpu,
+            "related_root_pids": sorted(set(related_root_pids)),
             "passed": bool(samples) and not foreign, "samples": len(samples),
             "threshold_percent_cpu": threshold}
 
@@ -1006,7 +1006,7 @@ def finalization_state(primary, errors, schedule_complete, fatal_type):
     return "completed" if schedule_complete else "row_failure"
 
 
-def require_completed_run(state, primary, errors, fatal_type):
+def require_completed_run(state, primary, errors, fatal_type, last_result=None):
     if state == "completed":
         return
     if isinstance(primary, fatal_type):
@@ -1017,6 +1017,10 @@ def require_completed_run(state, primary, errors, fatal_type):
                   (f"; {details}" if details else "")
     if not details:
         details = f"run ended with state: {state}"
+        if last_result:
+            details += f'; row: {last_result.get("run")}; ' \
+                       f'row state: {last_result.get("state")}; ' \
+                       f'error: {last_result.get("error")}'
     raise RuntimeError(details) from primary
 
 
@@ -1231,14 +1235,18 @@ def run_stage(config_path, config, work, setup_ready_sha256):
             primary, finalization_errors, schedule_complete,
             BASE.FatalCodexmonSurvivor)
         save_new(output / "run-finalization.json", {
+            "attempted": len(results),
             "cleanup_failed": bool(finalization_errors),
             "errors": finalization_errors,
             "passed": state == "completed",
             "primary": f"{type(primary).__name__}: {primary}" if primary else None,
+            "schedule_complete": schedule_complete,
+            "scheduled": len(schedule),
             "state": state,
         })
     require_completed_run(
-        state, primary, finalization_errors, BASE.FatalCodexmonSurvivor)
+        state, primary, finalization_errors, BASE.FatalCodexmonSurvivor,
+        results[-1] if results else None)
     save_new(output / "run-report.json", {
         "attempted": len(results),
         "correct": sum(row.get("answer_correct") is True for row in results),

@@ -78,6 +78,7 @@ class ReproductionHarnessTests(unittest.TestCase):
                 "101 100 80.0 10 rg rg symbol",
                 "200 300 80.0 10 daemon-worker daemon-worker build",
                 "300 1 0.0 10 daemon daemon",
+                "400 1 80.0 10 foreign foreign build",
             ],
             "related_root_pids": [100],
         }
@@ -86,24 +87,27 @@ class ReproductionHarnessTests(unittest.TestCase):
             path.write_text(json.dumps(sample) + "\n")
             report = REPRODUCE.runtime_contention_report(path)
         self.assertFalse(report["passed"])
-        self.assertEqual([row["pid"] for row in report["foreign_processes"]], [200])
+        self.assertEqual(
+            [row["pid"] for row in report["foreign_processes"]], [200, 400])
 
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "contention-samples.jsonl"
             path.write_text(json.dumps(sample) + "\n")
             report = REPRODUCE.runtime_contention_report(path, (300,))
-        self.assertTrue(report["passed"])
-        self.assertEqual(report["foreign_processes"], [])
+        self.assertFalse(report["passed"])
+        self.assertEqual([row["pid"] for row in report["foreign_processes"]], [400])
         self.assertEqual(
-            [row["pid"] for row in report["mcp_processes_at_or_above_threshold"]],
-            [200])
+            [row["pid"] for row in report["related_processes_at_or_above_threshold"]],
+            [101, 200])
         self.assertEqual(report["threshold_percent_cpu"], 50.0)
 
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "contention-samples.jsonl"
             path.write_text(json.dumps(sample) + "\n")
             report = REPRODUCE.runtime_contention_report(path, (300,), 90.0)
-        self.assertEqual(report["mcp_processes_at_or_above_threshold"], [])
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["foreign_processes"], [])
+        self.assertEqual(report["related_processes_at_or_above_threshold"], [])
         self.assertEqual(report["threshold_percent_cpu"], 90.0)
 
     def test_mcp_roots_include_owned_processes(self):
@@ -154,9 +158,10 @@ class ReproductionHarnessTests(unittest.TestCase):
         self.assertEqual(REPRODUCE.finalization_state(
             REPRODUCE.AdmissionRejected(), ["cleanup"], False, FatalMonitor),
             "admission_rejected")
-        with self.assertRaisesRegex(RuntimeError, "run ended with state: row_failure"):
+        with self.assertRaisesRegex(RuntimeError, "row_failure.*row-17.*model failed"):
             REPRODUCE.require_completed_run(
-                "row_failure", None, [], FatalMonitor)
+                "row_failure", None, [], FatalMonitor,
+                {"error": "model failed", "run": "row-17", "state": "controller_failure"})
         REPRODUCE.require_completed_run("completed", None, [], FatalMonitor)
 
     def test_setup_requires_an_external_ready_hash(self):
