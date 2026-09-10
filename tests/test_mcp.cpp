@@ -3794,11 +3794,11 @@ TEST(tool_trace_test_nodes_do_not_spend_result_budget) {
         snprintf(name, sizeof(name), "BudgetTest%d", i);
         edge(add(name, "Tests/callers.c"), target);
     }
-    int64_t near = add("BudgetNear", "src/chain.c");
+    int64_t near_node = add("BudgetNear", "src/chain.c");
     int64_t middle = add("BudgetMiddle", "src/chain.c");
     int64_t start = add("BudgetStart", "src/chain.c");
-    edge(near, target);
-    edge(middle, near);
+    edge(near_node, target);
+    edge(middle, near_node);
     edge(start, middle);
     for (bool include_tests : {false, true}) {
         char request[1024];
