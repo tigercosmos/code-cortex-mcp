@@ -4,19 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents</title>
-    <meta name="description" content="Local knowledge-graph MCP server for AI coding agents. In a controlled warm-index C++ benchmark, complete tasks were 57.9% faster than shell tools on 22 source-correct matched pairs.">
+    <meta name="description" content="Complete warm-index C++ tasks ran 57.7%-59.4% faster than shell tools at 10K-100M lines and 36.9%-37.8% faster than upstream at 10K-1M lines.">
     <meta name="keywords" content="MCP server, code analysis, knowledge graph, tree-sitter, Claude Code, Codex, Cursor, Gemini CLI, VS Code, Zed, OpenCode, developer tools, code exploration, code intelligence, C++23">
 
     <!-- Open Graph -->
     <meta property="og:title" content="code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents">
-    <meta property="og:description" content="155 languages and bounded graph queries. Complete tasks were 57.9% faster than shell tools on 22 source-correct matched pairs in a controlled warm-index C++ benchmark.">
+    <meta property="og:description" content="Complete warm-index C++ tasks ran 57.7%-59.4% faster than shell tools at 10K-100M lines and 36.9%-37.8% faster than upstream at 10K-1M lines.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://tigercosmos.github.io/code-cortex-mcp">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents">
-    <meta name="twitter:description" content="155 languages and bounded graph queries. Complete tasks were 57.9% faster than shell tools on 22 source-correct matched pairs in a controlled warm-index C++ benchmark.">
+    <meta name="twitter:description" content="Complete warm-index C++ tasks ran 57.7%-59.4% faster than shell tools at 10K-100M lines and 36.9%-37.8% faster than upstream at 10K-1M lines.">
 
     <link rel="canonical" href="https://tigercosmos.github.io/code-cortex-mcp">
 
@@ -56,6 +56,19 @@
             color: var(--text-secondary);
             margin: 0 auto 32px;
             max-width: 700px;
+        }
+        .hero .benchmark-lead {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin: 0 auto 16px;
+            max-width: 780px;
+        }
+        .hero .benchmark-table { max-width: 780px; margin: 0 auto 8px; }
+        .hero .benchmark-note {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin: 0 auto 32px;
+            max-width: 780px;
         }
         .hero .stat {
             display: inline-block;
@@ -159,6 +172,24 @@
 <div class="container">
     <section class="hero">
         <h1>code-cortex-mcp</h1>
+        <p class="benchmark-lead">
+            Complete AI coding tasks ran 57.7% to 59.4% faster than shell tools and
+            36.9% to 37.8% faster than upstream codebase-memory-mcp, depending on codebase size.
+        </p>
+        <div class="table-wrap benchmark-table">
+        <table class="num">
+            <thead><tr><th>Codebase size</th><th>Faster than shell</th><th>Faster than upstream</th></tr></thead>
+            <tbody>
+                <tr><td>10K lines</td><td class="win">57.7% (8/8)</td><td class="win">37.8% (8/8)</td></tr>
+                <tr><td>1M lines</td><td class="win">56.1% (6/8)</td><td class="win">36.9% (6/8)</td></tr>
+                <tr><td>100M lines</td><td class="win">59.4% (8/8)</td><td>Unavailable *</td></tr>
+            </tbody>
+        </table>
+        </div>
+        <p class="benchmark-note">
+            The table includes only source-correct, exact pairs. * Upstream exceeded the sealed 4 GiB and
+            32 GiB memory budgets before the 100M-line task run.
+        </p>
         <p class="tagline">
             A local MCP server that gives AI coding agents a knowledge graph of your codebase:
             functions, classes, call graphs, HTTP routes, and cross-service links.
@@ -176,10 +207,6 @@
             <div class="stat">
                 <div class="number">2.4×</div>
                 <div class="label">2026-08-25 cold-index median</div>
-            </div>
-            <div class="stat">
-                <div class="number">57.9%</div>
-                <div class="label">warm C++ task reduction vs shell</div>
             </div>
         </div>
         <div class="cta-buttons">

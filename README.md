@@ -7,6 +7,20 @@
 [![Languages](https://img.shields.io/badge/languages-155-orange)](#language-support)
 [![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](https://github.com/tigercosmos/code-cortex-mcp/releases/latest)
 
+**Complete AI coding tasks ran 57.7% to 59.4% faster than shell tools across
+measured codebases from 10K to 100M lines. They ran 36.9% to 37.8% faster than
+upstream codebase-memory-mcp at 10K and 1M lines.**
+
+| Codebase size | Faster than shell | Faster than upstream |
+|---:|---:|---:|
+| 10K lines | **57.7%** (8/8 pairs) | **37.8%** (8/8 pairs) |
+| 1M lines | **56.1%** (6/8 pairs) | **36.9%** (6/8 pairs) |
+| 100M lines | **59.4%** (8/8 pairs) | Unavailable: upstream exceeded the 4 GiB and 32 GiB memory budgets |
+
+The values include only terminal, source-correct, exact task pairs. Two Code Cortex answers
+were not exact, so the 1M results contain six of eight pairs. See
+[Complete-task performance](#complete-task-performance) for the method and limits.
+
 **code-cortex-mcp** is a local [MCP](https://modelcontextprotocol.io) server for AI coding
 agents. It builds a knowledge graph of your codebase: functions, classes, call graphs, HTTP
 routes, and cross-service links. Graph queries can replace repeated grep-and-read cycles when
