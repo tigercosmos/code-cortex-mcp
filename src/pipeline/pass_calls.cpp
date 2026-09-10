@@ -555,7 +555,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         }
     }
 
-    if (call->requires_typed_resolution) return 0;
+    if (call->requires_typed_resolution)
+        return 0;
 
     /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the service
      * signal lives in the callee_name. The registry can mis-resolve such a call

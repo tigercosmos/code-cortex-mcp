@@ -53,7 +53,7 @@
 #define HA_STDIN_CAP (256 * 1024) /* hook payloads are tiny; cap defensively */
 #define HA_MIN_TOKEN 4            /* skip short/noisy patterns before any work */
 #define HA_MAX_TOKEN 96
-#define HA_MAX_WALKUP 8    /* cwd may be a subdir of the indexed root  */
+#define HA_MAX_WALKUP 8 /* cwd may be a subdir of the indexed root  */
 /* Hard in-process budgets per hook event (see also: the settings.json
  * "timeout" backstop). A search augment must be invisible; a post-edit
  * note and the session brief may take a little longer. */
@@ -683,8 +683,8 @@ static char *ha_task_context(yyjson_doc *doc, size_t max_bytes) {
     yyjson_val *root = yyjson_doc_get_root(doc);
     yyjson_val *source = yyjson_obj_get(root, "source");
     yyjson_val *index = yyjson_obj_get(root, "index");
-    if (!yyjson_is_obj(yyjson_obj_get(root, "symbol")) ||
-        !yyjson_is_str(source) || yyjson_get_len(source) == 0 ||
+    if (!yyjson_is_obj(yyjson_obj_get(root, "symbol")) || !yyjson_is_str(source) ||
+        yyjson_get_len(source) == 0 ||
         yyjson_is_true(yyjson_obj_get(index, "file_modified_after_index")) ||
         yyjson_obj_get(root, "error")) {
         return nullptr;
@@ -692,8 +692,8 @@ static char *ha_task_context(yyjson_doc *doc, size_t max_bytes) {
     yyjson_mut_doc *out = yyjson_mut_doc_new(nullptr);
     yyjson_mut_val *obj = yyjson_mut_obj(out);
     yyjson_mut_doc_set_root(out, obj);
-    const char *keys[] = {"symbol", "source", "source_end_line", "source_clipped",
-                          "index", "coverage_note"};
+    const char *keys[] = {"symbol",         "source", "source_end_line",
+                          "source_clipped", "index",  "coverage_note"};
     for (const char *key : keys) {
         yyjson_val *value = yyjson_obj_get(root, key);
         if (value) {
@@ -732,8 +732,8 @@ static char *ha_source_context(const char *events, size_t max_bytes, bool comple
     yyjson_mut_val *truncated = yyjson_mut_bool(doc, !complete);
     yyjson_mut_obj_add_val(doc, root, "truncated", truncated);
     yyjson_mut_obj_add_str(doc, root, "coverage_note",
-                          "Text matches can include declarations and calls. Verify ownership "
-                          "and definitions in source. Ignored files are not searched.");
+                           "Text matches can include declarations and calls. Verify ownership "
+                           "and definitions in source. Ignored files are not searched.");
     yyjson_mut_val *matches = yyjson_mut_arr(doc);
     yyjson_mut_obj_add_val(doc, root, "source_matches", matches);
     std::vector<yyjson_mut_val *> rows;
@@ -782,14 +782,14 @@ static char *ha_source_context(const char *events, size_t max_bytes, bool comple
             }
             const char *source = yyjson_mut_get_str(yyjson_mut_obj_get(row, "source"));
             const char *match = qualified.find("::") == std::string::npos
-                                    ? nullptr : strstr(source, qualified.c_str());
+                                    ? nullptr
+                                    : strstr(source, qualified.c_str());
             bool boundary = match && (match == source ||
-                (!isalnum((unsigned char)match[-1]) && match[-1] != '_'));
+                                      (!isalnum((unsigned char)match[-1]) && match[-1] != '_'));
             return boundary ? 2 : 1;
         };
-        std::stable_sort(rows.begin(), rows.end(), [&](auto *a, auto *b) {
-            return rank(a) > rank(b);
-        });
+        std::stable_sort(rows.begin(), rows.end(),
+                         [&](auto *a, auto *b) { return rank(a) > rank(b); });
     }
     for (auto *row : rows) {
         yyjson_mut_arr_append(matches, row);
@@ -855,16 +855,31 @@ static char *ha_unindexed_context(const char *repo, const char *symbol, size_t m
         /* Candidate selection only: skip common call expressions before capture
          * and byte limits. Unusual or multiline signatures may be absent. */
         pattern = "^[ \t]*(?:[A-Za-z_][A-Za-z0-9_:<>,*& \t]*[ \t*&])?"
-                  "(?:[A-Za-z_][A-Za-z0-9_]*::)*" + std::string(last) +
+                  "(?:[A-Za-z_][A-Za-z0-9_]*::)*" +
+                  std::string(last) +
                   "[ \t]*\\([^;{}]*\\)[^;{}]*(?:\\{|$)|"
                   "^[ \t]*(?:class|struct|interface|enum)[ \t]+" +
                   std::string(last) + "\\b";
     }
-    const char *argv[] = {"/usr/bin/env", "rg", "--json", "--context", "2", "--glob",
-                         "*.{c,cc,cpp,cxx,h,hpp,hxx,py,rs,go,js,ts,tsx,java,kt,cs,swift}",
-                         "--glob", "!**/build/**", "--glob", "!**/3rdParty/**", "--glob",
-                         "!**/thirdparty/**", "--glob", "!**/third_party/**",
-                         "--", pattern.c_str(), resolved, nullptr};
+    const char *argv[] = {"/usr/bin/env",
+                          "rg",
+                          "--json",
+                          "--context",
+                          "2",
+                          "--glob",
+                          "*.{c,cc,cpp,cxx,h,hpp,hxx,py,rs,go,js,ts,tsx,java,kt,cs,swift}",
+                          "--glob",
+                          "!**/build/**",
+                          "--glob",
+                          "!**/3rdParty/**",
+                          "--glob",
+                          "!**/thirdparty/**",
+                          "--glob",
+                          "!**/third_party/**",
+                          "--",
+                          pattern.c_str(),
+                          resolved,
+                          nullptr};
     /* Stop the hook alarm before spawning: an abrupt parent exit would orphan
      * the search. The piped supervisor owns the deadline and always reaps. */
     ha_arm_deadline(0);
@@ -883,7 +898,8 @@ static char *ha_unindexed_context(const char *repo, const char *symbol, size_t m
     bool eof = false;
     while (output.size() < 65536) {
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - std::chrono::steady_clock::now()).count();
+                             deadline - std::chrono::steady_clock::now())
+                             .count();
         if (remaining <= 0 || cbm_subprocess_wait_readable(&child, (int)remaining) <= 0) {
             break;
         }
@@ -925,7 +941,8 @@ static bool ha_request_identifier(const std::string &name) {
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
             (!start && c >= '0' && c <= '9')) {
             start = false;
-        } else if (!start && (c == '.' || (c == ':' && i + 1 < name.size() && name[i + 1] == ':'))) {
+        } else if (!start &&
+                   (c == '.' || (c == ':' && i + 1 < name.size() && name[i + 1] == ':'))) {
             i += c == ':';
             start = true;
         } else {
@@ -1034,13 +1051,14 @@ static bool ha_request_is_lookup(const char *request) {
             lookup |= word == "find" || word == "locate" || word == "where" || word == "which";
             definition |= word == "definition" || word == "defined" || word == "implementation" ||
                           word == "declaration" || word == "signature";
-            const char *excluded[] = {"add", "fix", "edit", "modify", "change", "update", "rename",
-                                      "remove", "delete", "refactor", "implement", "repair", "callers",
-                                      "impact", "trace", "hierarchy", "subclasses", "overrides", "bug"};
-            for (const char *token : excluded) {
-                if (word == token && previous != "not" && previous != "never") {
-                    return false;
-                }
+            const char *excluded[] = {"add",       "fix",        "edit",      "modify", "change",
+                                      "update",    "rename",     "remove",    "delete", "refactor",
+                                      "implement", "repair",     "callers",   "impact", "trace",
+                                      "hierarchy", "subclasses", "overrides", "bug"};
+            if (previous != "not" && previous != "never" &&
+                std::ranges::any_of(excluded,
+                                    [&word](const char *token) { return word == token; })) {
+                return false;
             }
             previous = word;
         }
@@ -1071,19 +1089,18 @@ static bool ha_request_chain(const char *request, std::string &from, std::string
             while (isalpha((unsigned char)*p)) {
                 word += (char)tolower((unsigned char)*p++);
             }
-            const char *edits[] = {"add", "fix", "edit", "modify", "change", "update", "rename",
-                                  "remove", "delete", "refactor", "implement", "repair"};
-            for (const char *edit : edits) {
-                if (word == edit && previous != "not" && previous != "never") {
-                    return false;
-                }
+            const char *edits[] = {"add",    "fix",    "edit",   "modify",   "change",    "update",
+                                   "rename", "remove", "delete", "refactor", "implement", "repair"};
+            if (previous != "not" && previous != "never" &&
+                std::ranges::any_of(edits, [&word](const char *edit) { return word == edit; })) {
+                return false;
             }
             previous = word;
         }
     }
     bool found = false;
-    for (const char *phrase : {"show the call chain from", "trace the call chain from",
-                               "find the call chain from"}) {
+    for (const char *phrase :
+         {"show the call chain from", "trace the call chain from", "find the call chain from"}) {
         for (size_t pos = lower.find(phrase); pos != std::string::npos;
              pos = lower.find(phrase, pos + 1)) {
             if (pos && (isalnum((unsigned char)request[pos - 1]) || request[pos - 1] == '_')) {
@@ -1095,23 +1112,32 @@ static bool ha_request_chain(const char *request, std::string &from, std::string
                 return false;
             }
             const char *p = request + pos + strlen(phrase);
-            while (isspace((unsigned char)*p)) ++p;
-            if (*p++ != '`') return false;
+            while (isspace((unsigned char)*p))
+                ++p;
+            if (*p++ != '`')
+                return false;
             const char *end = strchr(p, '`');
-            if (!end) return false;
+            if (!end)
+                return false;
             std::string a(p, end);
             p = end + 1;
-            while (isspace((unsigned char)*p)) ++p;
+            while (isspace((unsigned char)*p))
+                ++p;
             if (tolower((unsigned char)p[0]) != 't' || !p[1] ||
-                tolower((unsigned char)p[1]) != 'o' || !isspace((unsigned char)p[2])) return false;
+                tolower((unsigned char)p[1]) != 'o' || !isspace((unsigned char)p[2]))
+                return false;
             p += 2;
-            while (isspace((unsigned char)*p)) ++p;
-            if (*p++ != '`') return false;
+            while (isspace((unsigned char)*p))
+                ++p;
+            if (*p++ != '`')
+                return false;
             end = strchr(p, '`');
-            if (!end) return false;
+            if (!end)
+                return false;
             std::string b(p, end);
             if (!ha_request_identifier(a) || !ha_request_identifier(b) ||
-                (found && (a != from || b != to))) return false;
+                (found && (a != from || b != to)))
+                return false;
             from = a;
             to = b;
             found = true;
@@ -1158,8 +1184,9 @@ int cbm_cmd_task_context(void) {
     yyjson_val *budget = yyjson_obj_get(root, "max_bytes");
     bool has_project = yyjson_obj_get(root, "project") != nullptr;
     bool has_repo = yyjson_obj_get(root, "repo_path") != nullptr;
-    if (has_symbol == has_request || has_project == has_repo || (has_project && (!project || !*project)) ||
-        (has_repo && (!repo || !*repo)) || !symbol || !*symbol ||
+    if (has_symbol == has_request || has_project == has_repo ||
+        (has_project && (!project || !*project)) || (has_repo && (!repo || !*repo)) || !symbol ||
+        !*symbol ||
         (budget && (!yyjson_is_uint(budget) || yyjson_get_uint(budget) == 0 ||
                     yyjson_get_uint(budget) > 24000))) {
         yyjson_doc_free(doc);
@@ -1233,12 +1260,12 @@ static size_t ha_arr_size(yyjson_val *obj, const char *key) {
 
 /* Append with bounds; keeps `off` valid. `cap` is the buffer capacity (the
  * buffers here are heap blocks, so sizeof would be the pointer size). */
-#define HA_APPEND(buf, cap, off, ...)                                                    \
-    do {                                                                                 \
-        if ((off) >= 0 && (size_t)(off) < (size_t)(cap)) {                               \
+#define HA_APPEND(buf, cap, off, ...)                                                     \
+    do {                                                                                  \
+        if ((off) >= 0 && (size_t)(off) < (size_t)(cap)) {                                \
             int _n = snprintf((buf) + (off), (size_t)(cap) - (size_t)(off), __VA_ARGS__); \
-            (off) = _n < 0 ? (int)(cap) : (off) + _n;                                    \
-        }                                                                                \
+            (off) = _n < 0 ? (int)(cap) : (off) + _n;                                     \
+        }                                                                                 \
     } while (0)
 
 /* ── PreToolUse search augment: what grep does not know ───────────────
@@ -1261,7 +1288,8 @@ static char *ha_format_symbol_brief(yyjson_doc *d, const char *token) {
     if (status && strcmp(status, "ambiguous") == 0) {
         yyjson_val *sugg = yyjson_obj_get(r, "suggestions");
         size_t n = (sugg && yyjson_is_arr(sugg)) ? yyjson_arr_size(sugg) : 0;
-        HA_APPEND(text, HA_TEXT_SZ, off, "[code-cortex] `%s` has %zu definitions in the graph:", token, n);
+        HA_APPEND(text, HA_TEXT_SZ, off,
+                  "[code-cortex] `%s` has %zu definitions in the graph:", token, n);
         size_t idx;
         size_t maxn;
         yyjson_val *s;
@@ -1302,8 +1330,8 @@ static char *ha_format_symbol_brief(yyjson_doc *d, const char *token) {
         yyjson_val *a0 = yyjson_arr_get(also, 0);
         HA_APPEND(text, HA_TEXT_SZ, off, " (also %s at %s:%d%s)",
                   ha_obj_str(a0, "label") ? ha_obj_str(a0, "label") : "declared",
-                  ha_obj_str(a0, "file") ? ha_obj_str(a0, "file") : "?", ha_obj_int(a0, "start_line"),
-                  yyjson_arr_size(also) > 1 ? ", +more" : "");
+                  ha_obj_str(a0, "file") ? ha_obj_str(a0, "file") : "?",
+                  ha_obj_int(a0, "start_line"), yyjson_arr_size(also) > 1 ? ", +more" : "");
     }
     yyjson_val *decl = yyjson_obj_get(r, "declared_in");
     if (decl && yyjson_is_arr(decl) && yyjson_arr_size(decl) > 0) {
@@ -1363,8 +1391,9 @@ static char *ha_format_symbol_brief(yyjson_doc *d, const char *token) {
         HA_APPEND(text, HA_TEXT_SZ, off, ". NOTE: the defining file changed after indexing");
     }
     if (ha_obj_str(r, "coverage_note")) {
-        HA_APPEND(text, HA_TEXT_SZ, off, ". NOTE: the defining file was only partially parsed; treat graph "
-                             "counts as lower bounds");
+        HA_APPEND(text, HA_TEXT_SZ, off,
+                  ". NOTE: the defining file was only partially parsed; treat graph "
+                  "counts as lower bounds");
     }
     HA_APPEND(text, HA_TEXT_SZ, off, ". Call-site lines and further pages: inspect_symbol(\"%s\").",
               token);
@@ -1441,8 +1470,9 @@ static char *ha_session_brief(cbm_mcp_server_t *srv, const char *project, bool *
         return NULL;
     }
     int off = 0;
-    HA_APPEND(text, HA_TEXT_SZ, off, "code-cortex: this repository is indexed as \"%s\" (%d symbols, %d edges",
-              project, ha_obj_int(ar, "total_nodes"), ha_obj_int(ar, "total_edges"));
+    HA_APPEND(text, HA_TEXT_SZ, off,
+              "code-cortex: this repository is indexed as \"%s\" (%d symbols, %d edges", project,
+              ha_obj_int(ar, "total_nodes"), ha_obj_int(ar, "total_edges"));
     yyjson_val *langs = yyjson_obj_get(ar, "languages");
     if (langs && yyjson_is_arr(langs) && yyjson_arr_size(langs) > 0) {
         HA_APPEND(text, HA_TEXT_SZ, off, "; ");
@@ -1473,7 +1503,8 @@ static char *ha_session_brief(cbm_mcp_server_t *srv, const char *project, bool *
                 break;
             }
             HA_APPEND(text, HA_TEXT_SZ, off, "%s%s (%d)", shown ? ", " : "",
-                      ha_obj_str(p, "name") ? ha_obj_str(p, "name") : "?", ha_obj_int(p, "node_count"));
+                      ha_obj_str(p, "name") ? ha_obj_str(p, "name") : "?",
+                      ha_obj_int(p, "node_count"));
             shown++;
         }
         HA_APPEND(text, HA_TEXT_SZ, off, ".");
@@ -1578,13 +1609,14 @@ static char *ha_walk_session(cbm_mcp_server_t *srv, const char *start) {
     return NULL;
 }
 
-static char *ha_walk_chain(cbm_mcp_server_t *srv, const char *start,
-                           const char *from, const char *to) {
+static char *ha_walk_chain(cbm_mcp_server_t *srv, const char *start, const char *from,
+                           const char *to) {
     char dir[4096];
     snprintf(dir, sizeof(dir), "%s", start);
     for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); ++level) {
         char *project = cbm_project_name_from_path(dir);
-        if (!project) return nullptr;
+        if (!project)
+            return nullptr;
         yyjson_mut_doc *args_doc = yyjson_mut_doc_new(nullptr);
         yyjson_mut_val *args = yyjson_mut_obj(args_doc);
         yyjson_mut_doc_set_root(args_doc, args);
@@ -1602,14 +1634,17 @@ static char *ha_walk_chain(cbm_mcp_server_t *srv, const char *start,
         yyjson_val *body = yyjson_doc_get_root(result);
         size_t bytes = 0;
         char *text = !error && yyjson_is_true(yyjson_obj_get(body, "path_found"))
-                         ? yyjson_write(result, 0, &bytes) : nullptr;
+                         ? yyjson_write(result, 0, &bytes)
+                         : nullptr;
         yyjson_doc_free(result);
         free(encoded);
         yyjson_mut_doc_free(args_doc);
         free(project);
-        if (text && bytes <= 5000) return text;
+        if (text && bytes <= 5000)
+            return text;
         free(text);
-        if (!project_missing || !ha_strip_last_component(dir)) break;
+        if (!project_missing || !ha_strip_last_component(dir))
+            break;
     }
     return nullptr;
 }
@@ -1692,8 +1727,8 @@ int cbm_cmd_hook_augment(void) {
     if (strcmp(event, "UserPromptSubmit") == 0) {
         const char *request = ha_obj_str(root, "prompt");
         const char *supplied_cwd = ha_obj_str(root, "cwd");
-        bool cwd_ok = !yyjson_obj_get(root, "cwd") ||
-                      (supplied_cwd && cbm_hook_path_is_abs(supplied_cwd));
+        bool cwd_ok =
+            !yyjson_obj_get(root, "cwd") || (supplied_cwd && cbm_hook_path_is_abs(supplied_cwd));
         std::string from, to;
         bool valid = cwd_ok && cwd && request &&
                      strlen(request) == yyjson_get_len(yyjson_obj_get(root, "prompt"));

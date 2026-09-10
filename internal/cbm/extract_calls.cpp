@@ -1236,19 +1236,24 @@ static char *extract_callee_name(CBMArena *a, TSNode node, const char *source, C
             for (uint32_t i = 0; i < ts_node_named_child_count(node); ++i) {
                 TSNode error = ts_node_named_child(node, i);
                 if (strcmp(ts_node_type(error), "ERROR") != 0 ||
-                    ts_node_named_child_count(error) != 1) continue;
+                    ts_node_named_child_count(error) != 1)
+                    continue;
                 TSNode op = ts_node_named_child(error, 0);
                 if (strcmp(ts_node_type(op), "operator_name") != 0 ||
-                    ts_node_start_byte(op) < ts_node_end_byte(function)) continue;
+                    ts_node_start_byte(op) < ts_node_end_byte(function))
+                    continue;
                 std::string separator(source + ts_node_end_byte(function),
                                       ts_node_start_byte(op) - ts_node_end_byte(function));
                 separator.erase(std::remove_if(separator.begin(), separator.end(),
-                    [](unsigned char c) { return isspace(c); }), separator.end());
-                if (separator != "." && separator != "->") continue;
+                                               [](unsigned char c) { return isspace(c); }),
+                                separator.end());
+                if (separator != "." && separator != "->")
+                    continue;
                 if (ts_node_end_byte(op) != ts_node_end_byte(error) ||
-                    ts_node_end_byte(error) > ts_node_start_byte(arguments)) continue;
+                    ts_node_end_byte(error) > ts_node_start_byte(arguments))
+                    continue;
                 return cbm_arena_sprintf(a, "%s%s%s", cbm_node_text(a, function, source),
-                                        separator.c_str(), cbm_node_text(a, op, source));
+                                         separator.c_str(), cbm_node_text(a, op, source));
             }
         }
     }
@@ -1842,7 +1847,8 @@ static void extract_cpp_operator_call(CBMExtractCtx *ctx, TSNode node, const cha
     }
     if (ctx->defer_cpp_operators) {
         ++ctx->result->deferred_cpp_operator_count;
-        cbm_track_deferred_cpp_operator(ctx->result, ts_node_start_byte(node), ts_node_end_byte(node));
+        cbm_track_deferred_cpp_operator(ctx->result, ts_node_start_byte(node),
+                                        ts_node_end_byte(node));
         return;
     }
     for (uint32_t i = 0; i < ts_node_child_count(node); i++) {

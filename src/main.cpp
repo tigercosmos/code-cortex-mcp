@@ -527,7 +527,8 @@ static void print_help(void) {
     printf("  code-cortex-mcp update [-y|-n]\n");
     printf("  code-cortex-mcp config <list|get|set|reset>\n");
     printf("  code-cortex-mcp doctor       Check install, hooks, and whether cwd is indexed\n");
-    printf("  code-cortex-mcp task-context Read {project|repo_path,symbol|request,max_bytes?} JSON from stdin; "
+    printf("  code-cortex-mcp task-context Read {project|repo_path,symbol|request,max_bytes?} JSON "
+           "from stdin; "
            "emit optional source context\n");
     printf("  code-cortex-mcp --version    Print version\n");
     printf("  code-cortex-mcp --help       Print this help\n");

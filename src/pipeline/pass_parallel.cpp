@@ -897,10 +897,10 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
 
         const CBMExtractOptions extract_options = {.defer_cpp_operators = true,
                                                    .deduplicate_usages = true};
-        CBMFileResult *result =
-            cbm_extract_file_with_options(source, source_len, fi->language, ec->project_name, fi->rel_path,
-                             CBM_EXTRACT_BUDGET, cbm_cc_index_defines(ec->cc_index, fi->rel_path),
-                             cbm_cc_index_includes(ec->cc_index, fi->rel_path), &extract_options);
+        CBMFileResult *result = cbm_extract_file_with_options(
+            source, source_len, fi->language, ec->project_name, fi->rel_path, CBM_EXTRACT_BUDGET,
+            cbm_cc_index_defines(ec->cc_index, fi->rel_path),
+            cbm_cc_index_includes(ec->cc_index, fi->rel_path), &extract_options);
 
         uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
 
@@ -1002,8 +1002,8 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
             if (!summary || !ec->result_store->put(file_idx, *result, error)) {
                 cbm_free_result(summary);
                 cbm_free_result(result);
-                cbm_log_error("result_store.publish_failed", "path", fi->rel_path,
-                              "reason", error.c_str());
+                cbm_log_error("result_store.publish_failed", "path", fi->rel_path, "reason",
+                              error.c_str());
                 atomic_store(ec->cancelled, 1);
                 cbm_destroy_thread_parser();
                 cbm_slab_reclaim();
@@ -2383,9 +2383,9 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         if (lsp_idx && call->enclosing_func_qn) {
             const char *call_leaf = cbm_pipeline_call_callee_leaf(call->callee_name);
             char key[1024];
-            int kn = call_leaf
-                         ? cbm_pipeline_lsp_key(key, sizeof(key), call->enclosing_func_qn, call_leaf, call->source_byte)
-                         : -1;
+            int kn = call_leaf ? cbm_pipeline_lsp_key(key, sizeof(key), call->enclosing_func_qn,
+                                                      call_leaf, call->source_byte)
+                               : -1;
             if (kn > 0 && kn < (int)sizeof(key)) {
                 lsp = (const CBMResolvedCall *)cbm_ht_get(lsp_idx, key);
                 if (!lsp && call->source_byte) {
@@ -2858,27 +2858,34 @@ static CBMTypeRegistry *pp_rust_shared_registry_get(void *ctx) {
 // checked by the caller before this bounded proof is attempted.
 static bool pp_cpp_sites_need_cross(const CBMFileResult *result) {
     if (result->pending_cpp_operator_count > 0 || result->calls.count > 4096 ||
-        result->resolved_calls.count > 8192) return true;
+        result->resolved_calls.count > 8192)
+        return true;
     std::unordered_set<std::string> covered;
     char key[1024];
     for (int i = 0; i < result->resolved_calls.count; ++i) {
-        const auto& resolved = result->resolved_calls.items[i];
-        if (resolved.strategy && strcmp(resolved.strategy, "lsp_unresolved") == 0) return true;
+        const auto &resolved = result->resolved_calls.items[i];
+        if (resolved.strategy && strcmp(resolved.strategy, "lsp_unresolved") == 0)
+            return true;
         if (!resolved.source_byte || !resolved.caller_qn || !resolved.callee_qn ||
-            resolved.confidence < CBM_LSP_CONFIDENCE_FLOOR) continue;
+            resolved.confidence < CBM_LSP_CONFIDENCE_FLOOR)
+            continue;
         const char *name = cbm_lsp_strategy_matches_on_reason(resolved.strategy) && resolved.reason
-                              ? resolved.reason : resolved.callee_qn;
+                               ? resolved.reason
+                               : resolved.callee_qn;
         int size = cbm_pipeline_lsp_key(key, sizeof(key), resolved.caller_qn,
                                         cbm_lsp_bare_segment(name), resolved.source_byte);
-        if (size < 0 || (size_t)size >= sizeof(key)) return true;
+        if (size < 0 || (size_t)size >= sizeof(key))
+            return true;
         covered.emplace(key);
     }
     for (int i = 0; i < result->calls.count; ++i) {
-        const auto& call = result->calls.items[i];
-        if (!call.source_byte || !call.enclosing_func_qn || !call.callee_name) return true;
+        const auto &call = result->calls.items[i];
+        if (!call.source_byte || !call.enclosing_func_qn || !call.callee_name)
+            return true;
         int size = cbm_pipeline_lsp_key(key, sizeof(key), call.enclosing_func_qn,
                                         cbm_lsp_bare_segment(call.callee_name), call.source_byte);
-        if (size < 0 || (size_t)size >= sizeof(key) || !covered.count(key)) return true;
+        if (size < 0 || (size_t)size >= sizeof(key) || !covered.count(key))
+            return true;
     }
     return false;
 }
@@ -2979,13 +2986,13 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         int64_t pending_calls = (int64_t)result->calls.count + result->deferred_cpp_operator_count;
         bool cpp_cross_lsp = (lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA);
         bool primitive_complete = cpp_cross_lsp && cbm_pipeline_cpp_primitives_complete(result);
-        bool cpp_sites_pending = cpp_cross_lsp && !primitive_complete &&
-                                 pp_cpp_sites_need_cross(result);
+        bool cpp_sites_pending =
+            cpp_cross_lsp && !primitive_complete && pp_cpp_sites_need_cross(result);
         bool cross_lsp_eligible =
             (rc->all_defs && rc->def_count > 0 && cbm_pxc_has_cross_lsp(lang) &&
              pending_calls > 0 &&
-             (jvm_cross_lsp || (cpp_cross_lsp ? cpp_sites_pending :
-                               result->resolved_calls.count < pending_calls)) &&
+             (jvm_cross_lsp ||
+              (cpp_cross_lsp ? cpp_sites_pending : result->resolved_calls.count < pending_calls)) &&
              !is_generated && !primitive_complete);
 
         /* Skip files with nothing else to resolve and no cross-LSP work. */

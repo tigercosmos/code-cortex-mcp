@@ -2934,14 +2934,17 @@ static const char **extract_param_types(CBMArena *a, TSNode params, const char *
         if (lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) {
             const char *kind = ts_node_type(param);
             if (strcmp(kind, "parameter_declaration") != 0 &&
-                strcmp(kind, "optional_parameter_declaration") != 0) continue;
+                strcmp(kind, "optional_parameter_declaration") != 0)
+                continue;
             // C-family overload selection needs ordered parameters, including
             // repeated builtins. A set of referenced user types loses arity.
             if (!type) {
                 TSNode tn = ts_node_child_by_field_name(param, TS_FIELD("type"));
-                if (!ts_node_is_null(tn)) type = cbm_node_text(a, tn, source);
+                if (!ts_node_is_null(tn))
+                    type = cbm_node_text(a, tn, source);
             }
-            if (type && strcmp(type, "void") == 0 && ts_node_named_child_count(params) == 1) continue;
+            if (type && strcmp(type, "void") == 0 && ts_node_named_child_count(params) == 1)
+                continue;
             types[count++] = type ? type : "?";
         } else {
             add_dedup_type(a, types, &count, type);
@@ -3120,9 +3123,8 @@ static bool c_declaration_language(CBMLanguage language) {
 
 static TSNode c_next_declarator(TSNode node) {
     TSNode next = ts_node_child_by_field_name(node, TS_FIELD("declarator"));
-    if (ts_node_is_null(next) &&
-        (strcmp(ts_node_type(node), "parenthesized_declarator") == 0 ||
-         strcmp(ts_node_type(node), "reference_declarator") == 0)) {
+    if (ts_node_is_null(next) && (strcmp(ts_node_type(node), "parenthesized_declarator") == 0 ||
+                                  strcmp(ts_node_type(node), "reference_declarator") == 0)) {
         // The C++ grammar leaves these inner declarators unnamed.
         for (uint32_t i = 0; i < ts_node_named_child_count(node); i++) {
             TSNode child = ts_node_named_child(node, i);
@@ -3251,8 +3253,8 @@ static std::string c_template_owner(const std::string &name,
             i++;
         }
         std::string token = name.substr(start, i - start);
-        std::string normalized = c_template_token(token, previous,
-                                                  angle_depth > 0 ? &parameters : nullptr);
+        std::string normalized =
+            c_template_token(token, previous, angle_depth > 0 ? &parameters : nullptr);
         out += std::to_string(normalized.size()) + ":" + normalized;
         if (token == "<") {
             angle_depth++;
@@ -3292,10 +3294,10 @@ static void c_signature_tokens(CBMExtractCtx *ctx, TSNode node, std::string &out
         uint32_t count = ts_node_child_count(node);
         if (count == 0) {
             std::string spelling = c_node_string(ctx, node);
-            bool identifier = strcmp(kind, "identifier") == 0 ||
-                              strcmp(kind, "type_identifier") == 0;
-            std::string token = c_template_token(spelling, previous,
-                                                 identifier ? parameters : nullptr);
+            bool identifier =
+                strcmp(kind, "identifier") == 0 || strcmp(kind, "type_identifier") == 0;
+            std::string token =
+                c_template_token(spelling, previous, identifier ? parameters : nullptr);
             previous = spelling;
             out += std::to_string(token.size()) + ":" + token;
             continue;
@@ -3393,8 +3395,10 @@ static const char *c_declaration_key(CBMExtractCtx *ctx, TSNode node, TSNode dec
             local = true;
         }
     }
-    std::string key = (template_parameters.empty() ? qualified :
-                       c_template_owner(qualified, template_parameters)) + "|";
+    std::string key =
+        (template_parameters.empty() ? qualified
+                                     : c_template_owner(qualified, template_parameters)) +
+        "|";
     if (local) {
         key += std::string(ctx->rel_path) + "|";
     }
@@ -6558,7 +6562,8 @@ void cbm_extract_definitions_without_module(CBMExtractCtx *ctx) {
 }
 
 static void preserve_cpp_overloads(CBMExtractCtx *ctx) {
-    if (ctx->language != CBM_LANG_CPP && ctx->language != CBM_LANG_CUDA) return;
+    if (ctx->language != CBM_LANG_CPP && ctx->language != CBM_LANG_CUDA)
+        return;
     std::vector<CBMDefinition *> callables;
     for (int i = 0; i < ctx->result->defs.count; i++) {
         auto *d = &ctx->result->defs.items[i];
@@ -6566,9 +6571,8 @@ static void preserve_cpp_overloads(CBMExtractCtx *ctx) {
             (strcmp(d->label, "Function") == 0 || strcmp(d->label, "Method") == 0))
             callables.push_back(d);
     }
-    std::sort(callables.begin(), callables.end(), [](auto *a, auto *b) {
-        return strcmp(a->qualified_name, b->qualified_name) < 0;
-    });
+    std::sort(callables.begin(), callables.end(),
+              [](auto *a, auto *b) { return strcmp(a->qualified_name, b->qualified_name) < 0; });
     std::vector<CBMOverload> overloads;
     std::vector<CBMDefinition> families;
     for (size_t begin = 0; begin < callables.size();) {
@@ -6595,13 +6599,15 @@ static void preserve_cpp_overloads(CBMExtractCtx *ctx) {
         }
         begin = end;
     }
-    if (overloads.empty()) return;
-    for (auto family : families) cbm_defs_push(&ctx->result->defs, ctx->arena, family);
-    std::sort(overloads.begin(), overloads.end(), [](auto a, auto b) {
-        return a.byte_offset < b.byte_offset;
-    });
+    if (overloads.empty())
+        return;
+    for (const auto &family : families)
+        cbm_defs_push(&ctx->result->defs, ctx->arena, family);
+    std::sort(overloads.begin(), overloads.end(),
+              [](auto a, auto b) { return a.byte_offset < b.byte_offset; });
     auto *result = ctx->result;
-    result->overloads = (CBMOverload *)cbm_arena_alloc(ctx->arena, overloads.size() * sizeof(CBMOverload));
+    result->overloads =
+        (CBMOverload *)cbm_arena_alloc(ctx->arena, overloads.size() * sizeof(CBMOverload));
     memcpy(result->overloads, overloads.data(), overloads.size() * sizeof(CBMOverload));
     result->overload_count = (int)overloads.size();
 }

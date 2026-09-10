@@ -28,28 +28,31 @@ struct UsageKeyHash {
 using UsageSet = std::unordered_set<UsageKey, UsageKeyHash>;
 
 bool cbm_usage_dedup_begin(CBMExtractCtx *ctx) {
-    if (!ctx->deduplicate_usages || ctx->usage_dedup) return false;
+    if (!ctx->deduplicate_usages || ctx->usage_dedup)
+        return false;
     auto *seen = new UsageSet;
     // Seed the expanded-source walk from the raw-source inventory. Result
     // strings outlive the walk; new keys borrow the current source buffer.
     for (int i = 0; i < ctx->result->usages.count; ++i) {
         const auto &usage = ctx->result->usages.items[i];
         if (usage.ref_name)
-            seen->insert({usage.enclosing_func_qn ? usage.enclosing_func_qn : "",
-                          usage.ref_name, usage.enclosing_func_qn == nullptr});
+            seen->insert({usage.enclosing_func_qn ? usage.enclosing_func_qn : "", usage.ref_name,
+                          usage.enclosing_func_qn == nullptr});
     }
     ctx->usage_dedup = seen;
     return true;
 }
 
 void cbm_usage_dedup_end(CBMExtractCtx *ctx, bool owned) {
-    if (!owned) return;
+    if (!owned)
+        return;
     delete static_cast<UsageSet *>(ctx->usage_dedup);
     ctx->usage_dedup = nullptr;
 }
 
 static bool duplicate_usage(CBMExtractCtx *ctx, TSNode node, const char *scope) {
-    if (!ctx->usage_dedup) return false;
+    if (!ctx->usage_dedup)
+        return false;
     uint32_t start = ts_node_start_byte(node), end = ts_node_end_byte(node);
     UsageKey key{scope ? scope : "", std::string_view(ctx->source + start, end - start),
                  scope == nullptr};
@@ -113,7 +116,8 @@ static void try_emit_usage(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
         return;
     }
     const char *scope = cbm_enclosing_func_qn_cached(ctx, node);
-    if (duplicate_usage(ctx, node, scope)) return;
+    if (duplicate_usage(ctx, node, scope))
+        return;
     char *name = cbm_node_text(ctx->arena, node, ctx->source);
     if (name && name[0] && !cbm_is_keyword(name, ctx->language)) {
         CBMUsage usage;
@@ -261,7 +265,8 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
         }
     }
 
-    if (duplicate_usage(ctx, node, state->enclosing_func_qn)) return;
+    if (duplicate_usage(ctx, node, state->enclosing_func_qn))
+        return;
     char *name = cbm_node_text(ctx->arena, node, ctx->source);
     if (name && name[0] && !cbm_is_keyword(name, ctx->language)) {
         CBMUsage usage;

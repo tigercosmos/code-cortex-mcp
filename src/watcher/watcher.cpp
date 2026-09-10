@@ -698,7 +698,8 @@ static void poll_project(const char *key, void *val, void *ud) {
             s->file_count = git_file_count(s->root_path);
             s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
         } else if (rc == CBM_INDEX_BUSY) {
-            cbm_log_info("watcher.index.deferred", "project", s->project_name, "reason", "index_busy");
+            cbm_log_info("watcher.index.deferred", "project", s->project_name, "reason",
+                         "index_busy");
             // Preserve pending dirty/HEAD state and the failure counter. This
             // is mutual exclusion, not proof that this snapshot was indexed.
             s->next_poll_ns = now_ns() + ((int64_t)s->interval_ms * US_PER_MS);

@@ -588,6 +588,9 @@ int cbm_pipeline_claim_index(cbm_pipeline_t *p) {
 
 struct pipeline_lease_scope {
     cbm_pipeline_t *p;
+    explicit pipeline_lease_scope(cbm_pipeline_t *pipeline) : p(pipeline) {}
+    pipeline_lease_scope(const pipeline_lease_scope &) = delete;
+    pipeline_lease_scope &operator=(const pipeline_lease_scope &) = delete;
     ~pipeline_lease_scope() {
         cbm_db_lease_release(p->index_lease);
         p->index_lease = NULL;
@@ -1120,11 +1123,13 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     }
     std::unique_ptr<cbm::ResultStore> result_store;
     char store_env[16];
-    const char *store_setting = cbm_safe_getenv("CBM_RESULT_STORE", store_env, sizeof(store_env), nullptr);
+    const char *store_setting =
+        cbm_safe_getenv("CBM_RESULT_STORE", store_env, sizeof(store_env), nullptr);
     if (store_setting && strcmp(store_setting, "1") == 0) {
         std::string error;
         result_store = cbm::ResultStore::create({256ULL * 1024 * 1024, 512ULL * 1024 * 1024,
-                                                (size_t)worker_count, 64ULL * 1024 * 1024 * 1024}, error);
+                                                 (size_t)worker_count, 64ULL * 1024 * 1024 * 1024},
+                                                error);
         if (!result_store) {
             cbm_log_error("result_store.create_failed", "reason", error.c_str());
             free(cache);
@@ -1135,14 +1140,17 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     ctx->result_store = result_store.get();
     struct StoreContextReset {
         cbm_pipeline_ctx_t *ctx;
-        ~StoreContextReset() { ctx->result_store = nullptr; }
+        ~StoreContextReset() {
+            ctx->result_store = nullptr;
+        }
     } reset_store_context{ctx};
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
     int rc = cbm_parallel_extract(ctx, files, file_count, cache, &shared_ids, worker_count);
     cbm_log_info("pass.timing", "pass", "parallel_extract", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(*t)));
     if (rc != 0 || check_cancel(p)) {
-        for (int i = 0; i < file_count; ++i) cbm_free_result(cache[i]);
+        for (int i = 0; i < file_count; ++i)
+            cbm_free_result(cache[i]);
         free(cache);
         return rc != 0 ? rc : CBM_NOT_FOUND;
     }
@@ -1271,9 +1279,8 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     free(cache);
     if (result_store) {
         auto stats = result_store->stats();
-        cbm_log_info("result_store.released", "records", n_buf(stats.records),
-                     "published_bytes", n_buf(stats.published_bytes),
-                     "live_leases", n_buf(stats.live_leases));
+        cbm_log_info("result_store.released", "records", n_buf(stats.records), "published_bytes",
+                     n_buf(stats.published_bytes), "live_leases", n_buf(stats.live_leases));
     }
     /* The extraction results are the bulk of the process (rocksdb: 2.5 GB of a
      * 3.0 GB peak). Freeing them only returns the pages to the allocator, so
@@ -1766,7 +1773,6 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
             version.size = st.st_size;
         }
     }
-
 
     /* Phase 2: Create graph buffer and registry */
     p->gbuf = cbm_gbuf_new(p->project_name, p->repo_path);

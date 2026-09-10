@@ -155,19 +155,25 @@ void *cbm_arena_alloc(CBMArena *a, size_t n) {
 }
 
 void *cbm_arena_alloc_bounded(CBMArena *a, size_t n, size_t max_capacity) {
-    if (!a || n == 0 || n > SIZE_MAX - ARENA_ALIGN || a->nblocks == 0) return NULL;
+    if (!a || n == 0 || n > SIZE_MAX - ARENA_ALIGN || a->nblocks == 0)
+        return NULL;
     size_t aligned = (n + ARENA_ALIGN) & ~(size_t)ARENA_ALIGN;
     size_t capacity = a->resizable_bytes;
     for (int i = 0; i < a->nblocks; ++i) {
-        if (a->block_sizes[i] > SIZE_MAX - capacity) return NULL;
+        if (a->block_sizes[i] > SIZE_MAX - capacity)
+            return NULL;
         capacity += a->block_sizes[i];
     }
-    if (capacity > max_capacity || a->used > a->block_size) return NULL;
+    if (capacity > max_capacity || a->used > a->block_size)
+        return NULL;
     if (aligned > a->block_size - a->used) {
-        if (a->block_size > SIZE_MAX / PAIR_LEN) return NULL;
+        if (a->block_size > SIZE_MAX / PAIR_LEN)
+            return NULL;
         size_t growth = a->block_size * PAIR_LEN;
-        if (growth < aligned) growth = aligned;
-        if (growth > max_capacity - capacity) return NULL;
+        if (growth < aligned)
+            growth = aligned;
+        if (growth > max_capacity - capacity)
+            return NULL;
     }
     return cbm_arena_alloc(a, n);
 }

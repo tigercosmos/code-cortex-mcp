@@ -22,8 +22,8 @@ typedef struct {
     size_t block_sizes[CBM_ARENA_MAX_BLOCKS]; // per-block sizes (for stats)
     int nblocks;
     size_t block_size;
-    size_t used;        // bytes used in current block
-    size_t total_alloc; // cumulative bytes allocated (for stats)
+    size_t used;                         // bytes used in current block
+    size_t total_alloc;                  // cumulative bytes allocated (for stats)
     struct CBMArenaResizable *resizable; // separately owned growable buffers
     size_t resizable_bytes;
 } CBMArena;

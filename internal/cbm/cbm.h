@@ -216,9 +216,9 @@ typedef struct {
     bool is_test;
     bool is_entry_point;
     const char *structural_profile; // AST structural profile (arena-allocated) or NULL
-    const char *body_tokens; // space-separated raw identifier tokens from body (arena) or NULL
+    const char *body_tokens;     // space-separated raw identifier tokens from body (arena) or NULL
     const char *declaration_key; // C/C++ scope and parameter-token identity, or NULL
-    uint32_t definition_offset; // Original source byte offset for C-family callable identity.
+    uint32_t definition_offset;  // Original source byte offset for C-family callable identity.
 } CBMDefinition;
 
 typedef struct {
@@ -237,20 +237,20 @@ typedef struct {
 #define CBM_MAX_CALL_ARGS 8
 
 typedef struct {
-    const char *callee_name;            // raw callee text ("pkg.Func", "foo")
-    const char *enclosing_func_qn;      // QN of enclosing function (or module QN)
-    const char *first_string_arg;       // first string literal argument (URL, topic, key) or NULL
-    const char *second_arg_name;        // second argument identifier (handler ref) or NULL
-    CBMCallArg *args;                  // arena-owned captured arguments; NULL when arg_count is zero
-    int arg_count;                      // number of captured arguments
-    int loop_depth;                     // enclosing loop nesting at the call site
-    int branch_depth;                   // enclosing branch nesting at the call site
-    int start_line;                     // 1-based source line of the call (for def range-match)
-    uint32_t source_byte; // Source byte offset plus one, or zero when unavailable.
-    bool requires_typed_resolution;     // Implicit operator candidates must not use name-only fallback.
-    bool is_method;                     // method/member call with a non-self receiver. Perl:
-                                        // arrow/method call ($obj->m). TS/JS/TSX: member call
-                                        // x.foo() whose receiver is not this/super. Default false.
+    const char *callee_name;        // raw callee text ("pkg.Func", "foo")
+    const char *enclosing_func_qn;  // QN of enclosing function (or module QN)
+    const char *first_string_arg;   // first string literal argument (URL, topic, key) or NULL
+    const char *second_arg_name;    // second argument identifier (handler ref) or NULL
+    CBMCallArg *args;               // arena-owned captured arguments; NULL when arg_count is zero
+    int arg_count;                  // number of captured arguments
+    int loop_depth;                 // enclosing loop nesting at the call site
+    int branch_depth;               // enclosing branch nesting at the call site
+    int start_line;                 // 1-based source line of the call (for def range-match)
+    uint32_t source_byte;           // Source byte offset plus one, or zero when unavailable.
+    bool requires_typed_resolution; // Implicit operator candidates must not use name-only fallback.
+    bool is_method;                 // method/member call with a non-self receiver. Perl:
+                                    // arrow/method call ($obj->m). TS/JS/TSX: member call
+                                    // x.foo() whose receiver is not this/super. Default false.
 } CBMCall;
 
 typedef struct {
@@ -448,8 +448,8 @@ typedef struct {
     int overload_count;
     CBMCallArray calls;
     int deferred_cpp_operator_count; // Binary expressions awaiting typed resolution.
-    int pending_cpp_operator_count; // Deferred expressions not proven to have builtin operands.
-    void *cpp_operator_tracker; // Temporary source-range tracker during local extraction.
+    int pending_cpp_operator_count;  // Deferred expressions not proven to have builtin operands.
+    void *cpp_operator_tracker;      // Temporary source-range tracker during local extraction.
     CBMImportArray imports;
     CBMUsageArray usages;
     CBMThrowArray throws;
@@ -603,10 +603,11 @@ typedef struct {
     bool defer_cpp_operators;
     bool deduplicate_usages; // Keep one reference per enclosing scope, preserving first occurrence.
 } CBMExtractOptions;
-CBMFileResult *cbm_extract_file_with_options(
-    const char *source, int source_len, CBMLanguage language, const char *project,
-    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
-    const char **include_paths, const CBMExtractOptions *options);
+CBMFileResult *cbm_extract_file_with_options(const char *source, int source_len,
+                                             CBMLanguage language, const char *project,
+                                             const char *rel_path, int64_t timeout_micros,
+                                             const char **extra_defines, const char **include_paths,
+                                             const CBMExtractOptions *options);
 
 // Append resolved binary operator sites to a deferred result after local/cross-file
 // resolution. Repeated calls are safe and can consume newly appended resolutions.

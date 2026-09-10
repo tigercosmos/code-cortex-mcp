@@ -815,7 +815,7 @@ static bool db_lease_windows_components_safe(const Char *path, bool allow_naviga
         size_t count = (size_t)(p - part);
         if (count) {
             bool navigation = allow_navigation && part[0] == '.' &&
-                (count == 1 || (count == 2 && part[1] == '.'));
+                              (count == 1 || (count == 2 && part[1] == '.'));
             if (!navigation && (part[count - 1] == '.' || part[count - 1] == ' ')) {
                 return false;
             }
@@ -835,15 +835,15 @@ static char *db_lease_real_path(const char *path, bool *missing) {
     if (!wide) {
         return NULL;
     }
-    HANDLE h = CreateFileW(wide, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    HANDLE h = CreateFileW(wide, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     DWORD open_error = h == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
     DWORD attributes = h == INVALID_HANDLE_VALUE ? GetFileAttributesW(wide) : 0;
     free(wide);
     if (h == INVALID_HANDLE_VALUE) {
-        *missing = (open_error == ERROR_FILE_NOT_FOUND || open_error == ERROR_PATH_NOT_FOUND) &&
-                   (attributes == INVALID_FILE_ATTRIBUTES ||
-                    !(attributes & FILE_ATTRIBUTE_REPARSE_POINT));
+        *missing =
+            (open_error == ERROR_FILE_NOT_FOUND || open_error == ERROR_PATH_NOT_FOUND) &&
+            (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_REPARSE_POINT));
         return NULL;
     }
     BY_HANDLE_FILE_INFORMATION info;
@@ -934,7 +934,7 @@ static char *db_lease_canonical_target(const char *path) {
             slash[1] = '\0';
         } else
 #endif
-        if (slash == parent) {
+            if (slash == parent) {
             slash[1] = '\0';
         } else {
             *slash = '\0';
@@ -987,17 +987,18 @@ int cbm_db_lease_try_acquire(const char *db_path, cbm_db_lease_t **out) {
     lease->target = target;
 #ifdef _WIN32
     wchar_t *wide = cbm_utf8_to_wide(lock_path);
-    lease->handle = wide ? CreateFileW(wide, GENERIC_READ | GENERIC_WRITE,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
-                                      FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+    lease->handle =
+        wide ? CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+             : INVALID_HANDLE_VALUE;
     free(wide);
     if (lease->handle == INVALID_HANDLE_VALUE) {
         cbm_db_lease_release(lease);
         return CBM_NOT_FOUND;
     }
     OVERLAPPED overlap = {};
-    if (!LockFileEx(lease->handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                    0, 1, 0, &overlap)) {
+    if (!LockFileEx(lease->handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
+                    &overlap)) {
         DWORD error = GetLastError();
         cbm_db_lease_release(lease);
         return error == ERROR_LOCK_VIOLATION ? CBM_INDEX_BUSY : CBM_NOT_FOUND;

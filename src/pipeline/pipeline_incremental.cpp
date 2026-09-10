@@ -670,7 +670,8 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
             cbm_log_error("incremental.err", "msg", "format_version", "project", project);
         }
 
-        persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count, versions);
+        persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count,
+                       versions);
 
         /* Coverage rows (#963): re-write the merged set into the rebuilt DB
          * (AFTER hashes, so the deleted-file prune sees the live file set). */
@@ -727,8 +728,8 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     int n_changed = 0;
     int n_unchanged = 0;
     std::vector<classified_version> versions((size_t)file_count);
-    bool *is_changed =
-        classify_files(files, file_count, stored, stored_count, &n_changed, &n_unchanged, versions.data());
+    bool *is_changed = classify_files(files, file_count, stored, stored_count, &n_changed,
+                                      &n_unchanged, versions.data());
 
     /* Classify stored files absent from current discovery: truly-deleted
      * (purge) vs mode-skipped (preserve nodes AND hash rows). */

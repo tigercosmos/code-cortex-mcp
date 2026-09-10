@@ -39,23 +39,29 @@
 // Keep source ranges only for the current raw or preprocessed walk. A known
 // primitive range can discharge its own pending work once, never another site.
 struct CPPPendingOperators {
-    struct Site { uint64_t range; bool discharged; };
+    struct Site {
+        uint64_t range;
+        bool discharged;
+    };
     CBMFileResult *result;
     std::vector<Site> sites;
     bool prepared = false;
     CPPPendingOperators(CBMFileResult *r, bool enabled) : result(enabled ? r : nullptr) {
-        if (result) result->cpp_operator_tracker = this;
+        if (result)
+            result->cpp_operator_tracker = this;
     }
     void prepare() {
-        std::sort(sites.begin(), sites.end(), [](const Site &a, const Site &b) {
-            return a.range < b.range;
-        });
+        std::sort(sites.begin(), sites.end(),
+                  [](const Site &a, const Site &b) { return a.range < b.range; });
         prepared = true;
     }
     void finish() {
-        if (result && result->cpp_operator_tracker == this) result->cpp_operator_tracker = nullptr;
+        if (result && result->cpp_operator_tracker == this)
+            result->cpp_operator_tracker = nullptr;
     }
-    ~CPPPendingOperators() { finish(); }
+    ~CPPPendingOperators() {
+        finish();
+    }
 };
 
 void cbm_track_deferred_cpp_operator(CBMFileResult *result, uint32_t start, uint32_t end) {
@@ -65,14 +71,15 @@ void cbm_track_deferred_cpp_operator(CBMFileResult *result, uint32_t start, uint
 }
 
 void cbm_discharge_builtin_cpp_operator(CBMFileResult *result, uint32_t start, uint32_t end) {
-    if (!result) return;
+    if (!result)
+        return;
     auto *tracker = static_cast<CPPPendingOperators *>(result->cpp_operator_tracker);
-    if (!tracker || !tracker->prepared) return;
+    if (!tracker || !tracker->prepared)
+        return;
     uint64_t key = ((uint64_t)start << 32) | end;
-    auto found = std::lower_bound(tracker->sites.begin(), tracker->sites.end(), key,
-                                 [](const CPPPendingOperators::Site &site, uint64_t range) {
-                                     return site.range < range;
-                                 });
+    auto found = std::lower_bound(
+        tracker->sites.begin(), tracker->sites.end(), key,
+        [](const CPPPendingOperators::Site &site, uint64_t range) { return site.range < range; });
     if (found != tracker->sites.end() && found->range == key && !found->discharged) {
         found->discharged = true;
         --result->pending_cpp_operator_count;
@@ -80,7 +87,8 @@ void cbm_discharge_builtin_cpp_operator(CBMFileResult *result, uint32_t start, u
 }
 
 int cbm_materialize_deferred_cpp_operators(CBMFileResult *result) {
-    if (!result || result->deferred_cpp_operator_count == 0) return 0;
+    if (!result || result->deferred_cpp_operator_count == 0)
+        return 0;
     std::unordered_set<std::string> seen;
     auto key = [](const char *caller, std::string_view name, uint32_t byte) {
         std::string value(caller ? caller : "");
@@ -98,17 +106,20 @@ int cbm_materialize_deferred_cpp_operators(CBMFileResult *result) {
     int added = 0;
     for (int i = 0; i < result->resolved_calls.count; ++i) {
         const auto &resolved = result->resolved_calls.items[i];
-        if (!resolved.binary_operator_line || !resolved.source_byte ||
-            !resolved.caller_qn || !resolved.callee_qn) continue;
+        if (!resolved.binary_operator_line || !resolved.source_byte || !resolved.caller_qn ||
+            !resolved.callee_qn)
+            continue;
         // C++ member QNs use dots, with occasional :: in namespace prefixes.
         const char *leaf = strrchr(resolved.callee_qn, '.');
         leaf = leaf ? leaf + 1 : resolved.callee_qn;
         for (const char *scope = strstr(leaf, "::"); scope; scope = strstr(leaf, "::"))
             leaf = scope + 2;
-        if (strncmp(leaf, "operator", 8) != 0) continue;
+        if (strncmp(leaf, "operator", 8) != 0)
+            continue;
         const char *suffix = strstr(leaf, "@overload_");
         std::string_view name(leaf, suffix ? (size_t)(suffix - leaf) : strlen(leaf));
-        if (!seen.insert(key(resolved.caller_qn, name, resolved.source_byte)).second) continue;
+        if (!seen.insert(key(resolved.caller_qn, name, resolved.source_byte)).second)
+            continue;
         CBMCall call = {0};
         call.callee_name = cbm_arena_strndup(&result->arena, name.data(), name.size());
         call.enclosing_func_qn = resolved.caller_qn;
@@ -254,8 +265,8 @@ void cbm_calls_push(CBMCallArray *arr, CBMArena *a, CBMCall call) {
         if ((size_t)new_cap > SIZE_MAX / sizeof(*arr->items)) {
             return;
         }
-        auto *items = (CBMCall *)cbm_arena_grow_buffer(a, arr->items,
-                                                     (size_t)new_cap * sizeof(*arr->items));
+        auto *items =
+            (CBMCall *)cbm_arena_grow_buffer(a, arr->items, (size_t)new_cap * sizeof(*arr->items));
         if (!items) {
             // LSP passes can append through a different scratch arena, and
             // scratch reclamation can copy arrays back into bump storage.
@@ -1082,8 +1093,8 @@ static bool cbm_span_contains_callable_def(const char *src, int src_len, uint32_
 
 // Published call locations refer to the original file, even when type resolution
 // ran against expanded source. Header-owned and unmapped calls belong elsewhere.
-static uint32_t cbm_preprocessed_main_call_line(const CBMPreprocessedSource *pp,
-                                                 uint32_t line, uint32_t original_lines) {
+static uint32_t cbm_preprocessed_main_call_line(const CBMPreprocessedSource *pp, uint32_t line,
+                                                uint32_t original_lines) {
     if (!pp || !pp->original_line_by_expanded_line || !pp->belongs_to_main_file ||
         pp->expanded_line_count <= 0 || !line || line > (uint32_t)pp->expanded_line_count ||
         !pp->belongs_to_main_file[line]) {
@@ -1093,9 +1104,9 @@ static uint32_t cbm_preprocessed_main_call_line(const CBMPreprocessedSource *pp,
     return original && original <= original_lines ? original : 0;
 }
 
-static void cbm_remap_preprocessed_calls(CBMFileResult *result, int first_call,
-                                        int first_resolved, const CBMPreprocessedSource *pp,
-                                        const char *source, int source_len) {
+static void cbm_remap_preprocessed_calls(CBMFileResult *result, int first_call, int first_resolved,
+                                         const CBMPreprocessedSource *pp, const char *source,
+                                         int source_len) {
     uint32_t original_lines = 1;
     for (int i = 0; i < source_len; ++i) {
         if (source[i] == '\n') {
@@ -1105,8 +1116,8 @@ static void cbm_remap_preprocessed_calls(CBMFileResult *result, int first_call,
     int keep = first_call;
     for (int i = first_call; i < result->calls.count; ++i) {
         CBMCall call = result->calls.items[i];
-        uint32_t original = cbm_preprocessed_main_call_line(
-            pp, (uint32_t)call.start_line, original_lines);
+        uint32_t original =
+            cbm_preprocessed_main_call_line(pp, (uint32_t)call.start_line, original_lines);
         if (!original) {
             continue;
         }
@@ -1120,8 +1131,8 @@ static void cbm_remap_preprocessed_calls(CBMFileResult *result, int first_call,
     for (int i = first_resolved; i < result->resolved_calls.count; ++i) {
         CBMResolvedCall resolved = result->resolved_calls.items[i];
         if (resolved.binary_operator_line) {
-            uint32_t original = cbm_preprocessed_main_call_line(
-                pp, resolved.binary_operator_line, original_lines);
+            uint32_t original =
+                cbm_preprocessed_main_call_line(pp, resolved.binary_operator_line, original_lines);
             if (!original) {
                 // Deferred counts describe syntactic candidates, not resolved
                 // records. Keep them conservative instead of guessing a decrement.
@@ -1332,7 +1343,7 @@ static int blank_skip_literal(const char *src, int len, int i) {
      * or ';' inside it must not end the literal or count as a separator. */
     {
         int r = i;
-        if ((src[r] == 'u' && r + 1 < len && src[r + 1] == '8') ) {
+        if ((src[r] == 'u' && r + 1 < len && src[r + 1] == '8')) {
             r += 2;
         } else if (src[r] == 'u' || src[r] == 'U' || src[r] == 'L') {
             r += 1;
@@ -1396,8 +1407,8 @@ static char *cbm_blank_statement_macros(CBMArena *a, const char *src, int len) {
         }
         unsigned char c = (unsigned char)src[i];
         bool ident_start = (c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
-        bool prev_ident = i > 0 && ((unsigned char)src[i - 1] == '_' ||
-                                    isalnum((unsigned char)src[i - 1]));
+        bool prev_ident =
+            i > 0 && ((unsigned char)src[i - 1] == '_' || isalnum((unsigned char)src[i - 1]));
         if (!ident_start || prev_ident) {
             i++;
             continue;
@@ -1478,10 +1489,11 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
                                          timeout_micros, extra_defines, include_paths, nullptr);
 }
 
-CBMFileResult *cbm_extract_file_with_options(
-    const char *source, int source_len, CBMLanguage language, const char *project,
-    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
-    const char **include_paths, const CBMExtractOptions *options) {
+CBMFileResult *cbm_extract_file_with_options(const char *source, int source_len,
+                                             CBMLanguage language, const char *project,
+                                             const char *rel_path, int64_t timeout_micros,
+                                             const char **extra_defines, const char **include_paths,
+                                             const CBMExtractOptions *options) {
     CBMFileResult *r = cbm_extract_file_impl(source, source_len, language, project, rel_path,
                                              timeout_micros, extra_defines, include_paths, options);
     cbm_index_mark_done(rel_path);
@@ -1654,8 +1666,7 @@ static void lsp_scratch_reclaim(CBMFileResult *result, CBMArena *dst, const CBMA
 static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                                             CBMLanguage language, const char *project,
                                             const char *rel_path, int64_t timeout_micros,
-                                            const char **extra_defines,
-                                            const char **include_paths,
+                                            const char **extra_defines, const char **include_paths,
                                             const CBMExtractOptions *options) {
     // Allocate result on heap (arena inside for all string data)
     enum { SINGLE = 1 };
@@ -1996,12 +2007,14 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                                 for (int j = 0; j < defs_before && adopt; j++) {
                                     const CBMDefinition &raw = result->defs.items[j];
                                     const char *q = raw.qualified_name;
-                                    bool same_qn = q && d->qualified_name &&
-                                                   strcmp(q, d->qualified_name) == 0;
+                                    bool same_qn =
+                                        q && d->qualified_name && strcmp(q, d->qualified_name) == 0;
                                     // Real overloads can carry different raw/expanded byte
                                     // suffixes for the same source definition.
-                                    bool same_definition = raw.start_line == d->start_line &&
-                                        raw.end_line == d->end_line && raw.declaration_key && d->declaration_key &&
+                                    bool same_definition =
+                                        raw.start_line == d->start_line &&
+                                        raw.end_line == d->end_line && raw.declaration_key &&
+                                        d->declaration_key &&
                                         strcmp(raw.declaration_key, d->declaration_key) == 0;
                                     if (same_qn || same_definition) {
                                         adopt = false;
@@ -2017,7 +2030,7 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                     // Resolve against the expanded view first; publish only mapped
                     // main-file locations after definition recovery has finished.
                     cbm_remap_preprocessed_calls(result, calls_before, orig_resolved_count,
-                                                  preprocessed, source, source_len);
+                                                 preprocessed, source, source_len);
                     ts_tree_delete(pp_tree);
                 }
             }
@@ -2122,12 +2135,14 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
     for (int i = 0; i < orig_resolved_count; ++i) {
         const auto &call = result->resolved_calls.items[i];
         if (!call.binary_operator_line || !call.caller_qn || !call.callee_qn ||
-            strcmp(call.caller_qn, call.callee_qn) != 0) continue;
+            strcmp(call.caller_qn, call.callee_qn) != 0)
+            continue;
         for (int di = 0; di < def_count; ++di) {
             auto &def = result->defs.items[di];
             if (def.qualified_name && strcmp(def.qualified_name, call.caller_qn) == 0) {
                 def.is_recursive = true;
-                if (has_self) has_self[di] = true;
+                if (has_self)
+                    has_self[di] = true;
                 break;
             }
         }

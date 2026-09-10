@@ -1501,8 +1501,8 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     cbm_gbuf_edge_t *existing = (cbm_gbuf_edge_t *)cbm_ht_get(gb->edge_by_key, key);
     if (existing) {
         if (strcmp(type, "CALLS") == 0 &&
-            ((properties_json && (strstr(properties_json, "\"line\"") ||
-                                  strstr(properties_json, "\"call_lines\""))) ||
+            ((properties_json &&
+              (strstr(properties_json, "\"line\"") || strstr(properties_json, "\"call_lines\""))) ||
              (existing->properties_json &&
               (strstr(existing->properties_json, "\"line\"") ||
                strstr(existing->properties_json, "\"call_lines\""))))) {

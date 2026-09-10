@@ -12,11 +12,14 @@ const char *cbm_overload_at(const CBMFileResult *result, uint32_t offset) {
     int low = 0, high = result->overload_count;
     while (low < high) {
         int mid = low + (high - low) / 2;
-        if (result->overloads[mid].byte_offset < offset) low = mid + 1;
-        else high = mid;
+        if (result->overloads[mid].byte_offset < offset)
+            low = mid + 1;
+        else
+            high = mid;
     }
     return low < result->overload_count && result->overloads[low].byte_offset == offset
-               ? result->overloads[low].qualified_name : nullptr;
+               ? result->overloads[low].qualified_name
+               : nullptr;
 }
 
 const char *cbm_overload_qn(CBMArena *arena, const char *family, uint32_t offset) {
@@ -211,9 +214,9 @@ bool cbm_label_is_registry_symbol(const char *label) {
         return false;
     }
     return strcmp(label, "Function") == 0 || strcmp(label, "Method") == 0 ||
-           strcmp(label, "OverloadSet") == 0 ||
-           cbm_label_is_type_like(label) || strcmp(label, "Variable") == 0 ||
-           strcmp(label, "Field") == 0 || cbm_label_is_relation(label);
+           strcmp(label, "OverloadSet") == 0 || cbm_label_is_type_like(label) ||
+           strcmp(label, "Variable") == 0 || strcmp(label, "Field") == 0 ||
+           cbm_label_is_relation(label);
 }
 
 bool cbm_is_keyword(const char *name, CBMLanguage lang) {

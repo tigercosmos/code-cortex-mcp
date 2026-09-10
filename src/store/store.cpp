@@ -3464,8 +3464,8 @@ static int bfs_collect_edges(cbm_store_t *s, int64_t start_id, const cbm_node_ho
     }
     size_t ilen = (size_t)snprintf(id_set, id_cap, "[%lld", (long long)start_id);
     for (int i = 0; i < visited_count; i++) {
-        ilen += (size_t)snprintf(id_set + ilen, id_cap - ilen, ",%lld",
-                                 (long long)visited[i].node.id);
+        ilen +=
+            (size_t)snprintf(id_set + ilen, id_cap - ilen, ",%lld", (long long)visited[i].node.id);
     }
     snprintf(id_set + ilen, id_cap - ilen, "]");
 
@@ -3620,8 +3620,10 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
     /* Keep a separate examined-row cap regardless of the predicate: excluded files cannot
      * consume accepted slots, but cannot cause an unbounded result scan either.
      * Reachability/grouping work retains the existing depth-bounded CTE. */
-    int sql_limit = max_examined > 0 ? max_examined + 1 :
-        (max_results >= 0 && max_results < INT32_MAX ? max_results + 1 : max_results);
+    int sql_limit =
+        max_examined > 0
+            ? max_examined + 1
+            : (max_results >= 0 && max_results < INT32_MAX ? max_results + 1 : max_results);
     int cte_row_limit = 0;
     if (trail) {
         cte_row_limit = bfs_cte_row_limit_for_depth(max_results, max_depth);
