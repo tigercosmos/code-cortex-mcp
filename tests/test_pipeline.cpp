@@ -95,7 +95,7 @@ TEST(pipeline_cpp_pointer_members_match_in_memory_and_store) {
             else cbm_unsetenv(name);
         }
     } store_env("CBM_RESULT_STORE"), single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
-    char root[] = "/tmp/cbm_cpp_fields_XXXXXX";
+    char root[256] = "/tmp/cbm_cpp_fields_XXXXXX";
     ASSERT_NOT_NULL(cbm_mkdtemp(root));
     std::string repo = std::string(root) + "/source";
     ASSERT_EQ(th_write_file((repo + "/header/RawPacket.h").c_str(),
@@ -174,7 +174,7 @@ TEST(pipeline_cpp_ambiguous_include_keeps_local_calls) {
         explicit SavedEnv(const char *key) : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
         ~SavedEnv() { if (present) cbm_setenv(name, value.c_str(), 1); else cbm_unsetenv(name); }
     } store_env("CBM_RESULT_STORE"), single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
-    char root[] = "/tmp/cbm_cpp_ambiguous_XXXXXX";
+    char root[256] = "/tmp/cbm_cpp_ambiguous_XXXXXX";
     ASSERT_NOT_NULL(cbm_mkdtemp(root));
     std::string repo = std::string(root) + "/source";
     ASSERT_EQ(th_write_file((repo + "/left/Widget.h").c_str(),
@@ -239,7 +239,8 @@ TEST(parallel_store_preserves_kotlin_to_java_method_call) {
         ~Env(){ if(present) cbm_setenv(name,value.c_str(),1); else cbm_unsetenv(name); }
     } store_env("CBM_RESULT_STORE"), single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
     cbm_unsetenv("CBM_INDEX_SINGLE_THREAD"); cbm_setenv("CBM_WORKERS","2",1);
-    char root[]="/tmp/cbm_store_jvm_XXXXXX"; ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    char root[256] = "/tmp/cbm_store_jvm_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
     std::string repo=std::string(root)+"/source";
     ASSERT_EQ(th_write_file((repo+"/src/main/java/demo/Base.java").c_str(),
         "package demo; public class Base { public int value(){return 7;} }\n"),0);
@@ -271,7 +272,7 @@ static void append_concurrent_function(void *path) {
 }
 
 TEST(pipeline_incremental_preserves_classified_version) {
-    char root[] = "/tmp/cbm_version_race_XXXXXX";
+    char root[256] = "/tmp/cbm_version_race_XXXXXX";
     ASSERT_NOT_NULL(cbm_mkdtemp(root));
     char dbpath[512], target[512], trigger[512];
     snprintf(dbpath, sizeof(dbpath), "%s/graph.db", root);
@@ -304,7 +305,7 @@ TEST(pipeline_incremental_preserves_classified_version) {
     PASS();
 }
 TEST(pipeline_initial_preserves_extracted_version) {
-    char root[] = "/tmp/cbm_version_race_XXXXXX";
+    char root[256] = "/tmp/cbm_version_race_XXXXXX";
     ASSERT_NOT_NULL(cbm_mkdtemp(root));
     char dbpath[512], target[512], trigger[512];
     snprintf(dbpath, sizeof(dbpath), "%s/graph.db", root);

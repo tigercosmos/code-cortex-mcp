@@ -352,7 +352,7 @@ TEST(watcher_reindexes_clean_reset_and_retries_failure) {
     /* Cover both registration on an already-dirty index and an edit observed
      * after registration. Failed clean reindex attempts must remain pending. */
     for (int initially_dirty = 0; initially_dirty < 2; initially_dirty++) {
-        char tmpdir[] = "/tmp/cbm_watcher_reset_XXXXXX";
+        char tmpdir[256] = "/tmp/cbm_watcher_reset_XXXXXX";
         ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
         ASSERT_EQ(wt_git(tmpdir, "init -q"), 0);
         char path[300];
