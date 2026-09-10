@@ -1,12 +1,13 @@
 # Contributing to code-cortex-mcp
 
-Contributions are welcome. This guide covers setup, testing, and PR guidelines.
+Contributions are welcome. This guide covers setup, testing, and pull request guidelines.
 
-> **Important**: This project is a **pure C binary** (rewritten from Go in v0.5.0). Please submit C code, not Go. Go PRs may be ported but cannot be merged directly.
+First-party source and tests use C++23. Vendored tree-sitter parsers and third-party libraries
+retain their upstream C sources.
 
 ## Build from Source
 
-**Prerequisites**: C compiler (gcc or clang), make, zlib, Git.
+**Prerequisites**: CMake, a C++23 compiler, make, zlib, and Git.
 
 ```bash
 git clone https://github.com/tigercosmos/code-cortex-mcp.git
@@ -15,8 +16,9 @@ git config core.hooksPath scripts/hooks  # activates pre-commit security checks
 scripts/build.sh
 ```
 
-macOS: `xcode-select --install` provides clang.
-Linux: `sudo apt install build-essential zlib1g-dev` (Debian/Ubuntu) or `sudo dnf install gcc zlib-devel` (Fedora).
+macOS: `xcode-select --install` provides Apple Clang.
+Linux: install `build-essential cmake zlib1g-dev` on Debian or Ubuntu. Install
+`gcc-c++ cmake zlib-devel` on Fedora.
 
 The binary is output to `build/c/code-cortex-mcp`.
 
@@ -26,9 +28,11 @@ The binary is output to `build/c/code-cortex-mcp`.
 scripts/test.sh
 ```
 
-This builds with ASan + UBSan and runs all tests (~2040 cases). Key test files:
+This builds with AddressSanitizer and UndefinedBehaviorSanitizer. It then runs the full test
+suite. Key test files:
+
 - `tests/test_pipeline.cpp` — pipeline integration tests
-- `tests/test_httplink.cpp` — HTTP route extraction and linking
+- `tests/test_integration.cpp` — end-to-end indexing and MCP tests
 - `tests/test_mcp.cpp` — MCP protocol and tool handler tests
 - `tests/test_store_*.cpp` — SQLite graph store tests
 
@@ -55,47 +59,50 @@ src/
   foundation/       Arena allocator, hash table, string utils, platform compat
   store/            SQLite graph storage (WAL mode, FTS5)
   cypher/           Cypher query → SQL translation
-  mcp/              MCP server (JSON-RPC 2.0 over stdio, 14 tools)
+  mcp/              MCP server (JSON-RPC 2.0 over stdio, 15 tools)
   pipeline/         Multi-pass indexing pipeline
-    pass_*.c        Individual pipeline passes (definitions, calls, usages, etc.)
-    httplink.c      HTTP route extraction (Go/Express/Laravel/Ktor/Python)
+    pass_*.cpp      Individual pipeline passes (definitions, calls, usages, routes)
+    result_store.*  Optional temporary storage for full extraction results
   discover/         File discovery with gitignore support
   watcher/          Git-based background auto-sync
   cli/              CLI subcommands (install, update, uninstall, config)
 internal/cbm/       Tree-sitter AST extraction (155 languages, vendored C grammars)
 vendored/           sqlite3, yyjson, mimalloc, xxhash
 scripts/            Build, test, lint, security audit scripts
-tests/              All C test files
+tests/              C++ unit, integration, and regression tests
 ```
 
 ## Adding or Fixing Language Support
 
 Language support is split between two layers:
 
-1. **Tree-sitter extraction** (`internal/cbm/`): Grammar loading, AST node type configuration in `lang_specs.c`, function/call/import extraction in `extract_*.c`
+1. **Tree-sitter extraction** (`internal/cbm/`): grammar loading, syntax-node configuration
+   in `lang_specs.cpp`, and extraction in `extract_*.cpp`.
 2. **Pipeline passes** (`src/pipeline/`): Call resolution, usage tracking, HTTP route linking
 
 **Workflow for language fixes:**
 
-1. Check the language spec in `internal/cbm/lang_specs.c`
-2. Use regression tests to verify extraction: `tests/test_extraction.cpp`
-3. Check parity tests: `internal/cbm/regression_test.go` (legacy, being migrated)
-4. Add a test case in `tests/test_pipeline.cpp` for integration-level fixes
-5. Verify with a real open-source repo
+1. Check the language spec in `internal/cbm/lang_specs.cpp`.
+2. Add an extraction regression test in `tests/test_extraction.cpp`.
+3. Add an integration test in `tests/test_pipeline.cpp` when the change affects graph edges.
+4. Test the change on a real open-source repository.
 
 ### Infrastructure Languages (Infra-Pass Pattern)
 
 Languages like **Dockerfile**, **docker-compose**, **Kubernetes manifests**, and **Kustomize** do not require a new tree-sitter grammar. Instead they follow an *infra-pass* pattern, reusing the existing tree-sitter YAML grammar where applicable:
 
-1. **Detection helpers** in `src/pipeline/pass_infrascan.c` — functions like `cbm_is_dockerfile()`, `cbm_is_k8s_manifest()`, `cbm_is_kustomize_file()` identify files by name and/or content heuristics (e.g., presence of `apiVersion:`).
-2. **Custom extractors** in `internal/cbm/extract_k8s.c` — tree-sitter-based parsers that walk the YAML AST (using the tree-sitter YAML grammar) and populate `CBMFileResult` with imports and definitions.
-3. **Pipeline pass** (`pass_k8s.c`, `pass_infrascan.c`) — calls the extractor and emits graph nodes/edges. K8s manifests emit `Resource` nodes; Kustomize files emit `Module` nodes with `IMPORTS` edges to referenced resource files.
+1. **Detection helpers** in `src/pipeline/pass_infrascan.cpp` identify files by name and
+   content. Examples include Dockerfiles, Kubernetes manifests, and Kustomize files.
+2. **Custom extractors** in `internal/cbm/extract_k8s.cpp` walk the YAML syntax tree. They
+   populate `CBMFileResult` with imports and definitions.
+3. **Pipeline passes** in `pass_k8s.cpp` and `pass_infrascan.cpp` emit graph nodes and edges.
+   Kubernetes manifests emit `Resource` nodes. Kustomize files emit `Module` nodes.
 
 **When adding a new infrastructure language:**
-- Add a detection helper (`cbm_is_<lang>_file()`) in `pass_infrascan.c` or a new `pass_<lang>.c`.
-- Add the `CBM_LANG_<LANG>` enum value in `internal/cbm/cbm.h` and a row in the language table in `lang_specs.c`.
+- Add a detection helper in `pass_infrascan.cpp` or a new `pass_<lang>.cpp` file.
+- Add the `CBM_LANG_<LANG>` value in `internal/cbm/cbm.h` and a row in `lang_specs.cpp`.
 - Write a custom extractor that returns `CBMFileResult*` — do not add a tree-sitter grammar.
-- Register the pass in `pipeline.c`.
+- Register the pass in `pipeline.cpp`.
 - Add tests in `tests/test_pipeline.cpp` following the `TEST(infra_is_dockerfile)` and `TEST(k8s_extract_manifest)` patterns.
 
 ## Commit Format
@@ -142,7 +149,7 @@ If in doubt, open an issue and ask.
 
 ### Code Requirements
 
-- **C code only** — this project was rewritten from Go to pure C in v0.5.0. Go PRs will be acknowledged and potentially ported, but cannot be merged directly.
+- Use C++23 for first-party source and tests.
 - Include tests for new functionality
 - Run `scripts/test.sh` and `scripts/lint.sh` before submitting
 - Keep PRs focused — avoid unrelated reformatting or refactoring

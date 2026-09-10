@@ -1,8 +1,12 @@
 # Code Cortex MCP -- v0.3.0 Language Benchmark
 
+> **Historical record:** This report preserves the 2026-03-01 v0.3.0 tool names and results.
+> It measured 35 languages from a planned 63-language corpus. For current complete-task
+> performance, see the [v743 results](benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md).
+
 ## Methodology
 
-- **63 languages** (27 programming + 8 config/markup), 12 questions each (4 for config languages)
+- **35 measured languages** (27 programming + 8 config/markup), 12 questions each (4 for config languages)
 - **Up to 5 attempts** per question with escalating retry strategies
 - **Real open-source repos** (medium to large: 78--49K nodes)
 - **Grading**: PASS (1.0) / PARTIAL (0.5) / FAIL (0.0), N/A excluded from denominator
@@ -290,7 +294,7 @@ Config/markup languages (HTML, CSS, SCSS, YAML, TOML, HCL, SQL, Dockerfile) run 
 **Tests**: 278 PHP-LSP unit tests, all passing (total project: 3,091 / 0 failed)
 **LSP module size**: ~3,700 lines C resolver + ~700 lines stdlib + ~5,500 lines tests = ~9,900 LoC
 
-PHP runs through a Light Semantic Pass (`internal/cbm/lsp/php_lsp.c`,
+PHP runs through a Light Semantic Pass (`internal/cbm/lsp/php_lsp.cpp`,
 ~3,500 lines) that approaches phpactor-grade type resolution while
 staying in-process and PHP-runtime-free. Phase 4 capabilities:
 

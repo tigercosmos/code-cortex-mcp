@@ -9,8 +9,9 @@
 
 **code-cortex-mcp** is a local [MCP](https://modelcontextprotocol.io) server for AI coding
 agents. It builds a knowledge graph of your codebase: functions, classes, call graphs, HTTP
-routes, and cross-service links. One graph query replaces dozens of grep-and-read cycles.
-It ships as a single static binary with no runtime dependencies.
+routes, and cross-service links. Graph queries can replace repeated grep-and-read cycles when
+the task depends on indexed relationships. It ships as a single static binary with no runtime
+dependencies.
 
 It parses 155 languages with [tree-sitter](https://tree-sitter.github.io/tree-sitter/)
 and resolves types for Go, C, C++, TypeScript/JavaScript, Java, Kotlin, Rust, Python, PHP,
@@ -23,6 +24,7 @@ the project it forked from. See
 - [Quick Start](#quick-start)
 - [MCP Tools](#mcp-tools)
 - [Features](#features)
+- [Architecture](#architecture)
 - [Performance](#performance)
 - [Language Support](#language-support)
 - [Graph Data Model](#graph-data-model)
@@ -75,22 +77,29 @@ language layer. All data stays in `~/.cache/code-cortex-mcp/` as SQLite.
 | `get_graph_schema` | Node and edge counts, property shapes |
 | `search_code` | Graph-augmented grep over indexed files |
 | `detect_changes` | Blast radius of a git diff |
-| `manage_adr` | Architecture Decision Records (CRUD) |
+| `manage_adr` | Read or replace Architecture Decision Records (`get`, `update`, `sections`) |
 | `ingest_traces` | Runtime traces (stub: counts spans only) |
 
 The `project` argument is optional for every query tool: inside an indexed repository it is
 inferred from the working directory, and a name that matches nothing is answered for that
 project with a `project_note` saying so. Names may be bare (`parse`), scoped
 (`Packet::addLayer`), or fully qualified. Replies are bounded (`max_bytes` on
-`inspect_symbol` and `search_code`) and say when they were cut and how to continue.
+`inspect_symbol`, `trace_path`, and `search_code`). Each bounded reply says when it was cut
+and how to continue.
 
 Every tool also runs from the CLI:
 
 ```bash
-code-cortex-mcp cli inspect_symbol '{"symbol": "hexStringToByteArray"}'
-code-cortex-mcp cli search_graph '{"name_pattern": ".*Handler.*", "label": "Function"}'
-code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LIMIT 5"}'
+code-cortex-mcp cli inspect_symbol --symbol hexStringToByteArray
+code-cortex-mcp cli search_graph --name-pattern '.*Handler.*' --label Function
+code-cortex-mcp cli trace_path --function-name B --from-function A --direction inbound --depth 3 --max-work 10000
+code-cortex-mcp cli query_graph --query 'MATCH (f:Function) RETURN f.name LIMIT 5'
 ```
+
+For a known call chain from `A` to `B`, use the bounded `trace_path` form above. Check
+`path_found` before using the returned path. If `traversal_truncated` is true, increase
+`max_work` or narrow the endpoint names. The targeted form supports `CALLS` edges,
+`mode="calls"`, and `direction="inbound"`.
 
 ## Features
 
@@ -112,6 +121,18 @@ code-cortex-mcp cli query_graph  '{"query": "MATCH (f:Function) RETURN f.name LI
 - **Team artifact** — commit `.code-cortex/graph.db.zst` (a zstd snapshot, about 10:1)
   and teammates import it instead of a full reindex. A `.gitattributes` `merge=ours` rule
   prevents merge conflicts. Gitignore `.code-cortex/` to opt out.
+
+## Architecture
+
+Code Cortex separates indexing from task-time retrieval. The indexing pipeline discovers
+files, parses syntax, resolves calls and types, builds graph edges, and writes SQLite. The
+MCP server then serves bounded graph queries from the indexed database.
+
+The scale redesign adds two bounded paths. `CBM_RESULT_STORE=1` moves full extraction
+results to temporary storage and keeps compact summaries in memory. Targeted `trace_path`
+queries search from one known endpoint to another with an explicit edge-work limit. See
+[Architecture and scale](docs/ARCHITECTURE.md) for the data flow, limits, and before/after
+comparison.
 
 ## Performance
 
@@ -147,7 +168,8 @@ source-correct retrieval but added text to required symbol names. Shell complete
 upstream completed 16/16. Upstream has no 100M timing: indexing exceeded both sealed 4 GiB and
 32 GiB memory budgets, and no time was imputed. These results establish the stated benefit for
 the measured warm-index lookup and three-hop-chain tasks, not for edits, cold indexing, every
-language, or every task shape. See the [full results and reproducibility evidence](docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md).
+language, or every task shape. See the [full results](docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md)
+and the [verification instructions](docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/README.md).
 
 ### Full-index performance
 
@@ -179,6 +201,9 @@ Elasticsearch. On top of that sits the parse working set of the files being read
 moment, which is what `CBM_WORKERS` moves. Set `CBM_RESULT_STORE=1` to serialize full per-file
 results to bounded system temporary storage after extraction and keep compact registry
 summaries in memory; resolution loads each full result on demand. This store is not durable.
+The per-run storage limit is 64 GiB. Make sure that the system temporary volume has enough
+free space before you enable the store. A failed store write, including an `ENOSPC`
+out-of-space error, cancels the indexing run. Free temporary-volume space before retrying.
 
 The indexer throttles workers when resident memory passes a budget derived from total RAM
 (25–50%, with a larger share on larger machines; `CBM_MEM_BUDGET_MB` overrides it in MiB).
@@ -237,6 +262,8 @@ The other 110 languages get structural parsing only.
 code-cortex-mcp config list
 code-cortex-mcp config set auto_index true        # index on MCP session start
 code-cortex-mcp config set auto_index_limit 50000 # max files for auto-index
+code-cortex-mcp config set auto_watch false       # default: true
+code-cortex-mcp config set ui-lang en              # auto, en, or zh; default: auto
 ```
 
 - **Storage** — `~/.cache/code-cortex-mcp/`; override with `CBM_CACHE_DIR`.
@@ -271,7 +298,9 @@ Run tests with `scripts/test.sh` (ASan/UBSan) and linters with `scripts/lint.sh`
 
 code-cortex-mcp forked from
 **[DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)** and keeps
-its on-disk graph format. It indexes faster and answers most tool calls faster.
+its on-disk graph format. Historical cold-index and warm-tool measurements show lower
+times for most measured operations. The [complete-task comparison](#complete-task-performance)
+measures the newer agent-task boundary.
 codebase-memory-mcp has features that code-cortex-mcp does not; the feature table names them.
 
 Test conditions for every number in this section:
@@ -371,7 +400,7 @@ coordination daemon for every CLI command unless `daemon start` keeps one warm.
 | Integrity memo for cold starts | `_config.db` | none |
 | Languages | 155 | 158 (adds CFML, CFScript, QML, ObjectScript) |
 | Hybrid LSP resolvers | 10 languages | 11 languages (adds Perl) |
-| MCP tools | 14 | 15 (adds `check_index_coverage`) |
+| MCP tools | 15 | 15 |
 | Reference precision (`CALL_REFERENCE` / `USAGE`) | no | yes |
 | Incremental reindex | yes | yes, plus delta staging (clone, patch, rename) |
 | Session coordination daemon | no | yes |

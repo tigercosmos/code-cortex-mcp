@@ -121,7 +121,7 @@ For each approved commit:
   the guard pattern from sibling headers.
 - Vendored code (sqlite3, mongoose, yyjson, lz4, zstd, tre, ts_runtime,
   `grammar_*.c`) **stays C**. Don't C++-ify it.
-- Tests under `tests/` compile as C11. Keep them C.
+- Tests under `tests/` compile as C++23. Preserve their current C++ test-framework idioms.
 
 #### Fork-side pitfalls (all have bitten a previous sync)
 

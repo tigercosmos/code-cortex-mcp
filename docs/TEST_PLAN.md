@@ -1,8 +1,14 @@
-# MCP vs Explorer Quality Benchmark — Test Plan (v8: 66 Languages)
+# Historical MCP vs Explorer test plan (v8: 66 languages)
+
+> **Historical plan:** This document preserves the v8 66-language corpus and Claude Code
+> workflow. The product now recognizes 155 languages. Use the
+> [v743 verification guide](benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/README.md)
+> for current source-correct timing comparisons.
 
 ## Purpose
 
-Compare code-cortex-mcp's structured graph queries against Claude Code's Explore agent (Grep/Glob/Read only) across all supported languages. Both phases use AI agents with the same 12-question set — the MCP agent gets MCP tools, the Explorer agent gets Grep/Glob/Read. Same questions, fair comparison.
+Compare Code Cortex graph queries against the Claude Code Explore agent across the v8
+66-language corpus. Both phases use the same 12-question set.
 
 ## Prerequisites
 
@@ -271,8 +277,8 @@ For each language, spawn a **general-purpose agent** with strict MCP-only constr
 
 ### MCP Agent Configuration
 
-- `subagent_type="general-purpose"`, `run_in_background=true`, `max_turns=8`
-- Tool budget: **8 turns total** — 1 ToolSearch + 6 MCP calls + 1 Bash write
+- `subagent_type="general-purpose"`, `run_in_background=true`, `max_turns=7`
+- Tool budget: **7 turns total** — 1 ToolSearch + 5 MCP calls + 1 Bash write
 - Forbidden: Grep, Glob, Read, Edit, Write — calling any of these invalidates the run
 - The hard `max_turns=7` cap enforces the budget mechanically
 
@@ -286,7 +292,7 @@ With only 5 MCP calls for 12 questions, the agent **must** choose calls that cov
 | 2 | get_architecture(aspects=["all"]) | Q7, Q8, Q12 (init, layers, structure) |
 | 3 | search_graph(label="Function", min_degree=3) | Q1, Q9 (public API, fan-out hotspots) |
 | 4 | search_graph(label="Interface"/"Trait"/"Type") | Q2, Q10 (interfaces, validation patterns) |
-| 5 | trace_call_path(function, direction="both") | Q5, Q6 (outbound + inbound call tree) |
+| 5 | trace_path(function_name="...", direction="both") | Q5, Q6 (outbound + inbound call tree) |
 | 6 | get_code_snippet(most complex function) | Q3, Q4 (error handling, code retrieval) |
 | 7 | Bash — write output file | Q11, Q12 answered from arch call above |
 
@@ -304,8 +310,8 @@ With only 5 MCP calls for 12 questions, the agent **must** choose calls that cov
 ```
 TOTAL TOOL BUDGET: 7 turns. Spend them wisely.
   Turn 1: ToolSearch — loads MCP tools (mandatory)
-  Turns 2–7: 6 MCP tool calls — cover all 12 questions
-  Turn 8: Bash — write output file (one heredoc, no other Bash)
+  Turns 2–6: 5 MCP tool calls — cover all 12 questions
+  Turn 7: Bash — write output file (one heredoc, no other Bash)
 
 FORBIDDEN (calling these invalidates the run):
   Grep, Glob, Read, Edit, Write, WebSearch, WebFetch
@@ -317,7 +323,7 @@ STRATEGY — cover multiple questions per call:
 - get_architecture(aspects=["all"]) → answers structure, layers, init, dependencies
 - search_graph(label=<primary type>, min_degree=3) → answers API surface, hotspots
 - search_graph(label=<interface/trait type>) → answers type system, validation patterns
-- trace_call_path(function=<central fn>, direction="both") → answers call chains
+- trace_path(function_name=<central fn>, direction="both") → answers call chains
 - get_code_snippet(qualified_name=<complex fn>) → answers code retrieval, error handling
 
 Answer ALL 12 questions from these 5 calls. If a call returns 0 results,
@@ -526,7 +532,7 @@ specific search patterns. Apply these strategies:
 2. Try ALL label variants: Function, Method, Procedure, Program, Paragraph, Module,
    Block, Definition, Declaration — use whichever the schema shows.
 3. For zero-result traces: first search_graph to find any function, then
-   trace_call_path on that exact name. Never guess a function name.
+   trace_path on that exact name. Never guess a function name.
 4. For COBOL specifically: labels are likely "Procedure" or "Paragraph" not "Function".
 5. For config/markup (Group E): use search_graph(label="Variable") for definitions,
    search_code for content patterns.
@@ -798,7 +804,7 @@ Config languages (TOML, INI, JSON, XML, YAML, Markdown) now produce sub-file nod
 
 **CONFIGURES edges** connect config nodes to code:
 - `search_graph(relationship="CONFIGURES")` — find all config↔code links
-- `trace_call_path(function_name="...", direction="inbound")` on config nodes — find what code uses them
+- `trace_path(function_name="...", direction="inbound")` on config nodes — find what code uses them
 - Three linking strategies:
   1. **Key→Symbol**: `max_connections` in TOML → `getMaxConnections()` in Go
   2. **Dependency→Import**: `serde` in Cargo.toml → `use serde::Serialize` in Rust

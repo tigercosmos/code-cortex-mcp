@@ -4,19 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents</title>
-    <meta name="description" content="Local MCP server that indexes a codebase into a knowledge graph for AI coding agents. 155 languages, sub-millisecond queries, 3-minute Linux kernel indexing, single static binary. Works with Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Aider, Cursor, and more.">
+    <meta name="description" content="Local knowledge-graph MCP server for AI coding agents. In a controlled warm-index C++ benchmark, complete tasks were 57.9% faster than shell tools on 22 source-correct matched pairs.">
     <meta name="keywords" content="MCP server, code analysis, knowledge graph, tree-sitter, Claude Code, Codex, Cursor, Gemini CLI, VS Code, Zed, OpenCode, developer tools, code exploration, code intelligence, C++23">
 
     <!-- Open Graph -->
     <meta property="og:title" content="code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents">
-    <meta property="og:description" content="155 languages, sub-millisecond graph queries, 3-minute Linux kernel indexing. Single static binary, no API key.">
+    <meta property="og:description" content="155 languages and bounded graph queries. Complete tasks were 57.9% faster than shell tools on 22 source-correct matched pairs in a controlled warm-index C++ benchmark.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://tigercosmos.github.io/code-cortex-mcp">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="code-cortex-mcp — Codebase Knowledge Graph MCP Server for AI Agents">
-    <meta name="twitter:description" content="155 languages, sub-millisecond graph queries, 3-minute Linux kernel indexing. Single static binary, no API key.">
+    <meta name="twitter:description" content="155 languages and bounded graph queries. Complete tasks were 57.9% faster than shell tools on 22 source-correct matched pairs in a controlled warm-index C++ benchmark.">
 
     <link rel="canonical" href="https://tigercosmos.github.io/code-cortex-mcp">
 
@@ -162,7 +162,7 @@
         <p class="tagline">
             A local MCP server that gives AI coding agents a knowledge graph of your codebase:
             functions, classes, call graphs, HTTP routes, and cross-service links.
-            One graph query replaces dozens of grep-and-read cycles.
+            Graph queries can replace repeated searches when a task depends on indexed relationships.
         </p>
         <div>
             <div class="stat">
@@ -170,16 +170,16 @@
                 <div class="label">languages</div>
             </div>
             <div class="stat">
-                <div class="number">3 min</div>
+                <div class="number">4.4 min</div>
                 <div class="label">Linux kernel index</div>
             </div>
             <div class="stat">
                 <div class="number">2.4×</div>
-                <div class="label">median indexing speedup vs upstream</div>
+                <div class="label">2026-08-25 cold-index median</div>
             </div>
             <div class="stat">
-                <div class="number">13</div>
-                <div class="label">agents configured</div>
+                <div class="number">57.9%</div>
+                <div class="label">warm C++ task reduction vs shell</div>
             </div>
         </div>
         <div class="cta-buttons">
@@ -211,16 +211,39 @@
     <section>
         <h2>How it works</h2>
         <div class="install-block">
-            <span class="comment">You:    "what calls ProcessOrder?"</span><br>
-            <span class="cmd">Agent:  trace_path(function_name="ProcessOrder", mode="calls")</span><br>
-            <span class="comment">Engine: runs the graph traversal, returns structured results</span><br>
+            <span class="comment">You:    "find the call path from ReceiveOrder to SaveOrder"</span><br>
+            <span class="cmd">Agent:  trace_path(function_name="SaveOrder", from_function="ReceiveOrder", direction="inbound", max_work=10000)</span><br>
+            <span class="comment">Engine: returns one bounded path and explicit result-state fields</span><br>
             <span class="comment">Agent:  explains the call chain in plain English</span>
         </div>
         <p>
             The engine parses every file with <a href="https://tree-sitter.github.io/tree-sitter/">tree-sitter</a>,
             resolves calls and types (LSP-style hybrid resolution for Go, C, C++, TypeScript/JavaScript,
             Java, Kotlin, Rust, Python, PHP, and C#), and stores the graph in SQLite.
-            A persistent worker process then answers tool calls in well under a millisecond.
+            A persistent worker process answers warm graph queries in 0.1–0.5 ms on the measured
+            graph. Complete agent tasks include startup, retrieval, and model execution.
+        </p>
+    </section>
+
+    <section>
+        <h2>Scale architecture</h2>
+        <div class="table-wrap">
+        <table>
+            <thead><tr><th>Area</th><th>Previous path</th><th>Current bounded path</th></tr></thead>
+            <tbody>
+                <tr><td>Extraction state</td><td>Full file results remained in memory through resolution.</td><td><code>CBM_RESULT_STORE=1</code> stores full results in temporary storage and retains compact summaries.</td></tr>
+                <tr><td>Known call chain</td><td>A broad trace could explore unrelated callers.</td><td><code>from_function</code> searches forward from the known entry point.</td></tr>
+                <tr><td>Traversal state</td><td>Depth and output limits did not identify exhausted search work.</td><td><code>max_work</code>, <code>path_found</code>, and <code>traversal_truncated</code> expose the bound and outcome.</td></tr>
+                <tr><td>Release check</td><td>MCP initialization started a background check.</td><td><code>CBM_UPDATE_CHECK=0</code> disables it for sealed runs.</td></tr>
+            </tbody>
+        </table>
+        </div>
+        <p class="muted">
+            Temporary extraction storage is run-local and not durable. The memory budget is a soft
+            back-pressure target, not a hard resident-memory limit. The result store has a 64 GiB
+            per-run limit and needs sufficient free space on the system temporary volume. An
+            <code>ENOSPC</code> store-write failure cancels the run; free space before retrying.
+            <a href="https://github.com/tigercosmos/code-cortex-mcp/blob/main/docs/ARCHITECTURE.md">Architecture details</a>.
         </p>
     </section>
 
@@ -231,15 +254,17 @@
             <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
             <tbody>
                 <tr><td><code>index_repository</code>, <code>index_status</code>, <code>list_projects</code>, <code>delete_project</code></td><td>Index and manage projects</td></tr>
+                <tr><td><code>inspect_symbol</code></td><td>Definition, source head, callers, tests, and trust signals</td></tr>
                 <tr><td><code>search_graph</code></td><td>Search by label, name pattern, file pattern, or degree</td></tr>
-                <tr><td><code>trace_path</code></td><td>Callers, callees, data flow, and cross-service chains</td></tr>
+                <tr><td><code>trace_path</code></td><td>Callers, callees, and bounded endpoint, data-flow, or cross-service paths</td></tr>
                 <tr><td><code>query_graph</code></td><td>Read-only Cypher-subset queries</td></tr>
                 <tr><td><code>get_code_snippet</code></td><td>Source of a symbol by qualified name</td></tr>
                 <tr><td><code>get_architecture</code></td><td>Languages, packages, routes, hotspots, clusters, cycles, ADRs</td></tr>
                 <tr><td><code>get_graph_schema</code></td><td>Node and edge counts, property shapes</td></tr>
                 <tr><td><code>search_code</code></td><td>Graph-augmented grep over indexed files</td></tr>
                 <tr><td><code>detect_changes</code></td><td>Blast radius of a git diff</td></tr>
-                <tr><td><code>manage_adr</code></td><td>Architecture Decision Records</td></tr>
+                <tr><td><code>manage_adr</code></td><td>Read or replace Architecture Decision Records</td></tr>
+                <tr><td><code>ingest_traces</code></td><td>Runtime trace ingestion stub</td></tr>
             </tbody>
         </table>
         </div>
@@ -247,6 +272,32 @@
 
     <section>
         <h2>Performance</h2>
+        <h3>Complete agent tasks</h3>
+        <p>
+            A controlled 2026-09-10 Linux run serialized 64 fresh <code>gpt-5.6-sol</code>
+            sessions. The timer included MCP startup, tool discovery, retrieval, topology checks,
+            and model execution. Lower ratios are faster.
+        </p>
+        <div class="table-wrap">
+        <table class="num">
+            <thead><tr><th>Comparison</th><th>Eligible pairs</th><th>Geometric ratio</th><th>Reduction</th></tr></thead>
+            <tbody>
+                <tr><td>Code Cortex / shell</td><td>22 / 24</td><td>0.421</td><td class="win">57.9%</td></tr>
+                <tr><td>Code Cortex / upstream</td><td>14 / 16</td><td>0.626</td><td class="win">37.4%</td></tr>
+                <tr><td>Upstream / shell</td><td>16 / 16</td><td>0.712</td><td class="win">28.8%</td></tr>
+            </tbody>
+        </table>
+        </div>
+        <p class="muted">
+            Each row includes only terminal, source-correct, exact matched pairs. Two Code Cortex
+            answers on 1M-line chain tasks added text to required symbol names. They were excluded
+            without retry or time imputation. The run covered warm synthetic C++ indexes at 10K,
+            1M, and 100M lines. It did not cover edits, cold indexing, all languages, or all tasks.
+            Upstream has no 100M timing because indexing exceeded sealed 4 GiB and 32 GiB budgets.
+            <a href="https://github.com/tigercosmos/code-cortex-mcp/blob/main/docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md">Full results and receipts</a>.
+        </p>
+
+        <h3>Full indexing and warm queries</h3>
         <p class="muted">Full index from an empty cache, median of three runs. Apple M3 Max (14 cores, 36 GB) and a 32-core Linux machine (62 GB), release builds.</p>
         <div class="table-wrap">
         <table class="num">
@@ -266,7 +317,7 @@
             </tbody>
         </table>
         </div>
-        <p class="muted">Peak RAM is the peak resident set size on the M3 Max at 14 workers. It follows how much the extractors produce rather than repository size, and indexing is where it goes &mdash; answering queries afterwards reads the SQLite file and needs almost none of it. The indexer throttles its own workers against a budget derived from total RAM, so a smaller machine still finishes, more slowly.</p>
+        <p class="muted">Peak RAM is the peak resident set size on the M3 Max at 14 workers. It follows extractor output rather than repository size. The memory budget applies soft back-pressure; it is not a hard resident-memory limit. Set <code>CBM_RESULT_STORE=1</code> to move full extraction results to bounded temporary storage while compact registry summaries remain in memory.</p>
     </section>
 
     <section>
@@ -287,6 +338,14 @@
             <div class="feature">
                 <h3>Crash isolation</h3>
                 <p>A supervisor contains per-file crashes and hangs during indexing. A persistent worker answers tool calls with a per-tool deadline.</p>
+            </div>
+            <div class="feature">
+                <h3>Bounded scale path</h3>
+                <p>An optional result store moves full extraction state to temporary storage. Compact summaries remain in memory for resolution.</p>
+            </div>
+            <div class="feature">
+                <h3>Directed endpoint traces</h3>
+                <p><code>from_function</code> and <code>max_work</code> bound known call-chain searches. Result fields distinguish no path from truncated work.</p>
             </div>
             <div class="feature">
                 <h3>Preprocessor-aware C/C++</h3>
@@ -312,8 +371,9 @@
         <p>
             code-cortex-mcp forked from
             <a href="https://github.com/DeusData/codebase-memory-mcp">DeusData/codebase-memory-mcp</a>
-            and keeps its on-disk graph format. It indexes faster and answers most tool calls faster.
-            codebase-memory-mcp has features that code-cortex-mcp does not; the feature table names them.
+            and keeps its on-disk graph format. Historical cold-index and warm-tool measurements
+            show lower times for most measured operations. The complete-task table above measures
+            the newer agent-task boundary. codebase-memory-mcp retains features that this fork omits.
         </p>
         <p class="muted">
             Measured 2026-08-25 on an Apple M3 Max (14 cores, 36 GB) and a 32-core Linux machine (62 GB):
@@ -374,7 +434,7 @@
                 <tr><td>Integrity memo for cold starts</td><td class="win"><code>_config.db</code></td><td>none</td></tr>
                 <tr><td>Languages</td><td>155</td><td class="win">158</td></tr>
                 <tr><td>Hybrid LSP resolvers</td><td>10</td><td class="win">11 (adds Perl)</td></tr>
-                <tr><td>MCP tools</td><td>14</td><td class="win">15 (adds <code>check_index_coverage</code>)</td></tr>
+                <tr><td>MCP tools</td><td>15</td><td>15</td></tr>
                 <tr><td>Reference precision (<code>CALL_REFERENCE</code> / <code>USAGE</code>)</td><td>no</td><td class="win">yes</td></tr>
                 <tr><td>Session coordination daemon</td><td>no</td><td class="win">yes</td></tr>
                 <tr><td>3D graph web UI</td><td>no</td><td class="win">yes</td></tr>
@@ -398,6 +458,7 @@
             (<a href="https://arxiv.org/abs/2603.27277">arXiv:2603.27277</a>).<br>
             <a href="https://github.com/tigercosmos/code-cortex-mcp">GitHub</a> &middot;
             <a href="https://github.com/tigercosmos/code-cortex-mcp/releases/latest">Releases</a> &middot;
+            <a href="https://github.com/tigercosmos/code-cortex-mcp/blob/main/docs/ARCHITECTURE.md">Architecture</a> &middot;
             <a href="https://github.com/tigercosmos/code-cortex-mcp/blob/main/README.md">README</a>
         </p>
     </div>

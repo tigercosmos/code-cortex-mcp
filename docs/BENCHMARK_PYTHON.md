@@ -1,11 +1,10 @@
-# Python LSP — Phase 11 benchmark methodology
+# Python LSP resolver benchmark
 
 This document describes how to measure the Python LSP type resolver
-(`internal/cbm/lsp/py_lsp.c`, Phases 0–10) against real Python code.
-Numbers from a specific corpus run can be appended in a "Results"
-section as new measurements land.
+(`internal/cbm/lsp/py_lsp.cpp`) against real Python code. Add new corpus
+measurements to the results section.
 
-## Targets (locked in PYTHON_LSP_PLAN.md)
+## Targets
 
 | Metric | Target |
 |---|---|
@@ -68,15 +67,12 @@ scripts/benchmark-index.sh \
   ~/project_dir/datadice/falkemedia \
   /tmp/py-bench-results
 
-# 3. Compute the resolution ratio. The benchmark dumps node/edge counts
-#    plus per-file timings; cross-reference with calls / resolved_calls
-#    via the MCP graph queries:
-code-cortex-mcp query \
-  "MATCH ()-[r:CALLS]->() WHERE r.strategy STARTS WITH 'lsp_' \
-   RETURN count(r) AS lsp_resolved"
+# 3. Query the graph after indexing.
+code-cortex-mcp cli query_graph \
+  --query 'MATCH ()-[r:CALLS]->() WHERE r.strategy STARTS WITH "lsp_" RETURN count(r) AS lsp_resolved'
 
-code-cortex-mcp query \
-  "MATCH ()-[r:CALLS]->() RETURN count(r) AS total_resolved"
+code-cortex-mcp cli query_graph \
+  --query 'MATCH ()-[r:CALLS]->() RETURN count(r) AS total_resolved'
 ```
 
 ### Manual spot-check
@@ -95,7 +91,7 @@ construct (e.g. `getattr`-style dispatch).
 
 ## Results
 
-### In-process benchmark (test_py_lsp_bench.c)
+### In-process benchmark (`tests/test_py_lsp_bench.cpp`)
 
 | Date | Commit | Fixture LOC | Calls | Resolved | Ratio | Time (ASan+UBSan) |
 |---|---|---:|---:|---:|---:|---:|
@@ -120,8 +116,8 @@ match/case dispatch, classmethod / staticmethod, common stdlib calls,
 and instance attributes via both `self.x = expr` in `__init__` and
 class-body `x: T` annotations.
 
-The remaining 5% gap (2/38 unresolved calls) hits cases that genuinely
-need a constraint solver — see "Stopping Point" below.
+The final fixture row resolves 52 of 52 calls. This fixture result does not remove the
+dynamic-language limits in the next section.
 
 ## Stopping Point — what we deliberately did not build
 
@@ -171,7 +167,7 @@ Items 1, 2, 3, 5, 7 are direct compiler-rebuild territory. Items 4,
 6 need significant per-pattern engineering. Item 8 is impossible
 statically. Item 9 is achievable but a separate v1.1 task.
 
-## Stress-test surface (test_py_lsp_stress.c)
+## Stress-test surface (`tests/test_py_lsp_stress.cpp`)
 
 **43 advanced patterns probed individually. All hard-asserted as PASS. Zero remaining KNOWN GAPs.**
 

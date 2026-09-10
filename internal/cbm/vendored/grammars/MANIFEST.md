@@ -19,7 +19,7 @@ The grammars were originally vendored as bare `parser.c`+`scanner.c` with **no r
 ## Custom extraction handling (definition extraction)
 
 The grammars below carry **custom definition-extraction support** in
-`internal/cbm/extract_defs.c` (and `internal/cbm/lang_specs.c`). Their function /
+`internal/cbm/extract_defs.cpp` (and `internal/cbm/lang_specs.cpp`). Their function /
 definition nodes do **not** expose a `name` field that the generic extractor reads
 — the name lives on a nested/child/parent node, or (for the Lisp family) a
 definition is a macro form inside a generic `list` node with no dedicated def
