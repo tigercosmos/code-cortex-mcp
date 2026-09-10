@@ -142,7 +142,7 @@ The exact commit will remain available after newer releases change `main`.
 ```bash
 git clone https://github.com/tigercosmos/code-cortex-mcp.git
 cd code-cortex-mcp
-git checkout REPRODUCTION_COMMIT
+git checkout 7cfdd1c5dda39606eeb02f5c2469660ac0057bdf
 ```
 
 The configuration also pins every reused fixture and frozen harness file by SHA-256.
