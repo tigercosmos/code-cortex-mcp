@@ -1,7 +1,0 @@
-{
-  "omitted": "hidden reasoning and system/developer message bodies",
-  "retained_records": 11,
-  "source_bytes": 36950,
-  "source_path": "/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/scratch/home/sessions/e78d9a2ada9d2a14/1m-lookup-3-mcp-context/sessions/2026/09/09/rollout-2026-09-09T18-15-29-01a08573-6cf9-7352-a5ac-721ac60b806d.jsonl",
-  "source_sha256": "6afb59f5694194bfd66bc9d589e4c2488392e068b9f7d5843dbbab10ef772731"
-}

@@ -1,4 +1,0 @@
-{"type":"thread.started","thread_id":"01a08571-e4fc-7fd1-8cd8-89b74edfaac1"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"part_0072/unit_072229.cpp:351"}}
-{"type":"turn.completed","usage":{"input_tokens":9580,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":15,"reasoning_output_tokens":0}}

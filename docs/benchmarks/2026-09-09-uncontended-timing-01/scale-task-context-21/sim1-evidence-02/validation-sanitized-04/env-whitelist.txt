@@ -1,5 +1,0 @@
-HOME=/home/anchi/code-cortex-mcp-goal-20260909/scratch-sanitized-04/home
-XDG_CACHE_HOME=/home/anchi/code-cortex-mcp-goal-20260909/scratch-sanitized-04/xdg-cache
-TMPDIR=/home/anchi/code-cortex-mcp-goal-20260909/scratch-sanitized-04/tmp
-CBM_CACHE_DIR=<unset>
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin

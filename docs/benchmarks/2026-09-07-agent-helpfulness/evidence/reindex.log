@@ -1,9 +1,0 @@
-03:39:24 /Users/tigercosmos/_bench/jansson -> Users-tigercosmos-_bench-jansson indexed nodes= 1011 edges= 4084 partial= 17 err= None (0 s)
-03:39:25 /Users/tigercosmos/_bench/lz4 -> Users-tigercosmos-_bench-lz4 indexed nodes= 2378 edges= 5982 partial= 35 err= None (1 s)
-03:39:25 /Users/tigercosmos/elfuse -> Users-tigercosmos-elfuse indexed nodes= 3666 edges= 9930 partial= 18 err= None (0 s)
-03:39:27 /Users/tigercosmos/PcapPlusPlus -> Users-tigercosmos-PcapPlusPlus indexed nodes= 12855 edges= 46923 partial= 57 err= None (2 s)
-03:39:28 /Users/tigercosmos/modmesh -> Users-tigercosmos-modmesh indexed nodes= 12545 edges= 63282 partial= 61 err= None (1 s)
-03:39:35 /Users/tigercosmos/Yatagarasu -> Users-tigercosmos-Yatagarasu indexed nodes= 84634 edges= 286287 partial= 334 err= None (7 s)
-03:39:54 /Users/tigercosmos/cgal -> Users-tigercosmos-cgal indexed nodes= 118012 edges= 686762 partial= 1974 err= None (19 s)
-03:40:09 /Users/tigercosmos/_bench/opencv -> Users-tigercosmos-_bench-opencv indexed nodes= 126245 edges= 684400 partial= 2116 err= None (15 s)
-REINDEX DONE

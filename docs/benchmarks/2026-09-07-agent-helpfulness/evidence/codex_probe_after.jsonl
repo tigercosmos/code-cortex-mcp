@@ -1,8 +1,0 @@
-{"cfg": "optional", "rep": 1, "wall_s": 5.89, "rc": 0, "mcp_call_events": 0, "verdict": "missing", "final": "TOOL_MISSING", "stderr_tail": "Reading additional input from stdin..."}
-{"cfg": "required", "rep": 1, "wall_s": 9.38, "rc": 0, "mcp_call_events": 2, "verdict": "ok", "final": "CORTEX_OK 24", "stderr_tail": "Reading additional input from stdin..."}
-{"cfg": "optional", "rep": 2, "wall_s": 11.56, "rc": 0, "mcp_call_events": 2, "verdict": "ok", "final": "CORTEX_OK 24", "stderr_tail": "Reading additional input from stdin..."}
-{"cfg": "required", "rep": 2, "wall_s": 10.2, "rc": 0, "mcp_call_events": 2, "verdict": "ok", "final": "CORTEX_OK 24", "stderr_tail": "Reading additional input from stdin..."}
-{"cfg": "optional", "rep": 3, "wall_s": 9.15, "rc": 0, "mcp_call_events": 2, "verdict": "ok", "final": "CORTEX_OK 24", "stderr_tail": "Reading additional input from stdin..."}
-{"cfg": "required", "rep": 3, "wall_s": 8.96, "rc": 0, "mcp_call_events": 2, "verdict": "ok", "final": "CORTEX_OK 24", "stderr_tail": "Reading additional input from stdin..."}
-{"cfg": "optional", "rep": 4, "wall_s": 8.87, "rc": 0, "mcp_call_events": 2, "verdict": "ok", "final": "CORTEX_OK 24", "stderr_tail": "Reading additional input from stdin..."}
-{"cfg": "required", "rep": 4, "wall_s": 9.07, "rc": 0, "mcp_call_events": 2, "verdict": "ok", "final": "CORTEX_OK 24", "stderr_tail": "Reading additional input from stdin..."}

@@ -100,6 +100,3 @@ The benchmark covers warm synthetic C++ indexes, exact lookups, and fixed three-
 10,000, 1 million, and 100 million lines. It does not cover edits, cold indexing, every language,
 or every task shape. Upstream has no 100-million-line task time because both setup attempts failed
 within sealed memory budgets.
-
-See the [complete-task results](benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md)
-and [verification instructions](benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/README.md).

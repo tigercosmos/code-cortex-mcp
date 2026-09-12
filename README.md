@@ -182,16 +182,12 @@ source-correct retrieval but added text to required symbol names. Shell complete
 upstream completed 16/16. Upstream has no 100M timing: indexing exceeded both sealed 4 GiB and
 32 GiB memory budgets, and no time was imputed. These results establish the stated benefit for
 the measured warm-index lookup and three-hop-chain tasks, not for edits, cold indexing, every
-language, or every task shape. See the [full results](docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/RESULTS.md)
-and the [verification instructions](docs/benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/README.md).
-Use the [complete reproduction kit](docs/benchmarks/complete-task-reproduction/README.md)
-to rebuild both MCPs, run the frozen 64-row schedule, and publish independently verifiable evidence.
+language, or every task shape.
 
 ### Full-index performance
 
 Full-index wall clock, median of three runs from an empty cache, on an Apple M3 Max (14 cores,
-36 GB) and a 32-core Linux machine (62 GB). The full 13-repository comparison with
-codebase-memory-mcp is in [docs/benchmarks/2026-08-25](docs/benchmarks/2026-08-25/README.md).
+36 GB) and a 32-core Linux machine (62 GB).
 
 | Repository | Lines | Nodes / edges | M3 Max | 32-core Linux | Peak RAM |
 |-----------|------:|---|------:|------:|------:|
@@ -332,8 +328,7 @@ Test conditions for every number in this section:
 ### Indexing speed
 
 Median of three full-index runs from an empty cache on 13 repositories, from Redis (0.6M lines)
-to llvm-project (46.8M lines). The per-repository tables, graph sizes, repository commits, and
-raw per-run data are in [docs/benchmarks/2026-08-25](docs/benchmarks/2026-08-25/README.md).
+to llvm-project (46.8M lines).
 
 | | Apple M3 Max (14 cores, 36 GB) | 32-core Linux (62 GB) |
 |---|---|---|

@@ -1,8 +1,0 @@
-{
-  "callees_limit": 0,
-  "callers_limit": 0,
-  "max_bytes": 4000,
-  "project": "scale-task-context-21-1m",
-  "source_lines": 2,
-  "symbol": "capacity_function_796"
-}

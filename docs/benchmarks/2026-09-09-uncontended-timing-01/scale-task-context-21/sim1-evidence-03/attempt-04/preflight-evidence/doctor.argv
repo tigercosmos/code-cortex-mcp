@@ -1,1 +1,0 @@
-env CODEXMON_CODEX=/home/anchi/.codex/packages/standalone/releases/0.152.1-x86_64-unknown-linux-musl/bin/codex /home/anchi/.local/bin/codexmon doctor --agent codex --json

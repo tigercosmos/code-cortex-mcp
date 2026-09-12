@@ -6,7 +6,7 @@
 # <bench_dir>/<repo> must be a checkout. Each run starts from an empty
 # CBM_CACHE_DIR, calls `cli index_repository` in full mode, and appends one CSV
 # row: engine,repo,run,seconds,nodes,edges,exit. Works with code-cortex-mcp and
-# codebase-memory-mcp binaries alike. See docs/benchmarks/ for recorded results.
+# codebase-memory-mcp binaries alike. Store the output outside the repository.
 set -u
 BIN="$1"; ENGINE="$2"; B="$3"; OUT="$4"; RUNS="$5"; shift 5
 CACHE="$(mktemp -d)"

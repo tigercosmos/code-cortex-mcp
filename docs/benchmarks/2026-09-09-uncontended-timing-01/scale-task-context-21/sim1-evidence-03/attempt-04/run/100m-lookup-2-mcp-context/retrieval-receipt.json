@@ -1,9 +1,0 @@
-{
-  "backend": "production_mcp_stdio_jsonrpc",
-  "context_bytes": 539,
-  "observed": "part_0029/unit_029979.cpp:101",
-  "payload_sha256": "410681ec28370bb7c86fd4be99685a44454be294cc4224ece87a051529753875",
-  "source_oracle_correct": true,
-  "tool": "inspect_symbol",
-  "wall_seconds": 0.0009051873348653316
-}

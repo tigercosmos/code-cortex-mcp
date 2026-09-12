@@ -1,9 +1,0 @@
-{
-  "cgroup": "0::/user.slice/user-1001.slice/user@1001.service/app.slice/cbm-v743-setup-86bd5949ed97235b9da416b02294fa3b.service",
-  "cgroup_path": "/user.slice/user-1001.slice/user@1001.service/app.slice/cbm-v743-setup-86bd5949ed97235b9da416b02294fa3b.service",
-  "nonce": "86bd5949ed97235b9da416b02294fa3b",
-  "role": "setup",
-  "schema": "v743-exact-user-systemd-scope-receipt",
-  "unit": "cbm-v743-setup-86bd5949ed97235b9da416b02294fa3b.service",
-  "verified": true
-}

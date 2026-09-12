@@ -1,3 +1,0 @@
-/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/protocol/protocol.json: OK
-/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/protocol/schedule.json: OK
-/home/anchi/code-cortex-mcp-goal-20260909/scale-task-context-21-attempt-04/protocol/tasks.json: OK

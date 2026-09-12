@@ -1,8 +1,0 @@
-{
-  "argv": [
-    "./build/nosan/test-runner"
-  ],
-  "cwd": "/Users/tigercosmos/code-cortex-mcp",
-  "started_epoch": 1788925150.223655,
-  "timeout_seconds": 1200
-}

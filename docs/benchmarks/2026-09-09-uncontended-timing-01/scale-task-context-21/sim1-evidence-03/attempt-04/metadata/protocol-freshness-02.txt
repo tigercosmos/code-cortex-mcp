@@ -1,9 +1,0 @@
-tasks_differ=True
-answers_differ=True
-counts_balance_identical=True
-primary_pass_criteria_identical=True
-limits_identical=True
-new_task_count=24
-new_schedule_count=48
-new_counts={'100m:multi-step': 4, '100m:one-shot': 4, '10k:multi-step': 4, '10k:one-shot': 4, '1m:multi-step': 4, '1m:one-shot': 4}
-new_arms={'mcp-context': 24, 'shell': 24}

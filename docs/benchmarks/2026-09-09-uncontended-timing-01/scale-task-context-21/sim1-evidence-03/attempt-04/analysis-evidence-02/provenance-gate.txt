@@ -1,5 +1,0 @@
-head_status_diff_match_preflight=true
-protocol_hashes_verified=true
-frozen_setup_hashes_verified=true
-post_source_oracle_24_of_24=true
-source_manifest_audit_unchanged=true
