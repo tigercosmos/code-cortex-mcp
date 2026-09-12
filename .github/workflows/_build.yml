@@ -99,9 +99,21 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           if [ -n "$VERSION" ]; then
-            scripts/build.sh --version "$VERSION" CC=clang CXX=clang++
+            scripts/build.sh --version "$VERSION" CC=clang CXX=clang++ STATIC=1
           else
-            scripts/build.sh CC=clang CXX=clang++
+            scripts/build.sh CC=clang CXX=clang++ STATIC=1
+          fi
+
+      - name: Verify static runtime linking
+        shell: msys2 {0}
+        run: |
+          BIN=build/c/code-cortex-mcp
+          [ -f "${BIN}.exe" ] && BIN="${BIN}.exe"
+          IMPORTS=$(llvm-objdump -p "$BIN" | sed -n 's/^[[:space:]]*DLL Name: //p')
+          printf '%s\n' "$IMPORTS"
+          if printf '%s\n' "$IMPORTS" | grep -Eiq '^(libc\+\+|libunwind|libwinpthread-1|zlib1)\.dll$'; then
+            echo "FAIL: Windows binary imports a toolchain runtime DLL"
+            exit 1
           fi
 
       - name: Archive standard binary

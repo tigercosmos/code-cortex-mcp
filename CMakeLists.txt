@@ -42,7 +42,7 @@ endif()
 
 # Production-binary knobs (mirror Makefile.cbm's CFLAGS_EXTRA / STATIC / with-ui).
 set(CBM_VERSION "dev" CACHE STRING "Version string baked into the binary")
-option(CBM_STATIC  "Link the production binary fully static (musl/Alpine portable builds)" OFF)
+option(CBM_STATIC  "Link the production binary fully static (portable Linux and Windows builds)" OFF)
 add_compile_definitions(CBM_VERSION="${CBM_VERSION}")
 
 # ── Common flags ────────────────────────────────────────────────
