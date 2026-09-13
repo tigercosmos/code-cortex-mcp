@@ -386,34 +386,6 @@ static const char *rust_lookup_prelude(const char *name) {
     return NULL;
 }
 
-/* Strip a leading `&` / `&mut` reference prefix from a textual type so we
- * can compare the inner head segment against builtins. */
-static const char *skip_ref_prefix(const char *text) {
-    if (!text) {
-        return text;
-    }
-    while (*text == '&' || isspace((unsigned char)*text)) {
-        text++;
-    }
-    if (strncmp(text, "mut ", 4) == 0) {
-        text += 4;
-        while (isspace((unsigned char)*text)) {
-            text++;
-        }
-    }
-    /* Also strip a single explicit lifetime: `'a ` */
-    if (*text == '\'') {
-        text++;
-        while (*text && (isalnum((unsigned char)*text) || *text == '_')) {
-            text++;
-        }
-        while (isspace((unsigned char)*text)) {
-            text++;
-        }
-    }
-    return text;
-}
-
 /* Resolve a Rust *path expression* (e.g. `Foo::bar` or `crate::x::y`)
  * into a canonical QN. The resolver cascades through these rules,
  * matching what `rust-analyzer`'s name resolver does at the path level:

@@ -1770,11 +1770,6 @@ static void walk_with_narrowings(PHPLSPContext *ctx, TSNode body,
     ctx->current_scope = saved;
 }
 
-/* Backwards-compat single-binding wrapper. */
-[[maybe_unused]] static void walk_with_narrowing(PHPLSPContext *ctx, TSNode body, const php_narrowing_t *nw) {
-    walk_with_narrowings(ctx, body, nw, nw ? 1 : 0);
-}
-
 /* Detect whether a statement node is a "leaves the function" terminator:
  *   return;  return $x;  throw ...;  exit;  die;  continue (in a loop);
  *   break (in a loop). For our purposes any of these means the rest of the
