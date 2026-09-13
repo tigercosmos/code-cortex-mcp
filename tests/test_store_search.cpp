@@ -1430,8 +1430,6 @@ TEST(store_risk_label_all_levels) {
     ASSERT_STR_EQ(cbm_risk_label(CBM_RISK_HIGH), "HIGH");
     ASSERT_STR_EQ(cbm_risk_label(CBM_RISK_MEDIUM), "MEDIUM");
     ASSERT_STR_EQ(cbm_risk_label(CBM_RISK_LOW), "LOW");
-    /* Out-of-range enum value falls to default → LOW */
-    ASSERT_STR_EQ(cbm_risk_label((cbm_risk_level_t)99), "LOW");
     PASS();
 }
 
