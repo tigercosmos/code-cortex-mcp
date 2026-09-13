@@ -4162,6 +4162,20 @@ static void arch_bind_path_scope(sqlite3_stmt *stmt, int exact_idx, int like_idx
     bind_text(stmt, like_idx, like_pat);
 }
 
+static int arch_prepare_stmt(cbm_store_t *s, const char *sql, const char *project, bool scoped,
+                             const char *norm, const char *like_pat, const char *error_context,
+                             sqlite3_stmt **stmt) {
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, error_context);
+        return CBM_STORE_ERR;
+    }
+    bind_text(*stmt, SKIP_ONE, project);
+    if (scoped) {
+        arch_bind_path_scope(*stmt, ST_COL_2, ST_COL_3, norm, like_pat);
+    }
+    return CBM_STORE_OK;
+}
+
 bool cbm_store_arch_path_scoped(const char *path) {
     char norm[CBM_SZ_512];
     char like[CBM_SZ_512 + 4];
@@ -4719,13 +4733,9 @@ static int arch_languages(cbm_store_t *s, const char *project, const char *path,
         snprintf(sqlbuf, sizeof(sqlbuf), "%s", base);
     }
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db, sqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "arch_languages");
+    if (arch_prepare_stmt(s, sqlbuf, project, scoped, norm, like, "arch_languages", &stmt) !=
+        CBM_STORE_OK) {
         return CBM_STORE_ERR;
-    }
-    bind_text(stmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
     }
 
     /* Count per language using a simple parallel array */
@@ -4807,13 +4817,9 @@ static int arch_entry_points(cbm_store_t *s, const char *project, const char *pa
         snprintf(sqlbuf, sizeof(sqlbuf), "%s LIMIT 20", base);
     }
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db, sqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "arch_entry_points");
+    if (arch_prepare_stmt(s, sqlbuf, project, scoped, norm, like, "arch_entry_points", &stmt) !=
+        CBM_STORE_OK) {
         return CBM_STORE_ERR;
-    }
-    bind_text(stmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
     }
 
     int cap = ST_INIT_CAP_8;
@@ -4883,13 +4889,9 @@ static int arch_routes(cbm_store_t *s, const char *project, const char *path,
         snprintf(sqlbuf, sizeof(sqlbuf), "%s LIMIT 20", base);
     }
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db, sqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "arch_routes");
+    if (arch_prepare_stmt(s, sqlbuf, project, scoped, norm, like, "arch_routes", &stmt) !=
+        CBM_STORE_OK) {
         return CBM_STORE_ERR;
-    }
-    bind_text(stmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
     }
 
     int cap = ST_INIT_CAP_8;
@@ -4964,13 +4966,9 @@ static int arch_hotspots(cbm_store_t *s, const char *project, const char *path,
         snprintf(sqlbuf, sizeof(sqlbuf), "%s GROUP BY n.id ORDER BY fan_in DESC LIMIT 10", base);
     }
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db, sqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "arch_hotspots");
+    if (arch_prepare_stmt(s, sqlbuf, project, scoped, norm, like, "arch_hotspots", &stmt) !=
+        CBM_STORE_OK) {
         return CBM_STORE_ERR;
-    }
-    bind_text(stmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
     }
 
     int cap = ST_INIT_CAP_8;
@@ -5058,13 +5056,9 @@ static int arch_boundaries(cbm_store_t *s, const char *project, const char *path
         snprintf(nsqlbuf, sizeof(nsqlbuf), "%s ORDER BY id", nbase);
     }
     sqlite3_stmt *nstmt = NULL;
-    if (sqlite3_prepare_v2(s->db, nsqlbuf, CBM_NOT_FOUND, &nstmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "arch_boundaries_nodes");
+    if (arch_prepare_stmt(s, nsqlbuf, project, scoped, norm, like, "arch_boundaries_nodes",
+                          &nstmt) != CBM_STORE_OK) {
         return CBM_STORE_ERR;
-    }
-    bind_text(nstmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(nstmt, ST_COL_2, ST_COL_3, norm, like);
     }
 
     int ncap = CBM_SZ_256;
@@ -5211,13 +5205,9 @@ static int arch_packages_from_qn(cbm_store_t *s, const char *project, const char
         snprintf(qsqlbuf, sizeof(qsqlbuf), "%s", qbase);
     }
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db, qsqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "arch_packages_qn");
+    if (arch_prepare_stmt(s, qsqlbuf, project, scoped, norm, like, "arch_packages_qn", &stmt) !=
+        CBM_STORE_OK) {
         return CBM_STORE_ERR;
-    }
-    bind_text(stmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
     }
 
     char *pnames[CBM_SZ_64];
@@ -5303,13 +5293,9 @@ static int arch_packages(cbm_store_t *s, const char *project, const char *path,
         snprintf(sqlbuf, sizeof(sqlbuf), "%s GROUP BY n.name ORDER BY cnt DESC LIMIT 15", base);
     }
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db, sqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "arch_packages");
+    if (arch_prepare_stmt(s, sqlbuf, project, scoped, norm, like, "arch_packages", &stmt) !=
+        CBM_STORE_OK) {
         return CBM_STORE_ERR;
-    }
-    bind_text(stmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
     }
 
     int cap = ST_INIT_CAP_16;
@@ -5745,13 +5731,9 @@ static int arch_file_tree(cbm_store_t *s, const char *project, const char *path,
         snprintf(sqlbuf, sizeof(sqlbuf), "%s", base);
     }
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(s->db, sqlbuf, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
-        store_set_error_sqlite(s, "arch_file_tree");
+    if (arch_prepare_stmt(s, sqlbuf, project, scoped, norm, like, "arch_file_tree", &stmt) !=
+        CBM_STORE_OK) {
         return CBM_STORE_ERR;
-    }
-    bind_text(stmt, SKIP_ONE, project);
-    if (scoped) {
-        arch_bind_path_scope(stmt, ST_COL_2, ST_COL_3, norm, like);
     }
 
     int fcap = CBM_SZ_32;
