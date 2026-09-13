@@ -903,7 +903,11 @@ int cbm_install_editor_mcp(const char *binary_path, const char *config_path) {
     return rc;
 }
 
-int cbm_remove_editor_mcp(const char *config_path) {
+/* Remove the current and legacy server entries from a JSON object at a fixed
+ * one- or two-key path. Missing/non-object containers are successful no-ops
+ * and are not written back, matching each editor-specific removal contract. */
+static int remove_json_mcp_entry(const char *config_path, const char *container_key,
+                                 const char *nested_key) {
     if (!config_path) {
         return CLI_ERR;
     }
@@ -922,10 +926,17 @@ int cbm_remove_editor_mcp(const char *config_path) {
     }
     yyjson_mut_doc_set_root(mdoc, root);
 
-    yyjson_mut_val *servers = yyjson_mut_obj_get(root, "mcpServers");
+    yyjson_mut_val *servers = yyjson_mut_obj_get(root, container_key);
     if (!servers || !yyjson_mut_is_obj(servers)) {
         yyjson_mut_doc_free(mdoc);
         return 0;
+    }
+    if (nested_key) {
+        servers = yyjson_mut_obj_get(servers, nested_key);
+        if (!servers || !yyjson_mut_is_obj(servers)) {
+            yyjson_mut_doc_free(mdoc);
+            return 0;
+        }
     }
 
     yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
@@ -934,6 +945,10 @@ int cbm_remove_editor_mcp(const char *config_path) {
     int rc = write_json_file(config_path, mdoc);
     yyjson_mut_doc_free(mdoc);
     return rc;
+}
+
+int cbm_remove_editor_mcp(const char *config_path) {
+    return remove_json_mcp_entry(config_path, "mcpServers", NULL);
 }
 
 /* ── OpenClaw MCP (nested mcp.servers with command + args) ────── */
@@ -990,42 +1005,7 @@ int cbm_install_openclaw_mcp(const char *binary_path, const char *config_path) {
 }
 
 int cbm_remove_openclaw_mcp(const char *config_path) {
-    if (!config_path) {
-        return CLI_ERR;
-    }
-
-    yyjson_doc *doc = read_json_file(config_path);
-    if (!doc) {
-        return CLI_ERR;
-    }
-
-    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-    yyjson_doc_free(doc);
-    if (!root) {
-        yyjson_mut_doc_free(mdoc);
-        return CLI_ERR;
-    }
-    yyjson_mut_doc_set_root(mdoc, root);
-
-    yyjson_mut_val *mcp = yyjson_mut_obj_get(root, "mcp");
-    if (!mcp || !yyjson_mut_is_obj(mcp)) {
-        yyjson_mut_doc_free(mdoc);
-        return 0;
-    }
-
-    yyjson_mut_val *servers = yyjson_mut_obj_get(mcp, "servers");
-    if (!servers || !yyjson_mut_is_obj(servers)) {
-        yyjson_mut_doc_free(mdoc);
-        return 0;
-    }
-
-    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
-
-    int rc = write_json_file(config_path, mdoc);
-    yyjson_mut_doc_free(mdoc);
-    return rc;
+    return remove_json_mcp_entry(config_path, "mcp", "servers");
 }
 
 /* ── VS Code MCP (servers key with type:stdio) ────────────────── */
@@ -1074,36 +1054,7 @@ int cbm_install_vscode_mcp(const char *binary_path, const char *config_path) {
 }
 
 int cbm_remove_vscode_mcp(const char *config_path) {
-    if (!config_path) {
-        return CLI_ERR;
-    }
-
-    yyjson_doc *doc = read_json_file(config_path);
-    if (!doc) {
-        return CLI_ERR;
-    }
-
-    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-    yyjson_doc_free(doc);
-    if (!root) {
-        yyjson_mut_doc_free(mdoc);
-        return CLI_ERR;
-    }
-    yyjson_mut_doc_set_root(mdoc, root);
-
-    yyjson_mut_val *servers = yyjson_mut_obj_get(root, "servers");
-    if (!servers || !yyjson_mut_is_obj(servers)) {
-        yyjson_mut_doc_free(mdoc);
-        return 0;
-    }
-
-    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
-
-    int rc = write_json_file(config_path, mdoc);
-    yyjson_mut_doc_free(mdoc);
-    return rc;
+    return remove_json_mcp_entry(config_path, "servers", NULL);
 }
 
 /* ── Zed MCP (context_servers with command + args) ────────────── */
@@ -1154,36 +1105,7 @@ int cbm_install_zed_mcp(const char *binary_path, const char *config_path) {
 }
 
 int cbm_remove_zed_mcp(const char *config_path) {
-    if (!config_path) {
-        return CLI_ERR;
-    }
-
-    yyjson_doc *doc = read_json_file(config_path);
-    if (!doc) {
-        return CLI_ERR;
-    }
-
-    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-    yyjson_doc_free(doc);
-    if (!root) {
-        yyjson_mut_doc_free(mdoc);
-        return CLI_ERR;
-    }
-    yyjson_mut_doc_set_root(mdoc, root);
-
-    yyjson_mut_val *servers = yyjson_mut_obj_get(root, "context_servers");
-    if (!servers || !yyjson_mut_is_obj(servers)) {
-        yyjson_mut_doc_free(mdoc);
-        return 0;
-    }
-
-    yyjson_mut_obj_remove_key(servers, "code-cortex-mcp");
-    yyjson_mut_obj_remove_key(servers, "codebase-memory-mcp"); /* legacy pre-rename key */
-
-    int rc = write_json_file(config_path, mdoc);
-    yyjson_mut_doc_free(mdoc);
-    return rc;
+    return remove_json_mcp_entry(config_path, "context_servers", NULL);
 }
 
 /* ── Agent detection ──────────────────────────────────────────── */
@@ -1957,36 +1879,7 @@ int cbm_upsert_opencode_mcp(const char *binary_path, const char *config_path) {
 }
 
 int cbm_remove_opencode_mcp(const char *config_path) {
-    if (!config_path) {
-        return CLI_ERR;
-    }
-
-    yyjson_doc *doc = read_json_file(config_path);
-    if (!doc) {
-        return CLI_ERR;
-    }
-
-    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_val_mut_copy(mdoc, yyjson_doc_get_root(doc));
-    yyjson_doc_free(doc);
-    if (!root) {
-        yyjson_mut_doc_free(mdoc);
-        return CLI_ERR;
-    }
-    yyjson_mut_doc_set_root(mdoc, root);
-
-    yyjson_mut_val *mcp = yyjson_mut_obj_get(root, "mcp");
-    if (!mcp || !yyjson_mut_is_obj(mcp)) {
-        yyjson_mut_doc_free(mdoc);
-        return 0;
-    }
-
-    yyjson_mut_obj_remove_key(mcp, "code-cortex-mcp");
-    yyjson_mut_obj_remove_key(mcp, "codebase-memory-mcp"); /* legacy pre-rename key */
-
-    int rc = write_json_file(config_path, mdoc);
-    yyjson_mut_doc_free(mdoc);
-    return rc;
+    return remove_json_mcp_entry(config_path, "mcp", NULL);
 }
 
 /* ── Antigravity MCP config (JSON, same mcpServers format) ────── */

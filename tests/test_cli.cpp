@@ -2257,6 +2257,62 @@ TEST(cli_upsert_opencode_mcp_existing) {
     PASS();
 }
 
+TEST(cli_json_mcp_removal_paths) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-remove-mcp-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/config.json", tmpdir);
+
+    /* Invalid inputs retain the existing error behavior. */
+    ASSERT_EQ(cbm_remove_openclaw_mcp(NULL), -1);
+    ASSERT_EQ(cbm_remove_openclaw_mcp(configpath), -1);
+
+    /* Missing and non-object containers are true no-ops: do not rewrite. */
+    const char *noops[] = {
+        "{\n  \"keep\": 1\n}\n",
+        "{\n  \"mcp\": {\"other\": true},\n  \"keep\": 1\n}\n",
+        "{\n  \"mcp\": false,\n  \"keep\": 1\n}\n",
+        "{\n  \"mcp\": {\"servers\": false},\n  \"keep\": 1\n}\n",
+    };
+    for (const char *unchanged : noops) {
+        ASSERT_EQ(write_test_file(configpath, unchanged), 0);
+        ASSERT_EQ(cbm_remove_openclaw_mcp(configpath), 0);
+        ASSERT_STR_EQ(read_test_file(configpath), unchanged);
+    }
+
+    /* The nested OpenClaw path removes both current and legacy entries. */
+    ASSERT_EQ(write_test_file(configpath, "{\"mcp\":{\"servers\":{"
+                                          "\"code-cortex-mcp\":{},"
+                                          "\"codebase-memory-mcp\":{},"
+                                          "\"keep\":{}}}}"),
+              0);
+    ASSERT_EQ(cbm_remove_openclaw_mcp(configpath), 0);
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NULL(strstr(data, "code-cortex-mcp"));
+    ASSERT_NULL(strstr(data, "codebase-memory-mcp"));
+    ASSERT_NOT_NULL(strstr(data, "keep"));
+
+    /* OpenCode uses the same removal behavior at the flat root.mcp path. */
+    ASSERT_EQ(write_test_file(configpath, "{\"mcp\":{"
+                                          "\"code-cortex-mcp\":{},"
+                                          "\"codebase-memory-mcp\":{},"
+                                          "\"keep\":{}}}"),
+              0);
+    ASSERT_EQ(cbm_remove_opencode_mcp(configpath), 0);
+    data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NULL(strstr(data, "code-cortex-mcp"));
+    ASSERT_NULL(strstr(data, "codebase-memory-mcp"));
+    ASSERT_NOT_NULL(strstr(data, "keep"));
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  *  Group B: MCP Config Upsert — Antigravity
  * ═══════════════════════════════════════════════════════════════════ */
@@ -3456,6 +3512,7 @@ SUITE(cli) {
     /* OpenCode MCP config upsert (2 tests — group B) */
     RUN_TEST(cli_upsert_opencode_mcp_fresh);
     RUN_TEST(cli_upsert_opencode_mcp_existing);
+    RUN_TEST(cli_json_mcp_removal_paths);
 
     /* Antigravity MCP config upsert (2 tests — group B) */
     RUN_TEST(cli_upsert_antigravity_mcp_fresh);
