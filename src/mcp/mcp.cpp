@@ -344,6 +344,15 @@ char *cbm_mcp_text_result(const char *text, bool is_error) {
     return out;
 }
 
+/* Wrap a heap-owned payload in the MCP text result envelope and release it.
+ * Keeping this ownership step in one place prevents handler tails from
+ * accidentally leaking serialized JSON or freeing it before it is copied. */
+static char *mcp_text_result_take_owned(char *text, bool is_error) {
+    char *result = cbm_mcp_text_result(text, is_error);
+    free(text);
+    return result;
+}
+
 bool cbm_mcp_cancel_request_matches(const char *params_json, int64_t active_id,
                                     const char *active_id_str) {
     if (!params_json) {
@@ -828,9 +837,7 @@ static char *index_busy_result(const char *project = NULL) {
     }
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 static int mcp_tools_cursor_offset(const char *params_json) {
@@ -2553,9 +2560,7 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
 
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 /* verify_project_indexed — returns a heap-allocated error JSON string when the
@@ -2643,9 +2648,7 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
     cbm_store_schema_free(&schema);
     free(project);
 
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 /* Validate edge type: uppercase letters + underscore only, max 64 chars. */
@@ -3232,9 +3235,7 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     free(file_pattern);
     free(relationship);
 
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
@@ -3332,9 +3333,7 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     free(query);
     free(project);
 
-    char *res = cbm_mcp_text_result(json, false);
-    free(json);
-    return res;
+    return mcp_text_result_take_owned(json, false);
 }
 
 /* Indexing-coverage report (#963), attached to index_status: the best-effort
@@ -3475,9 +3474,7 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_doc_free(doc);
     free(project);
 
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 /* delete_project: just erase the .db file (and WAL/SHM). */
@@ -3570,9 +3567,7 @@ static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_doc_free(doc);
     free(name);
 
-    char *result = cbm_mcp_text_result(json, is_error);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, is_error);
 }
 
 /* Canonical list of valid aspect tokens for get_architecture. Single source
@@ -4365,9 +4360,7 @@ static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
     free(project);
     free(scope_path);
 
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 /* Resolve edge types from args: explicit array > mode-based > default ("CALLS").
@@ -5370,9 +5363,7 @@ static char *handle_trace_call_path_impl(cbm_mcp_server_t *srv, const char *args
         yyjson_doc_free(et_doc_keep);
     }
 
-    char *result = cbm_mcp_text_result(json, is_error);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, is_error);
 }
 
 static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
@@ -5560,9 +5551,7 @@ static char *handle_cross_repo_mode(const char *repo_path, const char *args) {
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     free(project);
-    char *out = cbm_mcp_text_result(json, false);
-    free(json);
-    return out;
+    return mcp_text_result_take_owned(json, false);
 }
 
 /* Bootstrap from artifact if no local DB exists for this project. */
@@ -5976,9 +5965,7 @@ static char *build_worker_failure_response(const char *args, cbm_proc_outcome_t 
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     free(repo_path);
-    char *result = cbm_mcp_text_result(json, true);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, true);
 }
 
 /* Drop the cached store so the next query reopens whatever the worker wrote (each
@@ -6596,9 +6583,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     free(project_name);
     free(repo_path);
 
-    char *result = cbm_mcp_text_result(json, rc != 0);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, rc != 0);
 }
 
 /* ── get_code_snippet ─────────────────────────────────────────── */
@@ -6646,9 +6631,7 @@ static char *snippet_suggestions(const char *input, cbm_node_t *nodes, int count
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
 
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 /* Enrich a mutable JSON object with key-value pairs from a node's properties_json.
@@ -7172,9 +7155,7 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     free(abs_path);
     free(source);
 
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 static char *handle_get_code_snippet(cbm_mcp_server_t *srv, const char *args) {
@@ -8855,9 +8836,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     free(base_branch);
     free(scope);
 
-    char *result = cbm_mcp_text_result(json, is_error);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, is_error);
 }
 
 /* ── manage_adr ───────────────────────────────────────────────── */
@@ -10238,9 +10217,7 @@ static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
     free(mode_str);
     free(content);
 
-    char *result = cbm_mcp_text_result(json, is_error);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, is_error);
 }
 
 /* ── ingest_traces ────────────────────────────────────────────── */
@@ -10272,9 +10249,7 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
 
-    char *result = cbm_mcp_text_result(json, false);
-    free(json);
-    return result;
+    return mcp_text_result_take_owned(json, false);
 }
 
 /* ── Tool dispatch ────────────────────────────────────────────── */
