@@ -5676,6 +5676,80 @@ TEST(extract_width_bearing_error_at_eof_still_flagged_issue1610) {
     PASS();
 }
 
+/* #1746: trailing blanks are extras owned by no node, so `ENTRYPOINT ["a"] ` +
+ * EOF parks the zero-width MISSING newline one byte short of source_len and the
+ * #1610 exact-EOF test missed it. The reporter's byte-exact controls pin the
+ * trigger to the PAIR: `] ` + EOF flagged, `] ` + newline and `]` + EOF did not. */
+TEST(extract_dockerfile_trailing_blank_at_eof_not_flagged_issue1746) {
+    static const char *const cases[] = {
+        "FROM scratch\nENTRYPOINT [\"a\"] ",     /* space + EOF — the report */
+        "FROM scratch\r\nENTRYPOINT [\"a\"] ",   /* CRLF first line */
+        "FROM scratch\nENTRYPOINT [\"a\"]\t",    /* tab + EOF */
+        "FROM scratch\nENTRYPOINT [\"a\"]\v",    /* vertical tab + EOF */
+        "FROM scratch\nENTRYPOINT [\"a\"]\f",    /* form feed + EOF */
+        "FROM scratch\nENTRYPOINT [\"a\"]  \t ", /* run of blanks + EOF */
+        "FROM scratch\nENTRYPOINT [\"a\"] \r",   /* CRLF file truncated to CR */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CBMFileResult *r = extract(cases[i], CBM_LANG_DOCKERFILE, "t", "Dockerfile");
+        ASSERT_NOT_NULL(r);
+        bool flagged = r->parse_incomplete;
+        if (flagged) {
+            fprintf(stderr, "  case %zu flagged: ranges=%s\n", i,
+                    r->error_ranges ? r->error_ranges : "(none)");
+        }
+        cbm_free_result(r);
+        if (flagged) {
+            FAIL("trailing blanks must not turn an absent final newline into parse_partial");
+        }
+    }
+    PASS();
+}
+
+/* Controls: the same bytes WITH the newline, and without the blank, stay clean
+ * — separate test so they execute even while the fixture above is RED. */
+TEST(extract_dockerfile_trailing_blank_controls_clean_issue1746) {
+    CBMFileResult *r =
+        extract("FROM scratch\nENTRYPOINT [\"a\"] \n", CBM_LANG_DOCKERFILE, "t", "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    cbm_free_result(r);
+    r = extract("FROM scratch\nENTRYPOINT [\"a\"]", CBM_LANG_DOCKERFILE, "t", "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* GUARDS: widening the tail must not swallow a genuine mid-file failure because
+ * the file happens to end in blanks, nor a WIDTH-BEARING loss at EOF (the
+ * Makefile recipe really is dropped; only zero-width nodes are excused). */
+TEST(extract_real_errors_still_flagged_with_trailing_blank_issue1746) {
+    CBMFileResult *r = extract("#include <stdio.h>\n"
+                               "\n"
+                               "void ok_before(void) { printf(\"a\"); }\n"
+                               "\n"
+                               "#ifdef FEATURE_A\n"
+                               "static int guarded(int x) {\n"
+                               "#else\n"
+                               "static int guarded_alt(int x) {\n"
+                               "#endif\n"
+                               "    return x + 1;\n"
+                               "}\n"
+                               "\n"
+                               "void ok_after(void) { printf(\"b\"); } ",
+                               CBM_LANG_C, "t", "split.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    r = extract("all:\n\techo hi ", CBM_LANG_MAKEFILE, "t", "Makefile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* #949 follow-up: an included header shifts physical lines in simplecpp's
  * expanded output. The #1050 name-on-same-line guard skipped this recoverable
  * definition; explicit source ownership mapping must restore its original
@@ -6718,6 +6792,9 @@ SUITE(extraction) {
     RUN_TEST(extract_final_newline_present_still_clean_issue1610);
     RUN_TEST(extract_missing_final_newline_across_grammars_issue1610);
     RUN_TEST(extract_width_bearing_error_at_eof_still_flagged_issue1610);
+    RUN_TEST(extract_dockerfile_trailing_blank_at_eof_not_flagged_issue1746);
+    RUN_TEST(extract_dockerfile_trailing_blank_controls_clean_issue1746);
+    RUN_TEST(extract_real_errors_still_flagged_with_trailing_blank_issue1746);
     RUN_TEST(extract_go_binary_concat_url_issue1249);
     RUN_TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249);
     RUN_TEST(extract_ts_url_builder_issue1009);
