@@ -3905,6 +3905,110 @@ TEST(extract_ts_decorators_survive_interleaved_comment) {
     PASS();
 }
 
+/* Upstream #1692: a C# attribute stack ([Foo][Bar][Baz]) compiles to separate
+ * sibling attribute_list nodes, one per bracket group. A single field lookup
+ * returned only the first, so every attribute after it was silently dropped. */
+TEST(extract_csharp_stacked_attribute_lists_issue1692) {
+    CBMFileResult *r = extract("namespace ReproNS {\n"
+                               "  public class AttrController {\n"
+                               "    [Foo]\n"
+                               "    [Bar(\"x\")]\n"
+                               "    [Baz]\n"
+                               "    public void StackedAttrsMethod() { }\n"
+                               "  }\n"
+                               "}\n",
+                               CBM_LANG_CSHARP, "t", "StackedAttrs.cs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *m = find_def_by_name(r, "StackedAttrsMethod");
+    ASSERT_NOT_NULL(m);
+    ASSERT(decorators_contain(m, "Foo"));
+    ASSERT(decorators_contain(m, "Bar"));
+    ASSERT(decorators_contain(m, "Baz"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* tree-sitter-elixir gives a call's arguments node no field name, so the
+ * generic `arguments` field lookup returns null and first_string_arg was never
+ * populated for any Elixir call — Phoenix route paths, service URLs and config
+ * keys all key off it. */
+TEST(elixir_call_string_argument) {
+    CBMFileResult *r = extract("defmodule Sample do\n"
+                               "  def run do\n"
+                               "    get(\"/wallets\", WalletController)\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "sample.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int seen = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        if (!r->calls.items[i].callee_name || strcmp(r->calls.items[i].callee_name, "get") != 0) {
+            continue;
+        }
+        seen = 1;
+        ASSERT_NOT_NULL(r->calls.items[i].first_string_arg);
+        ASSERT_STR_EQ("/wallets", r->calls.items[i].first_string_arg);
+    }
+    ASSERT_EQ(1, seen);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A Swift force-unwrap reaches the scanner's suppressor path, which shifted an
+ * int by up to TOKEN_COUNT bits. This cannot go red outside a trapping UBSan
+ * build; parsing the file at all is the check. */
+TEST(swift_force_unwrap_scanner_shift) {
+    CBMFileResult *r =
+        extract("func load() { let u = cached! }\n", CBM_LANG_SWIFT, "t", "Load.swift");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    cbm_free_result(r);
+    PASS();
+}
+
+static const CBMCall *swift_find_call(CBMFileResult *r, const char *callee) {
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && strcmp(r->calls.items[i].callee_name, callee) == 0) {
+            return &r->calls.items[i];
+        }
+    }
+    return nullptr;
+}
+
+/* Upstream #1892: the Swift grammar declares no "arguments" field, so the
+ * generic field lookup read nothing and every Swift call lost its arguments. */
+TEST(swift_call_string_arg_issue1892) {
+    CBMFileResult *r =
+        extract("func listWidgets() { AF.request(\"https://example.com/api/v1/widgets\") }\n",
+                CBM_LANG_SWIFT, "t", "Client.swift");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c = swift_find_call(r, "AF.request");
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(c->first_string_arg);
+    ASSERT_STR_EQ(c->first_string_arg, "https://example.com/api/v1/widgets");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Swift labels its arguments; each sits in a value_argument that leads with the
+ * label, so reading the first child alone would return `with`, not the path. */
+TEST(swift_labeled_call_string_arg_issue1892) {
+    CBMFileResult *r =
+        extract("func fetch() { URLSession.shared.dataTask(with: \"/api/v1/widgets/1\") }\n",
+                CBM_LANG_SWIFT, "t", "Fetch.swift");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c = swift_find_call(r, "URLSession.shared.dataTask");
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(c->first_string_arg);
+    ASSERT_STR_EQ(c->first_string_arg, "/api/v1/widgets/1");
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Find an in-body call by its raw callee text; returns the call or NULL. */
 static const CBMCall *find_call_by_callee(CBMFileResult *r, const char *callee) {
     for (int i = 0; i < r->calls.count; i++) {
@@ -5691,6 +5795,11 @@ SUITE(extraction) {
     RUN_TEST(swift_method_call);
     RUN_TEST(swift_constructor_call);
     RUN_TEST(swift_chained_call);
+    RUN_TEST(swift_force_unwrap_scanner_shift);
+    RUN_TEST(swift_call_string_arg_issue1892);
+    RUN_TEST(swift_labeled_call_string_arg_issue1892);
+    RUN_TEST(elixir_call_string_argument);
+    RUN_TEST(extract_csharp_stacked_attribute_lists_issue1692);
     RUN_TEST(objc_interface);
     RUN_TEST(objc_implementation);
     RUN_TEST(dart_top_level_function);

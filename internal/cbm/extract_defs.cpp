@@ -27,6 +27,7 @@
 #define MAX_PARAMS_MINUS_1 31
 #define MAX_RETURN_TYPES 16
 #define MAX_RETURN_TYPES_MINUS_1 15
+#define MAX_ATTR_WRAPPERS 16 // stacked C#/PHP attribute_list siblings per declaration (#1692)
 
 // Tree traversal limits.
 enum {
@@ -1290,7 +1291,7 @@ static const char *extract_docstring(CBMArena *a, TSNode node, const char *sourc
     return NULL;
 }
 
-static TSNode find_jvm_modifiers(TSNode node, CBMLanguage lang);
+static int find_jvm_modifiers(TSNode node, CBMLanguage lang, TSNode *out, int max);
 
 /* HTTP method names recognized in decorator calls (e.g., @router.post → "POST") */
 static const char *decorator_method_name(const char *attr_text) {
@@ -1664,8 +1665,10 @@ static bool try_route_from_annotation(CBMArena *a, TSNode annotation, const char
 static bool extract_route_from_annotations(CBMArena *a, TSNode func_node, const char *source,
                                            const CBMLangSpec *spec, const char **out_path,
                                            const char **out_method) {
-    TSNode modifiers = find_jvm_modifiers(func_node, spec->language);
-    if (!ts_node_is_null(modifiers)) {
+    TSNode wrappers[MAX_ATTR_WRAPPERS];
+    int wn = find_jvm_modifiers(func_node, spec->language, wrappers, MAX_ATTR_WRAPPERS);
+    for (int w = 0; w < wn; w++) {
+        TSNode modifiers = wrappers[w];
         uint32_t mc = ts_node_child_count(modifiers);
         for (uint32_t mi = 0; mi < mc; mi++) {
             TSNode mchild = ts_node_child(modifiers, mi);
@@ -1744,13 +1747,22 @@ static int count_modifier_annotations(TSNode modifiers, const CBMLangSpec *spec)
     return count;
 }
 
-// Find the wrapper child that holds annotations/attributes for languages where
-// they are nested under an intermediate node rather than being a prev-sibling:
-//   Java/Kotlin/C#/Swift → `modifiers` (contains annotation/attribute)
-//   PHP 8                → `attribute_list` (contains attribute_group)
-// Returns a null node when the language has no such wrapper.
-static TSNode find_jvm_modifiers(TSNode node, CBMLanguage lang) {
-    TSNode null_node = {0};
+// Find every wrapper child that holds annotations/attributes for languages
+// where they are nested under an intermediate node rather than being a
+// prev-sibling:
+//   Java/Kotlin/Swift → `modifiers` (one node, contains every annotation)
+//   C#/PHP 8          → `attribute_list` (contains attribute/attribute_group)
+//
+// C# attribute stacks are NOT a single wrapper: each bracketed group (`[Foo]`,
+// `[Bar]`, ...) compiles to its own `attribute_list` node, so `[A] [B] [C]`
+// above a declaration produces three separate `attribute_list` siblings. A
+// field-name lookup only ever returns the first child registered under a
+// given field, which silently dropped every attribute after the first bracket
+// group (upstream #1692). Scanning all children by kind fixes that and is a
+// no-op for Java/Kotlin/Swift (`modifiers` never repeats) and PHP (one
+// `attribute_list` holding every `attribute_group`).
+// Writes up to `max` wrapper nodes into `out`; returns how many were found.
+static int find_jvm_modifiers(TSNode node, CBMLanguage lang, TSNode *out, int max) {
     const char *wrapper = NULL;
     switch (lang) {
     case CBM_LANG_JAVA:
@@ -1766,13 +1778,9 @@ static TSNode find_jvm_modifiers(TSNode node, CBMLanguage lang) {
         wrapper = "attribute_list";
         break;
     default:
-        return null_node;
+        return 0;
     }
-    TSNode w = ts_node_child_by_field_name(node, wrapper, (uint32_t)strlen(wrapper));
-    if (ts_node_is_null(w)) {
-        w = cbm_find_child_by_kind(node, wrapper);
-    }
-    return w;
+    return cbm_find_children_by_kind(node, wrapper, out, max);
 }
 
 // Count direct children of `node` that are decorator/annotation nodes (used by
@@ -1850,13 +1858,14 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
         prev = ts_node_prev_sibling(prev);
     }
 
-    TSNode modifiers = {0};
+    TSNode wrappers[MAX_ATTR_WRAPPERS];
+    int wn = 0;
     int mod_count = 0;
     int child_count = 0;
     if (count == 0) {
-        modifiers = find_jvm_modifiers(node, lang);
-        if (!ts_node_is_null(modifiers)) {
-            mod_count = count_modifier_annotations(modifiers, spec);
+        wn = find_jvm_modifiers(node, lang, wrappers, MAX_ATTR_WRAPPERS);
+        for (int w = 0; w < wn; w++) {
+            mod_count += count_modifier_annotations(wrappers[w], spec);
         }
         /* Languages like Scala attach the annotation directly as a child of the
          * definition node (no wrapper, no prev-sibling). */
@@ -1886,8 +1895,8 @@ static const char **extract_decorators(CBMArena *a, TSNode node, const char *sou
         }
         prev = ts_node_prev_sibling(prev);
     }
-    if (!ts_node_is_null(modifiers)) {
-        idx = collect_modifier_decorators(a, modifiers, source, spec, result, idx, total);
+    for (int w = 0; w < wn && mod_count > 0; w++) {
+        idx = collect_modifier_decorators(a, wrappers[w], source, spec, result, idx, total);
     }
     if (child_count > 0) {
         idx = collect_child_decorators(a, node, source, spec, result, idx, total);
@@ -2256,7 +2265,13 @@ static int collect_bases_from_field(CBMArena *a, TSNode field_node, const char *
              * dotted base like `mod.Base`). Without these the raw-text fallback
              * below captured the whole "(Base)" field text, which never
              * resolved -> zero INHERITS edges for Python subclasses. */
-            strcmp(ck, "identifier") == 0 || strcmp(ck, "attribute") == 0) {
+            strcmp(ck, "identifier") == 0 || strcmp(ck, "attribute") == 0 ||
+            /* Ruby `class C < Base` wraps the base in a `superclass` node whose
+             * child is a `constant` (or `scope_resolution` for `A::B`). Without
+             * these the raw-text fallback captured "< Base" (operator included),
+             * which never resolves — breaking INHERITS and the Ruby LSP's
+             * superclass chain (upstream #1701). */
+            strcmp(ck, "constant") == 0 || strcmp(ck, "scope_resolution") == 0) {
             char *t = cbm_node_text(a, child, source);
             if (t) {
                 char *angle = strchr(t, '<');

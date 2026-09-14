@@ -60,7 +60,9 @@ static const char *lookup_url_builder(const CBMExtractCtx *ctx, const char *name
 static int is_string_like(const char *kind) {
     return (strcmp(kind, "string") == 0 || strcmp(kind, "string_literal") == 0 ||
             strcmp(kind, "interpreted_string_literal") == 0 ||
-            strcmp(kind, "raw_string_literal") == 0 || strcmp(kind, "string_content") == 0);
+            strcmp(kind, "raw_string_literal") == 0 || strcmp(kind, "string_content") == 0 ||
+            /* Swift's ordinary "..." literal (upstream #1892). */
+            strcmp(kind, "line_string_literal") == 0);
 }
 
 /* Strip surrounding quotes from a string, return arena-allocated copy */
@@ -442,6 +444,29 @@ static bool perl_is_identifier_callee(const char *name) {
         return false; // '.', space, quote, '/', etc. → not a sub/method name
     }
     return true;
+}
+
+/* tree-sitter-elixir gives a call's arguments node no field name, so it is
+ * found positionally. Mirrors elixir_call_args() in extract_defs.cpp, which the
+ * definition side has always used for the same reason. */
+static TSNode elixir_call_arguments_fallback(TSNode node) {
+    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+    if (ts_node_is_null(args) && ts_node_child_count(node) > 1) {
+        args = ts_node_child(node, 1);
+    }
+    return args;
+}
+
+/* Swift models a call as a target expression plus a call_suffix, and its grammar
+ * declares no "arguments" field at all. Reach the argument list through the
+ * suffix. A trailing closure has a call_suffix with no value_arguments, which
+ * returns a null node and leaves the call without a string argument, as before. */
+static TSNode swift_call_args(TSNode node) {
+    TSNode suffix = cbm_find_child_by_kind(node, "call_suffix");
+    if (ts_node_is_null(suffix)) {
+        return suffix;
+    }
+    return cbm_find_child_by_kind(suffix, "value_arguments");
 }
 
 // Callee extraction for scripting languages (Elixir, Perl, PHP, Kotlin, MATLAB).
@@ -1641,6 +1666,18 @@ static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args) {
         if (strcmp(ts_node_type(arg), "argument") == 0 && ts_node_named_child_count(arg) > 0) {
             arg = ts_node_named_child(arg, 0);
         }
+        /* Swift wraps each argument in a value_argument that may lead with its
+         * label, so `data(from: url)` would otherwise yield the label `from`
+         * rather than the value. Step past a leading value_argument_label. */
+        if (strcmp(ts_node_type(arg), "value_argument") == 0 &&
+            ts_node_named_child_count(arg) > 0) {
+            TSNode val = ts_node_named_child(arg, 0);
+            if (strcmp(ts_node_type(val), "value_argument_label") == 0 &&
+                ts_node_named_child_count(arg) > 1) {
+                val = ts_node_named_child(arg, 1);
+            }
+            arg = val;
+        }
         const char *ak = ts_node_type(arg);
 
         if (strcmp(ak, "keyword_argument") == 0 || strcmp(ak, "pair") == 0) {
@@ -2078,6 +2115,20 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             }
 
             TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
+            /* tree-sitter-elixir attaches NO field name to a call's arguments
+             * node, so the lookup above is always null for Elixir and
+             * first_string_arg was never populated for any Elixir call
+             * (Phoenix route paths, service URLs, config keys). Positional
+             * second-child fallback, restricted to `call` nodes (upstream). */
+            if (ts_node_is_null(args) && ctx->language == CBM_LANG_ELIXIR &&
+                strcmp(ts_node_type(node), "call") == 0) {
+                args = elixir_call_arguments_fallback(node);
+            }
+            /* Swift declares no "arguments" field; its args hang off call_suffix
+             * (upstream #1892). */
+            if (ts_node_is_null(args) && ctx->language == CBM_LANG_SWIFT) {
+                args = swift_call_args(node);
+            }
             if (!ts_node_is_null(args)) {
                 call.first_string_arg = extract_url_or_topic_arg(ctx, args);
                 if (call.first_string_arg && call.first_string_arg[0] == '/') {

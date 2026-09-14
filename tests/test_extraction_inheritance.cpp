@@ -1659,6 +1659,61 @@ TEST(inherit_rust_impls) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+ * RUBY  (expected: GREEN — regression guards, upstream #1701)
+ *
+ * tree-sitter-ruby wraps `class C < Base` in a `superclass` node whose
+ * child is a `constant` (or `scope_resolution` for `A::B`).
+ * collect_bases_from_field() matched neither, so the raw-text fallback
+ * stored "< Base" — operator included — which never resolves, so Ruby
+ * subclasses produced zero INHERITS edges. Every row asserts "<" never
+ * appears in a captured base name: that substring IS the bug's signature.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static const inherit_case_t ruby_cases[] = {
+    {CBM_LANG_RUBY,
+     "m.rb",
+     "class Animal\nend\n\nclass Dog < Animal\nend\n",
+     "Dog",
+     {"Animal", NULL},
+     {"<", NULL},
+     1},
+    {CBM_LANG_RUBY,
+     "m.rb",
+     "class ApplicationRecord < ActiveRecord::Base\nend\n",
+     "ApplicationRecord",
+     {"ActiveRecord::Base", NULL},
+     {"<", NULL},
+     1},
+    {CBM_LANG_RUBY,
+     "m.rb",
+     "class ApplicationRecord < ActiveRecord::Base\nend\n"
+     "class User < ApplicationRecord\nend\n",
+     "User",
+     {"ApplicationRecord", NULL},
+     {"<", NULL},
+     1},
+    {CBM_LANG_RUBY,
+     "m.rb",
+     "class Base\nend\n\nmodule Admin\n  class Panel < Base\n  end\nend\n",
+     "Panel",
+     {"Base", NULL},
+     {"<", NULL},
+     1},
+    {CBM_LANG_RUBY,
+     "m.rb",
+     "class AppError < StandardError\nend\n",
+     "AppError",
+     {"StandardError", NULL},
+     {"<", NULL},
+     1},
+};
+
+TEST(inherit_ruby) {
+    RUN_CASES(ruby_cases);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
  * SUITE declaration
  * ═══════════════════════════════════════════════════════════════════ */
 
@@ -1668,6 +1723,7 @@ SUITE(extraction_inheritance) {
     RUN_TEST(inherit_csharp);
     RUN_TEST(inherit_cpp);
     RUN_TEST(inherit_rust_impls);
+    RUN_TEST(inherit_ruby);
 
     /* Languages expected RED (broken extractors — reproduce-first) */
     RUN_TEST(inherit_python); /* RED: identifier-node not matched in collect_bases_from_field */

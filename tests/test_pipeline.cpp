@@ -827,6 +827,73 @@ TEST(pipeline_definitions_defines_edges) {
     PASS();
 }
 
+/* Upstream #1692 through the real pipeline: one C# method, three stacked
+ * attributes, nothing else that could carry DECORATES — so the project-wide
+ * edge count must be exactly 3, not 1 for the first bracket group. */
+TEST(pipeline_csharp_stacked_attributes_all_decorate_issue1692) {
+    char root[256] = "/tmp/cbm_cs_attrs_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    std::string repo = std::string(root) + "/repo";
+    ASSERT_EQ(th_write_file((repo + "/StackedAttrs.cs").c_str(),
+                            "using System;\n\nnamespace ReproNS\n{\n"
+                            "    public class AttrController\n    {\n"
+                            "        [Foo]\n        [Bar(\"x\")]\n        [Baz]\n"
+                            "        public void StackedAttrsMethod() { }\n    }\n}\n"),
+              0);
+    std::string db_path = std::string(root) + "/graph.db";
+    cbm_pipeline_t *p = cbm_pipeline_new(repo.c_str(), db_path.c_str(), CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    cbm_store_t *s = cbm_store_open_path(db_path.c_str());
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_count_edges_by_type(s, cbm_pipeline_project_name(p), "DECORATES"), 3);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(root);
+    PASS();
+}
+
+/* Upstream #1892: Swift produced no HTTP_CALLS edge and no Route node, because
+ * the Swift grammar has no "arguments" field and the URL never arrived. */
+TEST(pipeline_swift_http_call_makes_route_issue1892) {
+    char root[256] = "/tmp/cbm_swifthttp_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    std::string repo = std::string(root) + "/repo";
+    /* URLSession, not Alamofire's `AF` shorthand: the service pattern table
+     * matches the library name in the callee text. */
+    ASSERT_EQ(th_write_file((repo + "/Sources/Client.swift").c_str(),
+                            "import Foundation\n"
+                            "final class Client {\n"
+                            "    func listWidgets() {\n"
+                            "        URLSession.shared.dataTask(with: \"/api/v1/widgets\")\n"
+                            "    }\n"
+                            "}\n"),
+              0);
+    std::string db_path = std::string(root) + "/graph.db";
+    cbm_pipeline_t *p = cbm_pipeline_new(repo.c_str(), db_path.c_str(), CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = cbm_store_open_path(db_path.c_str());
+    ASSERT_NOT_NULL(s);
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 1);
+    cbm_node_t *routes = nullptr;
+    int route_count = 0;
+    cbm_store_find_nodes_by_label(s, project, "Route", &routes, &route_count);
+    int widget_routes = 0;
+    for (int i = 0; i < route_count; i++) {
+        if (routes[i].qualified_name && strstr(routes[i].qualified_name, "/api/v1/widgets")) {
+            widget_routes++;
+        }
+    }
+    cbm_store_free_nodes(routes, route_count);
+    ASSERT_GTE(widget_routes, 1);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(root);
+    PASS();
+}
+
 TEST(pipeline_definitions_properties) {
     if (setup_test_repo() != 0) {
         FAIL("failed to create temp dir");
@@ -7478,6 +7545,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_lease_independent_processes);
     RUN_TEST(pipeline_lease_canonical_aliases);
     RUN_TEST(pipeline_lease_crash_release);
+    RUN_TEST(pipeline_csharp_stacked_attributes_all_decorate_issue1692);
+    RUN_TEST(pipeline_swift_http_call_makes_route_issue1892);
     RUN_TEST(pipeline_lease_run_busy_is_nondestructive);
     RUN_TEST(pipeline_lease_error_exit_releases);
     RUN_TEST(pipeline_lease_busy_result_contract);
