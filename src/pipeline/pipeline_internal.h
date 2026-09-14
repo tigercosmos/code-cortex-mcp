@@ -224,6 +224,14 @@ static inline int cbm_pipeline_check_cancel(const cbm_pipeline_ctx_t *ctx) {
 
 /* ── Testable helpers ────────────────────────────────────────────── */
 
+/* #1934: whether the import resolver's name-guess fallbacks -- Strategy 1b
+ * (sibling file; its label filter admits symbols) and Strategy 3 (symbol
+ * name) -- may run for imports from this language. False for Go: an import
+ * path names a package, never a symbol, so a Strategy-1 miss means the import
+ * is external and the correct result is no edge. Pure; exercised through
+ * ei_go_import_never_binds_symbol. */
+bool cbm_import_symbol_fallback_allowed(CBMLanguage lang);
+
 /* Check if a file path is worth tracking for git history analysis. */
 bool cbm_is_trackable_file(const char *path);
 
