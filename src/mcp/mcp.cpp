@@ -3368,6 +3368,20 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
  * the graph, stored outside it). Full per-project list, capped generously. */
 enum { COVERAGE_FILE_CAP = 500 };
 
+/* Append one parse_unusable file entry, {path, whole_file:true, range_end}, to
+ * `files`. `range` is the stored "start-end" text; "range_end" is the END of the
+ * range, not the length of the file: a grammar can end an error node past the
+ * last line. Shared by index_status and the index_repository summary. */
+static void add_parse_unusable_file(yyjson_mut_doc *doc, yyjson_mut_val *files, const char *path,
+                                    const char *range) {
+    yyjson_mut_val *fe = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, fe, "path", path);
+    yyjson_mut_obj_add_bool(doc, fe, "whole_file", true);
+    const char *dash = range ? strchr(range, '-') : NULL;
+    yyjson_mut_obj_add_int(doc, fe, "range_end", dash ? atoi(dash + 1) : 0);
+    yyjson_mut_arr_add_val(files, fe);
+}
+
 static void add_coverage_report(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_store_t *store,
                                 const char *project) {
     cbm_coverage_row_t *rows = NULL;
@@ -3399,14 +3413,7 @@ static void add_coverage_report(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_s
             /* Needs its own branch: the catch-all below builds skipped[], and a
              * reader who finds a file there believes it was never indexed. */
             if (pu_n < COVERAGE_FILE_CAP) {
-                yyjson_mut_val *fe = yyjson_mut_obj(doc);
-                yyjson_mut_obj_add_strcpy(doc, fe, "path", rows[i].rel_path);
-                yyjson_mut_obj_add_bool(doc, fe, "whole_file", true);
-                /* The END of the range, not the length of the file: a grammar
-                 * can end an error node past the last line. */
-                const char *dash = rows[i].detail ? strchr(rows[i].detail, '-') : NULL;
-                yyjson_mut_obj_add_int(doc, fe, "range_end", dash ? atoi(dash + 1) : 0);
-                yyjson_mut_arr_add_val(pu_files, fe);
+                add_parse_unusable_file(doc, pu_files, rows[i].rel_path, rows[i].detail);
             }
             pu_n++;
         } else if (strcmp(kind, "not_indexed_dir") == 0) {
@@ -5753,42 +5760,70 @@ static void add_skipped_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
  * are missing from the graph because tree-sitter could not parse them. The
  * note spells out the best-effort framing: absence from this list is NOT a
  * completeness guarantee. */
-static void add_parse_partial_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
-                                      const cbm_file_error_t *errs, int count) {
-    int partials = 0;
+/* One half of the coverage summary: which entries belong to it, the JSON keys
+ * it writes, how one file entry looks, and the note attached to the section. */
+typedef struct {
+    bool (*matches)(const cbm_file_error_t *e);
+    const char *count_key;
+    const char *section_key;
+    void (*add_file)(yyjson_mut_doc *doc, yyjson_mut_val *files, const cbm_file_error_t *e);
+    const char *note;
+} parse_coverage_section_t;
+
+static void add_parse_coverage_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                       const cbm_file_error_t *errs, int count,
+                                       const parse_coverage_section_t *section) {
+    int flagged = 0;
     for (int i = 0; i < count; i++) {
-        if (is_parse_partial(&errs[i])) {
-            partials++;
+        if (section->matches(&errs[i])) {
+            flagged++;
         }
     }
-    yyjson_mut_obj_add_int(doc, root, "parse_partial_count", partials);
-    if (!errs || partials <= 0) {
+    yyjson_mut_obj_add_int(doc, root, section->count_key, flagged);
+    if (!errs || flagged <= 0) {
         return;
     }
-    yyjson_mut_val *pp = yyjson_mut_obj(doc);
+    yyjson_mut_val *obj = yyjson_mut_obj(doc);
     yyjson_mut_val *files = yyjson_mut_arr(doc);
     int shown = 0;
     for (int i = 0; i < count && shown < INDEX_SKIPPED_FILE_CAP; i++) {
-        if (!is_parse_partial(&errs[i])) {
+        if (!section->matches(&errs[i])) {
             continue;
         }
-        yyjson_mut_val *fe = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_strcpy(doc, fe, "path", errs[i].path ? errs[i].path : "");
-        yyjson_mut_obj_add_strcpy(doc, fe, "error_ranges", errs[i].reason ? errs[i].reason : "");
-        yyjson_mut_arr_add_val(files, fe);
+        section->add_file(doc, files, &errs[i]);
         shown++;
     }
-    yyjson_mut_obj_add_val(doc, pp, "files", files);
-    yyjson_mut_obj_add_int(doc, pp, "count", partials);
-    yyjson_mut_obj_add_bool(doc, pp, "truncated", partials > INDEX_SKIPPED_FILE_CAP);
-    yyjson_mut_obj_add_str(doc, pp, "note",
-                           "Best-effort signal, not a completeness guarantee: these files WERE "
-                           "indexed, but constructs inside the listed line ranges (1-based) could "
-                           "not be parsed and MAY be missing from the graph (tree-sitter error "
-                           "recovery still salvages some). Prefer text search (grep) for those "
-                           "regions. Files absent from this list are NOT guaranteed to be fully "
-                           "indexed. Query the persisted signal via index_status.");
-    yyjson_mut_obj_add_val(doc, root, "parse_partial", pp);
+    yyjson_mut_obj_add_val(doc, obj, "files", files);
+    yyjson_mut_obj_add_int(doc, obj, "count", flagged);
+    yyjson_mut_obj_add_bool(doc, obj, "truncated", flagged > INDEX_SKIPPED_FILE_CAP);
+    yyjson_mut_obj_add_str(doc, obj, "note", section->note);
+    yyjson_mut_obj_add_val(doc, root, section->section_key, obj);
+}
+
+static void add_parse_partial_file(yyjson_mut_doc *doc, yyjson_mut_val *files,
+                                   const cbm_file_error_t *e) {
+    yyjson_mut_val *fe = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, fe, "path", e->path ? e->path : "");
+    yyjson_mut_obj_add_strcpy(doc, fe, "error_ranges", e->reason ? e->reason : "");
+    yyjson_mut_arr_add_val(files, fe);
+}
+
+static void add_parse_unusable_error_file(yyjson_mut_doc *doc, yyjson_mut_val *files,
+                                          const cbm_file_error_t *e) {
+    add_parse_unusable_file(doc, files, e->path ? e->path : "", e->reason);
+}
+
+static void add_parse_partial_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                      const cbm_file_error_t *errs, int count) {
+    static const parse_coverage_section_t section = {
+        is_parse_partial, "parse_partial_count", "parse_partial", add_parse_partial_file,
+        "Best-effort signal, not a completeness guarantee: these files WERE "
+        "indexed, but constructs inside the listed line ranges (1-based) could "
+        "not be parsed and MAY be missing from the graph (tree-sitter error "
+        "recovery still salvages some). Prefer text search (grep) for those "
+        "regions. Files absent from this list are NOT guaranteed to be fully "
+        "indexed. Query the persisted signal via index_status."};
+    add_parse_coverage_summary(doc, root, errs, count, &section);
 }
 
 /* The whole-file half of the coverage summary. Always emits a top-level
@@ -5800,38 +5835,11 @@ static void add_parse_partial_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
  * line the range names — it can exceed the file, so it is not the length. */
 static void add_parse_unusable_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
                                        const cbm_file_error_t *errs, int count) {
-    int unusable = 0;
-    for (int i = 0; i < count; i++) {
-        if (is_parse_unusable(&errs[i])) {
-            unusable++;
-        }
-    }
-    yyjson_mut_obj_add_int(doc, root, "parse_unusable_count", unusable);
-    if (!errs || unusable <= 0) {
-        return;
-    }
-    yyjson_mut_val *pu = yyjson_mut_obj(doc);
-    yyjson_mut_val *files = yyjson_mut_arr(doc);
-    int shown = 0;
-    for (int i = 0; i < count && shown < INDEX_SKIPPED_FILE_CAP; i++) {
-        if (!is_parse_unusable(&errs[i])) {
-            continue;
-        }
-        yyjson_mut_val *fe = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_strcpy(doc, fe, "path", errs[i].path ? errs[i].path : "");
-        yyjson_mut_obj_add_bool(doc, fe, "whole_file", true);
-        const char *dash = errs[i].reason ? strchr(errs[i].reason, '-') : NULL;
-        yyjson_mut_obj_add_int(doc, fe, "range_end", dash ? atoi(dash + 1) : 0);
-        yyjson_mut_arr_add_val(files, fe);
-        shown++;
-    }
-    yyjson_mut_obj_add_val(doc, pu, "files", files);
-    yyjson_mut_obj_add_int(doc, pu, "count", unusable);
-    yyjson_mut_obj_add_bool(doc, pu, "truncated", unusable > INDEX_SKIPPED_FILE_CAP);
-    yyjson_mut_obj_add_str(doc, pu, "note",
-                           "Indexed, but the parse failed across nearly the whole file, so line "
-                           "ranges are not useful here — read the source directly.");
-    yyjson_mut_obj_add_val(doc, root, "parse_unusable", pu);
+    static const parse_coverage_section_t section = {
+        is_parse_unusable, "parse_unusable_count", "parse_unusable", add_parse_unusable_error_file,
+        "Indexed, but the parse failed across nearly the whole file, so line "
+        "ranges are not useful here — read the source directly."};
+    add_parse_coverage_summary(doc, root, errs, count, &section);
 }
 
 /* Write the FULL (uncapped) skip list to a per-run logfile — ONLY when >=1 file
