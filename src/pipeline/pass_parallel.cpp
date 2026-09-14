@@ -2645,6 +2645,12 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
             continue;
         }
+        /* #1942/#1962: a bare Go reference can never denote a struct field;
+         * the member half of a selector may. Mirrors pass_usages.cpp. */
+        if (cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, usage->is_member_access,
+                                           tgt->label)) {
+            continue;
+        }
         /* uprops must exceed the escaped value + wrapper (the sequential twin in
          * pass_usages.cpp already uses CBM_SZ_512): at CBM_SZ_256 a long
          * reference name cut the blob before its closing quote+brace. */
@@ -2715,6 +2721,11 @@ static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFi
         /* #1928: bare-name registry guess -- never cross a language boundary.
          * Mirrors pass_usages.cpp resolve_rw_edges. */
         if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
+            continue;
+        }
+        /* #1942/#1962: a bare Go reference can never denote a struct field;
+         * a selector-LHS write (`t.err = x`) may bind it. */
+        if (cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, rw->is_member_access, tgt->label)) {
             continue;
         }
         const char *etype = rw->is_write ? "WRITES" : "READS";

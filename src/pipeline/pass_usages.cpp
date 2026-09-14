@@ -251,6 +251,12 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
             continue;
         }
+        /* #1942/#1962: a bare Go reference can never denote a struct field;
+         * the member half of a selector may. */
+        if (cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, usage->is_member_access,
+                                           tgt->label)) {
+            continue;
+        }
 
         /* ref_name is sliced source text and can contain quotes/newlines —
          * escape it or the edge properties JSON is malformed. */
@@ -327,6 +333,11 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
         /* #1928: every resolution here is a bare-name registry guess -- never
          * let it bind a read/write across a language boundary. */
         if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
+            continue;
+        }
+        /* #1942/#1962: a bare Go reference can never denote a struct field;
+         * a selector-LHS write (`t.err = x`) may bind it. */
+        if (cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, rw->is_member_access, tgt->label)) {
             continue;
         }
 

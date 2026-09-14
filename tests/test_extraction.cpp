@@ -3212,6 +3212,57 @@ TEST(go_imports) {
     PASS();
 }
 
+/* #1935: Go struct fields were never extracted -- find_class_body() returns the
+ * struct_type node, whose only named child is a field_declaration_list, so the
+ * member loop matched nothing. Interfaces hold their method specs directly and
+ * always worked. The blank identifier `_` is struct padding, not a
+ * referenceable field, and must stay out. */
+TEST(extract_go_struct_fields_have_nodes) {
+    CBMFileResult *r = extract("package fxf\n\n"
+                               "type Config struct {\n"
+                               "\tName    string\n"
+                               "\tTimeout int\n"
+                               "\tNested  *Config\n"
+                               "\t_       [8]byte\n"
+                               "}\n\n"
+                               "type Reader interface {\n"
+                               "\tRead(p []byte) (int, error)\n"
+                               "\tClose() error\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "cfg.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* RED before the descend fix: count is 0. The blank identifier must not
+     * bring it to 4. */
+    ASSERT_EQ(count_defs_with_label(r, "Field"), 3);
+    ASSERT_TRUE(has_def(r, "Field", "Name"));
+    ASSERT_TRUE(has_def(r, "Field", "Timeout"));
+    ASSERT_TRUE(has_def(r, "Field", "Nested"));
+    ASSERT_FALSE(has_def(r, "Field", "_"));
+    /* Each field carries its declared type in return_type. */
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (!d->label || strcmp(d->label, "Field") != 0) {
+            continue;
+        }
+        ASSERT_NOT_NULL(d->return_type);
+        if (strcmp(d->name, "Name") == 0) {
+            ASSERT_STR_EQ(d->return_type, "string");
+        }
+        if (strcmp(d->name, "Timeout") == 0) {
+            ASSERT_STR_EQ(d->return_type, "int");
+        }
+        if (strcmp(d->name, "Nested") == 0) {
+            ASSERT_STR_EQ(d->return_type, "*Config");
+        }
+    }
+    /* Interface members keep extracting exactly as before. */
+    ASSERT_TRUE(has_def(r, "Method", "Read"));
+    ASSERT_TRUE(has_def(r, "Method", "Close"));
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(java_imports) {
     CBMFileResult *r = extract(
         "import java.util.List;\nimport java.util.ArrayList;\nimport static java.lang.Math.PI;\n"
@@ -6299,6 +6350,7 @@ SUITE(extraction) {
     RUN_TEST(python_imports);
     RUN_TEST(js_imports);
     RUN_TEST(go_imports);
+    RUN_TEST(extract_go_struct_fields_have_nodes);
     RUN_TEST(java_imports);
     RUN_TEST(rust_imports);
     RUN_TEST(c_imports);

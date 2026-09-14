@@ -468,6 +468,24 @@ TEST(cross_language_ref_drops_go_vs_c) {
     PASS();
 }
 
+TEST(go_bare_ref_never_binds_field) {
+    /* #1942/#1962: a bare Go identifier can never denote a struct field. The
+     * extractor strips the receiver before the resolver runs, so the
+     * selector-vs-bare distinction arrives as the recorded is_member_access
+     * signal, never as a dot in the reference text. */
+    ASSERT_TRUE(cbm_go_suppress_bare_field_ref(true, false, "Field"));
+    /* The member half of a selector may bind a field. */
+    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(true, true, "Field"));
+    /* Bare references to non-fields are untouched. */
+    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(true, false, "Variable"));
+    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(true, false, "Function"));
+    /* Other languages reference their own members bare inside methods. */
+    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(false, false, "Field"));
+    /* Degenerate input -> nothing to judge. */
+    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(true, false, NULL));
+    PASS();
+}
+
 TEST(cross_language_suffix_match_drops_py_vs_js) {
     ASSERT_TRUE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "web/src/pages/Editor.js",
                                                          "suffix_match"));
@@ -859,6 +877,7 @@ SUITE(registry) {
     RUN_TEST(resolve_caps_unresolvably_ambiguous_names);
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
     RUN_TEST(cross_language_ref_drops_go_vs_c);
+    RUN_TEST(go_bare_ref_never_binds_field);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(local_binding_suppress_drops_weak_shadowed_bare_calls);

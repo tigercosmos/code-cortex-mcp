@@ -456,6 +456,22 @@ bool cbm_weak_short_name_strategy(const char *strategy) {
            strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
 }
 
+bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const char *target_label) {
+    /* #1942/#1962: a bare Go identifier can never denote a struct field --
+     * field access is always a selector expression (x.f). The extractor
+     * strips the receiver before the resolver runs (resolve_lhs_write_name
+     * records the trailing field name; is_reference_node records the inner
+     * field_identifier), so the reference TEXT cannot carry the distinction --
+     * the recorded is_member_access shape can. Only a reference that was never
+     * the member half of a selector is refused a Field bind. Go-gated: a
+     * C#/Java/C++/Python method body legitimately references its own members
+     * bare, so a global veto would break those languages. */
+    if (!is_go || is_member_access || !target_label) {
+        return false;
+    }
+    return strcmp(target_label, "Field") == 0;
+}
+
 /* Dynamic-language analogue of the Perl guard above (#592/#606/#1276
  * direction; precedent #477). A member call `x.foo()` reaches the weak textual
  * cascade ONLY when the language's LSP could not resolve the receiver type —

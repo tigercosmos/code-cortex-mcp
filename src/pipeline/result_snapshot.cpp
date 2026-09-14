@@ -199,16 +199,16 @@ template <class A> void fields(A &a, CBMImport &v) {
     a(local_name, module_path);
 }
 template <class A> void fields(A &a, CBMUsage &v) {
-    auto &[ref_name, enclosing_func_qn] = v;
-    a(ref_name, enclosing_func_qn);
+    auto &[ref_name, enclosing_func_qn, is_member_access] = v;
+    a(ref_name, enclosing_func_qn, is_member_access);
 }
 template <class A> void fields(A &a, CBMThrow &v) {
     auto &[exception_name, enclosing_func_qn] = v;
     a(exception_name, enclosing_func_qn);
 }
 template <class A> void fields(A &a, CBMReadWrite &v) {
-    auto &[var_name, enclosing_func_qn, is_write] = v;
-    a(var_name, enclosing_func_qn, is_write);
+    auto &[var_name, enclosing_func_qn, is_write, is_member_access] = v;
+    a(var_name, enclosing_func_qn, is_write, is_member_access);
 }
 template <class A> void fields(A &a, CBMTypeRef &v) {
     auto &[type_name, enclosing_func_qn] = v;

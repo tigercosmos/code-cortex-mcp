@@ -226,6 +226,14 @@ bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const cha
  * unit-tested in test_registry.cpp. */
 bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target_file_path);
 
+/* #1942/#1962: a bare Go identifier can never denote a struct field -- field
+ * access is always a selector expression. Drops a READS/WRITES/USAGE bind
+ * whose target is a Field unless the reference was recorded as the member half
+ * of a selector (CBMUsage/CBMReadWrite.is_member_access). Go only: other OO
+ * languages reference their own members bare inside method bodies. Pure;
+ * unit-tested in test_registry.cpp. */
+bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const char *target_label);
+
 /* Relation-permitting resolve, for SQL FROM/JOIN lineage ONLY. The default
  * cbm_registry_resolve vetoes Table/View results because common relation names
  * collide with code identifiers in every language. Uncached by design — see the

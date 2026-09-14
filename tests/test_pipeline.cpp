@@ -7682,6 +7682,82 @@ TEST(pipeline_go_rw_usage_never_cross_into_c) {
 /* Parallel twin (pass_parallel.cpp resolve_file_usages / resolve_file_rw):
  * upstream's sequential-only fix left 344 Go->C WRITES alive on a ~1150-file
  * repo. >= 50 files forces the parallel pipeline. */
+/* #1942/#1962 fixture: a Go struct field named like the commonest local
+ * (`err`), a function whose bare local of the same name must NOT bind it, and
+ * a method whose genuine selector references (`t.err = nil`, `t.n`) must. */
+static const char *const k_go_bare_field_names[] = {"go.mod", "state/state.go", "state/reset.go",
+                                                    "app/app.go"};
+static const char *const k_go_bare_field_bodies[] = {
+    "module example.com/fxbare\n\ngo 1.22\n",
+    "package state\n\ntype Tracker struct {\n\terr error\n\tn   int\n}\n",
+    "package state\n\nfunc (t *Tracker) Reset() int {\n\tt.err = nil\n\treturn t.n\n}\n",
+    "package app\n\nimport \"errors\"\n\nfunc Run() error {\n\terr := errors.New(\"x\")\n\treturn "
+    "err\n}\n"};
+
+/* 0 = bare local binds no Field and both selector references do; negative
+ * values name the first violated property. */
+static int go_bare_field_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p = index_fixture_with_padding(k_go_bare_field_names, k_go_bare_field_bodies, 4,
+                                                   pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -9;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -8;
+    if (s) {
+        cbm_node_t *fields = NULL;
+        int nfields = 0;
+        cbm_store_find_nodes_by_name(s, proj, "err", &fields, &nfields);
+        int err_fields = 0;
+        for (int i = 0; i < nfields; i++) {
+            if (fields[i].label && strcmp(fields[i].label, "Field") == 0) {
+                err_fields++;
+            }
+        }
+        cbm_store_free_nodes(fields, nfields);
+        int bare = named_edge_count(s, proj, "WRITES", "Run", "err") +
+                   named_edge_count(s, proj, "READS", "Run", "err") +
+                   named_edge_count(s, proj, "USAGE", "Run", "err");
+        int sel_write = named_edge_count(s, proj, "WRITES", "Reset", "err");
+        int sel_use = named_edge_count(s, proj, "USAGE", "Reset", "n");
+        printf("  go bare-field probe pad=%d: err Field nodes=%d bare=%d sel_write=%d sel_use=%d\n",
+               pad, err_fields, bare, sel_write, sel_use);
+        if (err_fields < 1) {
+            rc = -1; /* #1935: the field must exist for the probe to mean anything */
+        } else if (bare != 0) {
+            rc = -2; /* #1942: the bare local bound the field */
+        } else if (sel_write < 1 || sel_use < 1) {
+            rc = -3; /* #1962: a blanket veto dropped genuine selector references */
+        } else {
+            rc = 0;
+        }
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+/* #1942: the READS/WRITES resolvers and the USAGE registry fallback hand bare
+ * reference text to the short-name registry, which contains Field nodes -- so
+ * every Go local `err := ...` bound whichever struct field was named err.
+ * #1962: keyed on the recorded selector shape, so `t.err = nil` still WRITES
+ * the field and `t.n` still produces USAGE. Sequential twin. */
+TEST(pipeline_go_bare_ref_never_binds_field) {
+    ASSERT_EQ(go_bare_field_probe(0), 0);
+    PASS();
+}
+
+/* Parallel twin: resolve_file_rw / resolve_file_usages are independent
+ * resolvers and must consult the same predicate. */
+TEST(pipeline_go_bare_ref_never_binds_field_parallel) {
+    ASSERT_EQ(go_bare_field_probe(52), 0);
+    PASS();
+}
+
 TEST(pipeline_go_rw_usage_never_cross_into_c_parallel) {
     ASSERT_EQ(go_c_ref_guard_probe(52), 0);
     PASS();
@@ -8416,6 +8492,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725);
     RUN_TEST(pipeline_go_rw_usage_never_cross_into_c);
     RUN_TEST(pipeline_go_rw_usage_never_cross_into_c_parallel);
+    RUN_TEST(pipeline_go_bare_ref_never_binds_field);
+    RUN_TEST(pipeline_go_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);
     RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
