@@ -168,4 +168,30 @@ static inline void th_cleanup(const char *path) {
     }
 }
 
+#ifdef __cplusplus
+#include <string>
+
+/* ── Environment save/restore ─────────────────────────────────── */
+
+/* Snapshot one environment variable and restore it when the scope ends:
+ * re-set to the saved value, or unset when it was absent. Declare one per
+ * variable a test mutates. */
+struct ThSavedEnv {
+    const char *name;
+    std::string value;
+    bool present;
+    explicit ThSavedEnv(const char *key)
+        : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+    ThSavedEnv(const ThSavedEnv &) = delete;
+    ThSavedEnv &operator=(const ThSavedEnv &) = delete;
+    ~ThSavedEnv() {
+        if (present) {
+            cbm_setenv(name, value.c_str(), 1);
+        } else {
+            cbm_unsetenv(name);
+        }
+    }
+};
+#endif
+
 #endif /* TEST_HELPERS_H */
