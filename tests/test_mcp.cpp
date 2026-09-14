@@ -5053,8 +5053,14 @@ TEST(bm25_searches_legacy_four_column_fts_without_error_issue518) {
     ASSERT_NOT_NULL(td);
     char dir[256];
     snprintf(dir, sizeof(dir), "%s", td);
+    /* cbm_mcp_server_new(project) opens <cache_dir>/<project>.db, so seeding the
+     * legacy table THERE puts the server on a pre-body database, the same way a
+     * real upgrade finds one. */
+    char *saved_cache = getenv("CBM_CACHE_DIR") ? strdup(getenv("CBM_CACHE_DIR")) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", dir, 1);
+    const char *proj = "legacyfts";
     char dbpath[512];
-    snprintf(dbpath, sizeof(dbpath), "%s/legacyfts.db", dir);
+    snprintf(dbpath, sizeof(dbpath), "%s/%s.db", dir, proj);
 
     sqlite3 *raw = NULL;
     ASSERT_EQ(sqlite3_open(dbpath, &raw), SQLITE_OK);
@@ -5066,11 +5072,16 @@ TEST(bm25_searches_legacy_four_column_fts_without_error_issue518) {
               SQLITE_OK);
     sqlite3_close(raw);
 
-    cbm_mcp_server_t *srv = cbm_mcp_server_new(dbpath);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(proj);
+    if (saved_cache) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache, 1);
+        free(saved_cache);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
     ASSERT_NOT_NULL(srv);
     cbm_store_t *st = cbm_mcp_server_store(srv);
     ASSERT_NOT_NULL(st);
-    const char *proj = "legacyfts";
     cbm_mcp_server_set_project(srv, proj);
     cbm_store_upsert_project(st, proj, dir);
     cbm_node_t fn = prose_node(proj, "Function", "reconcile", "legacy.a.reconcile", "a.c",
