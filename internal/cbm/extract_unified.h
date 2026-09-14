@@ -27,8 +27,16 @@ extern "C" {
 /* One name bound as a function/lambda parameter by a scope currently OPEN on
  * the walk stack. A count, not a flag: `def outer(run): def inner(run):` binds
  * the same name twice and the inner pop must not unbind the outer. */
+/* A parameter name as a span of the file's source bytes. The walk never copies
+ * names: the source outlives the walk, and a copy per parameter would land in
+ * the per-file result arena for the whole index. */
 typedef struct {
-    const char *name;
+    const char *ptr;
+    uint32_t len;
+} CBMParamName;
+
+typedef struct {
+    CBMParamName name;
     uint32_t hash; // 0 marks an empty slot
     int count;
 } CBMParamSlot;
@@ -62,8 +70,8 @@ typedef struct {
     CBMParamSlot inline_py_param_slots[INLINE_PY_PARAM_SLOTS];
     int py_param_slot_capacity;
     int py_param_slot_used;
-    const char **py_param_stack;
-    const char *inline_py_param_stack[INLINE_PY_PARAM_STACK];
+    CBMParamName *py_param_stack;
+    CBMParamName inline_py_param_stack[INLINE_PY_PARAM_STACK];
     int py_param_stack_capacity;
     int py_param_stack_count;
     /* Allocation failure: stop tracking and answer "not bound" forever after,
@@ -71,10 +79,11 @@ typedef struct {
     bool py_param_tracking_failed;
 } WalkState;
 
-/* Is `name` bound as a parameter by a Python function or lambda scope currently
- * open on the walk stack? O(1). Answers false on any failure, so a caller can
- * only ever lose a suppression, never a true edge. */
-bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name);
+/* Is the `len`-byte name at `name` (not NUL-terminated) bound as a parameter by
+ * a Python function or lambda scope currently open on the walk stack? O(1).
+ * Answers false on any failure, so a caller can only ever lose a suppression,
+ * never a true edge. */
+bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name, uint32_t len);
 
 // Per-node handler prototypes. Each is called once per node during the
 // unified cursor walk, replacing the old recursive walk_* functions.

@@ -21,15 +21,15 @@ enum { MAX_INFRA_BINDINGS = 8 };
 // Every failure path answers "not bound", which can only ever cost a
 // suppression -- never a true edge.
 
-static uint32_t py_param_hash(const char *s) {
+static uint32_t py_param_hash(CBMParamName name) {
     uint32_t h = 2166136261u; /* FNV-1a */
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        h = (h ^ *p) * 16777619u;
+    for (uint32_t i = 0; i < name.len; i++) {
+        h = (h ^ (unsigned char)name.ptr[i]) * 16777619u;
     }
     return h ? h : 1u; /* 0 marks an empty slot */
 }
 
-static CBMParamSlot *py_param_slot(const WalkState *state, const char *name, uint32_t hash) {
+static CBMParamSlot *py_param_slot(const WalkState *state, CBMParamName name, uint32_t hash) {
     int mask = state->py_param_slot_capacity - 1;
     int i = (int)(hash & (uint32_t)mask);
     for (;;) {
@@ -37,7 +37,8 @@ static CBMParamSlot *py_param_slot(const WalkState *state, const char *name, uin
         if (slot->hash == 0) {
             return slot; /* free slot -- caller decides whether to claim it */
         }
-        if (slot->hash == hash && strcmp(slot->name, name) == 0) {
+        if (slot->hash == hash && slot->name.len == name.len &&
+            memcmp(slot->name.ptr, name.ptr, name.len) == 0) {
             return slot;
         }
         i = (i + 1) & mask;
@@ -75,21 +76,21 @@ static bool py_param_stack_reserve(CBMArena *arena, WalkState *state) {
     if (new_capacity <= state->py_param_stack_capacity) {
         return false;
     }
-    auto **grown =
-        (const char **)cbm_arena_alloc(arena, (size_t)new_capacity * sizeof(const char *));
+    auto *grown =
+        (CBMParamName *)cbm_arena_alloc(arena, (size_t)new_capacity * sizeof(CBMParamName));
     if (!grown) {
         return false;
     }
     memcpy(grown, state->py_param_stack,
-           (size_t)state->py_param_stack_count * sizeof(const char *));
+           (size_t)state->py_param_stack_count * sizeof(CBMParamName));
     state->py_param_stack = grown;
     state->py_param_stack_capacity = new_capacity;
     return true;
 }
 
 /* Bind one parameter name for the lifetime of the frame currently on top. */
-static void py_param_bind(CBMArena *arena, WalkState *state, const char *name) {
-    if (state->py_param_tracking_failed || !name || !name[0]) {
+static void py_param_bind(CBMArena *arena, WalkState *state, CBMParamName name) {
+    if (state->py_param_tracking_failed || name.len == 0) {
         return;
     }
     /* Grow before inserting: the probe must always find a free slot, and a table
@@ -105,6 +106,7 @@ static void py_param_bind(CBMArena *arena, WalkState *state, const char *name) {
     }
     uint32_t hash = py_param_hash(name);
     CBMParamSlot *slot = py_param_slot(state, name, hash);
+    /* slot->name keeps the FIRST binder's span; any equal span compares the same. */
     if (slot->hash == 0) {
         slot->hash = hash;
         slot->name = name;
@@ -121,7 +123,7 @@ static void py_param_unwind_to(WalkState *state, int base) {
         return;
     }
     while (state->py_param_stack_count > base) {
-        const char *name = state->py_param_stack[--state->py_param_stack_count];
+        CBMParamName name = state->py_param_stack[--state->py_param_stack_count];
         CBMParamSlot *slot = py_param_slot(state, name, py_param_hash(name));
         if (slot->hash != 0 && slot->count > 0) {
             slot->count--;
@@ -129,12 +131,13 @@ static void py_param_unwind_to(WalkState *state, int base) {
     }
 }
 
-bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name) {
-    if (!state || !name || !name[0] || state->py_param_tracking_failed ||
-        state->py_param_slot_used == 0) {
+bool cbm_walk_python_param_is_bound(const WalkState *state, const char *name, uint32_t len) {
+    if (!state || state->py_param_slot_used == 0 || state->py_param_tracking_failed || !name ||
+        len == 0) {
         return false;
     }
-    const CBMParamSlot *slot = py_param_slot(state, name, py_param_hash(name));
+    CBMParamName span = {name, len};
+    const CBMParamSlot *slot = py_param_slot(state, span, py_param_hash(span));
     return slot->hash != 0 && slot->count > 0;
 }
 
@@ -161,25 +164,31 @@ static void pop_expired_scopes(WalkState *state, uint32_t cur_depth) {
 
 /* The identifier a Python parameter node binds. Handles the bare, typed,
  * defaulted, keyword-only, *args and **kwargs shapes; the bare `*` separator
- * binds nothing and yields NULL. */
-static const char *py_parameter_name(CBMExtractCtx *ctx, TSNode param) {
+ * binds nothing and yields an empty span. */
+static CBMParamName py_parameter_name(const char *source, TSNode param) {
+    CBMParamName none = {NULL, 0};
     if (ts_node_is_null(param)) {
-        return NULL;
+        return none;
     }
-    if (strcmp(ts_node_type(param), "identifier") == 0) {
-        return cbm_node_text(ctx->arena, param, ctx->source);
+    TSNode ident = param;
+    if (strcmp(ts_node_type(param), "identifier") != 0) {
+        ident = ts_node_child_by_field_name(param, TS_FIELD("name"));
+        if (ts_node_is_null(ident) || strcmp(ts_node_type(ident), "identifier") != 0) {
+            /* `*args` / `**kwargs`, and any typed shape without a `name` field:
+             * the bound identifier is the first named child. */
+            ident = ts_node_named_child(param, 0);
+            if (ts_node_is_null(ident) || strcmp(ts_node_type(ident), "identifier") != 0) {
+                return none;
+            }
+        }
     }
-    TSNode name = ts_node_child_by_field_name(param, TS_FIELD("name"));
-    if (!ts_node_is_null(name) && strcmp(ts_node_type(name), "identifier") == 0) {
-        return cbm_node_text(ctx->arena, name, ctx->source);
+    uint32_t start = ts_node_start_byte(ident);
+    uint32_t end = ts_node_end_byte(ident);
+    if (end <= start) {
+        return none;
     }
-    /* `*args` / `**kwargs`, and any typed shape without a `name` field: the bound
-     * identifier is the first named child. */
-    TSNode first = ts_node_named_child(param, 0);
-    if (!ts_node_is_null(first) && strcmp(ts_node_type(first), "identifier") == 0) {
-        return cbm_node_text(ctx->arena, first, ctx->source);
-    }
-    return NULL;
+    CBMParamName span = {source + start, end - start};
+    return span;
 }
 
 /* Bind a Python def's or lambda's parameters into a frame opened for THIS node,
@@ -208,9 +217,11 @@ static void py_bind_scope_parameters(CBMExtractCtx *ctx, TSNode node, WalkState 
             return;
         }
     }
+    /* The map lives only as long as this walk, so its growth is scratch. */
+    CBMArena *arena = ctx->scratch ? ctx->scratch : ctx->arena;
     uint32_t count = ts_node_named_child_count(params);
     for (uint32_t i = 0; i < count; i++) {
-        py_param_bind(ctx->arena, state, py_parameter_name(ctx, ts_node_named_child(params, i)));
+        py_param_bind(arena, state, py_parameter_name(ctx->source, ts_node_named_child(params, i)));
     }
 }
 

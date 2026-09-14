@@ -2139,6 +2139,15 @@ static void extract_java_method_reference(CBMExtractCtx *ctx, TSNode node, const
  * Note `self.client.send()` is NOT exempt: the receiver is `self.client`, an
  * attribute of unknown type, not `self` itself. Imports are extracted before
  * the unified walk, so ctx->result->imports is complete here. */
+/* True when `node`'s source bytes equal the NUL-terminated `text`. Compares in
+ * place: a copy would live in the result arena for the whole index. */
+static bool node_text_equals(TSNode node, const char *source, const char *text) {
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    size_t len = end > start ? end - start : 0;
+    return strlen(text) == len && memcmp(source + start, text, len) == 0;
+}
+
 static bool python_receiver_is_exempt(CBMExtractCtx *ctx, TSNode receiver) {
     if (ts_node_is_null(receiver)) {
         return false;
@@ -2147,11 +2156,8 @@ static bool python_receiver_is_exempt(CBMExtractCtx *ctx, TSNode receiver) {
     /* super().m() — the receiver is a call node whose function is `super`. */
     if (strcmp(ts_node_type(receiver), "call") == 0) {
         TSNode fn = ts_node_child_by_field_name(receiver, TS_FIELD("function"));
-        if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0) {
-            const char *name = cbm_node_text(ctx->arena, fn, ctx->source);
-            return name && strcmp(name, "super") == 0;
-        }
-        return false;
+        return !ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0 &&
+               node_text_equals(fn, ctx->source, "super");
     }
 
     /* Walk an attribute chain down to its root identifier: for `pkg.sub.fn()`
@@ -2165,13 +2171,10 @@ static bool python_receiver_is_exempt(CBMExtractCtx *ctx, TSNode receiver) {
         return false;
     }
 
-    const char *name = cbm_node_text(ctx->arena, root, ctx->source);
-    if (!name) {
-        return false;
-    }
     /* self/cls only as a DIRECT receiver: `self.m()` is class-local, but
      * `self.client.m()` has receiver `self.client` of unknown type. */
-    if (direct_identifier && (strcmp(name, "self") == 0 || strcmp(name, "cls") == 0)) {
+    if (direct_identifier && (node_text_equals(root, ctx->source, "self") ||
+                              node_text_equals(root, ctx->source, "cls"))) {
         return true;
     }
     /* Import-bound root, incl. aliases (`import tools as toolkit` binds
@@ -2179,31 +2182,11 @@ static bool python_receiver_is_exempt(CBMExtractCtx *ctx, TSNode receiver) {
      * corpus, so this stays O(file). */
     for (int i = 0; i < ctx->result->imports.count; i++) {
         const char *local_name = ctx->result->imports.items[i].local_name;
-        if (local_name && strcmp(local_name, name) == 0) {
+        if (local_name && node_text_equals(root, ctx->source, local_name)) {
             return true;
         }
     }
     return false;
-}
-
-/* True when the callee of a BARE Python call `foo()` is bound as a parameter of
- * an enclosing function or lambda — the bare-call counterpart of
- * python_receiver_is_exempt above. A parameter binding shadows any module-level
- * `foo` for the whole body, so resolving such a call by short name alone
- * fabricates the edge BY CONSTRUCTION (`def _run_with_heavy_slot(run): run()`
- * must not bind an unrelated `SatoriLive.run`). Python forbids `global` on a
- * parameter, and a parameter is in scope for the whole body regardless of
- * position, so no flow analysis is needed. Local assignments are deliberately
- * NOT covered: they are flow- and binding-form-sensitive, and a partial scan
- * would suppress the wrong edges invisibly.
- *
- * The answer is CARRIED BY THE WALK (cbm_walk_python_param_is_bound), not
- * recomputed here by ascending the tree: an ascent is O(depth) per call, which
- * is quadratic on f(f(f(...))) and hung a 30,000-deep fixture upstream. */
-static bool python_callee_is_bound_parameter(CBMExtractCtx *ctx, const WalkState *state,
-                                             TSNode callee_ident) {
-    const char *callee_name = cbm_node_text(ctx->arena, callee_ident, ctx->source);
-    return cbm_walk_python_param_is_bound(state, callee_name);
 }
 
 void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state) {
@@ -2252,7 +2235,13 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                     TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
                     call.is_method = !python_receiver_is_exempt(ctx, obj);
                 } else if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0) {
-                    call.callee_is_locally_bound = python_callee_is_bound_parameter(ctx, state, fn);
+                    /* A parameter binding shadows any module-level `foo` for the
+                     * whole body (`def f(run): run()` must not bind an unrelated
+                     * `X.run`). The walk carries the bindings, so this is O(1). */
+                    uint32_t start = ts_node_start_byte(fn);
+                    uint32_t end = ts_node_end_byte(fn);
+                    call.callee_is_locally_bound = cbm_walk_python_param_is_bound(
+                        state, ctx->source + start, end > start ? end - start : 0);
                 }
             }
             // TS/JS/TSX receiver-aware guard (#592/#606 direction; same intent
