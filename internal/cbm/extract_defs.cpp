@@ -6,6 +6,7 @@
 #include "foundation/platform.h" // safe_realloc (frees old on failure)
 #include "foundation/log.h"      // cbm_log_warn
 #include "foundation/sha256.h"
+#include "foundation/str_util.h" // cbm_str_ends_with
 #include "extract_node_stack.h"
 #include "simhash/minhash.h"
 #include "semantic/ast_profile.h"
@@ -1214,16 +1215,34 @@ static bool is_comment_node(const char *kind) {
             strcmp(kind, "line_comment") == 0 || strcmp(kind, "multiline_comment") == 0);
 }
 
-// Extract comment text, truncating to MAX_COMMENT_LEN.
-// #1017: snap the cut point back to a complete UTF-8 codepoint boundary.
+/* UTF-8 classification: every continuation byte matches 10xxxxxx, and a lead
+ * byte's high bits name the sequence length. */
+enum {
+    UTF8_CONT_MASK = 0xC0,
+    UTF8_CONT_MARK = 0x80,
+    UTF8_LEAD2_MASK = 0xE0,
+    UTF8_LEAD3_MASK = 0xF0,
+    UTF8_LEAD4_MASK = 0xF8,
+};
+
+static bool utf8_is_continuation(unsigned char c) {
+    return (c & UTF8_CONT_MASK) == UTF8_CONT_MARK;
+}
+
+/* #1017: back a cut index up over continuation bytes to the start of the
+ * codepoint it lands in. Terminating at the result keeps whole codepoints. */
+static size_t utf8_snap_cut(const char *text, size_t cut) {
+    while (cut > 0 && utf8_is_continuation((unsigned char)text[cut])) {
+        cut--;
+    }
+    return cut;
+}
+
+// Extract comment text, truncating to MAX_COMMENT_LEN on a codepoint boundary.
 static char *extract_comment_text(CBMArena *a, TSNode node, const char *source) {
     char *text = cbm_node_text(a, node, source);
     if (text && strlen(text) > MAX_COMMENT_LEN) {
-        size_t cut = MAX_COMMENT_LEN;
-        while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80) {
-            cut--;
-        }
-        text[cut] = '\0';
+        text[utf8_snap_cut(text, MAX_COMMENT_LEN)] = '\0';
     }
     return text;
 }
@@ -3701,55 +3720,35 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
 
 // --- Class definition extraction ---
 
-/* UTF-8 sequence classification: a lead byte's high bits name the sequence
- * length, and every continuation byte matches 10xxxxxx. */
-enum {
-    PROSE_UTF8_CONT_MASK = 0xC0,
-    PROSE_UTF8_CONT_MARK = 0x80,
-    PROSE_UTF8_LEAD2_MASK = 0xE0,
-    PROSE_UTF8_LEAD2_MARK = 0xC0,
-    PROSE_UTF8_LEAD3_MASK = 0xF0,
-    PROSE_UTF8_LEAD3_MARK = 0xE0,
-    PROSE_UTF8_LEAD4_MASK = 0xF8,
-    PROSE_UTF8_LEAD4_MARK = 0xF0,
-    PROSE_UTF8_LEN_1 = 1,
-    PROSE_UTF8_LEN_2 = 2,
-    PROSE_UTF8_LEN_3 = 3,
-    PROSE_UTF8_LEN_4 = 4,
-};
-
-static size_t prose_utf8_sequence_len(unsigned char lead) {
-    if ((lead & PROSE_UTF8_LEAD2_MASK) == PROSE_UTF8_LEAD2_MARK) {
-        return PROSE_UTF8_LEN_2;
+/* Bytes in the UTF-8 sequence a lead byte starts; 1 for anything else. Each
+ * length's lead mark equals the next shorter length's mask (110xxxxx under
+ * 0xE0 is 0xC0, 1110xxxx under 0xF0 is 0xE0, 11110xxx under 0xF8 is 0xF0). */
+static size_t utf8_sequence_len(unsigned char lead) {
+    if ((lead & UTF8_LEAD2_MASK) == UTF8_CONT_MASK) {
+        return 2;
     }
-    if ((lead & PROSE_UTF8_LEAD3_MASK) == PROSE_UTF8_LEAD3_MARK) {
-        return PROSE_UTF8_LEN_3;
+    if ((lead & UTF8_LEAD3_MASK) == UTF8_LEAD2_MASK) {
+        return 3;
     }
-    if ((lead & PROSE_UTF8_LEAD4_MASK) == PROSE_UTF8_LEAD4_MARK) {
-        return PROSE_UTF8_LEN_4;
+    if ((lead & UTF8_LEAD4_MASK) == UTF8_LEAD3_MASK) {
+        return 4;
     }
-    return PROSE_UTF8_LEN_1;
+    return 1;
 }
 
 /* Drop a trailing PARTIAL UTF-8 sequence left by a byte-length cut, so capped
- * prose never ends mid-codepoint (#1017's rule, applied to prose bodies). */
+ * prose never ends mid-codepoint (#1017's rule, applied to prose bodies). The
+ * byte past the cut is gone here, so the last sequence's lead byte decides. */
 static void prose_utf8_trim_partial_tail(char *text) {
     size_t n = strlen(text);
     if (n == 0) {
         return;
     }
-    size_t i = n;
-    while (i > 0 && ((unsigned char)text[i - PROSE_UTF8_LEN_1] & PROSE_UTF8_CONT_MASK) ==
-                        PROSE_UTF8_CONT_MARK) {
-        i--;
-    }
-    if (i == 0) {
-        text[0] = '\0'; /* continuation bytes only — not decodable */
-        return;
-    }
-    size_t need = prose_utf8_sequence_len((unsigned char)text[i - PROSE_UTF8_LEN_1]);
-    if (i - PROSE_UTF8_LEN_1 + need > n) {
-        text[i - PROSE_UTF8_LEN_1] = '\0';
+    size_t lead = utf8_snap_cut(text, n - 1);
+    /* A continuation byte at 0 means continuation bytes only — not decodable. */
+    if (utf8_is_continuation((unsigned char)text[lead]) ||
+        lead + utf8_sequence_len((unsigned char)text[lead]) > n) {
+        text[lead] = '\0';
     }
 }
 
@@ -5802,30 +5801,6 @@ static bool is_helm_values_file(const char *rel) {
     return strcmp(b, "values.yaml") == 0 || strcmp(b, "values.yml") == 0;
 }
 
-// Extract ONLY top-level keys of a YAML document (no leaf explosion). Used for
-// Helm values.yaml so each chart's tunables surface as a handful of structured
-// Variables instead of one node per nested leaf (#338).
-static TSNode find_yaml_toplevel_mapping(TSNode root);
-
-static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
-    CBMArena *a = ctx->arena;
-    TSNode bm = find_yaml_toplevel_mapping(root);
-    if (ts_node_is_null(bm)) {
-        return;
-    }
-    uint32_t n = ts_node_named_child_count(bm);
-    for (uint32_t i = 0; i < n; i++) {
-        TSNode pair = ts_node_named_child(bm, i);
-        if (strcmp(ts_node_type(pair), "block_mapping_pair") != 0) {
-            continue;
-        }
-        TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
-        if (!ts_node_is_null(key)) {
-            push_var_def(ctx, cbm_node_text(a, key, ctx->source), pair);
-        }
-    }
-}
-
 // Descend stream -> document -> block_node to a YAML document's top-level
 // block_mapping. Returns a null node when the document has none.
 static TSNode find_yaml_toplevel_mapping(TSNode root) {
@@ -5853,6 +5828,28 @@ static TSNode find_yaml_toplevel_mapping(TSNode root) {
         cur = next;
     }
     return bm;
+}
+
+// Extract ONLY top-level keys of a YAML document (no leaf explosion). Used for
+// Helm values.yaml so each chart's tunables surface as a handful of structured
+// Variables instead of one node per nested leaf (#338).
+static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
+    CBMArena *a = ctx->arena;
+    TSNode bm = find_yaml_toplevel_mapping(root);
+    if (ts_node_is_null(bm)) {
+        return;
+    }
+    uint32_t n = ts_node_named_child_count(bm);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode pair = ts_node_named_child(bm, i);
+        if (strcmp(ts_node_type(pair), "block_mapping_pair") != 0) {
+            continue;
+        }
+        TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+        if (!ts_node_is_null(key)) {
+            push_var_def(ctx, cbm_node_text(a, key, ctx->source), pair);
+        }
+    }
 }
 
 // Descend to a JSON document's top-level object. Returns a null node if absent.
@@ -6891,9 +6888,9 @@ static bool cbm_path_is_razor(const char *rel_path) {
     }
     static const char *const suffixes[] = {".razor", ".cshtml"};
     size_t len = strlen(rel_path);
+    /* Strictly longer than the suffix: a bare ".razor" names no Razor file. */
     return std::any_of(std::begin(suffixes), std::end(suffixes), [&](const char *suffix) {
-        size_t slen = strlen(suffix);
-        return len > slen && strcmp(rel_path + (len - slen), suffix) == 0;
+        return len > strlen(suffix) && cbm_str_ends_with(rel_path, suffix);
     });
 }
 
