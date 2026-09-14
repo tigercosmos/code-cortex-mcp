@@ -636,6 +636,19 @@ TEST(ei_go_import_never_binds_symbol) {
     PASS();
 }
 
+/* JS: a parent-relative import of a non-JS asset ("../styles.css",
+ * "../Widget.vue") keeps its extension through relative resolution only if the
+ * extension is on the JS/TS list, and then misses the target Module. A real
+ * language extension is stripped; a dotted extensionless basename is not. */
+TEST(ei_js_parent_relative_asset_import) {
+    static const EILangFile f[] = {
+        {"styles.css", ".banner { color: red; }\n"},
+        {"src/main.js", "import '../styles.css';\nexport function boot() { return 1; }\n"},
+    };
+    ASSERT_TRUE(ei_edge_count_is(f, 2, "IMPORTS", 1));
+    PASS();
+}
+
 /* C++: a dot-relative include ("../a.h") names the header by its path from the
  * includer's directory. The raw spelling ends no file path, so it used to fall
  * through to module resolution, which only reached a same-stem SOURCE file's
@@ -1199,6 +1212,7 @@ SUITE(edge_imports) {
     RUN_TEST(ei_go_blank_import);
     RUN_TEST(ei_go_two_consumers_same_package);
     RUN_TEST(ei_go_import_never_binds_symbol);
+    RUN_TEST(ei_js_parent_relative_asset_import);
     RUN_TEST(ei_cpp_dot_relative_include_targets_header_file);
     RUN_TEST(ei_cpp_header_include_targets_header_file);
 

@@ -3224,6 +3224,33 @@ TEST(go_imports) {
  * member loop matched nothing. Interfaces hold their method specs directly and
  * always worked. The blank identifier `_` is struct padding, not a
  * referenceable field, and must stay out. */
+/* One Go field declaration can name several fields (`X, Y int`). Each name is a
+ * separate `name` child, and a single field lookup returns only the first, so
+ * `Y` vanished along with every call resolved through it. */
+TEST(extract_go_struct_multi_name_field_declaration) {
+    CBMFileResult *r = extract("package geo\n\n"
+                               "type Point struct {\n"
+                               "\tX, Y int\n"
+                               "\t_, Z float64\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "point.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_defs_with_label(r, "Field"), 3);
+    ASSERT_TRUE(has_def(r, "Field", "X"));
+    ASSERT_TRUE(has_def(r, "Field", "Y"));
+    ASSERT_TRUE(has_def(r, "Field", "Z"));
+    ASSERT_FALSE(has_def(r, "Field", "_"));
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->label && strcmp(d->label, "Field") == 0 && strcmp(d->name, "Y") == 0) {
+            ASSERT_STR_EQ(d->return_type, "int");
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(extract_go_struct_fields_have_nodes) {
     CBMFileResult *r = extract("package fxf\n\n"
                                "type Config struct {\n"
@@ -5850,6 +5877,37 @@ static int cov_ranges_dropped_marker(const char *ranges) {
     return atoi(plus + 1);
 }
 
+/* A comment marker inside a string literal ("/*") is code, not a comment
+ * opener. Treated as one, every following line looks like comment text, so the
+ * dropped #ifdef branch is classified as holding no code and its only error
+ * range is refined away: the file reports clean while the graph misses it. */
+static const char *const COV_C_IFDEF_SPLIT_AFTER_MARKER_LITERAL =
+    "#include <stdio.h>\n"                      /* 1 */
+    "\n"                                        /* 2 */
+    "static const char *marker = \"/*\";\n"     /* 3 */
+    "void ok_before(void) { printf(\"a\"); }\n" /* 4 */
+    "\n"                                        /* 5 */
+    "#ifdef FEATURE_A\n"                        /* 6 */
+    "static int guarded(int x) {\n"             /* 7 */
+    "#else\n"                                   /* 8 */
+    "static int guarded_alt(int x) {\n"         /* 9 */
+    "#endif\n"                                  /* 10 */
+    "    return x + 1;\n"                       /* 11 */
+    "}\n"                                       /* 12 */
+    "\n"                                        /* 13 */
+    "void ok_after(void) { printf(\"b\"); }\n"; /* 14 */
+
+TEST(extract_c_comment_marker_in_string_keeps_dropped_branch_range) {
+    CBMFileResult *r =
+        extract(COV_C_IFDEF_SPLIT_AFTER_MARKER_LITERAL, CBM_LANG_C, "t", "marker.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_ranges_cover_line(r->error_ranges, 7u)); /* dropped branch */
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(extract_c_ifdef_split_range_narrows_to_dropped_branch_issue963) {
     CBMFileResult *r = extract(COV_C_IFDEF_SPLIT, CBM_LANG_C, "t", "split.c");
     ASSERT_NOT_NULL(r);
@@ -6998,6 +7056,7 @@ SUITE(extraction) {
     RUN_TEST(python_imports);
     RUN_TEST(js_imports);
     RUN_TEST(go_imports);
+    RUN_TEST(extract_go_struct_multi_name_field_declaration);
     RUN_TEST(extract_go_struct_fields_have_nodes);
     RUN_TEST(java_imports);
     RUN_TEST(rust_imports);
@@ -7076,6 +7135,7 @@ SUITE(extraction) {
     RUN_TEST(extract_dockerfile_trailing_blank_at_eof_not_flagged_issue1746);
     RUN_TEST(extract_dockerfile_trailing_blank_controls_clean_issue1746);
     RUN_TEST(extract_real_errors_still_flagged_with_trailing_blank_issue1746);
+    RUN_TEST(extract_c_comment_marker_in_string_keeps_dropped_branch_range);
     RUN_TEST(extract_c_ifdef_split_range_narrows_to_dropped_branch_issue963);
     RUN_TEST(extract_c_ifdef_split_range_excludes_explained_lines_issue963);
     RUN_TEST(extract_c_refinement_keeps_real_garbage_issue963);

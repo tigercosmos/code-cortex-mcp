@@ -6167,33 +6167,51 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
             continue;
         }
 
-        char *name = cbm_node_text(a, name_node, ctx->source);
-        if (!name || !name[0]) {
-            continue;
+        /* Go declares several fields in one declaration (`X, Y int`), each a
+         * `name` child; the field lookup above returns only the first. */
+        enum { MAX_FIELD_NAMES = 32 };
+        TSNode names[MAX_FIELD_NAMES];
+        uint32_t name_count = 0;
+        if (ctx->language == CBM_LANG_GO) {
+            uint32_t cc = ts_node_named_child_count(child);
+            for (uint32_t k = 0; k < cc && name_count < MAX_FIELD_NAMES; k++) {
+                TSNode nm = ts_node_named_child(child, k);
+                if (strcmp(ts_node_type(nm), "field_identifier") == 0) {
+                    names[name_count++] = nm;
+                }
+            }
+        }
+        if (name_count == 0) {
+            names[name_count++] = name_node;
         }
 
-        /* Go: `_` is the blank identifier, used for explicit struct padding in
-         * generated code. It is not a referenceable field, and emitting it gives
-         * every `_` in the repository a same-named node to collide with. */
-        if (ctx->language == CBM_LANG_GO && strcmp(name, "_") == 0) {
-            continue;
+        for (uint32_t k = 0; k < name_count; k++) {
+            char *name = cbm_node_text(a, names[k], ctx->source);
+            if (!name || !name[0]) {
+                continue;
+            }
+
+            /* Go: `_` is the blank identifier, used for explicit struct padding in
+             * generated code. It is not a referenceable field, and emitting it
+             * gives every `_` in the repository a same-named node to collide with. */
+            if (ctx->language == CBM_LANG_GO && strcmp(name, "_") == 0) {
+                continue;
+            }
+
+            CBMDefinition def;
+            memset(&def, 0, sizeof(def));
+            def.name = name;
+            def.qualified_name = cbm_arena_sprintf(a, "%s.%s", class_qn, name);
+            def.label = "Field";
+            def.file_path = ctx->rel_path;
+            def.parent_class = class_qn;
+            def.return_type = type_text;
+            def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
+            def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
+            def.is_exported = cbm_is_exported(name, ctx->language);
+
+            cbm_defs_push(&ctx->result->defs, a, def);
         }
-
-        const char *field_qn = cbm_arena_sprintf(a, "%s.%s", class_qn, name);
-
-        CBMDefinition def;
-        memset(&def, 0, sizeof(def));
-        def.name = name;
-        def.qualified_name = field_qn;
-        def.label = "Field";
-        def.file_path = ctx->rel_path;
-        def.parent_class = class_qn;
-        def.return_type = type_text;
-        def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
-        def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
-        def.is_exported = cbm_is_exported(name, ctx->language);
-
-        cbm_defs_push(&ctx->result->defs, a, def);
     }
 }
 

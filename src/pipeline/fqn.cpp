@@ -7,6 +7,7 @@
 #include "pipeline/pipeline.h"
 #include "foundation/constants.h"
 #include "foundation/platform.h"
+#include "discover/discover.h"
 
 #include <stdbool.h>
 #include <stddef.h> // NULL
@@ -281,8 +282,10 @@ static char *resolve_python_relative(char *buf, size_t buf_size, const char *mod
     return strdup(buf);
 }
 
-/* Strip an explicit JS/TS module file extension while preserving dots that are
- * part of an extensionless basename (e.g. "featureX.engine"). */
+/* Strip the final segment's file extension when it is a real one: an explicit
+ * JS/TS module extension, or any extension the indexer maps to a language
+ * ("../styles.css", "../Widget.vue"). A dotted extensionless basename such as
+ * "featureX.engine" names no language, so its dot is kept. */
 static size_t strip_js_module_ext(const char *seg_start, size_t seg_len) {
     static const char *const extensions[] = {
         ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".json",
@@ -291,6 +294,18 @@ static size_t strip_js_module_ext(const char *seg_start, size_t seg_len) {
         size_t ext_len = strlen(ext);
         if (seg_len > ext_len && memcmp(seg_start + seg_len - ext_len, ext, ext_len) == 0) {
             return seg_len - ext_len;
+        }
+    }
+    size_t dot = seg_len;
+    while (dot > 0 && seg_start[dot - 1] != '.') {
+        dot--;
+    }
+    char leaf[CBM_SZ_256];
+    if (dot > 1 && dot < seg_len && seg_len < sizeof(leaf)) {
+        memcpy(leaf, seg_start, seg_len);
+        leaf[seg_len] = '\0';
+        if (cbm_language_for_filename(leaf) != CBM_LANG_COUNT) {
+            return dot - 1;
         }
     }
     return seg_len;

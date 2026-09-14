@@ -1122,6 +1122,18 @@ static void cbm_mark_no_code_lines(const char *src, int src_len, uint8_t *map,
             if (src[j] == '/' && j + 1 < end && src[j + 1] == '/') {
                 break; /* rest of the line is a comment */
             }
+            if (src[j] == '"' || src[j] == '\'') {
+                /* A literal is code, and a comment marker inside it ("/*") must
+                 * not open a block: skip to the closing quote on this line. */
+                char quote = src[j];
+                for (j++; j < end && src[j] != quote; j++) {
+                    if (src[j] == '\\' && j + 1 < end) {
+                        j++;
+                    }
+                }
+                has_code = true;
+                continue;
+            }
             if (src[j] != ' ' && src[j] != '\t' && src[j] != '\r') {
                 has_code = true;
             }
