@@ -442,6 +442,32 @@ TEST(resolve_caps_unresolvably_ambiguous_names) {
  * hotspot whose in-degree came from another language. unique_name
  * (candidates == 1) is a different strategy and must survive, as must
  * same_module / import_map / lsp_* — those have real evidence behind them. */
+TEST(cross_language_ref_drops_go_vs_c) {
+    /* #1928: the USAGE/WRITES/READS analog of #725. Reference edges carry no
+     * import-closure evidence, so EVERY registry strategy is a bare-name
+     * guess -- the predicate takes no strategy at all. */
+    ASSERT_TRUE(cbm_suppress_cross_language_ref(CBM_LANG_GO, "bpf/probe.c"));
+    ASSERT_TRUE(cbm_suppress_cross_language_ref(CBM_LANG_GO, "driver/mock.hpp"));
+    ASSERT_TRUE(cbm_suppress_cross_language_ref(CBM_LANG_C, "pkg/events/event.go"));
+    ASSERT_TRUE(cbm_suppress_cross_language_ref(CBM_LANG_PYTHON, "web/src/pages/Editor.js"));
+    /* Same language -> keep. */
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_GO, "pkg/state/state.go"));
+    /* C and C++ are one family: .h maps to CBM_LANG_CPP. */
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_C, "bpf/probe.h"));
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_CPP, "driver/compat.c"));
+    /* ...but Go into a header is still a boundary. */
+    ASSERT_TRUE(cbm_suppress_cross_language_ref(CBM_LANG_GO, "bpf/probe.h"));
+    /* JS/TS/TSX are one family. */
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_JAVASCRIPT, "lib/util.ts"));
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_TYPESCRIPT, "ui/Panel.tsx"));
+    /* Unknown caller/target language or no path -> nothing to judge -> keep. */
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_COUNT, "store.py"));
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_GO, NULL));
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_GO, ""));
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_GO, "Makefile.inc.unknownext"));
+    PASS();
+}
+
 TEST(cross_language_suffix_match_drops_py_vs_js) {
     ASSERT_TRUE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "web/src/pages/Editor.js",
                                                          "suffix_match"));
@@ -832,6 +858,7 @@ SUITE(registry) {
     RUN_TEST(resolve_suffix_match);
     RUN_TEST(resolve_caps_unresolvably_ambiguous_names);
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
+    RUN_TEST(cross_language_ref_drops_go_vs_c);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(local_binding_suppress_drops_weak_shadowed_bare_calls);

@@ -1239,6 +1239,13 @@ static const char *cbm_reg_path_basename(const char *path) {
     return slash ? slash + 1 : path;
 }
 
+/* C and C++ are one family for cross-language reference checks: .h maps to
+ * CBM_LANG_CPP in the extension table, so a .c file referencing a symbol
+ * declared in its own header would otherwise read as a language boundary. */
+static bool cbm_c_cpp_family(CBMLanguage lang) {
+    return lang == CBM_LANG_C || lang == CBM_LANG_CPP;
+}
+
 bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const char *target_file_path,
                                               const char *strategy) {
     if (!strategy || strcmp(strategy, "suffix_match") != 0) {
@@ -1255,6 +1262,31 @@ bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const cha
         return false;
     }
     if (cbm_js_ts_family(caller_lang) && cbm_js_ts_family(target_lang)) {
+        return false;
+    }
+    return true;
+}
+
+bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target_file_path) {
+    /* #1928: USAGE / WRITES / READS analog of the CALLS guard above. A
+     * variable or field reference resolved by the short-name registry must
+     * not cross a language boundary: unlike CALLS, a reference edge carries
+     * no import-closure evidence at all -- a Go test's local `event` and an
+     * eBPF C probe's automatic `event` share nothing but the spelling, so
+     * EVERY registry strategy is a bare-name guess here and none is exempt.
+     * The JS/TS family keeps its exemption, and C/C++ count as one family
+     * (.h maps to CBM_LANG_CPP). */
+    if (caller_lang == CBM_LANG_COUNT || !target_file_path || !target_file_path[0]) {
+        return false;
+    }
+    CBMLanguage target_lang = cbm_language_for_filename(cbm_reg_path_basename(target_file_path));
+    if (target_lang == CBM_LANG_COUNT || caller_lang == target_lang) {
+        return false;
+    }
+    if (cbm_js_ts_family(caller_lang) && cbm_js_ts_family(target_lang)) {
+        return false;
+    }
+    if (cbm_c_cpp_family(caller_lang) && cbm_c_cpp_family(target_lang)) {
         return false;
     }
     return true;

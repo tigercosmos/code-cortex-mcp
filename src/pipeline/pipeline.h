@@ -218,6 +218,14 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
 bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const char *target_file_path,
                                               const char *strategy);
 
+/* #1928: USAGE/WRITES/READS analog of the CALLS guard above. Reference edges
+ * resolved by the short-name registry carry no import-closure evidence, so a
+ * cross-language binding is a bare-name collision for EVERY strategy -- drop
+ * it whenever the caller's language and the target file's language disagree
+ * (JS/TS family members and the C/C++ header family excepted). Pure;
+ * unit-tested in test_registry.cpp. */
+bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target_file_path);
+
 /* Relation-permitting resolve, for SQL FROM/JOIN lineage ONLY. The default
  * cbm_registry_resolve vetoes Table/View results because common relation names
  * collide with code identifiers in every language. Uncached by design — see the

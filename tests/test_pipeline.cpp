@@ -7587,6 +7587,106 @@ static int named_edge_count(cbm_store_t *s, const char *project, const char *typ
     return hits;
 }
 
+/* Index `n` fixture files plus `pad` filler Go files (>= 50 total forces the
+ * parallel pipeline) into g_lang_tmpdir; returns the pipeline, or NULL. The
+ * caller opens the store at `db`, frees the pipeline and tears the repo down. */
+static cbm_pipeline_t *index_fixture_with_padding(const char *const *names,
+                                                  const char *const *bodies, int n, int pad,
+                                                  char *db, size_t db_sz) {
+    enum { MAX_FIXTURE_FILES = 96 };
+    const char *all_names[MAX_FIXTURE_FILES];
+    const char *all_bodies[MAX_FIXTURE_FILES];
+    std::string pad_names[MAX_FIXTURE_FILES];
+    std::string pad_bodies[MAX_FIXTURE_FILES];
+    if (n + pad > MAX_FIXTURE_FILES) {
+        return NULL;
+    }
+    for (int i = 0; i < n; i++) {
+        all_names[i] = names[i];
+        all_bodies[i] = bodies[i];
+    }
+    for (int i = 0; i < pad; i++) {
+        pad_names[i] = "pad/filler" + std::to_string(i) + ".go";
+        pad_bodies[i] = "package pad\n\nfunc filler" + std::to_string(i) + "() int { return " +
+                        std::to_string(i) + " }\n";
+        all_names[n + i] = pad_names[i].c_str();
+        all_bodies[n + i] = pad_bodies[i].c_str();
+    }
+    if (setup_lang_repo(all_names, all_bodies, n + pad) != 0) {
+        return NULL;
+    }
+    snprintf(db, db_sz, "%s/test.db", g_lang_tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    if (p && cbm_pipeline_run(p) != 0) {
+        cbm_pipeline_free(p);
+        return NULL;
+    }
+    return p;
+}
+
+/* #1928 fixture: Go identifiers spelled like a C probe's names. None of them
+ * can touch anything in a C translation unit. */
+static const char *const k_go_c_ref_names[] = {"go.mod", "probe/probe.c", "app/app.go",
+                                               "state/vars.go", "state/state.go"};
+static const char *const k_go_c_ref_bodies[] = {
+    "module example.com/fxguard\n\ngo 1.22\n",
+    "static int total_events = 0;\n\nstatic int handle(void) {\n    int event = 0;\n"
+    "    total_events += event;\n    return event;\n}\n",
+    "package app\n\nfunc TrackEvent() int {\n\tevent := 1\n\treturn event\n}\n\n"
+    "func UsesHandle() int {\n\th := handle\n\t_ = h\n\treturn 4\n}\n\n"
+    "func WriteTotal() {\n\ttotal_events := 5\n\t_ = total_events\n}\n",
+    "package state\n\nvar Counter int\n", "package state\n\nfunc Bump() {\n\tCounter = 2\n}\n"};
+
+/* 0 = no cross-language reference edge and the same-language control kept;
+ * -1 = a cross-language edge formed; -2 = the control edge vanished. */
+static int go_c_ref_guard_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p =
+        index_fixture_with_padding(k_go_c_ref_names, k_go_c_ref_bodies, 5, pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -3;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int bad = -1;
+    int keep = 0;
+    if (s) {
+        bad = named_edge_count(s, proj, "WRITES", "TrackEvent", "event") +
+              named_edge_count(s, proj, "READS", "TrackEvent", "event") +
+              named_edge_count(s, proj, "USAGE", "UsesHandle", "handle") +
+              named_edge_count(s, proj, "READS", "UsesHandle", "handle") +
+              named_edge_count(s, proj, "WRITES", "WriteTotal", "total_events") +
+              named_edge_count(s, proj, "USAGE", "WriteTotal", "total_events");
+        keep = named_edge_count(s, proj, "WRITES", "Bump", "Counter");
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    if (bad != 0) {
+        printf("  cross-language reference edges: %d (want 0)\n", bad);
+        return -1;
+    }
+    return keep > 0 ? 0 : -2;
+}
+
+/* #1928: USAGE and WRITES/READS resolve through the same short-name registry
+ * as CALLS but never consulted the #725 cross-language guard, so on a Go tree
+ * with eBPF C probes every Go identifier spelled like a C one produced an edge
+ * into the C file. Sequential twin (pass_usages.cpp). */
+TEST(pipeline_go_rw_usage_never_cross_into_c) {
+    ASSERT_EQ(go_c_ref_guard_probe(0), 0);
+    PASS();
+}
+
+/* Parallel twin (pass_parallel.cpp resolve_file_usages / resolve_file_rw):
+ * upstream's sequential-only fix left 344 Go->C WRITES alive on a ~1150-file
+ * repo. >= 50 files forces the parallel pipeline. */
+TEST(pipeline_go_rw_usage_never_cross_into_c_parallel) {
+    ASSERT_EQ(go_c_ref_guard_probe(52), 0);
+    PASS();
+}
+
 /* SQL DDL becomes first-class Table/View nodes wired into FROM/JOIN lineage,
  * while the shared name registry must NOT leak those relations into other
  * languages' textual resolution: a Python call or identifier sharing the table's
@@ -8314,6 +8414,8 @@ SUITE(pipeline) {
     RUN_TEST(pkgmap_swift_scan_repo_finds_nested_manifest);
     RUN_TEST(pipeline_cross_language_same_name_does_not_share_calls_issue725);
     RUN_TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725);
+    RUN_TEST(pipeline_go_rw_usage_never_cross_into_c);
+    RUN_TEST(pipeline_go_rw_usage_never_cross_into_c_parallel);
     RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);
     RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);

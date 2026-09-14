@@ -2640,6 +2640,11 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!tgt || src->id == tgt->id) {
             continue;
         }
+        /* #1928: the registry answer is a bare-name guess -- never let it bind
+         * a reference across a language boundary. Mirrors pass_usages.cpp. */
+        if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
+            continue;
+        }
         /* uprops must exceed the escaped value + wrapper (the sequential twin in
          * pass_usages.cpp already uses CBM_SZ_512): at CBM_SZ_256 a long
          * reference name cut the blob before its closing quote+brace. */
@@ -2687,7 +2692,7 @@ static void resolve_file_throws(resolve_ctx_t *rc, resolve_worker_state_t *ws,
 /* Resolve reads/writes for one file. */
 static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFileResult *result,
                             const char *rel, const char *module_qn, const char **imp_keys,
-                            const char **imp_vals, int imp_count) {
+                            const char **imp_vals, int imp_count, CBMLanguage lang) {
     for (int r = 0; r < result->rw.count; r++) {
         CBMReadWrite *rw = &result->rw.items[r];
         if (!rw->var_name) {
@@ -2705,6 +2710,11 @@ static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFi
         }
         const cbm_gbuf_node_t *tgt = cbm_gbuf_find_by_qn(rc->main_gbuf, res.qualified_name);
         if (!tgt || src->id == tgt->id) {
+            continue;
+        }
+        /* #1928: bare-name registry guess -- never cross a language boundary.
+         * Mirrors pass_usages.cpp resolve_rw_edges. */
+        if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
             continue;
         }
         const char *etype = rw->is_write ? "WRITES" : "READS";
@@ -3155,7 +3165,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
 
         /* ── READS / WRITES ────────────────────────────────────── */
         _ph_t0 = extract_now_ns();
-        resolve_file_rw(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count);
+        resolve_file_rw(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count, lang);
         atomic_fetch_add_explicit(&rc->time_ns_rw, extract_now_ns() - _ph_t0, memory_order_relaxed);
 
         /* ── INHERITS + DECORATES + IMPLEMENTS ──────────────────── */
