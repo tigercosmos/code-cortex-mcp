@@ -29,6 +29,9 @@
 #include "graph_buffer/graph_buffer.h"
 #include "yyjson/yyjson.h"
 #include "service_patterns.h"     // cbm_service_pattern_is_http_route_literal
+#include "foundation/compat_fs.h" // cbm_opendir (complexity cycle-order fixture copy)
+#include <algorithm>
+#include <vector>
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 extern "C" bool cbm_test_cpp_sites_need_cross(const CBMFileResult *result);
@@ -4924,6 +4927,160 @@ TEST(pipeline_arg_url_rejects_non_http_slash_arguments) {
     PASS();
 }
 
+/* Reproduce-first for the determinism gap distilled from upstream #1925
+ * (e410c86f): the complexity pass walked Function/Method seeds in the graph
+ * buffer's label-list order and each node's CALLS targets in adjacency order.
+ * Both follow the ids extract workers draw from one shared counter, and the
+ * memoised DFS truncates a branch at the first back edge, so which member of a
+ * mutual-recursion cycle it enters first decided the transitive_loop_depth the
+ * other members read. Measured on this fork before the fix: every 4-worker run
+ * disagreed with the single-threaded run on 22 of 73 functions. (This fork
+ * already marks every cycle member `recursive`, so that flag was stable; the
+ * depth was not.) The fixture holds 24 two-member and 6 three-member cycles,
+ * one function per file, above MIN_FILES_FOR_PARALLEL. */
+enum { CX_ORDER_MT_RUNS = 6 };
+
+/* Copy the regular files of a flat fixture directory into dst_dir. Returns the
+ * number of files copied, or -1 when the directory cannot be read. */
+static int cx_order_copy_fixture(const char *src_dir, const std::string &dst_dir) {
+    cbm_dir_t *d = cbm_opendir(src_dir);
+    if (!d) {
+        return -1;
+    }
+    int copied = 0;
+    cbm_dirent_t *entry;
+    while ((entry = cbm_readdir(d)) != NULL) {
+        if (entry->name[0] == '.' || entry->is_dir) {
+            continue;
+        }
+        std::string src = std::string(src_dir) + "/" + entry->name;
+        FILE *in = fopen(src.c_str(), "rb");
+        if (!in) {
+            copied = -1;
+            break;
+        }
+        std::string body;
+        char buf[CBM_SZ_4K];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+            body.append(buf, n);
+        }
+        fclose(in);
+        if (th_write_file((dst_dir + "/" + entry->name).c_str(), body.c_str()) != 0) {
+            copied = -1;
+            break;
+        }
+        copied++;
+    }
+    cbm_closedir(d);
+    return copied;
+}
+
+/* One line per Function in qualified-name order: "<qn> <tld> <recursive>".
+ * Sorting by name keeps DB ids and row order out of the comparison. Returns
+ * false when the store cannot be read. */
+static bool cx_order_signature(const std::string &db_path, const char *project, std::string *sig,
+                               int *func_count) {
+    cbm_store_t *s = cbm_store_open_path(db_path.c_str());
+    if (!s) {
+        return false;
+    }
+    cbm_node_t *funcs = NULL;
+    int count = 0;
+    if (cbm_store_find_nodes_by_label(s, project, "Function", &funcs, &count) != CBM_STORE_OK) {
+        cbm_store_close(s);
+        return false;
+    }
+    std::vector<std::string> lines;
+    for (int i = 0; i < count; i++) {
+        const char *props = funcs[i].properties_json ? funcs[i].properties_json : "{}";
+        const char *tld = strstr(props, "\"transitive_loop_depth\":");
+        const char *rec = strstr(props, "\"recursive\":");
+        std::string line = funcs[i].qualified_name ? funcs[i].qualified_name : "";
+        line += " ";
+        line += tld ? std::string(tld, strcspn(tld, ",}")) : "";
+        line += " ";
+        line += rec ? std::string(rec, strcspn(rec, ",}")) : "";
+        lines.push_back(line);
+    }
+    std::sort(lines.begin(), lines.end());
+    sig->clear();
+    for (const std::string &l : lines) {
+        *sig += l;
+        *sig += "\n";
+    }
+    cbm_store_free_nodes(funcs, count);
+    cbm_store_close(s);
+    *func_count = count;
+    return true;
+}
+
+TEST(pipeline_complexity_props_independent_of_worker_order) {
+    struct SavedEnv {
+        const char *name;
+        std::string value;
+        bool present;
+        explicit SavedEnv(const char *key)
+            : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+        ~SavedEnv() {
+            if (present) {
+                cbm_setenv(name, value.c_str(), 1);
+            } else {
+                cbm_unsetenv(name);
+            }
+        }
+    } workers_env("CBM_WORKERS"), single_env("CBM_INDEX_SINGLE_THREAD");
+
+    char tmp[256] = "/tmp/cbm_cx_order_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    std::string repo = std::string(tmp) + "/repo";
+    int copied = cx_order_copy_fixture("tests/fixtures/complexity_pass_cycle_order", repo);
+    ASSERT_GT(copied, 0);
+
+    cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+    std::string seq_db = std::string(tmp) + "/cx_sequential.db";
+    cbm_pipeline_t *sequential = cbm_pipeline_new(repo.c_str(), seq_db.c_str(), CBM_MODE_FULL);
+    ASSERT_NOT_NULL(sequential);
+    ASSERT_EQ(cbm_pipeline_run(sequential), 0);
+    std::string seq_sig;
+    int seq_funcs = 0;
+    bool seq_ok =
+        cx_order_signature(seq_db, cbm_pipeline_project_name(sequential), &seq_sig, &seq_funcs);
+    cbm_pipeline_free(sequential);
+    ASSERT_TRUE(seq_ok);
+    /* At least one function per fixture file, and the cycles reach the pass. */
+    ASSERT_GTE(seq_funcs, copied);
+    ASSERT_TRUE(seq_sig.find("\"recursive\":true") != std::string::npos);
+
+    cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    cbm_setenv("CBM_WORKERS", "4", 1);
+    for (int r = 0; r < CX_ORDER_MT_RUNS; r++) {
+        std::string db = std::string(tmp) + "/cx_parallel_" + std::to_string(r) + ".db";
+        cbm_pipeline_t *parallel = cbm_pipeline_new(repo.c_str(), db.c_str(), CBM_MODE_FULL);
+        ASSERT_NOT_NULL(parallel);
+        ASSERT_EQ(cbm_pipeline_run(parallel), 0);
+        std::string sig;
+        int funcs = 0;
+        bool ok = cx_order_signature(db, cbm_pipeline_project_name(parallel), &sig, &funcs);
+        cbm_pipeline_free(parallel);
+        ASSERT_TRUE(ok);
+        if (sig != seq_sig) {
+            size_t at = 0;
+            while (at < sig.size() && at < seq_sig.size() && sig[at] == seq_sig[at]) {
+                at++;
+            }
+            size_t line_start = seq_sig.rfind('\n', at);
+            line_start = line_start == std::string::npos ? 0 : line_start + 1;
+            printf("\n    parallel run %d diverges from sequential near: %.160s\n", r,
+                   seq_sig.c_str() + line_start);
+            th_rmtree(tmp);
+            FAIL("complexity props depend on worker id order");
+        }
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
 TEST(registry_fuzzy_confidence_single) {
     cbm_registry_t *reg = cbm_registry_new();
     cbm_registry_add(reg, "Handler", "proj.svc.Handler", "Function");
@@ -8055,6 +8212,7 @@ SUITE(pipeline) {
     RUN_TEST(registry_receiver_chain_ignores_bare_name_issue1893);
     RUN_TEST(http_route_literal_guard_rejects_regex_replacement_operands);
     RUN_TEST(pipeline_arg_url_rejects_non_http_slash_arguments);
+    RUN_TEST(pipeline_complexity_props_independent_of_worker_order);
     RUN_TEST(registry_fuzzy_confidence_single);
     RUN_TEST(registry_fuzzy_confidence_distance);
     RUN_TEST(registry_negative_import_rejects);

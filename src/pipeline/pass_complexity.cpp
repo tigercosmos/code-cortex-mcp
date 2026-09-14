@@ -99,76 +99,163 @@ static void append_complexity_props(cbm_gbuf_node_t *node, int tld, bool recursi
     node->properties_json = neu;
 }
 
+/* Content-only node order: qualified_name, then file path and start line.
+ * Never the temp id, and never the graph buffer's label-list order: extract
+ * workers draw ids from one shared counter, so both follow worker scheduling
+ * and differ between a sequential and a parallel index (and run to run). The
+ * memoised DFS truncates a branch at the first back edge, so which member of a
+ * call cycle it ENTERS first decides the transitive_loop_depth every other
+ * member reads; both the seed order and the callee order must therefore be a
+ * function of the inputs alone. A dangling target (no node for the id) has no
+ * edges of its own, so where it sorts cannot move a result; it keys as empty
+ * strings. */
+enum { TLD_CMP_LESS = -1, TLD_CMP_GREATER = 1 };
+
+static const char *str_or_empty(const char *s) {
+    return s ? s : "";
+}
+
+static int cmp_node_canonical(const cbm_gbuf_node_t *a, const cbm_gbuf_node_t *b) {
+    int r = strcmp(str_or_empty(a ? a->qualified_name : NULL),
+                   str_or_empty(b ? b->qualified_name : NULL));
+    if (r != 0) {
+        return r;
+    }
+    r = strcmp(str_or_empty(a ? a->file_path : NULL), str_or_empty(b ? b->file_path : NULL));
+    if (r != 0) {
+        return r;
+    }
+    int la = a ? a->start_line : 0;
+    int lb = b ? b->start_line : 0;
+    if (la != lb) {
+        return la < lb ? TLD_CMP_LESS : TLD_CMP_GREATER;
+    }
+    return 0;
+}
+
+static int cmp_seed_canonical(const void *pa, const void *pb) {
+    return cmp_node_canonical(*(const cbm_gbuf_node_t *const *)pa,
+                              *(const cbm_gbuf_node_t *const *)pb);
+}
+
+typedef struct {
+    const cbm_gbuf_node_t *node; /* NULL for a dangling target id */
+    int64_t id;
+} tld_callee_t;
+
+static int cmp_callee_canonical(const void *pa, const void *pb) {
+    return cmp_node_canonical(((const tld_callee_t *)pa)->node, ((const tld_callee_t *)pb)->node);
+}
+
+/* Traversal state. `callees` is one bump stack shared by every DFS frame: a
+ * frame takes its out-degree worth of slots, sorts them, recurses, then
+ * releases them. Nodes on the recursion path are distinct (state 1 blocks
+ * re-entry), so the live slots never exceed the CALLS edge count the stack is
+ * sized for. `path` is the DFS path stack used to attribute a back edge to
+ * every member of the cycle it closes. */
+typedef struct {
+    const cbm_gbuf_t *gb;
+    int64_t maxid;
+    int *loop_depth;
+    int *tld;
+    char *state;
+    bool *recursive;
+    int64_t *path;
+    tld_callee_t *callees;
+    int callee_top;
+    int callee_cap;
+} tld_ctx_t;
+
 /* Memoized DFS: tld(id) = loop_depth(id) + max over CALLS-callees of tld(callee).
  * state: 0=unvisited, 1=in-progress (back-edge → cycle), 2=done. */
-static int tld_dfs(const cbm_gbuf_t *gb, int64_t id, const int *loop_depth, int *tld, char *state,
-                   bool *recursive, int64_t maxid, int depth, int64_t *path) {
-    if (id < 1 || id > maxid) {
+static int tld_dfs(tld_ctx_t *cx, int64_t id, int depth) {
+    if (id < 1 || id > cx->maxid) {
         return 0;
     }
-    if (state[id] == 2) {
-        return tld[id];
+    if (cx->state[id] == 2) {
+        return cx->tld[id];
     }
-    if (state[id] == 1) {
+    if (cx->state[id] == 1) {
         /* Back edge: id is an ancestor on the current DFS path, so every node
          * from the current caller back up to id forms one call cycle (mutual
          * recursion A→B→A). Mark the whole cycle, not just id — otherwise the
          * caller is memoized done with recursive=false. */
         for (int k = depth - 1; k >= 0; k--) {
-            recursive[path[k]] = true;
-            if (path[k] == id) {
+            cx->recursive[cx->path[k]] = true;
+            if (cx->path[k] == id) {
                 break;
             }
         }
-        recursive[id] = true; /* back edge → call-graph cycle */
+        cx->recursive[id] = true; /* back edge → call-graph cycle */
         return 0;
     }
     if (depth > CBM_TLD_MAX_DEPTH) {
-        return loop_depth[id];
+        return cx->loop_depth[id];
     }
-    state[id] = 1;
-    path[depth] = id; /* push onto the DFS path stack for cycle attribution */
-    int best = 0;
     const cbm_gbuf_edge_t **edges = NULL;
     int ne = 0;
-    cbm_gbuf_find_edges_by_source_type(gb, id, "CALLS", &edges, &ne);
+    cbm_gbuf_find_edges_by_source_type(cx->gb, id, "CALLS", &edges, &ne);
+    if (ne > cx->callee_cap - cx->callee_top) {
+        return cx->loop_depth[id]; /* unreachable by construction; same as the depth cap */
+    }
+    cx->state[id] = 1;
+    cx->path[depth] = id; /* push onto the DFS path stack for cycle attribution */
+    tld_callee_t *callees = cx->callees + cx->callee_top;
+    int nc = 0;
     for (int i = 0; i < ne; i++) {
         int64_t c = edges[i]->target_id;
         if (c == id) {
-            recursive[id] = true; /* direct self-recursion */
+            cx->recursive[id] = true; /* direct self-recursion */
             continue;
         }
-        int ct = tld_dfs(gb, c, loop_depth, tld, state, recursive, maxid, depth + 1, path);
+        callees[nc].id = c;
+        callees[nc].node = cbm_gbuf_find_by_id(cx->gb, c);
+        nc++;
+    }
+    cx->callee_top += nc;
+    qsort(callees, (size_t)nc, sizeof(*callees), cmp_callee_canonical);
+    int best = 0;
+    for (int i = 0; i < nc; i++) {
+        int ct = tld_dfs(cx, callees[i].id, depth + 1);
         if (ct > best) {
             best = ct;
         }
     }
-    tld[id] = loop_depth[id] + best;
-    state[id] = 2;
-    return tld[id];
+    cx->callee_top -= nc;
+    cx->tld[id] = cx->loop_depth[id] + best;
+    cx->state[id] = 2;
+    return cx->tld[id];
 }
 
 /* Seed each Function/Method node's loop_depth and self_recursive flag, and
- * remember the node pointer for write-back. The self_recursive seed (set at
- * extraction) feeds the final recursive flag; tld_dfs additionally ORs in
- * mutual recursion discovered as a call-graph cycle. */
-static void seed_loop_depths(const cbm_gbuf_t *gb, const char *label, int *loop_depth,
-                             bool *recursive, cbm_gbuf_node_t **nptr, int64_t maxid, int64_t *roots,
-                             int *root_count) {
+ * collect the node as a traversal seed (also the write-back target). The
+ * self_recursive seed (set at extraction) feeds the final recursive flag;
+ * tld_dfs additionally ORs in mutual recursion discovered as a call-graph
+ * cycle. */
+static void seed_loop_depths(tld_ctx_t *cx, const char *label, cbm_gbuf_node_t **seeds,
+                             int *seed_count, int seed_cap) {
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
-    if (cbm_gbuf_find_by_label(gb, label, &nodes, &count) != 0) {
+    if (cbm_gbuf_find_by_label(cx->gb, label, &nodes, &count) != 0) {
         return;
     }
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count && *seed_count < seed_cap; i++) {
         const cbm_gbuf_node_t *n = nodes[i];
-        if (n->id >= 1 && n->id <= maxid) {
-            loop_depth[n->id] = json_get_int(n->properties_json, "loop_depth", 0);
-            recursive[n->id] = json_get_bool(n->properties_json, "self_recursive");
-            nptr[n->id] = (cbm_gbuf_node_t *)n;
-            roots[(*root_count)++] = n->id;
+        if (n->id >= 1 && n->id <= cx->maxid) {
+            cx->loop_depth[n->id] = json_get_int(n->properties_json, "loop_depth", 0);
+            cx->recursive[n->id] = json_get_bool(n->properties_json, "self_recursive");
+            seeds[(*seed_count)++] = (cbm_gbuf_node_t *)n;
         }
     }
+}
+
+static int calls_edge_count(const cbm_gbuf_t *gb) {
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_edges_by_type(gb, "CALLS", &edges, &count) != 0) {
+        return 0;
+    }
+    return count;
 }
 
 void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
@@ -181,60 +268,60 @@ void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
         return;
     }
     size_t sz = (size_t)maxid + 1;
-    int *loop_depth = (int *)calloc(sz, sizeof(int));
-    int *tld = (int *)calloc(sz, sizeof(int));
-    char *state = (char *)calloc(sz, sizeof(char));
-    bool *recursive = (bool *)calloc(sz, sizeof(bool));
-    cbm_gbuf_node_t **nptr = (cbm_gbuf_node_t **)calloc(sz, sizeof(cbm_gbuf_node_t *));
-    if (!loop_depth || !tld || !state || !recursive || !nptr) {
-        free(loop_depth);
-        free(tld);
-        free(state);
-        free(recursive);
-        free(nptr);
+    tld_ctx_t cx = {};
+    cx.gb = gb;
+    cx.maxid = maxid;
+    cx.callee_cap = calls_edge_count(gb);
+    cx.loop_depth = (int *)calloc(sz, sizeof(int));
+    cx.tld = (int *)calloc(sz, sizeof(int));
+    cx.state = (char *)calloc(sz, sizeof(char));
+    cx.recursive = (bool *)calloc(sz, sizeof(bool));
+    cx.path = (int64_t *)calloc(CBM_TLD_MAX_DEPTH + 1, sizeof(int64_t));
+    cx.callees = (tld_callee_t *)calloc((size_t)cx.callee_cap + 1, sizeof(tld_callee_t));
+    /* Seeds are bounded by the node-id ceiling; `written` guards a node listed
+     * under both labels from being written back twice. */
+    cbm_gbuf_node_t **seeds = (cbm_gbuf_node_t **)calloc(sz, sizeof(cbm_gbuf_node_t *));
+    char *written = (char *)calloc(sz, sizeof(char));
+    if (!cx.loop_depth || !cx.tld || !cx.state || !cx.recursive || !cx.path || !cx.callees ||
+        !seeds || !written) {
+        free(cx.loop_depth);
+        free(cx.tld);
+        free(cx.state);
+        free(cx.recursive);
+        free(cx.path);
+        free(cx.callees);
+        free(seeds);
+        free(written);
         return;
     }
 
-    /* DFS roots, in the graph buffer's canonical node order. The memoised DFS
-     * truncates a branch at the first back edge, so which member of a call
-     * cycle is memoised first decides the depth every other member reads —
-     * walking roots by node id instead made the answer depend on the id the
-     * shared counter happened to hand each node during parallel extraction
-     * (etcd: executeTxn scored 8 or 20 across identical runs). */
-    int64_t *roots = (int64_t *)malloc(sz * sizeof(int64_t));
-    if (!roots) {
-        free(loop_depth);
-        free(tld);
-        free(state);
-        free(recursive);
-        free(nptr);
-        return;
-    }
-    int root_count = 0;
-    seed_loop_depths(gb, "Function", loop_depth, recursive, nptr, maxid, roots, &root_count);
-    seed_loop_depths(gb, "Method", loop_depth, recursive, nptr, maxid, roots, &root_count);
+    int seed_count = 0;
+    seed_loop_depths(&cx, "Function", seeds, &seed_count, (int)sz);
+    seed_loop_depths(&cx, "Method", seeds, &seed_count, (int)sz);
+    qsort(seeds, (size_t)seed_count, sizeof(*seeds), cmp_seed_canonical);
 
     int updated = 0;
-    int64_t path[CBM_TLD_MAX_DEPTH + 1]; /* DFS path stack for cycle attribution */
-    for (int r = 0; r < root_count; r++) {
-        int64_t id = roots[r];
-        if (!nptr[id]) {
+    for (int i = 0; i < seed_count; i++) {
+        cbm_gbuf_node_t *n = seeds[i];
+        if (written[n->id]) {
             continue; /* already written (same node listed twice) */
         }
-        if (state[id] != 2) {
-            tld_dfs(gb, id, loop_depth, tld, state, recursive, maxid, 0, path);
+        if (cx.state[n->id] != 2) {
+            tld_dfs(&cx, n->id, 0);
         }
-        append_complexity_props(nptr[id], tld[id], recursive[id]);
-        nptr[id] = NULL;
+        append_complexity_props(n, cx.tld[n->id], cx.recursive[n->id]);
+        written[n->id] = 1;
         updated++;
     }
-    free(roots);
 
     cbm_log_info("pass.complexity", "functions", itoa_cx(updated));
 
-    free(loop_depth);
-    free(tld);
-    free(state);
-    free(recursive);
-    free(nptr);
+    free(cx.loop_depth);
+    free(cx.tld);
+    free(cx.state);
+    free(cx.recursive);
+    free(cx.path);
+    free(cx.callees);
+    free(seeds);
+    free(written);
 }
