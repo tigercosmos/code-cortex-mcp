@@ -51,6 +51,13 @@ static const ext_entry_t EXT_TABLE[] = {
 
     /* C# */
     {".cs", CBM_LANG_CSHARP},
+    /* Blazor components and Razor Pages / MVC views. The C# grammar recovers
+     * the @code / @{ } / @functions blocks; the surrounding markup parses as
+     * ERROR regions and is reported via parse_partial, which is why this is a
+     * best-effort mapping rather than a dedicated grammar. The `@page`
+     * directive that routes them is read from raw source in extract_defs. */
+    {".razor", CBM_LANG_CSHARP},
+    {".cshtml", CBM_LANG_CSHARP},
 
     /* Clojure */
     {".clj", CBM_LANG_CLOJURE},

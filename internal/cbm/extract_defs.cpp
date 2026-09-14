@@ -6891,6 +6891,90 @@ static void preserve_cpp_overloads(CBMExtractCtx *ctx) {
     result->overload_count = (int)overloads.size();
 }
 
+/* True when rel_path names a Razor file: a Blazor component (.razor) or a Razor
+ * Page / MVC view (.cshtml). `@page` is what DEFINES a Razor Page, so a .cshtml
+ * route is at least as worth extracting as a .razor one. Deliberately not
+ * .aspx/.ascx: Web Forms is a different templating syntax with no `@page`. */
+static bool cbm_path_is_razor(const char *rel_path) {
+    if (!rel_path) {
+        return false;
+    }
+    static const char *const suffixes[] = {".razor", ".cshtml"};
+    size_t len = strlen(rel_path);
+    for (const char *suffix : suffixes) {
+        size_t slen = strlen(suffix);
+        if (len > slen && strcmp(rel_path + (len - slen), suffix) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Match `@page "/route"` on ONE line; returns the route text or NULL.
+ *
+ * Deliberately strict: the directive must be the first token on the line and be
+ * followed by whitespace and a double-quoted path beginning with '/', so
+ * neither `@pageSize` nor a `@page` mentioned in markup prose can match. */
+static const char *razor_page_route_on_line(CBMArena *a, const char *line, const char *line_end) {
+    static const char directive[] = "@page";
+    const size_t dlen = sizeof(directive) - 1U;
+
+    const char *p = line;
+    while (p < line_end && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    if (p == line_end) {
+        return NULL; /* blank line -- nothing can follow */
+    }
+    if ((size_t)(line_end - p) <= dlen || strncmp(p, directive, dlen) != 0) {
+        return NULL;
+    }
+    p += dlen;
+    if (*p != ' ' && *p != '\t') {
+        return NULL; /* `@pageSize` and friends */
+    }
+    while (p < line_end && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    if (p == line_end || *p != '"') {
+        return NULL;
+    }
+    p++;
+    const char *route = p;
+    while (p < line_end && *p != '"') {
+        p++;
+    }
+    if (p == line_end || p == route || *route != '/') {
+        return NULL; /* unterminated, empty, or not a rooted path */
+    }
+    return cbm_arena_strndup(a, route, (size_t)(p - route));
+}
+
+/* Razor route directive: `@page "/counter"` lives in MARKUP above any code
+ * block. Tree-sitter's C# grammar recovers `@code` but never parses the
+ * directive, so there is no AST node to read it from -- this scans the raw
+ * source instead. A file may declare several routes; the first is taken,
+ * because CBMDefinition carries a single route_path. */
+static const char *cbm_razor_page_route(CBMArena *a, const char *source, int source_len) {
+    if (!source || source_len <= 0) {
+        return NULL;
+    }
+    const char *end = source + source_len;
+    const char *line = source;
+    while (line < end) {
+        const char *nl = static_cast<const char *>(memchr(line, '\n', (size_t)(end - line)));
+        const char *route = razor_page_route_on_line(a, line, nl ? nl : end);
+        if (route) {
+            return route;
+        }
+        if (!nl) {
+            break;
+        }
+        line = nl + 1;
+    }
+    return NULL;
+}
+
 void cbm_extract_definitions(CBMExtractCtx *ctx) {
     const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
     if (!spec) {
@@ -6912,6 +6996,17 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     mod.is_test = ctx->result->is_test_file;
     // #519: index what a config file declares itself to be, not only its path.
     mod.docstring = extract_config_module_description(ctx);
+    /* A routable Razor file carries its route on the module def: a .razor
+     * component's class is implicit, so there is no class node to hang it on,
+     * and the module QN already is the component's identity.
+     * insert_def_into_gbuf creates Route+HANDLES for any def with route_path. */
+    if (ctx->language == CBM_LANG_CSHARP && cbm_path_is_razor(ctx->rel_path)) {
+        const char *route = cbm_razor_page_route(a, ctx->source, ctx->source_len);
+        if (route) {
+            mod.route_path = route;
+            mod.route_method = "GET"; /* a routable page is reached by navigation */
+        }
+    }
     cbm_defs_push(&ctx->result->defs, a, mod);
 
     cbm_extract_definitions_without_module(ctx);

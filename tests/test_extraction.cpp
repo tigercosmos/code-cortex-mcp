@@ -3712,6 +3712,105 @@ TEST(pkl_calls_gated_on_argument_list) {
     PASS();
 }
 
+/* Return the file's Module definition (extraction pushes it first), or NULL. */
+static const CBMDefinition *find_module_def(CBMFileResult *r) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].label && strcmp(r->defs.items[i].label, "Module") == 0) {
+            return &r->defs.items[i];
+        }
+    }
+    return NULL;
+}
+
+/* Blazor: a routable component declares its route with a `@page` directive in
+ * MARKUP, above the `@code` block. The C# grammar recovers `@code` but never
+ * sees the directive, so the route hangs off the file's Module definition --
+ * a .razor component's class is implicit, so there is no class node to carry
+ * it, and insert_def_into_gbuf creates Route+HANDLES for any def with a
+ * route_path, whatever its label. */
+TEST(extract_blazor_page_directive_routes_component) {
+    CBMFileResult *r = extract("@page \"/counter\"\n"
+                               "@inject NavigationManager Nav\n"
+                               "\n"
+                               "<h1>Counter</h1>\n"
+                               "<button @onclick=\"Increment\">Click</button>\n"
+                               "\n"
+                               "@code {\n"
+                               "    private int count;\n"
+                               "    private void Increment() { count++; }\n"
+                               "}\n",
+                               CBM_LANG_CSHARP, "t", "Pages/Counter.razor");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* The markup must not cost us the @code block. */
+    ASSERT_NOT_NULL(find_def_by_name(r, "Increment"));
+    const CBMDefinition *mod = find_module_def(r);
+    ASSERT_NOT_NULL(mod);
+    ASSERT_NOT_NULL(mod->route_path);
+    ASSERT_STR_EQ(mod->route_path, "/counter");
+    ASSERT_NOT_NULL(mod->route_method);
+    ASSERT_STR_EQ(mod->route_method, "GET");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A non-routable component (no @page) has to stay route-free, or every shared
+ * component in the tree becomes a bogus Route node. */
+TEST(extract_blazor_component_without_page_has_no_route) {
+    CBMFileResult *r = extract("@inject IJSRuntime JS\n"
+                               "\n"
+                               "<div class=\"card\">@Title</div>\n"
+                               "\n"
+                               "@code {\n"
+                               "    private void Refresh() { }\n"
+                               "}\n",
+                               CBM_LANG_CSHARP, "t", "Shared/Card.razor");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *mod = find_module_def(r);
+    ASSERT_NOT_NULL(mod);
+    ASSERT_NULL(mod->route_path);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Razor Pages: `@page` is what turns a .cshtml view INTO a page, so an ASP.NET
+ * Core app's routable surface lives in this file type. Same mechanism as the
+ * .razor case. */
+TEST(extract_razor_page_directive_routes_cshtml_view) {
+    CBMFileResult *r = extract("@page \"/orders\"\n"
+                               "@model OrderIndexModel\n"
+                               "\n"
+                               "<h1>Orders</h1>\n"
+                               "<table><tr><td>@Model.Count</td></tr></table>\n",
+                               CBM_LANG_CSHARP, "t", "Pages/Orders/Index.cshtml");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *mod = find_module_def(r);
+    ASSERT_NOT_NULL(mod);
+    ASSERT_NOT_NULL(mod->route_path);
+    ASSERT_STR_EQ(mod->route_path, "/orders");
+    ASSERT_NOT_NULL(mod->route_method);
+    ASSERT_STR_EQ(mod->route_method, "GET");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Most .cshtml files are layouts and partials with no `@page`; a spurious Route
+ * per view would be worse than the missing ones, because it looks
+ * authoritative. */
+TEST(extract_razor_layout_without_page_has_no_route) {
+    CBMFileResult *r = extract("@model LayoutModel\n"
+                               "<!DOCTYPE html>\n"
+                               "<html><body>@RenderBody()</body></html>\n",
+                               CBM_LANG_CSHARP, "t", "Pages/Shared/_Layout.cshtml");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *mod = find_module_def(r);
+    ASSERT_NOT_NULL(mod);
+    ASSERT_NULL(mod->route_path);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(html_imports_basic) {
     /* Plain HTML with inline ES module imports — same generic walker. */
     CBMFileResult *r = extract("<!DOCTYPE html><html><head>\n"
@@ -6154,15 +6253,6 @@ TEST(extract_python_bare_call_flag_is_depth_independent) {
  * question asked in words could not reach either. Both now carry the prose in
  * `docstring`, which is what nodes_fts indexes into its `body` column. */
 
-static const CBMDefinition *find_module_def(CBMFileResult *r) {
-    for (int i = 0; i < r->defs.count; i++) {
-        if (strcmp(r->defs.items[i].label, "Module") == 0) {
-            return &r->defs.items[i];
-        }
-    }
-    return NULL;
-}
-
 TEST(markdown_section_body_becomes_docstring_issue518) {
     CBMFileResult *r = extract("# Installation\n"
                                "Run the bootstrap script to provision a workstation.\n"
@@ -6571,6 +6661,10 @@ SUITE(extraction) {
     RUN_TEST(html_embedded_structure_issue1807);
     RUN_TEST(astro_embedded_structure_issue1807);
     RUN_TEST(pkl_calls_gated_on_argument_list);
+    RUN_TEST(extract_blazor_page_directive_routes_component);
+    RUN_TEST(extract_blazor_component_without_page_has_no_route);
+    RUN_TEST(extract_razor_page_directive_routes_cshtml_view);
+    RUN_TEST(extract_razor_layout_without_page_has_no_route);
     RUN_TEST(html_imports_basic);
 
     /* config_extraction_test.go ports */
