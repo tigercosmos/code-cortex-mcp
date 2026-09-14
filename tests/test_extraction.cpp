@@ -5998,6 +5998,39 @@ TEST(extract_c_thread_local_grammar_limit_is_pinned_issue963) {
     PASS();
 }
 
+/* #963: two error nodes can sit on ONE line (upstream's setup-windows.ps1 line
+ * 113 reported "113-113,113-113"); a line range says nothing new the second
+ * time, so an exact repeat collapses. */
+TEST(extract_coverage_repeated_error_line_reports_one_range_issue963) {
+    CBMFileResult *r = extract("Write-Host \"start\"\n"
+                               "wsl.exe -- bash -c $Command 2>&1\n"
+                               "Write-Host \"end\"\n",
+                               CBM_LANG_POWERSHELL, "t", "two_errors.ps1");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_STR_EQ(r->error_ranges, "2-2");
+    ASSERT_EQ(r->error_region_count, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* #963: an error region running to EOF ends at (row N, column 0) — a row with
+ * no text. Reading it as a line named a line past the end of the file. */
+TEST(extract_coverage_range_never_ends_past_the_last_line_issue963) {
+    CBMFileResult *r = extract("} else {\n"
+                               "    if ($a) {\n"
+                               "        Write-Host x\n"
+                               "}\n",
+                               CBM_LANG_POWERSHELL, "t", "error_to_eof.ps1");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_STR_EQ(r->error_ranges, "1-4"); /* four lines; line 5 does not exist */
+    cbm_free_result(r);
+    PASS();
+}
+
 /* #949 follow-up: an included header shifts physical lines in simplecpp's
  * expanded output. The #1050 name-on-same-line guard skipped this recoverable
  * definition; explicit source ownership mapping must restore its original
@@ -7052,6 +7085,8 @@ SUITE(extraction) {
     RUN_TEST(extract_python_whole_file_error_is_unusable_issue963);
     RUN_TEST(extract_local_error_stays_partial_not_unusable_issue963);
     RUN_TEST(extract_c_thread_local_grammar_limit_is_pinned_issue963);
+    RUN_TEST(extract_coverage_repeated_error_line_reports_one_range_issue963);
+    RUN_TEST(extract_coverage_range_never_ends_past_the_last_line_issue963);
     RUN_TEST(extract_go_binary_concat_url_issue1249);
     RUN_TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249);
     RUN_TEST(extract_ts_url_builder_issue1009);
