@@ -3677,6 +3677,41 @@ TEST(astro_embedded_structure_issue1807) {
     PASS();
 }
 
+/* Pkl has no dedicated call node: unqualifiedAccessExpr / qualifiedAccessExpr
+ * are the same node for `helper(a)` and a bare property read `host`. Only the
+ * argumentList child discriminates, so a call must extract and a bare read must
+ * NOT -- without the gate every property read in every Pkl file is a CALLS
+ * edge. `new Server { }` resolves to its declared type. Before the port
+ * pkl_call_types was empty and this file yielded zero calls. */
+TEST(pkl_calls_gated_on_argument_list) {
+    CBMFileResult *r = extract("module cbm.Config\n"
+                               "\n"
+                               "typealias Port = Int\n"
+                               "\n"
+                               "function makeUrl(host: String, port: Port): String = "
+                               "\"http://\\(host):\\(port)\"\n"
+                               "\n"
+                               "class Server {\n"
+                               "  host: String = \"localhost\"\n"
+                               "  port: Port = 8080\n"
+                               "  tls: Boolean = false\n"
+                               "\n"
+                               "  function url(): String = makeUrl(host, port)\n"
+                               "\n"
+                               "  function clone(): Server = new Server { host = host }\n"
+                               "}\n",
+                               CBM_LANG_PKL, "t", "config.pkl");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_calls_named(r, "makeUrl"), 1);
+    ASSERT_EQ(count_calls_named(r, "Server"), 1);
+    ASSERT_EQ(count_calls_named(r, "host"), 0);
+    ASSERT_EQ(count_calls_named(r, "port"), 0);
+    ASSERT_EQ(count_calls_named(r, "tls"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(html_imports_basic) {
     /* Plain HTML with inline ES module imports — same generic walker. */
     CBMFileResult *r = extract("<!DOCTYPE html><html><head>\n"
@@ -6535,6 +6570,7 @@ SUITE(extraction) {
     RUN_TEST(svelte_embedded_structure_both_blocks_issue1807);
     RUN_TEST(html_embedded_structure_issue1807);
     RUN_TEST(astro_embedded_structure_issue1807);
+    RUN_TEST(pkl_calls_gated_on_argument_list);
     RUN_TEST(html_imports_basic);
 
     /* config_extraction_test.go ports */

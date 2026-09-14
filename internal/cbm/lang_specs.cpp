@@ -1538,11 +1538,21 @@ static const char *tlaplus_branch_types[] = {"if_then_else", "case", NULL};
 static const char *tlaplus_var_types[] = {"variable_declaration", NULL};
 static const char *tlaplus_module_types[] = {"source_file", NULL};
 static const char *pkl_func_types[] = {"classMethod", "objectMethod", NULL};
-static const char *pkl_class_types[] = {"clazz", NULL};
-static const char *pkl_import_types[] = {"importClause", "extendsOrAmendsClause", "extends",
-                                         "import", NULL};
+static const char *pkl_class_types[] = {"clazz", "typeAlias", NULL};
+static const char *pkl_import_types[] = {
+    "importClause", "importGlobClause", "importExpr", "extendsOrAmendsClause",
+    "extends",      "import",           NULL};
 static const char *pkl_var_types[] = {"classProperty", "objectProperty", NULL};
 static const char *pkl_module_types[] = {"module", NULL};
+/* Both access exprs double as plain property reads; extract_pkl_callee keeps
+ * only the ones carrying an argumentList. `newExpr` resolves to its type. */
+static const char *pkl_call_types[] = {"unqualifiedAccessExpr", "qualifiedAccessExpr", "newExpr",
+                                       NULL};
+/* Control-flow only, matching every other spec (short-circuit operators are
+ * deliberately excluded). `forGenerator` is also a loop -- see helpers.cpp. */
+static const char *pkl_branch_types[] = {"ifExpr", "whenGenerator", "forGenerator", NULL};
+static const char *pkl_throw_types[] = {"throwExpr", NULL};
+static const char *pkl_decorator_types[] = {"annotation", NULL};
 static const char *gomod_var_types[] = {"require_directive", "replace_directive", NULL};
 static const char *gomod_import_types[] = {"require", NULL};
 static const char *gomod_module_types[] = {"source_file", NULL};
@@ -4143,15 +4153,15 @@ static const std::array<CBMLangSpec, CBM_LANG_COUNT> &lang_specs_table() {
                            pkl_class_types,
                            empty_types,
                            pkl_module_types,
-                           empty_types,
+                           pkl_call_types,
                            pkl_import_types,
                            empty_types,
-                           empty_types,
+                           pkl_branch_types,
                            pkl_var_types,
                            empty_types,
-                           empty_types,
+                           pkl_throw_types,
                            NULL,
-                           empty_types,
+                           pkl_decorator_types,
                            NULL,
                            NULL,
                            tree_sitter_pkl,
