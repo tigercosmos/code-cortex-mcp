@@ -626,6 +626,17 @@ static CBMLanguage detect_file_language(const char *entry_name, const char *abs_
     if (dot && strcmp(dot, ".m") == 0) {
         lang = cbm_disambiguate_m(abs_path);
     }
+    /* Special: .cls is shared by Apex and VB6 class modules (#721) */
+    if (dot && strcmp(dot, ".cls") == 0) {
+        lang = cbm_disambiguate_cls(abs_path);
+    }
+    /* Special: .frm is shared by FORM and VB6 forms (#721) */
+    if (dot && strcmp(dot, ".frm") == 0) {
+        lang = cbm_disambiguate_frm(abs_path);
+    }
+    if (lang == CBM_LANG_COUNT) {
+        return CBM_LANG_COUNT;
+    }
     /* Check ignored JSON files */
     if (lang == CBM_LANG_JSON && str_in_list(entry_name, IGNORED_JSON_FILES)) {
         return CBM_LANG_COUNT;

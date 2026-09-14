@@ -1028,3 +1028,57 @@ CBMLanguage cbm_disambiguate_m(const char *path) {
 
     return CBM_LANG_MATLAB;
 }
+
+/* Visual Basic 6 / VBA source exports are recognisable from their header (#721):
+ * every module carries `Attribute VB_Name = "..."`, class modules open with
+ * `VERSION 1.0 CLASS`, forms/controls with `VERSION 5.00` + `Begin VB.Form` /
+ * `Begin VB.UserControl`. None of these occur in Apex classes or FORM programs,
+ * whose .cls / .frm extensions VB6 happens to share. */
+static bool has_vb6_markers(const char *buf) {
+    return str_contains(buf, "Attribute VB_Name") || str_contains(buf, "VERSION 1.0 CLASS") ||
+           str_contains(buf, "Begin VB.") || str_contains(buf, "\nOption Explicit");
+}
+
+/* Read up to 4KB of `path` into `buf` (NUL-terminated). False on open failure. */
+static bool read_head_4k(const char *path, char *buf) {
+    FILE *f = cbm_fopen(path, "r");
+    if (!f) {
+        return false;
+    }
+    size_t n = fread(buf, SKIP_ONE, CBM_SZ_4K, f);
+    buf[n] = '\0';
+    (void)fclose(f);
+    return true;
+}
+
+/* Disambiguate .frm files: shared by the FORM symbolic-manipulation language
+ * and Visual Basic 6 forms (#721). There is no Visual Basic language yet, so a
+ * VB6 form is reported as unsupported (CBM_LANG_COUNT) rather than handed to
+ * the FORM grammar, which yields no defs and stray junk nodes. Defaults to
+ * FORM on any doubt. */
+CBMLanguage cbm_disambiguate_frm(const char *path) {
+    char buf[CBM_SZ_4K + SKIP_ONE];
+    if (!path || !read_head_4k(path, buf)) {
+        return CBM_LANG_FORM;
+    }
+    /* VB6 form files open with "VERSION x.yy" on line 1. */
+    if (strncmp(buf, "VERSION ", SLEN("VERSION ")) == 0 &&
+        isdigit((unsigned char)buf[SLEN("VERSION ")])) {
+        return CBM_LANG_COUNT;
+    }
+    return has_vb6_markers(buf) ? CBM_LANG_COUNT : CBM_LANG_FORM;
+}
+
+/* Disambiguate .cls files: shared by Salesforce Apex and Visual Basic 6 class
+ * modules (#721). VB6 class modules carry the VB6 header markers and are
+ * reported as unsupported (CBM_LANG_COUNT) until a Visual Basic grammar exists;
+ * the VB6 class modules otherwise went to the Apex grammar (junk nodes, extract
+ * timeouts). Defaults to Apex on any doubt. Upstream also routes ObjectScript
+ * UDL here; this fork does not carry ObjectScript. */
+CBMLanguage cbm_disambiguate_cls(const char *path) {
+    char buf[CBM_SZ_4K + SKIP_ONE];
+    if (!path || !read_head_4k(path, buf)) {
+        return CBM_LANG_APEX;
+    }
+    return has_vb6_markers(buf) ? CBM_LANG_COUNT : CBM_LANG_APEX;
+}

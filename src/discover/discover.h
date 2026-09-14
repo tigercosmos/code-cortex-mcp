@@ -43,6 +43,16 @@ const char *cbm_language_name(CBMLanguage lang);
  * On read failure, defaults to CBM_LANG_MATLAB. */
 CBMLanguage cbm_disambiguate_m(const char *path);
 
+/* Disambiguate .cls files by reading first 4KB of content (upstream #721).
+ * Returns CBM_LANG_COUNT (unsupported) for a Visual Basic 6 class module,
+ * otherwise CBM_LANG_APEX. On read failure, defaults to CBM_LANG_APEX. */
+CBMLanguage cbm_disambiguate_cls(const char *path);
+
+/* Disambiguate .frm files by reading first 4KB of content (upstream #721).
+ * Returns CBM_LANG_COUNT (unsupported) for a Visual Basic 6 form, otherwise
+ * CBM_LANG_FORM. On read failure, defaults to CBM_LANG_FORM. */
+CBMLanguage cbm_disambiguate_frm(const char *path);
+
 /* ── Gitignore pattern matching ──────────────────────────────────── */
 
 typedef struct cbm_gitignore cbm_gitignore_t;
