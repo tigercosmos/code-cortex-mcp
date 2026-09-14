@@ -329,6 +329,18 @@ static const char *pxc_join_base_qns(CBMArena *arena, const char *const *bases,
     return pxc_join_pipe(arena, resolved);
 }
 
+/* True when any definition in the file carries a base-class spelling, the
+ * only input pxc_join_base_qns resolves through the file's import map. */
+static bool pxc_file_has_base_classes(const CBMFileResult *file) {
+    for (int di = 0; di < file->defs.count; di++) {
+        const char *const *bases = file->defs.items[di].base_classes;
+        if (bases && bases[0]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Convert one CBMDefinition into a CBMLSPDef. Returns 0 on success, -1
  * to skip (unsupported label or missing required field). dst gets borrowed
  * pointers into src and into `arena` for synthesised composites. A non-NULL
@@ -725,16 +737,19 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult
         }
         /* One import map per FILE (not per def or base name) for the cross-file
          * base-class resolution; built only for the languages that consume
-         * resolved base QNs, and only when the caller supplied a pipeline
-         * context with a registry (NULL keeps the raw spelling). */
+         * resolved base QNs, only when the caller supplied a pipeline context
+         * with a registry (NULL keeps the raw spelling), and only when some def
+         * in the file has a base class -- the map feeds nothing else. */
         const cbm_registry_t *base_reg = NULL;
         const char **imp_keys = NULL;
         const char **imp_vals = NULL;
         int imp_count = 0;
         if (ctx && ctx->registry && ctx->gbuf && pxc_lang_resolves_base_qns(files[fi].language)) {
             base_reg = ctx->registry;
-            pxc_build_import_map(ctx->gbuf, project_name, files[fi].rel_path, &imp_keys, &imp_vals,
-                                 &imp_count);
+            if (pxc_file_has_base_classes(cache[fi])) {
+                pxc_build_import_map(ctx->gbuf, project_name, files[fi].rel_path, &imp_keys,
+                                     &imp_vals, &imp_count);
+            }
         }
         int first_def = idx;
         for (int di = 0; di < cache[fi]->defs.count; di++) {
