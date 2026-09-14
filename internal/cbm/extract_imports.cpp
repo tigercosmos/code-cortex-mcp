@@ -1447,66 +1447,88 @@ static bool ascii_trimmed_equals(const char *value, const char *expected) {
     return true;
 }
 
-/* Vue is the only host that opts into structural embedded extraction. Restrict
- * its inline programs to the language forms whose parsers we can select
- * exactly. A src attribute always denotes an external program and therefore
- * suppresses any inline extraction, even for malformed mixed markup. */
-static bool vue_embedded_language(CBMExtractCtx *ctx, TSNode script, CBMLanguage *language) {
-    enum { VUE_ATTR_STACK_CAP = 128 };
-    TSNode stack[VUE_ATTR_STACK_CAP];
+/* The text of a <script> attribute's value, or "" when it carries none
+ * (`<script type>`), so every attribute reads through one path. */
+static const char *script_attribute_value(CBMExtractCtx *ctx, TSNode attribute) {
+    TSNode value_node = attribute;
+    if (!find_first_descendant_of(attribute, "attribute_value", &value_node)) {
+        return "";
+    }
+    const char *text = cbm_node_text(ctx->arena, value_node, ctx->source);
+    return text ? text : "";
+}
+
+/* Apply one <script> attribute to the parse decision. Returns false when the
+ * attribute rules the block out of inline extraction:
+ *   src=   always names an external program, so nothing inline is extracted,
+ *          even for malformed mixed markup;
+ *   lang=  selects the JavaScript or TypeScript grammar; any other language
+ *          has no parser here;
+ *   type=  plain HTML routinely carries non-program blocks (application/json,
+ *          importmap, text/x-template, application/ld+json) that would parse
+ *          into garbage definitions and calls. Only the JavaScript forms in
+ *          current use pass -- absent or empty, module, text/javascript,
+ *          application/javascript -- and the rest bail. */
+static bool apply_script_attribute(CBMExtractCtx *ctx, TSNode attribute, CBMLanguage *language) {
+    if (ts_node_named_child_count(attribute) == 0) {
+        return false;
+    }
+    const char *name = cbm_node_text(ctx->arena, ts_node_named_child(attribute, 0), ctx->source);
+    if (ascii_trimmed_equals(name, "src")) {
+        return false;
+    }
+    if (ascii_trimmed_equals(name, "lang")) {
+        const char *value = script_attribute_value(ctx, attribute);
+        if (ascii_trimmed_equals(value, "js") || ascii_trimmed_equals(value, "javascript")) {
+            *language = CBM_LANG_JAVASCRIPT;
+            return true;
+        }
+        if (ascii_trimmed_equals(value, "ts") || ascii_trimmed_equals(value, "typescript")) {
+            *language = CBM_LANG_TYPESCRIPT;
+            return true;
+        }
+        return false;
+    }
+    if (ascii_trimmed_equals(name, "type")) {
+        const char *value = script_attribute_value(ctx, attribute);
+        return ascii_trimmed_equals(value, "") || ascii_trimmed_equals(value, "module") ||
+               ascii_trimmed_equals(value, "text/javascript") ||
+               ascii_trimmed_equals(value, "application/javascript");
+    }
+    return true;
+}
+
+/* Markup hosts (Vue, Svelte, HTML, Astro) hang the attributes that decide
+ * whether and how an inline program is parsed off the <script> start tag.
+ * *language enters holding the spec row's default and leaves holding the
+ * grammar to parse with; an attribute-free block (Astro's frontmatter fence)
+ * keeps the row's language rather than falling through to JavaScript. */
+static bool script_embedded_language(CBMExtractCtx *ctx, TSNode script, CBMLanguage *language) {
+    enum { SCRIPT_ATTR_STACK_CAP = 128 };
+    TSNode stack[SCRIPT_ATTR_STACK_CAP];
     int top = 0;
-    bool has_lang = false;
-    bool lang_supported = true;
-    CBMLanguage selected = CBM_LANG_JAVASCRIPT;
     stack[top++] = script;
     while (top > 0) {
         TSNode node = stack[--top];
         if (strcmp(ts_node_type(node), "attribute") == 0) {
-            uint32_t named_count = ts_node_named_child_count(node);
-            if (named_count == 0) {
+            if (!apply_script_attribute(ctx, node, language)) {
                 return false;
-            }
-            TSNode name_node = ts_node_named_child(node, 0);
-            char *name = cbm_node_text(ctx->arena, name_node, ctx->source);
-            if (ascii_trimmed_equals(name, "src")) {
-                return false;
-            }
-            if (ascii_trimmed_equals(name, "lang")) {
-                TSNode value_node = node;
-                if (!find_first_descendant_of(node, "attribute_value", &value_node)) {
-                    return false;
-                }
-                char *value = cbm_node_text(ctx->arena, value_node, ctx->source);
-                has_lang = true;
-                if (ascii_trimmed_equals(value, "js") ||
-                    ascii_trimmed_equals(value, "javascript")) {
-                    selected = CBM_LANG_JAVASCRIPT;
-                } else if (ascii_trimmed_equals(value, "ts") ||
-                           ascii_trimmed_equals(value, "typescript")) {
-                    selected = CBM_LANG_TYPESCRIPT;
-                } else {
-                    lang_supported = false;
-                }
             }
             continue;
         }
         uint32_t count = ts_node_named_child_count(node);
-        if ((int)count > VUE_ATTR_STACK_CAP - top) {
+        if ((int)count > SCRIPT_ATTR_STACK_CAP - top) {
             return false;
         }
         for (int i = (int)count - 1; i >= 0; i--) {
             stack[top++] = ts_node_named_child(node, (uint32_t)i);
         }
     }
-    if (has_lang && !lang_supported) {
-        return false;
-    }
-    *language = selected;
     return true;
 }
 
 static void parse_one_embedded_block(CBMExtractCtx *ctx, const CBMEmbeddedBlock *block,
-                                     CBMLanguage embedded_language, bool extract_structure) {
+                                     CBMLanguage embedded_language) {
     const TSLanguage *language = cbm_ts_language(embedded_language);
     if (!language || ctx->source_len < 0) {
         return;
@@ -1552,13 +1574,9 @@ static void parse_one_embedded_block(CBMExtractCtx *ctx, const CBMEmbeddedBlock 
         .module_qn = ctx->module_qn,
         .root = ts_tree_root_node(tree),
     };
-    if (extract_structure) {
-        cbm_extract_definitions_without_module(&sub_ctx);
-    }
+    cbm_extract_definitions_without_module(&sub_ctx);
     walk_es_imports(&sub_ctx, sub_ctx.root);
-    if (extract_structure) {
-        cbm_extract_unified(&sub_ctx);
-    }
+    cbm_extract_unified(&sub_ctx);
 
     ts_tree_delete(tree);
     ts_parser_delete(parser);
@@ -1576,16 +1594,14 @@ static void parse_embedded_imports(CBMExtractCtx *ctx) {
         embedded_collect_content_nodes(ctx->root, e, hits, &hit_count, MAX_EMBEDDED_BLOCKS);
         for (int i = 0; i < hit_count; i++) {
             CBMLanguage embedded_language = e->embedded_language;
-            /* Vue single-file components are the only host that opts into
-             * structural extraction: its <script> block contributes Function
-             * defs and CALLS to the host file's Module (#1410). Svelte, HTML
-             * and Astro keep imports-only, deliberately (#1807). */
-            bool extract_structure = ctx->language == CBM_LANG_VUE;
-            if (extract_structure &&
-                !vue_embedded_language(ctx, hits[i].script, &embedded_language)) {
+            /* Every markup host (Vue since #1410; Svelte, HTML and Astro since
+             * #1807) extracts structure -- definitions and calls -- from its
+             * inline programs, gated by the <script> tag's attributes. Only
+             * markup hosts declare embedded specs in this tree. */
+            if (!script_embedded_language(ctx, hits[i].script, &embedded_language)) {
                 continue;
             }
-            parse_one_embedded_block(ctx, &hits[i], embedded_language, extract_structure);
+            parse_one_embedded_block(ctx, &hits[i], embedded_language);
         }
     }
 }
