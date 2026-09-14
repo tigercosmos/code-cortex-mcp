@@ -6,6 +6,7 @@
 #include "foundation/compat.h"    /* cbm_setenv, cbm_unsetenv */
 #include "foundation/compat_fs.h" /* cbm_mkdir_p, cbm_fopen */
 #include "foundation/cbm_atomic.h"
+#include "foundation/constants.h" /* CBM_SZ_32 */
 #include "foundation/log.h"
 #include "foundation/platform.h" /* cbm_resolve_cache_dir, cbm_resolve_self_exe_path */
 #include "foundation/profile.h"  /* cbm_profile_active (keep worker log under CBM_PROFILE) */
@@ -151,12 +152,19 @@ int cbm_index_timeout_ms(void) {
  * CBM_INDEX_WORKER_TIMEOUT_S override (seconds → ms) tightens it for tests. */
 static int worker_quiet_timeout_ms(void) {
     enum { DEFAULT_QUIET_TIMEOUT_MS = 900000 }; /* 15 min with no progress */
-    const char *e = getenv("CBM_INDEX_WORKER_TIMEOUT_S");
-    if (e && e[0]) {
-        long s = atol(e);
-        if (s > 0) {
-            return (int)(s * 1000);
-        }
+    enum { MS_PER_SECOND = 1000 };
+    long s = 0;
+    /* The upper bound only stops the seconds-to-ms multiply overflowing an int. */
+    if (cbm_env_long("CBM_INDEX_WORKER_TIMEOUT_S", &s) && s > 0 && s <= INT_MAX / MS_PER_SECOND) {
+        return (int)(s * MS_PER_SECOND);
+    }
+    /* atol used to answer 0 for a value it could not read, and 0 fell straight
+     * through to the 15-minute default with nothing on screen. An unreadable
+     * value now says so before it is dropped. */
+    char raw[CBM_SZ_32] = {0};
+    if (cbm_safe_getenv("CBM_INDEX_WORKER_TIMEOUT_S", raw, sizeof(raw), NULL) && raw[0]) {
+        cbm_log_warn("index.supervisor.worker_timeout_ignored", "value", raw, "action",
+                     "using_default");
     }
     return DEFAULT_QUIET_TIMEOUT_MS;
 }

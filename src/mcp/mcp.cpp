@@ -69,6 +69,8 @@ enum {
 #include "git/git_context.h"
 #include "cli/cli.h"
 #include "watcher/watcher.h"
+#include "discover/discover.h" /* cbm_discover_count_bounded: auto_index admission (#713) */
+#include "helpers.h"           /* cbm_kind_in_set_free_cache: auto-index thread teardown */
 #include "foundation/mem.h"
 #include "foundation/diagnostics.h"
 #include "foundation/platform.h"
@@ -6123,6 +6125,34 @@ static int supervisor_remaining_ms(uint64_t deadline_ms) {
  *   - a contained-failure response if even that cannot produce a clean run.
  * Every attempt shares one hard deadline; failure never falls back to an
  * unbounded in-process index in the production host. */
+/* How many times a failed index worker may be re-run before the server gives
+ * up, as CBM_INDEX_MAX_RESTARTS sets it. Default 100; 0 means no restarts. */
+static int index_restart_cap(void) {
+    enum { INDEX_RESTART_CAP_DEFAULT = 100 };
+    long v = 0;
+    if (!cbm_env_long("CBM_INDEX_MAX_RESTARTS", &v)) {
+        /* Unset is the ordinary case and says nothing. A value that is set but
+         * unreadable is a person's intent being dropped, so name it. */
+        char raw[CBM_SZ_64] = {0};
+        if (cbm_safe_getenv("CBM_INDEX_MAX_RESTARTS", raw, sizeof(raw), NULL) && raw[0]) {
+            cbm_log_warn("index.restart_cap.ignored", "value", raw, "action", "using_default");
+        }
+        return INDEX_RESTART_CAP_DEFAULT;
+    }
+    /* Zero is a real answer. The old reader kept the default unless the number
+     * was above zero, so the one value meaning "leave the worker alone" did the
+     * opposite. */
+    if (v < 0 || v > INT_MAX) {
+        cbm_log_warn("index.restart_cap.out_of_range", "action", "using_default");
+        return INDEX_RESTART_CAP_DEFAULT;
+    }
+    return (int)v;
+}
+
+int cbm_index_restart_cap_for_testing(void) {
+    return index_restart_cap();
+}
+
 static char *index_run_supervised(cbm_mcp_server_t *srv, const char *args) {
     supervisor_invalidate_store(srv);
     uint64_t deadline_ms = cbm_now_ms() + (uint64_t)cbm_index_timeout_ms();
@@ -6178,14 +6208,7 @@ static char *index_run_supervised(cbm_mcp_server_t *srv, const char *args) {
         (void)fclose(qinit);
     }
 
-    int cap = 100;
-    const char *cap_env = getenv("CBM_INDEX_MAX_RESTARTS");
-    if (cap_env && cap_env[0]) {
-        int v = atoi(cap_env);
-        if (v > 0) {
-            cap = v;
-        }
-    }
+    int cap = index_restart_cap();
 
     char *resp = NULL;
     int quarantined = 0;         /* files pinned + added to the quarantine list so far */
@@ -7411,11 +7434,14 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
             /* -0: read NUL-separated paths from the filelist so paths containing
              * spaces stay one argument (issue #687). Pairs with the NUL separator
              * written by write_scoped_filelist. */
-            snprintf(cmd, cmd_sz, "xargs -0 grep -Hn %s --include='%s' -f '%s' < '%s' 2>/dev/null",
-                     flag, file_pattern, tmpfile, filelist);
+            /* -d skip: a stale directory operand (an incremental store can keep
+             * structural paths) is skipped instead of being read as a file. */
+            snprintf(cmd, cmd_sz,
+                     "xargs -0 grep -Hn -d skip %s --include='%s' -f '%s' < '%s' 2>/dev/null", flag,
+                     file_pattern, tmpfile, filelist);
         } else {
-            snprintf(cmd, cmd_sz, "xargs -0 grep -Hn %s -f '%s' < '%s' 2>/dev/null", flag, tmpfile,
-                     filelist);
+            snprintf(cmd, cmd_sz, "xargs -0 grep -Hn -d skip %s -f '%s' < '%s' 2>/dev/null", flag,
+                     tmpfile, filelist);
         }
     } else {
         if (file_pattern) {
@@ -10371,6 +10397,32 @@ static void register_watcher_if_enabled(cbm_mcp_server_t *srv, bool index_pendin
     }
 }
 
+/* Admission guard for auto_index (#713): true when the root holds at most
+ * file_limit indexable files under the full discovery policy. *file_count_out
+ * gets the exact count, file_limit + 1 when the limit was passed, or -1 when
+ * the root could not be counted (missing, or the count timed out). */
+bool cbm_mcp_auto_index_within_file_limit(const char *root_path, int file_limit,
+                                          int *file_count_out) {
+    if (file_count_out) {
+        *file_count_out = -1;
+    }
+    if (!root_path || !root_path[0] || file_limit < 0) {
+        return false;
+    }
+    enum { AUTO_INDEX_COUNT_TIMEOUT_MS = 5000 };
+    cbm_discover_opts_t options = {};
+    options.mode = CBM_MODE_FULL;
+    int count = -1;
+    cbm_discover_status_t status = cbm_discover_count_bounded(
+        root_path, &options, file_limit, cbm_now_ms() + AUTO_INDEX_COUNT_TIMEOUT_MS, &count);
+    if (file_count_out) {
+        *file_count_out = status == CBM_DISCOVER_LIMIT_EXCEEDED
+                              ? (file_limit < INT_MAX ? file_limit + 1 : INT_MAX)
+                              : count;
+    }
+    return status == CBM_DISCOVER_OK;
+}
+
 /* Background auto-index thread function */
 static void *autoindex_thread(void *arg) {
     cbm_mcp_server_t *srv = (cbm_mcp_server_t *)arg;
@@ -10423,6 +10475,11 @@ static void *autoindex_thread(void *arg) {
     cbm_pipeline_unlock();
 
     cbm_pipeline_free(p);
+    /* Extraction builds a THREAD-LOCAL node-type bitset cache (cbm_kind_in_set).
+     * Parallel workers free theirs in pass_parallel.cpp; the in-process auto-index
+     * runs extraction on THIS short-lived thread, so it must free its own cache
+     * before exiting or LeakSanitizer reports the orphaned bitsets. */
+    cbm_kind_in_set_free_cache();
     cbm_mem_collect(); /* return mimalloc pages to OS after indexing (in-process only) */
 
     if (rc == 0) {
@@ -10476,26 +10533,24 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
         return;
     }
 
-    /* Quick file count check to avoid OOM on massive repos */
-    if (!cbm_validate_shell_arg(srv->session_root)) {
-        cbm_log_warn("autoindex.skip", "reason", "path contains shell metacharacters");
+    /* Bounded file count to avoid OOM on massive trees (#713). The old guard
+     * counted `git ls-files`, which is 0 outside a checkout, so a plain
+     * directory of 60k files was admitted and walked in full (tens of GB RSS).
+     * The discovery layer's bounded count applies the SAME filter policy as the
+     * index itself, to every root, and stops one file past the limit. */
+    int file_count = -1;
+    if (!cbm_mcp_auto_index_within_file_limit(srv->session_root, file_limit, &file_count)) {
+        char files[CBM_SZ_32];
+        char limit[CBM_SZ_32];
+        (void)snprintf(files, sizeof(files), "%d", file_count);
+        (void)snprintf(limit, sizeof(limit), "%d", file_limit);
+        char root_disp[CBM_SZ_1K];
+        (void)snprintf(root_disp, sizeof(root_disp), "%s", srv->session_root);
+        cbm_normalize_path_sep(root_disp); /* forward-slash paths in diagnostics */
+        cbm_log_warn("autoindex.skip", "reason",
+                     file_count >= 0 ? "too_many_files" : "unsafe_or_unavailable_path", "files",
+                     files, "limit", limit, "root", root_disp);
         return;
-    }
-    char cmd[CBM_SZ_1K];
-    snprintf(cmd, sizeof(cmd), "git -C '%s' ls-files 2>/dev/null | wc -l", srv->session_root);
-    FILE *fp = cbm_popen(cmd, "r");
-    if (fp) {
-        char line[CBM_SZ_64];
-        if (fgets(line, sizeof(line), fp)) {
-            int count = (int)strtol(line, NULL, CBM_DECIMAL_BASE);
-            if (count > file_limit) {
-                cbm_log_warn("autoindex.skip", "reason", "too_many_files", "files", line, "limit",
-                             CBM_CONFIG_AUTO_INDEX_LIMIT);
-                cbm_pclose(fp);
-                return;
-            }
-        }
-        cbm_pclose(fp);
     }
 
     /* Launch auto-index in background */

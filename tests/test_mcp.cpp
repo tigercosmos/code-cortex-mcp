@@ -4817,7 +4817,103 @@ TEST(mcp_destructive_symlink_paths_preserve_backing_database) {
 }
 #endif
 
+/* ══════════════════════════════════════════════════════════════════
+ *  #713 — the auto_index_limit admission guard
+ *
+ *  The old guard counted `git ls-files | wc -l`, which is 0 outside a
+ *  checkout, so a plain directory of 60k files was admitted and walked in
+ *  full (tens of GB RSS). The bounded discovery count applies to every root.
+ * ══════════════════════════════════════════════════════════════════ */
+
+static char *autoindex_limit_fixture(int files, bool git_root) {
+    char *base = th_mktempdir("cbm_autoindex_limit");
+    if (!base) {
+        return NULL;
+    }
+    for (int i = 0; i < files; i++) {
+        char rel[64];
+        char body[96];
+        snprintf(rel, sizeof(rel), "f%d.py", i);
+        snprintf(body, sizeof(body), "def f%d():\n    return %d\n", i, i);
+        th_write_file(TH_PATH(base, rel), body);
+    }
+    if (git_root) {
+        th_write_file(TH_PATH(base, ".git/HEAD"), "ref: refs/heads/main\n");
+    }
+    return base;
+}
+
+/* The reporter's shape scaled down (60 files vs limit 50): a PLAIN directory
+ * over the limit is refused. RED on the `git ls-files` guard (count 0). */
+TEST(autoindex_limit_guards_non_git_root_issue713) {
+    char *base = autoindex_limit_fixture(60, false);
+    ASSERT_NOT_NULL(base);
+    int count = -1;
+    bool admitted = cbm_mcp_auto_index_within_file_limit(base, 50, &count);
+    th_cleanup(base);
+    ASSERT_FALSE(admitted);
+    ASSERT_EQ(count, 51);
+    PASS();
+}
+
+/* One file under the limit is admitted with the exact count — the guard bounds,
+ * it does not fail closed on every non-git root. A checkout is judged the same. */
+TEST(autoindex_limit_admits_under_limit_issue713) {
+    char *plain = autoindex_limit_fixture(49, false);
+    ASSERT_NOT_NULL(plain);
+    int count = -1;
+    bool admitted = cbm_mcp_auto_index_within_file_limit(plain, 50, &count);
+    th_cleanup(plain);
+    ASSERT_TRUE(admitted);
+    ASSERT_EQ(count, 49);
+
+    char *checkout = autoindex_limit_fixture(60, true);
+    ASSERT_NOT_NULL(checkout);
+    count = -1;
+    admitted = cbm_mcp_auto_index_within_file_limit(checkout, 50, &count);
+    th_cleanup(checkout);
+    ASSERT_FALSE(admitted);
+    ASSERT_EQ(count, 51);
+
+    count = 5;
+    ASSERT_FALSE(
+        cbm_mcp_auto_index_within_file_limit("/nonexistent/cbm-autoindex-713", 50, &count));
+    ASSERT_EQ(count, -1);
+    PASS();
+}
+
+/* CBM_INDEX_MAX_RESTARTS: 0 means no restarts (the old reader kept 100), and an
+ * unreadable value keeps the default instead of silently becoming 0. */
+TEST(index_restart_cap_reads_env_strictly) {
+    char *old = getenv("CBM_INDEX_MAX_RESTARTS") ? strdup(getenv("CBM_INDEX_MAX_RESTARTS")) : NULL;
+    cbm_unsetenv("CBM_INDEX_MAX_RESTARTS");
+    int unset_cap = cbm_index_restart_cap_for_testing();
+    cbm_setenv("CBM_INDEX_MAX_RESTARTS", "0", 1);
+    int zero_cap = cbm_index_restart_cap_for_testing();
+    cbm_setenv("CBM_INDEX_MAX_RESTARTS", "abc", 1);
+    int bad_cap = cbm_index_restart_cap_for_testing();
+    cbm_setenv("CBM_INDEX_MAX_RESTARTS", "7", 1);
+    int seven_cap = cbm_index_restart_cap_for_testing();
+    cbm_setenv("CBM_INDEX_MAX_RESTARTS", "-3", 1);
+    int negative_cap = cbm_index_restart_cap_for_testing();
+    if (old) {
+        cbm_setenv("CBM_INDEX_MAX_RESTARTS", old, 1);
+        free(old);
+    } else {
+        cbm_unsetenv("CBM_INDEX_MAX_RESTARTS");
+    }
+    ASSERT_EQ(unset_cap, 100);
+    ASSERT_EQ(zero_cap, 0);
+    ASSERT_EQ(bad_cap, 100);
+    ASSERT_EQ(seven_cap, 7);
+    ASSERT_EQ(negative_cap, 100);
+    PASS();
+}
+
 SUITE(mcp) {
+    RUN_TEST(autoindex_limit_guards_non_git_root_issue713);
+    RUN_TEST(autoindex_limit_admits_under_limit_issue713);
+    RUN_TEST(index_restart_cap_reads_env_strictly);
 #ifndef _WIN32
     RUN_TEST(mcp_destructive_symlink_paths_preserve_backing_database);
 #endif

@@ -41,6 +41,17 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
                                     const char *file_pattern, const char *tmpfile,
                                     const char *filelist, const char *root_path);
 
+/* auto_index admission guard (#713): true when root_path holds at most
+ * file_limit indexable files under the full discovery policy, git checkout or
+ * not. *file_count_out receives the exact count, file_limit + 1 past the limit,
+ * or -1 when the root could not be counted. */
+bool cbm_mcp_auto_index_within_file_limit(const char *root_path, int file_limit,
+                                          int *file_count_out);
+
+/* CBM_INDEX_MAX_RESTARTS as the supervised index resolves it: 100 by default
+ * and for an unreadable value, 0 means no restarts. Exposed for tests. */
+int cbm_index_restart_cap_for_testing(void);
+
 #ifdef __cplusplus
 }
 #endif
