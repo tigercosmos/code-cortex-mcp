@@ -24,6 +24,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"
 #include "foundation/str_util.h"
+#include "pipeline/artifact.h" /* CBM_ARTIFACT_DIR: the indexer's own output directory */
 
 #include <errno.h>
 #include <stdio.h>
@@ -159,9 +160,18 @@ static int git_head(const char *root_path, char *out, size_t out_size) {
  * changes inside submodules that `git status` alone would not report. */
 static bool git_is_dirty(const char *root_path) {
     char cmd[CBM_SZ_1K];
+    /* `:(exclude)<artifact dir>` drops the indexer's OWN output. After a
+     * publish the pipeline re-exports <root>/.code-cortex/ whenever an artifact
+     * already lives there (once persisted, or committed by the team and checked
+     * out into every worktree). Folding that write into the dirty check made
+     * each successful reindex look like a NEW change on the next poll, and the
+     * watcher re-triggered itself forever (upstream #1953). Nothing under that
+     * directory is ever an index input, so a change there never requires a
+     * reindex. The pathspec is CWD-relative, so a project watched at a monorepo
+     * sub-package excludes its own artifact directory. */
     snprintf(cmd, sizeof(cmd),
              "git --no-optional-locks -C \"%s\" status --porcelain "
-             "--untracked-files=normal 2>%s",
+             "--untracked-files=normal -- . \":(exclude)" CBM_ARTIFACT_DIR "\" 2>%s",
              root_path, WATCHER_NULDEV);
     FILE *fp = cbm_popen(cmd, "r");
     if (!fp) {

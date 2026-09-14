@@ -694,6 +694,59 @@ TEST(watcher_git_removed_no_crash) {
     PASS();
 }
 
+/* The indexer's own artifact directory must not make a clean tree look dirty.
+ * After a publish the pipeline re-exports <root>/.code-cortex/ whenever an
+ * artifact already lives there; counting that write as a change made every
+ * successful reindex re-trigger the next one forever (upstream #1953). A real
+ * edit next to the artifact is still detected. */
+TEST(watcher_ignores_own_artifact_dir) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_watcher_artifact_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    if (wt_git(tmpdir, "init -q") != 0) { th_rmtree(tmpdir); FAIL("git init failed"); }
+    { char p[300]; th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "hello\n"); }
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m init");
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    cbm_watcher_watch(w, "artifact-repo", tmpdir);
+    index_call_count = 0;
+
+    cbm_watcher_poll_once(w); /* baseline */
+    ASSERT_EQ(index_call_count, 0);
+
+    /* The exporter writes its artifact (untracked, as after a first persist). */
+    {
+        char p[300];
+        th_write_file(wt_path(p, sizeof(p), tmpdir, ".code-cortex/artifact.json"), "{}\n");
+        th_write_file(wt_path(p, sizeof(p), tmpdir, ".code-cortex/graph.db.zst"), "zst\n");
+    }
+    cbm_watcher_touch(w, "artifact-repo");
+    cbm_watcher_poll_once(w);
+    cbm_watcher_touch(w, "artifact-repo");
+    cbm_watcher_poll_once(w);
+    int after_artifact = index_call_count;
+
+    /* A real source edit is still a change. */
+    {
+        char p[300];
+        th_append_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "edit\n");
+    }
+    cbm_watcher_touch(w, "artifact-repo");
+    cbm_watcher_poll_once(w);
+    int after_edit = index_call_count;
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    ASSERT_EQ(after_artifact, 0);
+    ASSERT_EQ(after_edit, 1);
+    PASS();
+}
+
 TEST(watcher_continued_dirty) {
     /* If working tree stays dirty, each poll should re-trigger reindex.
      * Port of repeated git sentinel detection behavior. */
@@ -1745,6 +1798,7 @@ SUITE(watcher) {
 
     /* Git removal + continued dirty + baseline dirty */
     RUN_TEST(watcher_git_removed_no_crash);
+    RUN_TEST(watcher_ignores_own_artifact_dir);
     RUN_TEST(watcher_continued_dirty);
     RUN_TEST(watcher_baseline_dirty_repo);
     RUN_TEST(watcher_unwatch_prunes_state);
