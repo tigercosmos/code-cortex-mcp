@@ -827,10 +827,9 @@ int cbm_store_exec(cbm_store_t *s, const char *sql);
  * decided in exactly ONE place. A hand-written INSERT naming only the
  * identifier columns silently leaves `body` NULL for every node it writes.
  *
- *   project == NULL → wholesale rebuild: clears the index, then reindexes every
- *                     node in the database.
- *   project != NULL → incremental: indexes only that project's nodes with
- *                     id > after_id, leaving existing rows untouched.
+ * Always a wholesale rebuild: clears the index, then reindexes every node in
+ * the database. `project` must be NULL and `after_id` 0 — the per-project
+ * incremental form is gone, and any other value answers CBM_STORE_ERR.
  *
  * Returns CBM_STORE_OK; CBM_STORE_NOT_FOUND when nodes_fts cannot be written at
  * all (FTS5 compiled out); CBM_STORE_ERR on a genuine write failure. */

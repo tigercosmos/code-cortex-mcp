@@ -1579,18 +1579,10 @@ TEST(store_fts_rebuild_tolerates_legacy_four_column_table) {
     PASS();
 }
 
-TEST(store_fts_rebuild_incremental_adds_only_nodes_above_watermark) {
+TEST(store_fts_rebuild_reindexes_added_nodes_without_duplicates) {
     cbm_store_t *s = cbm_store_open_memory();
     seed_prose_nodes(s);
     ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
-
-    sqlite3_stmt *st = NULL;
-    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(s), "SELECT COALESCE(MAX(id),0) FROM nodes", -1,
-                                 &st, NULL),
-              SQLITE_OK);
-    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
-    int64_t watermark = sqlite3_column_int64(st, 0);
-    sqlite3_finalize(st);
 
     cbm_node_t added = {};
     added.project = "p";
@@ -1601,7 +1593,13 @@ TEST(store_fts_rebuild_incremental_adds_only_nodes_above_watermark) {
     added.properties_json = "{\"docstring\":\"migrates the retention ledger\"}";
     ASSERT_TRUE(cbm_store_upsert_node(s, &added) > 0);
 
-    ASSERT_EQ(cbm_store_fts_rebuild(s, "p", watermark), CBM_STORE_OK);
+    /* The per-project incremental form is gone: refused, and nothing written. */
+    ASSERT_EQ(cbm_store_fts_rebuild(s, "p", 0), CBM_STORE_ERR);
+    ASSERT_EQ(fts_match_count(s, "body:retention"), 0);
+
+    /* A second wholesale rebuild picks up the new node's prose `body` and
+     * does not duplicate the rows the first one wrote. */
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
     ASSERT_EQ(fts_match_count(s, "body:retention"), 1);
     ASSERT_EQ(fts_match_count(s, "body:ephemeral"), 1); /* not duplicated */
     ASSERT_EQ(fts_match_count(s, "name:plainFunction"), 1);
@@ -1680,5 +1678,5 @@ SUITE(store_search) {
     RUN_TEST(store_fts_rebuild_indexes_docstring_as_body_issue518);
     RUN_TEST(store_fts_rebuild_survives_malformed_properties_json);
     RUN_TEST(store_fts_rebuild_tolerates_legacy_four_column_table);
-    RUN_TEST(store_fts_rebuild_incremental_adds_only_nodes_above_watermark);
+    RUN_TEST(store_fts_rebuild_reindexes_added_nodes_without_duplicates);
 }
