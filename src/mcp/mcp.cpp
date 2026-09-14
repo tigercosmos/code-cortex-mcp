@@ -1143,7 +1143,8 @@ struct cbm_mcp_server {
     struct cbm_watcher *watcher;      /* external watcher ref (not owned) */
     struct cbm_config *config;        /* external config ref (not owned) */
     cbm_thread_t autoindex_tid;
-    bool autoindex_active; /* true if auto-index thread was started */
+    bool autoindex_active;    /* true if auto-index thread was started */
+    int autoindex_file_limit; /* auto_index_limit, read before the thread starts */
 
     /* Active pipeline tracking for cancellation support */
     cbm_pipeline_t *active_pipeline; /* non-NULL while index_repository runs */
@@ -10551,6 +10552,29 @@ bool cbm_mcp_auto_index_within_file_limit(const char *root_path, int file_limit,
 static void *autoindex_thread(void *arg) {
     cbm_mcp_server_t *srv = (cbm_mcp_server_t *)arg;
 
+    /* Bounded file count to avoid OOM on massive trees (#713). The old guard
+     * counted `git ls-files`, which is 0 outside a checkout, so a plain
+     * directory of 60k files was admitted and walked in full (tens of GB RSS).
+     * The discovery layer's bounded count applies the SAME filter policy as the
+     * index itself, to every root, and stops one file past the limit. It runs
+     * here, not in maybe_auto_index, because counting up to the limit can take
+     * seconds and `initialize` must not wait for it. */
+    int file_limit = srv->autoindex_file_limit;
+    int file_count = -1;
+    if (!cbm_mcp_auto_index_within_file_limit(srv->session_root, file_limit, &file_count)) {
+        char files[CBM_SZ_32];
+        char limit[CBM_SZ_32];
+        (void)snprintf(files, sizeof(files), "%d", file_count);
+        (void)snprintf(limit, sizeof(limit), "%d", file_limit);
+        char root_disp[CBM_SZ_1K];
+        (void)snprintf(root_disp, sizeof(root_disp), "%s", srv->session_root);
+        cbm_normalize_path_sep(root_disp); /* forward-slash paths in diagnostics */
+        cbm_log_warn("autoindex.skip", "reason",
+                     file_count >= 0 ? "too_many_files" : "unsafe_or_unavailable_path", "files",
+                     files, "limit", limit, "root", root_disp);
+        return NULL;
+    }
+
     cbm_log_info("autoindex.start", "project", srv->session_project, "path", srv->session_root);
 
     /* #832: prefer the supervised worker subprocess. Indexing the whole session in
@@ -10657,27 +10681,9 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
         return;
     }
 
-    /* Bounded file count to avoid OOM on massive trees (#713). The old guard
-     * counted `git ls-files`, which is 0 outside a checkout, so a plain
-     * directory of 60k files was admitted and walked in full (tens of GB RSS).
-     * The discovery layer's bounded count applies the SAME filter policy as the
-     * index itself, to every root, and stops one file past the limit. */
-    int file_count = -1;
-    if (!cbm_mcp_auto_index_within_file_limit(srv->session_root, file_limit, &file_count)) {
-        char files[CBM_SZ_32];
-        char limit[CBM_SZ_32];
-        (void)snprintf(files, sizeof(files), "%d", file_count);
-        (void)snprintf(limit, sizeof(limit), "%d", file_limit);
-        char root_disp[CBM_SZ_1K];
-        (void)snprintf(root_disp, sizeof(root_disp), "%s", srv->session_root);
-        cbm_normalize_path_sep(root_disp); /* forward-slash paths in diagnostics */
-        cbm_log_warn("autoindex.skip", "reason",
-                     file_count >= 0 ? "too_many_files" : "unsafe_or_unavailable_path", "files",
-                     files, "limit", limit, "root", root_disp);
-        return;
-    }
-
-    /* Launch auto-index in background */
+    /* Launch auto-index in background; the #713 file-limit admission check runs
+     * first thing on that thread, so `initialize` answers without waiting. */
+    srv->autoindex_file_limit = file_limit;
     if (cbm_thread_create(&srv->autoindex_tid, 0, autoindex_thread, srv) == 0) {
         srv->autoindex_active = true;
     }
