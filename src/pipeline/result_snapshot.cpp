@@ -188,10 +188,10 @@ template <class A> void fields(A &a, CBMCallArg &v) {
 }
 template <class A> void fields(A &a, CBMCall &v) {
     auto &[callee_name, enclosing_func_qn, first_string_arg, second_arg_name, args, arg_count,
-           loop_depth, branch_depth, start_line, source_byte, requires_typed_resolution,
-           is_method] = v;
+           loop_depth, branch_depth, start_line, source_byte, requires_typed_resolution, is_method,
+           callee_is_locally_bound] = v;
     a(callee_name, enclosing_func_qn, first_string_arg, second_arg_name, loop_depth, branch_depth,
-      start_line, source_byte, requires_typed_resolution, is_method);
+      start_line, source_byte, requires_typed_resolution, is_method, callee_is_locally_bound);
     a.array(args, arg_count);
 }
 template <class A> void fields(A &a, CBMImport &v) {

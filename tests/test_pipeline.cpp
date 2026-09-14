@@ -7537,6 +7537,159 @@ TEST(pipeline_lease_windows_extended_component_is_not_retargeted) {
 }
 #endif
 
+/* ── Python weak-call guards (#1276 receiver, bare-call parameter shadowing) ── */
+
+struct PyGuardEnv {
+    const char *name;
+    std::string value;
+    bool present;
+    explicit PyGuardEnv(const char *key)
+        : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+    ~PyGuardEnv() {
+        if (present)
+            cbm_setenv(name, value.c_str(), 1);
+        else
+            cbm_unsetenv(name);
+    }
+};
+
+static int py_guard_calls(const char *db_path, const char *caller, const char *callee) {
+    sqlite3 *db = nullptr;
+    if (sqlite3_open(db_path, &db) != SQLITE_OK) {
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_stmt *stmt = nullptr;
+    int n = -1;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT COUNT(*) FROM edges e JOIN nodes s ON s.id=e.source_id "
+                           "JOIN nodes t ON t.id=e.target_id "
+                           "WHERE e.type='CALLS' AND s.name=?1 AND t.name=?2",
+                           -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, caller, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, callee, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+            n = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return n;
+}
+
+/* Index `repo` into root/graph.db either single-threaded (sequential
+ * pass_calls.cpp) or with 4 workers over >= 50 files (pass_parallel.cpp). */
+static int py_guard_index(const std::string &root, const std::string &repo, bool parallel) {
+    if (parallel) {
+        for (int i = 0; i < 52; ++i) {
+            std::string body =
+                "def filler" + std::to_string(i) + "():\n    return " + std::to_string(i) + "\n";
+            if (th_write_file((repo + "/filler" + std::to_string(i) + ".py").c_str(),
+                              body.c_str()) != 0)
+                return -1;
+        }
+        cbm_setenv("CBM_WORKERS", "4", 1);
+        cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    } else {
+        cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+    }
+    std::string db = root + "/graph.db";
+    cbm_pipeline_t *p = cbm_pipeline_new(repo.c_str(), db.c_str(), CBM_MODE_FULL);
+    if (!p)
+        return -1;
+    int rc = cbm_pipeline_run(p);
+    cbm_pipeline_free(p);
+    return rc;
+}
+
+/* Receiver guard, both resolvers. NEGATIVE: attribute calls on unknown receivers
+ * (a parameter, an attribute of one) must not bind same-named project methods
+ * through unique_name / suffix_match / the parallel field_type_hint (which
+ * capitalizes `accelerator` into MockAccelerator). POSITIVE: an import-bound
+ * receiver and a bare local call keep their edges. */
+static int py_receiver_guard_case(bool parallel) {
+    PyGuardEnv workers("CBM_WORKERS"), single("CBM_INDEX_SINGLE_THREAD");
+    char root[256] = "/tmp/cbm_py_recv_XXXXXX";
+    if (!cbm_mkdtemp(root))
+        return 1;
+    std::string repo = std::string(root) + "/src";
+    th_write_file((repo + "/targets.py").c_str(),
+                  "class MockAccelerator:\n    def print(self, value):\n        return value\n\n"
+                  "class OtherPrinter:\n    def print(self, value):\n        return value\n\n"
+                  "class FlashAttentionFunction:\n    def backward(self, loss):\n"
+                  "        return loss\n\n"
+                  "class EulerScheduler:\n    def step(self):\n        return 1\n");
+    th_write_file((repo + "/pkg/__init__.py").c_str(), "from .helper import compute\n");
+    th_write_file((repo + "/pkg/helper.py").c_str(), "def compute(value):\n    return value * 2\n");
+    th_write_file((repo + "/caller.py").c_str(),
+                  "from pkg import helper\n\ndef local_helper():\n    return 1\n\n"
+                  "def train(accelerator, trainer):\n    accelerator.print('hello')\n"
+                  "    accelerator.backward(1)\n    trainer.lr_scheduler.step()\n"
+                  "    helper.compute(42)\n    return local_helper()\n");
+    int fail = 0;
+    if (py_guard_index(root, repo, parallel) != 0)
+        fail = 2;
+    std::string db = std::string(root) + "/graph.db";
+    if (!fail && (py_guard_calls(db.c_str(), "train", "print") != 0 ||
+                  py_guard_calls(db.c_str(), "train", "backward") != 0 ||
+                  py_guard_calls(db.c_str(), "train", "step") != 0))
+        fail = 3;
+    if (!fail && (py_guard_calls(db.c_str(), "train", "compute") < 1 ||
+                  py_guard_calls(db.c_str(), "train", "local_helper") < 1))
+        fail = 4;
+    th_rmtree(root);
+    return fail;
+}
+
+TEST(pipeline_python_receiver_suppresses_weak_method_edge) {
+    ASSERT_EQ(py_receiver_guard_case(false), 0);
+    PASS();
+}
+
+TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges) {
+    ASSERT_EQ(py_receiver_guard_case(true), 0);
+    PASS();
+}
+
+/* Bare-call local-binding guard, both resolvers. `run` / `execute` are
+ * PARAMETERS, so `run()` cannot bind SatoriLive.run. The positive control is a
+ * CROSS-FILE bare call with no import, so it resolves by a weak strategy this
+ * guard could have killed — a same_module edge would prove nothing. */
+static int py_local_binding_guard_case(bool parallel) {
+    PyGuardEnv workers("CBM_WORKERS"), single("CBM_INDEX_SINGLE_THREAD");
+    char root[256] = "/tmp/cbm_py_bare_XXXXXX";
+    if (!cbm_mkdtemp(root))
+        return 1;
+    std::string repo = std::string(root) + "/src";
+    th_write_file((repo + "/live.py").c_str(),
+                  "class SatoriLive:\n    def run(self):\n        return 1\n\n"
+                  "class BatchJob:\n    def execute(self):\n        return 2\n");
+    th_write_file((repo + "/helpers.py").c_str(), "def compute_widget_total():\n    return 7\n");
+    th_write_file((repo + "/gate.py").c_str(),
+                  "def _run_with_heavy_slot(run, execute):\n    run()\n    return execute()\n\n"
+                  "def uses_free_function():\n    return compute_widget_total()\n");
+    int fail = 0;
+    if (py_guard_index(root, repo, parallel) != 0)
+        fail = 2;
+    std::string db = std::string(root) + "/graph.db";
+    if (!fail && (py_guard_calls(db.c_str(), "_run_with_heavy_slot", "run") != 0 ||
+                  py_guard_calls(db.c_str(), "_run_with_heavy_slot", "execute") != 0))
+        fail = 3;
+    if (!fail && py_guard_calls(db.c_str(), "uses_free_function", "compute_widget_total") < 1)
+        fail = 4;
+    th_rmtree(root);
+    return fail;
+}
+
+TEST(pipeline_python_bare_local_binding_suppresses_weak_edge) {
+    ASSERT_EQ(py_local_binding_guard_case(false), 0);
+    PASS();
+}
+
+TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge) {
+    ASSERT_EQ(py_local_binding_guard_case(true), 0);
+    PASS();
+}
+
 SUITE(pipeline) {
 #ifdef _WIN32
     RUN_TEST(pipeline_lease_windows_ambiguous_missing_and_replaced_names);
@@ -7831,6 +7984,10 @@ SUITE(pipeline) {
     RUN_TEST(pkgmap_swift_scan_repo_finds_nested_manifest);
     RUN_TEST(pipeline_cross_language_same_name_does_not_share_calls_issue725);
     RUN_TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725);
+    RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
+    RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
+    RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

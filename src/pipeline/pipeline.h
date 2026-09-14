@@ -270,13 +270,31 @@ bool cbm_perl_is_builtin(const char *name);
 bool cbm_perl_suppress_generic_match(bool is_perl, bool is_method, const char *callee_name,
                                      const char *strategy);
 
-/* Decide whether a resolved TS/JS/TSX member-call edge is weak-strategy noise to
- * drop (#592/#606): true only for TS/JS, only for a member call with a
- * non-this/super receiver (is_method), and only when the match used a weak
- * short-name strategy (suffix_match / unique_name / field_type_hint / fuzzy).
+/* True for the registry strategies that are pure short-name guesses
+ * (suffix_match / unique_name / field_type_hint / fuzzy). NULL/empty is false.
+ * The single drop-list shared by every weak-match guard (the two call guards
+ * below and the cross-LSP base-class resolution), so they cannot disagree about
+ * what "weak" means. */
+bool cbm_weak_short_name_strategy(const char *strategy);
+
+/* Decide whether a resolved member-call edge is weak-strategy noise to drop
+ * (#592/#606/#1276): true only when the CALLER's per-language gate says the
+ * guard applies (`enabled`), only for a member call with an unresolved receiver
+ * (is_method), and only when the match used a weak short-name strategy.
  * Explicit drop-list keeps every lsp_* / import / same-module / qualified match.
- * Pure; unit-tested in test_registry.c. */
-bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const char *strategy);
+ * The language set lives at the call sites (pass_calls.cpp / pass_parallel.cpp)
+ * and must be identical in both, or the sequential and parallel resolvers
+ * diverge. Pure; unit-tested in test_registry.cpp. */
+bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *strategy);
+
+/* Bare-call counterpart of the guard above. True when a resolved BARE call edge
+ * binds a callee that is shadowed by an enclosing parameter, and the match came
+ * from a weak short-name strategy — so the edge is fabricated by construction
+ * (`def f(run): run()` must not bind an unrelated `SatoriLive.run`). Keyed on
+ * the SCOPE FACT, not on the callee's spelling. Same call-site language-gate
+ * contract as above. Pure; unit-tested in test_registry.cpp. */
+bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_bound,
+                                          const char *strategy);
 
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);

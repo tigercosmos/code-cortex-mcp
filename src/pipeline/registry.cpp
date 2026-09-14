@@ -436,31 +436,73 @@ bool cbm_perl_suppress_generic_match(bool is_perl, bool is_method, const char *c
     return true; /* weak short-name match (suffix_match / unique_name / …) → drop */
 }
 
-/* TS/JS analogue of the Perl guard above (#592/#606 direction; precedent #477).
- * A member call `x.foo()` reaches the weak textual cascade ONLY when the TS-LSP
- * could not resolve the receiver type — type-resolved calls win via lsp_*
- * strategies before the registry runs. Binding such a call to a project symbol
- * by a weak short-name strategy fabricates a CALLS edge (`re.test()` ->
- * SalesforceRestClient.test, `date.toISOString()` -> any project toISOString).
- * Drop ONLY the weak strategies; keep import/same-module/qualified-tail matches
- * and every lsp_* strategy. Uses an EXPLICIT drop-list (not keep-list +
- * default-drop) because the parallel resolver runs lsp_* strategies through the
- * same guard variable — a default-drop would silently kill lsp_ts_method. Pure
- * + side-effect-free so the contract is unit-testable without a full pipeline. */
-bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const char *strategy) {
-    if (!is_tsjs || !is_method || !strategy || !strategy[0]) {
+/* The weak short-name strategies that actually reach the call-resolution
+ * guards: the registry's suffix_match / unique_name and the parallel
+ * field_type_hint. "fuzzy" is listed as defensive insurance only —
+ * cbm_registry_fuzzy_resolve is not wired into the sequential/parallel resolvers
+ * today, so it never reaches these helpers, but naming it keeps a future wiring
+ * from silently reintroducing the noise. Everything else — same_module /
+ * import_map / import_map_suffix / qualified_suffix / callee_suffix /
+ * service_pattern / lsp_* — is a receiver- or import-aware match and is KEPT.
+ *
+ * Shared by BOTH weak-call guards below so the drop-list exists exactly once: a
+ * list that drifted between the member guard and the local-binding guard would
+ * make the two disagree about what "weak" means. */
+bool cbm_weak_short_name_strategy(const char *strategy) {
+    if (!strategy || !strategy[0]) {
         return false;
     }
-    /* Weak short-name strategies that actually reach the call-resolution guards:
-     * the registry's suffix_match / unique_name and the parallel field_type_hint.
-     * "fuzzy" is listed as defensive insurance only — cbm_registry_fuzzy_resolve
-     * is not wired into the sequential/parallel resolvers today, so it never
-     * reaches this helper, but naming it keeps a future wiring from silently
-     * reintroducing the noise. Everything else — same_module / import_map /
-     * import_map_suffix / qualified_suffix / callee_suffix / service_pattern /
-     * lsp_* — is a receiver- or import-aware match and is KEPT. */
     return strcmp(strategy, "suffix_match") == 0 || strcmp(strategy, "unique_name") == 0 ||
            strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
+}
+
+/* Dynamic-language analogue of the Perl guard above (#592/#606/#1276
+ * direction; precedent #477). A member call `x.foo()` reaches the weak textual
+ * cascade ONLY when the language's LSP could not resolve the receiver type —
+ * type-resolved calls win via lsp_* strategies before the registry runs.
+ * Binding such a call to a project symbol by a weak short-name strategy
+ * fabricates a CALLS edge (`re.test()` -> SalesforceRestClient.test,
+ * `accelerator.print()` -> MockAccelerator.print). Drop ONLY the weak
+ * strategies; keep import/same-module/qualified-tail matches and every lsp_*
+ * strategy. Uses an EXPLICIT drop-list (not keep-list + default-drop) because
+ * the parallel resolver runs lsp_* strategies through the same guard variable —
+ * a default-drop would silently kill lsp_ts_method. Pure + side-effect-free so
+ * the contract is unit-testable without a full pipeline.
+ *
+ * `enabled` is the CALLER's per-language gate, deliberately kept OUT of this
+ * helper: the guard applies only to the language set each call site enumerates
+ * (today Python plus the JS/TS family). Widening it is a per-language decision
+ * made at the call sites in pass_calls.cpp and pass_parallel.cpp, which MUST
+ * stay in lockstep — a gate added to only one of them diverges the sequential
+ * and parallel resolvers. */
+bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *strategy) {
+    if (!enabled || !is_method) {
+        return false;
+    }
+    return cbm_weak_short_name_strategy(strategy);
+}
+
+/* Bare-call counterpart of the member guard above. A Python call `foo()` whose
+ * callee identifier is bound as a parameter of an enclosing scope cannot be the
+ * module-level `foo`: the parameter shadows it for the whole body. Binding such
+ * a call to a project Function/Method by a weak short-name strategy fabricates
+ * the edge by construction (`def _run_with_heavy_slot(run): run()` ->
+ * SatoriLive.run).
+ *
+ * This is deliberately NOT keyed on the callee's spelling. A list of
+ * "generic-looking" names (get / run / execute) asserts that certain spellings
+ * are usually noise, which is a claim about corpus fashion rather than about
+ * what the resolver knew — and it ages invisibly. A parameter binding is a fact
+ * about THIS file's scope, decidable outright.
+ *
+ * `enabled` is the caller's per-language gate, kept out of the helper for the
+ * same reason as the member guard. Pure; unit-tested in test_registry.cpp. */
+bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_bound,
+                                          const char *strategy) {
+    if (!enabled || !callee_is_locally_bound) {
+        return false;
+    }
+    return cbm_weak_short_name_strategy(strategy);
 }
 
 /* ── Lifecycle ──────────────────────────────────────────────────── */

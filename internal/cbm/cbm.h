@@ -248,9 +248,16 @@ typedef struct {
     int start_line;                 // 1-based source line of the call (for def range-match)
     uint32_t source_byte;           // Source byte offset plus one, or zero when unavailable.
     bool requires_typed_resolution; // Implicit operator candidates must not use name-only fallback.
-    bool is_method;                 // method/member call with a non-self receiver. Perl:
+    bool is_method;                 // method/member call with an UNRESOLVED receiver. Perl:
                                     // arrow/method call ($obj->m). TS/JS/TSX: member call
-                                    // x.foo() whose receiver is not this/super. Default false.
+                                    // x.foo() whose receiver is not this/super. Python:
+                                    // x.foo() where x is not self/cls/super() and is not
+                                    // rooted in an imported name. Read by the weak-member
+                                    // guard. Default false.
+    bool callee_is_locally_bound;   // bare call foo() whose callee identifier is bound as a
+                                    // parameter of an enclosing function or lambda, so it
+                                    // cannot be the module-level foo. Python only today. Read
+                                    // by the weak-local-binding guard. Default false.
 } CBMCall;
 
 typedef struct {

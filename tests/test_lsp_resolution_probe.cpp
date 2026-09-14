@@ -825,18 +825,29 @@ TEST(lrp_python_s5_chained) {
     PASS();
 }
 
-/* S6 — Python inherited method call. */
+/* S6 — Python method call through an UN-annotated parameter. */
 TEST(lrp_python_s6_inherited_method) {
     static const LRP_File f[] = {
         {"base.py", "class Base:\n    def describe(self):\n        return 'base'\n"},
         {"child.py", "from .base import Base\n\n\nclass Child(Base):\n"
                      "    def extra(self):\n        return 'extra'\n\n\n"
                      "def run(c):\n    return c.describe()\n"}};
-    /* Uncertain: c.describe() on a Child — py_lsp_cross must see Child inherits Base
-     * (requires INHERITS edge resolution).  Given the Python extraction bug for
-     * base_classes, this may be RED end-to-end even if py_lsp_cross is correct.
-     * Assert the correct outcome; RED if extraction bug blocks resolution. */
-    ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "python/S6/inherited_method", 0));
+    /* MEASURED before the Python weak-member guard: strategy=unique_name.
+     * "describe" is the only symbol of that name in this 2-file fixture, so a
+     * weak short-name guess happened to be right; in a real repo the same guess
+     * binds an arbitrary same-named method (#1276: accelerator.print() ->
+     * MockAccelerator.print). `c` is a bare parameter, so the guard suppresses
+     * the weak match and the ONLY call in the fixture yields exactly zero CALLS.
+     *
+     * NOT an inheritance case despite the name, and no flip-back condition:
+     * `c` is un-annotated, so no receiver type exists to inherit THROUGH.
+     * Tripwire: the store opened AND calls == 0 exactly. */
+    LRP_Proj lp;
+    cbm_store_t *store = lrp_index(&lp, f, 2);
+    ASSERT_NOT_NULL(store);
+    int calls = cbm_store_count_edges_by_type(store, lp.project, "CALLS");
+    lrp_cleanup(&lp, store);
+    ASSERT_EQ(calls, 0);
     PASS();
 }
 

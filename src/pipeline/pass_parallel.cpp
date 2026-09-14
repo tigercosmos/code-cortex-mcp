@@ -2468,20 +2468,28 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             continue;
         }
 
-        /* TS/JS/TSX weak-method suppression (#592/#606). The receiver-aware guard
-         * must NOT drop this call here: doing so would also skip the #523
-         * callee-name service bypass below, emit_service_edge's route/gRPC/config
-         * branches, and its unconditional detect_url_in_args (which classifies
-         * verb-suffix HTTP clients like api.patch('/x')). Instead, defer to the
-         * emit path and suppress ONLY the plain-CALLS fall-through
-         * (emit_normal_calls_edge), so every service edge stays main-identical by
-         * construction. res.strategy may carry an lsp_* value here (LSP-resolved
-         * calls keep res through this point); the helper's EXPLICIT drop-list
-         * leaves lsp_ts_method / lsp_cross untouched. See #606 direction. */
-        bool is_tsjs =
-            lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
-        bool tsjs_drop_plain_call =
-            cbm_tsjs_suppress_weak_method_match(is_tsjs, call->is_method, res.strategy);
+        /* Dynamic-language weak-member suppression (#592/#606/#1276). The
+         * receiver-aware guard must NOT drop this call here: doing so would also
+         * skip the #523 callee-name service bypass below, emit_service_edge's
+         * route/gRPC/config branches, and its unconditional detect_url_in_args
+         * (which classifies verb-suffix HTTP clients like api.patch('/x')).
+         * Instead, defer to the emit path and suppress ONLY the plain-CALLS
+         * fall-through (emit_normal_calls_edge), so every service edge stays
+         * main-identical by construction. res.strategy may carry an lsp_* value
+         * here (LSP-resolved calls keep res through this point); the helper's
+         * EXPLICIT drop-list leaves lsp_ts_method / lsp_cross untouched.
+         *
+         * Both language gates MUST match the ones in pass_calls.cpp exactly — a
+         * gate on only one resolver diverges the sequential and parallel paths.
+         * The bare-call local-binding gate is Python-only because only Python
+         * extraction sets callee_is_locally_bound. */
+        bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
+                                    lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+        bool suppress_weak_local_binding = lang == CBM_LANG_PYTHON;
+        bool drop_plain_call =
+            cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy) ||
+            cbm_suppress_weak_local_binding_call(suppress_weak_local_binding,
+                                                 call->callee_is_locally_bound, res.strategy);
 
         /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the
          * service signal lives in the callee_name. The registry can mis-resolve
@@ -2578,7 +2586,7 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         _rc_t0 = extract_now_ns();
         emit_service_edge(ws->local_edge_buf, source_node, target_node, call, &res, module_qn,
                           rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count,
-                          tsjs_drop_plain_call);
+                          drop_plain_call);
         atomic_fetch_add_explicit(&rc->time_ns_rc_emit, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
         ws->calls_resolved++;

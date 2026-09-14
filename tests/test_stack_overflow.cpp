@@ -489,6 +489,31 @@ TEST(lsp_cpp_deep_expression_no_crash) {
     PASS();
 }
 
+TEST(lsp_python_deep_nesting_no_crash) {
+    /* Every level of f(f(f(...))) is a bare call under a def whose parameter is
+     * `f`, so each one consults the parameter-shadowing guard. The guard must
+     * be O(1) per call: a per-call ancestor walk is quadratic here and upstream
+     * measured it as a hang at this depth. See lsp_java_deep_nesting_no_crash on
+     * the depth choice. */
+    const int DEPTH = 30000;
+    size_t sz = (size_t)DEPTH * 3 + 256;
+    char *src = (char *)malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src;
+    p += snprintf(p, sz, "def g(f):\n    return ");
+    for (int i = 0; i < DEPTH; i++) {
+        *p++ = 'f';
+        *p++ = '(';
+    }
+    *p++ = '1';
+    memset(p, ')', DEPTH);
+    p += DEPTH;
+    snprintf(p, sz - (size_t)(p - src), "\n");
+    ASSERT_FALSE(so_extract_crashes(src, CBM_LANG_PYTHON, "deep.py"));
+    free(src);
+    PASS();
+}
+
 TEST(lsp_java_lambda_args_exceed_params_no_crash) {
     /* A call with MORE arguments than the resolved method's declared params:
      * bind_lambda_args indexed the NULL-terminated signature param_types array
@@ -528,6 +553,7 @@ SUITE(stack_overflow) {
     RUN_TEST(ts_allocator_bound_to_mimalloc_issue424);
     RUN_TEST(cpp_large_templated_header_no_crash_issue424);
     RUN_TEST(lsp_java_deep_nesting_no_crash);
+    RUN_TEST(lsp_python_deep_nesting_no_crash);
     RUN_TEST(lsp_java_lambda_args_exceed_params_no_crash);
     RUN_TEST(lsp_cpp_deep_expression_no_crash);
     RUN_TEST(lsp_ts_cyclic_types_no_crash);

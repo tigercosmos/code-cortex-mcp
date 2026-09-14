@@ -5668,9 +5668,196 @@ TEST(extract_c_clean_file_no_recovery_duplicates_issue961) {
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* Python receiver-aware flag (#1276; same intent as the Perl and TS/JS flags).
+ * Pins BOTH directions: an unknown receiver (a parameter, or an attribute of
+ * self) IS flagged so the resolver can suppress a weak short-name match, while
+ * self/cls/super() and import-bound receivers — Python's canonical cross-file
+ * call shape — are NOT, so their true edges survive. */
+TEST(extract_python_member_call_flags_is_method) {
+    CBMFileResult *r = extract("from pkg import helper\n"
+                               "import tools as toolkit\n"
+                               "\n"
+                               "class C(Base):\n"
+                               "    def run(self, external):\n"
+                               "        external.commit()\n"
+                               "        self.client.send()\n"
+                               "        self.helper()\n"
+                               "        super ( ).render()\n"
+                               "        helper.compute()\n"
+                               "        toolkit.format()\n"
+                               "        helper()\n",
+                               CBM_LANG_PYTHON, "t", "x.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    struct {
+        const char *callee;
+        bool exact;
+        bool expect_method;
+        int seen;
+    } cases[] = {
+        {"external.commit", true, true, 0},  /* parameter receiver — unknown type */
+        {"self.client.send", true, true, 0}, /* attribute of self — NOT self */
+        {"self.helper", true, false, 0},
+        {"render", false, false, 0}, /* super().render() */
+        {"helper.compute", true, false, 0},
+        {"toolkit.format", true, false, 0}, /* aliased import: local_name "toolkit" */
+        {"helper", true, false, 0},
+    };
+    for (int i = 0; i < r->calls.count; i++) {
+        const char *cn = r->calls.items[i].callee_name;
+        for (auto &c : cases) {
+            if (cn && (c.exact ? strcmp(cn, c.callee) == 0 : strstr(cn, c.callee) != NULL)) {
+                c.seen++;
+                ASSERT_EQ(r->calls.items[i].is_method, c.expect_method);
+                break;
+            }
+        }
+    }
+    /* Each shape exactly once, so a missed extraction cannot pass vacuously. */
+    for (auto &c : cases) {
+        ASSERT_EQ(c.seen, 1);
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Python bare-call local-binding flag: a callee shadowed by a parameter of an
+ * enclosing scope IS flagged; an unshadowed callee — a module-level function,
+ * an imported name, a nested `def` — is NOT. Every parameter binding form the
+ * grammar produces is covered. */
+TEST(extract_python_bare_call_flags_locally_bound_callee) {
+    CBMFileResult *r = extract("from pkg import helper\n"
+                               "\n"
+                               "def outer(run, *rest, timeout=5, label: str = 'x', **opts):\n"
+                               "    def inner():\n"
+                               "        return run()\n"
+                               "    rest()\n"
+                               "    timeout()\n"
+                               "    label()\n"
+                               "    opts()\n"
+                               "    module_level()\n"
+                               "    helper()\n"
+                               "    return inner()\n"
+                               "\n"
+                               "def typed(cb: Callable):\n"
+                               "    return cb()\n"
+                               "\n"
+                               "apply_it = lambda fn: fn()\n"
+                               "after_lambda = fn()\n",
+                               CBM_LANG_PYTHON, "t", "x.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    struct {
+        const char *callee;
+        bool expect_bound;
+        int seen_bound;
+        int seen_unbound;
+    } cases[] = {
+        {"run", true, 0, 0},     /* closure over an ENCLOSING function's parameter */
+        {"rest", true, 0, 0},    /* *args */
+        {"timeout", true, 0, 0}, /* default_parameter */
+        {"label", true, 0, 0},   /* typed_default_parameter */
+        {"opts", true, 0, 0},    /* **kwargs */
+        {"cb", true, 0, 0},      /* typed_parameter */
+        {"module_level", false, 0, 0},
+        {"helper", false, 0, 0},
+        {"inner", false, 0, 0},
+    };
+    int fn_bound = 0, fn_unbound = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const char *cn = r->calls.items[i].callee_name;
+        if (!cn) {
+            continue;
+        }
+        bool bound = r->calls.items[i].callee_is_locally_bound;
+        if (strcmp(cn, "fn") == 0) {
+            (bound ? fn_bound : fn_unbound)++;
+            continue;
+        }
+        for (auto &c : cases) {
+            if (strcmp(cn, c.callee) == 0) {
+                (bound ? c.seen_bound : c.seen_unbound)++;
+            }
+        }
+    }
+    for (auto &c : cases) {
+        ASSERT_EQ(c.seen_bound, c.expect_bound ? 1 : 0);
+        ASSERT_EQ(c.seen_unbound, c.expect_bound ? 0 : 1);
+    }
+    /* The lambda parameter shadows `fn` inside the lambda only: the module-level
+     * call after the lambda closed must NOT be flagged. */
+    ASSERT_EQ(fn_bound, 1);
+    ASSERT_EQ(fn_unbound, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The bare-call flag is DEPTH-INDEPENDENT and UNWOUND when its scope closes.
+ * The answer is carried by the unified walk (bound on scope open, unwound on
+ * pop), not recomputed per call by ascending the tree — an ascent is O(depth)
+ * per call and upstream capped it at 64 ancestors, failing open past that. The
+ * deep case fails if a cap is reintroduced; the unwind case fails if a frame's
+ * bindings outlive its scope. */
+TEST(extract_python_bare_call_flag_is_depth_independent) {
+    enum { PARENS = 200 };
+    std::string src = "def deep(handler):\n    return ";
+    src.append(PARENS, '(');
+    src += "handler()";
+    src.append(PARENS, ')');
+    src += "\n";
+    CBMFileResult *deep = extract(src.c_str(), CBM_LANG_PYTHON, "t", "d.py");
+    ASSERT_NOT_NULL(deep);
+    ASSERT_FALSE(deep->has_error);
+    int deep_seen = 0;
+    for (int i = 0; i < deep->calls.count; i++) {
+        const char *cn = deep->calls.items[i].callee_name;
+        if (cn && strcmp(cn, "handler") == 0) {
+            deep_seen++;
+            ASSERT_TRUE(deep->calls.items[i].callee_is_locally_bound);
+        }
+    }
+    ASSERT_EQ(deep_seen, 1);
+    cbm_free_result(deep);
+
+    /* `handler` is a parameter of shadowed() (and of its nested inner()) and a
+     * module-level function. Both calls inside shadowed() are flagged — leaving
+     * inner() must not unbind the outer binding — and the call in sibling(),
+     * after that scope closed, must NOT be. */
+    CBMFileResult *unwound = extract("def handler():\n"
+                                     "    return 1\n"
+                                     "\n"
+                                     "def shadowed(handler):\n"
+                                     "    def inner(handler):\n"
+                                     "        return handler()\n"
+                                     "    return inner(handler) or handler()\n"
+                                     "\n"
+                                     "def sibling():\n"
+                                     "    return handler()\n",
+                                     CBM_LANG_PYTHON, "t", "u.py");
+    ASSERT_NOT_NULL(unwound);
+    ASSERT_FALSE(unwound->has_error);
+    int flagged = 0;
+    int unflagged = 0;
+    for (int i = 0; i < unwound->calls.count; i++) {
+        const char *cn = unwound->calls.items[i].callee_name;
+        if (!cn || strcmp(cn, "handler") != 0) {
+            continue;
+        }
+        (unwound->calls.items[i].callee_is_locally_bound ? flagged : unflagged)++;
+    }
+    ASSERT_EQ(flagged, 2);
+    ASSERT_EQ(unflagged, 1);
+    cbm_free_result(unwound);
+    PASS();
+}
+
 SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
+
+    RUN_TEST(extract_python_member_call_flags_is_method);
+    RUN_TEST(extract_python_bare_call_flags_locally_bound_callee);
+    RUN_TEST(extract_python_bare_call_flag_is_depth_independent);
 
     /* R box-module imports + member calls */
     RUN_TEST(registry_summary_owns_definition_and_infrastructure_strings);

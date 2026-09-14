@@ -632,20 +632,34 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         return 0;
     }
 
-    /* TS/JS/TSX weak-method suppression (#592/#606). A member call x.foo() only
-     * reaches the registry when the TS-LSP could not resolve the receiver type
-     * (the LSP block above already returned for type-resolved calls, including
-     * the "resolved but target out of gbuf" fall-through). Binding such a call
-     * by a weak short-name strategy fabricates an edge (`re.test()` -> a project
-     * `test`). Rather than drop it here — which would also skip the service
-     * bypasses below and emit_classified_edge's route/HTTP/CONFIG branches —
-     * defer to emit_classified_edge and suppress ONLY the plain-CALLS
-     * fall-through, so every service edge stays main-identical. res.strategy may
-     * be lsp_* here; the helper's explicit drop-list leaves lsp_* untouched. */
-    bool is_tsjs =
-        lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
-    bool tsjs_drop_plain_call =
-        cbm_tsjs_suppress_weak_method_match(is_tsjs, call->is_method, res.strategy);
+    /* Dynamic-language weak-member suppression (#592/#606/#1276). A member call
+     * x.foo() only reaches the registry when the language's LSP could not
+     * resolve the receiver type (the LSP block above already returned for
+     * type-resolved calls, including the "resolved but target out of gbuf"
+     * fall-through). Binding such a call by a weak short-name strategy
+     * fabricates an edge (`re.test()` -> a project `test`,
+     * `accelerator.print()` -> MockAccelerator.print). Rather than drop it here
+     * — which would also skip the service bypasses below and
+     * emit_classified_edge's route/HTTP/CONFIG branches — defer to
+     * emit_classified_edge and suppress ONLY the plain-CALLS fall-through, so
+     * every service edge stays main-identical. res.strategy may be lsp_* here;
+     * the helper's explicit drop-list leaves lsp_* untouched.
+     *
+     * Bare-call local-binding suppression rides the same flag: a bare `run()`
+     * has no receiver for the member guard to reason about, but when `run` is a
+     * parameter of an enclosing scope it cannot be the module-level `run`.
+     * Python-only because only Python extraction sets callee_is_locally_bound.
+     *
+     * Both language gates MUST match the ones in pass_parallel.cpp exactly — a
+     * gate on only one resolver produces an edge on the sequential path and not
+     * the parallel one (or vice versa), breaking MT determinism. */
+    bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
+                                lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+    bool suppress_weak_local_binding = lang == CBM_LANG_PYTHON;
+    bool drop_plain_call =
+        cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy) ||
+        cbm_suppress_weak_local_binding_call(suppress_weak_local_binding,
+                                             call->callee_is_locally_bound, res.strategy);
 
     /* Service-pattern HTTP/ASYNC calls to an EXTERNAL client library (e.g.
      * `requests.get("/api/orders/{id}")`) resolve to a QN containing the library
@@ -678,7 +692,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         return 0;
     }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
-                         imp_count, tsjs_drop_plain_call);
+                         imp_count, drop_plain_call);
     return SKIP_ONE;
 }
 

@@ -700,6 +700,94 @@ TEST(fuzzy_no_import_map_passthrough) {
     PASS();
 }
 
+TEST(dynamic_suppress_drops_weak_method_matches) {
+    /* #592/#606/#1276: a member call whose receiver the LSP could not type, that
+     * landed via a WEAK short-name strategy, is generic-resolver noise → drop.
+     * "fuzzy" is covered defensively (cbm_registry_fuzzy_resolve is not wired
+     * into the resolvers today) so a future wiring cannot silently reintroduce it. */
+    ASSERT_TRUE(cbm_suppress_weak_member_match(true, true, "suffix_match"));
+    ASSERT_TRUE(cbm_suppress_weak_member_match(true, true, "unique_name"));
+    ASSERT_TRUE(cbm_suppress_weak_member_match(true, true, "field_type_hint"));
+    ASSERT_TRUE(cbm_suppress_weak_member_match(true, true, "fuzzy"));
+    PASS();
+}
+
+TEST(dynamic_suppress_keeps_high_confidence_and_non_methods) {
+    /* Keep every receiver-/import-aware strategy. The PARALLEL resolver runs
+     * lsp_* strategies through this same guard variable, so an explicit
+     * drop-list must never touch them. */
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "same_module"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "import_map"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "import_map_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "qualified_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "callee_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "service_pattern"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "lsp_ts_method"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "lsp_cross"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "lsp_ts_local"));
+    /* A bare call (is_method=false) is a free-function call → never suppressed. */
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, false, "unique_name"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, false, "suffix_match"));
+    /* Languages outside the caller's guard set are never affected. */
+    ASSERT_FALSE(cbm_suppress_weak_member_match(false, true, "suffix_match"));
+    /* No match (NULL/empty strategy) → nothing to suppress. */
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, NULL));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, ""));
+    PASS();
+}
+
+TEST(local_binding_suppress_drops_weak_shadowed_bare_calls) {
+    /* A bare `run()` whose callee is a parameter of an enclosing scope cannot be
+     * the module-level `run`, so a weak short-name match fabricates the edge. */
+    ASSERT_TRUE(cbm_suppress_weak_local_binding_call(true, true, "suffix_match"));
+    ASSERT_TRUE(cbm_suppress_weak_local_binding_call(true, true, "unique_name"));
+    ASSERT_TRUE(cbm_suppress_weak_local_binding_call(true, true, "field_type_hint"));
+    ASSERT_TRUE(cbm_suppress_weak_local_binding_call(true, true, "fuzzy"));
+    PASS();
+}
+
+TEST(local_binding_suppress_keeps_unshadowed_and_strong_strategies) {
+    /* THE RECALL PIN. A bare call to a genuine module-level function is NOT
+     * locally bound, so it is never suppressed — whatever the callee is spelled.
+     * A name-keyed guard (get/run/execute) would fail exactly this. */
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, false, "suffix_match"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, false, "unique_name"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, false, "field_type_hint"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, false, "fuzzy"));
+    /* Every receiver-/import-aware strategy is kept even when shadowed. */
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "same_module"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "import_map"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "import_map_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "qualified_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "callee_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "service_pattern"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "lsp_cross"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "lsp_py_method"));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, "lsp_direct"));
+    /* Languages outside the caller's gate are never affected. */
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(false, true, "suffix_match"));
+    /* No match (NULL/empty strategy) → nothing to suppress. */
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, NULL));
+    ASSERT_FALSE(cbm_suppress_weak_local_binding_call(true, true, ""));
+    PASS();
+}
+
+TEST(weak_call_guards_share_one_drop_list) {
+    /* The member guard, the local-binding guard and the cross-LSP base-class
+     * resolution must agree on what "weak" means; all read one predicate. */
+    static const char *const strategies[] = {
+        "suffix_match",    "unique_name", "field_type_hint", "fuzzy",         "same_module",
+        "import_map",      "import_map_suffix", "qualified_suffix", "callee_suffix",
+        "service_pattern", "lsp_cross",   "lsp_ts_method",   "lsp_py_method", "lsp_direct",
+        "",                NULL};
+    for (int i = 0; strategies[i] != NULL; i++) {
+        bool weak = cbm_weak_short_name_strategy(strategies[i]);
+        ASSERT_EQ(cbm_suppress_weak_member_match(true, true, strategies[i]), weak);
+        ASSERT_EQ(cbm_suppress_weak_local_binding_call(true, true, strategies[i]), weak);
+    }
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(registry) {
@@ -744,6 +832,11 @@ SUITE(registry) {
     RUN_TEST(resolve_suffix_match);
     RUN_TEST(resolve_caps_unresolvably_ambiguous_names);
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
+    RUN_TEST(dynamic_suppress_drops_weak_method_matches);
+    RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
+    RUN_TEST(local_binding_suppress_drops_weak_shadowed_bare_calls);
+    RUN_TEST(local_binding_suppress_keeps_unshadowed_and_strong_strategies);
+    RUN_TEST(weak_call_guards_share_one_drop_list);
     RUN_TEST(resolve_import_map_aliased_from_import);
     RUN_TEST(resolve_import_map_suffix);
     /* Import reachability */
