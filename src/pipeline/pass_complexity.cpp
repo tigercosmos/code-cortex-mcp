@@ -22,6 +22,7 @@
 #include "foundation/hash_table.h"
 #include "cbm.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -44,64 +45,169 @@ static const char *itoa_cx(int val) {
     return bufs[i];
 }
 
-/* Parse an integer "key":N from a flat JSON object. Returns def if absent. */
-static int json_get_int(const char *json, const char *key, int dflt) {
-    if (!json) {
-        return dflt;
+/* ── Flat JSON property helpers (shared by both passes) ─────────────── */
+
+/* Pointer just past the JSON value starting at p, or NULL if unterminated. */
+static const char *json_value_end(const char *p) {
+    if (*p == '"') {
+        for (p++; *p; p++) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                continue;
+            }
+            if (*p == '"') {
+                return p + 1;
+            }
+        }
+        return nullptr;
     }
-    char pat[CBM_SZ_64];
-    snprintf(pat, sizeof(pat), "\"%s\":", key);
-    const char *p = strstr(json, pat);
-    if (!p) {
-        return dflt;
+    if (*p == '{' || *p == '[') {
+        int depth = 0;
+        bool in_str = false;
+        for (; *p; p++) {
+            if (in_str) {
+                if (*p == '\\' && p[1]) {
+                    p++;
+                } else if (*p == '"') {
+                    in_str = false;
+                }
+            } else if (*p == '"') {
+                in_str = true;
+            } else if (*p == '{' || *p == '[') {
+                depth++;
+            } else if ((*p == '}' || *p == ']') && --depth == 0) {
+                return p + 1;
+            }
+        }
+        return nullptr;
     }
-    p += strlen(pat);
-    while (*p == ' ' || *p == '\t') {
+    while (*p && *p != ',' && *p != '}' && *p != ']') {
         p++;
     }
-    return (int)strtol(p, NULL, CBM_DECIMAL_BASE);
+    return p;
+}
+
+/* Start of the value stored under `"key"` (past the ':' and any blanks), or
+ * NULL when the key is absent. The key must be genuinely in KEY position —
+ * preceded by '{' or ',' and followed by ':' (modulo whitespace); a bare
+ * strstr would also match text inside a string VALUE. */
+static const char *json_find_value(const char *json, const char *key) {
+    if (!json) {
+        return nullptr;
+    }
+    char pat[CBM_SZ_64];
+    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(pat)) {
+        return nullptr;
+    }
+    for (const char *p = json; (p = strstr(p, pat)) != nullptr; p += n) {
+        const char *before = p;
+        while (before > json && isspace((unsigned char)before[-1])) {
+            before--;
+        }
+        char prev = (before > json) ? before[-1] : '\0';
+        const char *after = p + n;
+        while (isspace((unsigned char)*after)) {
+            after++;
+        }
+        if ((prev == '{' || prev == ',') && *after == ':') {
+            after++;
+            while (isspace((unsigned char)*after)) {
+                after++;
+            }
+            return after;
+        }
+    }
+    return nullptr;
+}
+
+/* Parse an integer "key":N from a flat JSON object. Returns dflt if absent. */
+static int json_get_int(const char *json, const char *key, int dflt) {
+    const char *v = json_find_value(json, key);
+    return v ? (int)strtol(v, NULL, CBM_DECIMAL_BASE) : dflt;
 }
 
 /* Parse a boolean "key":true/false from a flat JSON object. */
 static bool json_get_bool(const char *json, const char *key) {
-    if (!json) {
-        return false;
-    }
-    char pat[CBM_SZ_64];
-    snprintf(pat, sizeof(pat), "\"%s\":", key);
-    const char *p = strstr(json, pat);
-    if (!p) {
-        return false;
-    }
-    p += strlen(pat);
-    while (*p == ' ' || *p == '\t') {
-        p++;
-    }
-    return *p == 't';
+    const char *v = json_find_value(json, key);
+    return v && *v == 't';
 }
 
-/* Append transitive_loop_depth + recursive to a node's properties JSON object. */
-static void append_complexity_props(cbm_gbuf_node_t *node, int tld, bool recursive) {
+/* Store `value` (a ready JSON token) under `key` in the node's properties
+ * object: overwrite the existing value in place, or append the key when it is
+ * absent. A blob that is not a JSON object, or an existing value that cannot
+ * be delimited, leaves the node untouched; so does an unchanged value. */
+static void props_upsert(cbm_gbuf_node_t *node, const char *key, const char *value) {
     const char *old = node->properties_json ? node->properties_json : "{}";
     size_t olen = strlen(old);
-    if (olen < 2 || old[olen - 1] != '}') {
-        return; /* not a JSON object — leave untouched */
+    if (olen < 2 || old[0] != '{' || old[olen - 1] != '}') {
+        return;
     }
-    bool empty = (olen == 2); /* "{}" */
-    char *neu = (char *)malloc(olen + CBM_SZ_64);
+    size_t vlen = strlen(value);
+
+    const char *v = json_find_value(old, key);
+    if (v) {
+        const char *vend = json_value_end(v);
+        if (!vend) {
+            return;
+        }
+        if ((size_t)(vend - v) == vlen && memcmp(v, value, vlen) == 0) {
+            return; /* already holds this value */
+        }
+        size_t head = (size_t)(v - old);
+        size_t tail = strlen(vend);
+        char *neu = (char *)malloc(head + vlen + tail + 1);
+        if (!neu) {
+            return;
+        }
+        memcpy(neu, old, head);
+        memcpy(neu + head, value, vlen);
+        memcpy(neu + head + vlen, vend, tail + 1);
+        free(node->properties_json);
+        node->properties_json = neu;
+        return;
+    }
+
+    /* An object holding only whitespace ("{ }") takes no leading comma. */
+    bool empty = true;
+    for (size_t i = 1; i + 1 < olen; i++) {
+        if (!isspace((unsigned char)old[i])) {
+            empty = false;
+            break;
+        }
+    }
+    size_t keep = empty ? 1 : olen - 1; /* drop the trailing '}' (and any inner blanks) */
+    size_t klen = strlen(key);
+    /* keep + ',' + '"' key '"' ':' + value + '}' + NUL */
+    char *neu = (char *)malloc(keep + 1 + klen + 3 + vlen + 2);
     if (!neu) {
         return;
     }
-    memcpy(neu, old, olen - 1); /* copy without trailing '}' */
-    int w =
-        snprintf(neu + (olen - 1), CBM_SZ_64, "%s\"transitive_loop_depth\":%d,\"recursive\":%s}",
-                 empty ? "" : ",", tld, recursive ? "true" : "false");
-    if (w < 0) {
-        free(neu);
-        return;
+    char *w = neu;
+    memcpy(w, old, keep);
+    w += keep;
+    if (!empty) {
+        *w++ = ',';
     }
+    *w++ = '"';
+    memcpy(w, key, klen);
+    w += klen;
+    *w++ = '"';
+    *w++ = ':';
+    memcpy(w, value, vlen);
+    w += vlen;
+    *w++ = '}';
+    *w = '\0';
     free(node->properties_json);
     node->properties_json = neu;
+}
+
+/* Record transitive_loop_depth + recursive in a node's properties JSON. */
+static void append_complexity_props(cbm_gbuf_node_t *node, int tld, bool recursive) {
+    char val[CBM_SZ_32];
+    snprintf(val, sizeof(val), "%d", tld);
+    props_upsert(node, "transitive_loop_depth", val);
+    props_upsert(node, "recursive", recursive ? "true" : "false");
 }
 
 /* Content-only node order: qualified_name, then file path and start line.
@@ -113,7 +219,11 @@ static void append_complexity_props(cbm_gbuf_node_t *node, int tld, bool recursi
  * member reads; both the seed order and the callee order must therefore be a
  * function of the inputs alone. A dangling target (no node for the id) has no
  * edges of its own, so where it sorts cannot move a result; it keys as empty
- * strings. */
+ * strings.
+ *
+ * The string comparison runs once per node: every node the traversal can order
+ * (the seeds and every CALLS target) is sorted into a dense integer rank —
+ * equal keys share a rank — and the DFS orders callees by that integer. */
 enum { TLD_CMP_LESS = -1, TLD_CMP_GREATER = 1 };
 
 static const char *str_or_empty(const char *s) {
@@ -138,26 +248,19 @@ static int cmp_node_canonical(const cbm_gbuf_node_t *a, const cbm_gbuf_node_t *b
     return 0;
 }
 
-static int cmp_seed_canonical(const void *pa, const void *pb) {
+static int cmp_node_ptr_canonical(const void *pa, const void *pb) {
     return cmp_node_canonical(*(const cbm_gbuf_node_t *const *)pa,
                               *(const cbm_gbuf_node_t *const *)pb);
 }
 
-typedef struct {
-    const cbm_gbuf_node_t *node; /* NULL for a dangling target id */
-    int64_t id;
-} tld_callee_t;
+enum { TLD_UNRANKED = -1 };
 
-static int cmp_callee_canonical(const void *pa, const void *pb) {
-    return cmp_node_canonical(((const tld_callee_t *)pa)->node, ((const tld_callee_t *)pb)->node);
-}
-
-/* Traversal state. `callees` is one bump stack shared by every DFS frame: a
- * frame takes its out-degree worth of slots, sorts them, recurses, then
- * releases them. Nodes on the recursion path are distinct (state 1 blocks
- * re-entry), so the live slots never exceed the CALLS edge count the stack is
- * sized for. `path` is the DFS path stack used to attribute a back edge to
- * every member of the cycle it closes. */
+/* Traversal state. `callees` is one growable stack shared by every DFS frame:
+ * a frame pushes its callee ids, sorts them by rank, recurses, then pops them.
+ * `path` is the DFS path stack used to attribute a back edge to every member
+ * of the cycle it closes. `rank` holds the canonical position of every seed
+ * and CALLS target (TLD_UNRANKED otherwise); an id with no node sorts at
+ * `dangling_rank`. */
 typedef struct {
     const cbm_gbuf_t *gb;
     int64_t maxid;
@@ -166,10 +269,37 @@ typedef struct {
     char *state;
     bool *recursive;
     int64_t *path;
-    tld_callee_t *callees;
-    int callee_top;
-    int callee_cap;
+    int *rank;
+    int dangling_rank;
+    int64_t *callees;
+    size_t callee_top;
+    size_t callee_cap;
 } tld_ctx_t;
+
+static int tld_rank(const tld_ctx_t *cx, int64_t id) {
+    if (id < 1 || id > cx->maxid || cx->rank[id] == TLD_UNRANKED) {
+        return cx->dangling_rank;
+    }
+    return cx->rank[id];
+}
+
+static bool tld_callees_reserve(tld_ctx_t *cx, size_t extra) {
+    size_t need = cx->callee_top + extra;
+    if (need <= cx->callee_cap) {
+        return true;
+    }
+    size_t cap = cx->callee_cap ? cx->callee_cap : CBM_SZ_64;
+    while (cap < need) {
+        cap *= 2;
+    }
+    auto *grown = (int64_t *)realloc(cx->callees, cap * sizeof(int64_t));
+    if (!grown) {
+        return false;
+    }
+    cx->callees = grown;
+    cx->callee_cap = cap;
+    return true;
+}
 
 /* Memoized DFS: tld(id) = loop_depth(id) + max over CALLS-callees of tld(callee).
  * state: 0=unvisited, 1=in-progress (back-edge → cycle), 2=done. */
@@ -200,33 +330,31 @@ static int tld_dfs(tld_ctx_t *cx, int64_t id, int depth) {
     const cbm_gbuf_edge_t **edges = NULL;
     int ne = 0;
     cbm_gbuf_find_edges_by_source_type(cx->gb, id, "CALLS", &edges, &ne);
-    if (ne > cx->callee_cap - cx->callee_top) {
-        return cx->loop_depth[id]; /* unreachable by construction; same as the depth cap */
+    if (!tld_callees_reserve(cx, (size_t)ne)) {
+        return cx->loop_depth[id]; /* out of memory: same as the depth cap */
     }
     cx->state[id] = 1;
     cx->path[depth] = id; /* push onto the DFS path stack for cycle attribution */
-    tld_callee_t *callees = cx->callees + cx->callee_top;
-    int nc = 0;
+    size_t base = cx->callee_top;
     for (int i = 0; i < ne; i++) {
         int64_t c = edges[i]->target_id;
         if (c == id) {
             cx->recursive[id] = true; /* direct self-recursion */
             continue;
         }
-        callees[nc].id = c;
-        callees[nc].node = cbm_gbuf_find_by_id(cx->gb, c);
-        nc++;
+        cx->callees[cx->callee_top++] = c;
     }
-    cx->callee_top += nc;
-    qsort(callees, (size_t)nc, sizeof(*callees), cmp_callee_canonical);
+    std::sort(cx->callees + base, cx->callees + cx->callee_top,
+              [cx](int64_t a, int64_t b) { return tld_rank(cx, a) < tld_rank(cx, b); });
     int best = 0;
-    for (int i = 0; i < nc; i++) {
-        int ct = tld_dfs(cx, callees[i].id, depth + 1);
+    /* Index, not pointer: a deeper frame may grow (move) the stack. */
+    for (size_t i = base; i < cx->callee_top; i++) {
+        int ct = tld_dfs(cx, cx->callees[i], depth + 1);
         if (ct > best) {
             best = ct;
         }
     }
-    cx->callee_top -= nc;
+    cx->callee_top = base;
     cx->tld[id] = cx->loop_depth[id] + best;
     cx->state[id] = 2;
     return cx->tld[id];
@@ -236,15 +364,16 @@ static int tld_dfs(tld_ctx_t *cx, int64_t id, int depth) {
  * collect the node as a traversal seed (also the write-back target). The
  * self_recursive seed (set at extraction) feeds the final recursive flag;
  * tld_dfs additionally ORs in mutual recursion discovered as a call-graph
- * cycle. */
+ * cycle. A node carries one label and is listed once under it, so no node is
+ * seeded twice and the seeds fit an array sized to the id ceiling. */
 static void seed_loop_depths(tld_ctx_t *cx, const char *label, cbm_gbuf_node_t **seeds,
-                             int *seed_count, int seed_cap) {
+                             int *seed_count) {
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
     if (cbm_gbuf_find_by_label(cx->gb, label, &nodes, &count) != 0) {
         return;
     }
-    for (int i = 0; i < count && *seed_count < seed_cap; i++) {
+    for (int i = 0; i < count; i++) {
         const cbm_gbuf_node_t *n = nodes[i];
         if (n->id >= 1 && n->id <= cx->maxid) {
             cx->loop_depth[n->id] = json_get_int(n->properties_json, "loop_depth", 0);
@@ -254,13 +383,53 @@ static void seed_loop_depths(tld_ctx_t *cx, const char *label, cbm_gbuf_node_t *
     }
 }
 
-static int calls_edge_count(const cbm_gbuf_t *gb) {
-    const cbm_gbuf_edge_t **edges = NULL;
-    int count = 0;
-    if (cbm_gbuf_find_edges_by_type(gb, "CALLS", &edges, &count) != 0) {
-        return 0;
+/* Rank the seeds and every CALLS target in canonical order. `order` is scratch
+ * sized for the id ceiling plus the NULL entry that keys a dangling id. */
+static void tld_build_ranks(tld_ctx_t *cx, cbm_gbuf_node_t **seeds, int seed_count,
+                            const cbm_gbuf_node_t **order) {
+    size_t n = 0;
+    for (int i = 0; i < seed_count; i++) {
+        cx->rank[seeds[i]->id] = 0; /* mark collected */
+        order[n++] = seeds[i];
     }
-    return count;
+    const cbm_gbuf_edge_t **edges = NULL;
+    int ne = 0;
+    if (cbm_gbuf_find_edges_by_type(cx->gb, "CALLS", &edges, &ne) == 0) {
+        for (int i = 0; i < ne; i++) {
+            int64_t t = edges[i]->target_id;
+            if (t < 1 || t > cx->maxid || cx->rank[t] != TLD_UNRANKED) {
+                continue;
+            }
+            const cbm_gbuf_node_t *node = cbm_gbuf_find_by_id(cx->gb, t);
+            if (node) {
+                cx->rank[t] = 0;
+                order[n++] = node;
+            }
+        }
+    }
+    order[n++] = NULL; /* the dangling-id key */
+    qsort(order, n, sizeof(*order), cmp_node_ptr_canonical);
+    int r = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (i > 0 && cmp_node_canonical(order[i - 1], order[i]) != 0) {
+            r++;
+        }
+        if (order[i]) {
+            cx->rank[order[i]->id] = r;
+        } else {
+            cx->dangling_rank = r;
+        }
+    }
+}
+
+static void tld_ctx_free(tld_ctx_t *cx) {
+    free(cx->loop_depth);
+    free(cx->tld);
+    free(cx->state);
+    free(cx->recursive);
+    free(cx->path);
+    free(cx->rank);
+    free(cx->callees);
 }
 
 void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
@@ -276,59 +445,38 @@ void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
     tld_ctx_t cx = {};
     cx.gb = gb;
     cx.maxid = maxid;
-    cx.callee_cap = calls_edge_count(gb);
     cx.loop_depth = (int *)calloc(sz, sizeof(int));
     cx.tld = (int *)calloc(sz, sizeof(int));
     cx.state = (char *)calloc(sz, sizeof(char));
     cx.recursive = (bool *)calloc(sz, sizeof(bool));
     cx.path = (int64_t *)calloc(CBM_TLD_MAX_DEPTH + 1, sizeof(int64_t));
-    cx.callees = (tld_callee_t *)calloc((size_t)cx.callee_cap + 1, sizeof(tld_callee_t));
-    /* Seeds are bounded by the node-id ceiling; `written` guards a node listed
-     * under both labels from being written back twice. */
-    cbm_gbuf_node_t **seeds = (cbm_gbuf_node_t **)calloc(sz, sizeof(cbm_gbuf_node_t *));
-    char *written = (char *)calloc(sz, sizeof(char));
-    if (!cx.loop_depth || !cx.tld || !cx.state || !cx.recursive || !cx.path || !cx.callees ||
-        !seeds || !written) {
-        free(cx.loop_depth);
-        free(cx.tld);
-        free(cx.state);
-        free(cx.recursive);
-        free(cx.path);
-        free(cx.callees);
-        free(seeds);
-        free(written);
-        return;
-    }
+    cx.rank = (int *)malloc(sz * sizeof(int));
+    /* Seeds are distinct nodes, so the id ceiling bounds them. */
+    auto **seeds = (cbm_gbuf_node_t **)calloc(sz, sizeof(cbm_gbuf_node_t *));
+    auto **order = (const cbm_gbuf_node_t **)malloc((sz + 1) * sizeof(cbm_gbuf_node_t *));
+    if (cx.loop_depth && cx.tld && cx.state && cx.recursive && cx.path && cx.rank && seeds &&
+        order) {
+        std::fill(cx.rank, cx.rank + sz, (int)TLD_UNRANKED);
+        int seed_count = 0;
+        seed_loop_depths(&cx, "Function", seeds, &seed_count);
+        seed_loop_depths(&cx, "Method", seeds, &seed_count);
+        tld_build_ranks(&cx, seeds, seed_count, order);
+        std::sort(seeds, seeds + seed_count, [&cx](cbm_gbuf_node_t *a, cbm_gbuf_node_t *b) {
+            return cx.rank[a->id] < cx.rank[b->id];
+        });
 
-    int seed_count = 0;
-    seed_loop_depths(&cx, "Function", seeds, &seed_count, (int)sz);
-    seed_loop_depths(&cx, "Method", seeds, &seed_count, (int)sz);
-    qsort(seeds, (size_t)seed_count, sizeof(*seeds), cmp_seed_canonical);
-
-    int updated = 0;
-    for (int i = 0; i < seed_count; i++) {
-        cbm_gbuf_node_t *n = seeds[i];
-        if (written[n->id]) {
-            continue; /* already written (same node listed twice) */
+        for (int i = 0; i < seed_count; i++) {
+            cbm_gbuf_node_t *n = seeds[i];
+            if (cx.state[n->id] != 2) {
+                tld_dfs(&cx, n->id, 0);
+            }
+            append_complexity_props(n, cx.tld[n->id], cx.recursive[n->id]);
         }
-        if (cx.state[n->id] != 2) {
-            tld_dfs(&cx, n->id, 0);
-        }
-        append_complexity_props(n, cx.tld[n->id], cx.recursive[n->id]);
-        written[n->id] = 1;
-        updated++;
+        cbm_log_info("pass.complexity", "functions", itoa_cx(seed_count));
     }
-
-    cbm_log_info("pass.complexity", "functions", itoa_cx(updated));
-
-    free(cx.loop_depth);
-    free(cx.tld);
-    free(cx.state);
-    free(cx.recursive);
-    free(cx.path);
-    free(cx.callees);
+    tld_ctx_free(&cx);
     free(seeds);
-    free(written);
+    free(order);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -401,75 +549,10 @@ static bool imp_name_is_distinctive(const char *name) {
     return false;
 }
 
-/* Pointer just past the JSON value starting at p, or NULL if unterminated. */
-static const char *imp_value_end(const char *p) {
-    if (*p == '"') {
-        for (p++; *p; p++) {
-            if (*p == '\\' && p[1]) {
-                p++;
-                continue;
-            }
-            if (*p == '"') {
-                return p + 1;
-            }
-        }
-        return nullptr;
-    }
-    if (*p == '{' || *p == '[') {
-        int depth = 0;
-        bool in_str = false;
-        for (; *p; p++) {
-            if (in_str) {
-                if (*p == '\\' && p[1]) {
-                    p++;
-                } else if (*p == '"') {
-                    in_str = false;
-                }
-            } else if (*p == '"') {
-                in_str = true;
-            } else if (*p == '{' || *p == '[') {
-                depth++;
-            } else if ((*p == '}' || *p == ']') && --depth == 0) {
-                return p + 1;
-            }
-        }
-        return nullptr;
-    }
-    while (*p && *p != ',' && *p != '}' && *p != ']') {
-        p++;
-    }
-    return p;
-}
-
-/* `"key"` genuinely in KEY position — preceded by '{' or ',' and followed by
- * ':' (modulo whitespace). A bare strstr would also match text inside a string
- * VALUE. Returns the opening quote, or NULL. */
-static const char *imp_find_key(const char *json, const char *key) {
-    char pat[CBM_SZ_64];
-    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
-    if (n < 0 || (size_t)n >= sizeof(pat)) {
-        return nullptr;
-    }
-    for (const char *p = json; (p = strstr(p, pat)) != nullptr; p += n) {
-        const char *before = p;
-        while (before > json && isspace((unsigned char)before[-1])) {
-            before--;
-        }
-        char prev = (before > json) ? before[-1] : '\0';
-        const char *after = p + n;
-        while (isspace((unsigned char)*after)) {
-            after++;
-        }
-        if ((prev == '{' || prev == ',') && *after == ':') {
-            return p;
-        }
-    }
-    return nullptr;
-}
-
 /* IDEMPOTENT BY CONTRACT: the incremental path rehydrates nodes that already
  * carry "importance"; a pure append would write {"importance":1,...,
- * "importance":2}. Overwrite in place; append only when absent. A blob that is
+ * "importance":2}. props_upsert overwrites in place, appends only when absent,
+ * and skips the rewrite when the formatted score is unchanged. A blob that is
  * not a JSON object — or a non-finite score, which "%f" renders as the invalid
  * JSON token `nan`/`inf` — leaves the node untouched: properties feed generated
  * columns, and one malformed blob gets the whole database quarantined. */
@@ -477,67 +560,12 @@ void cbm_pipeline_importance_append_prop(cbm_gbuf_node_t *node, double score) {
     if (!node || !std::isfinite(score)) {
         return;
     }
-    const char *old = node->properties_json ? node->properties_json : "{}";
-    size_t olen = strlen(old);
-    if (olen < 2 || old[0] != '{' || old[olen - 1] != '}') {
-        return;
-    }
     char val[CBM_SZ_32];
     int vn = snprintf(val, sizeof(val), "%.6f", score);
     if (vn < 0 || (size_t)vn >= sizeof(val)) {
         return;
     }
-
-    const char *k = imp_find_key(old, "importance");
-    if (k) {
-        const char *v = strchr(k, ':');
-        if (!v) {
-            return;
-        }
-        v++;
-        while (isspace((unsigned char)*v)) {
-            v++;
-        }
-        const char *vend = imp_value_end(v);
-        if (!vend) {
-            return;
-        }
-        size_t head = (size_t)(v - old);
-        size_t tail = strlen(vend);
-        char *neu = (char *)malloc(head + (size_t)vn + tail + 1);
-        if (!neu) {
-            return;
-        }
-        memcpy(neu, old, head);
-        memcpy(neu + head, val, (size_t)vn);
-        memcpy(neu + head + (size_t)vn, vend, tail + 1);
-        free(node->properties_json);
-        node->properties_json = neu;
-        return;
-    }
-
-    /* An object holding only whitespace ("{ }") takes no leading comma. */
-    bool empty = true;
-    for (size_t i = 1; i + 1 < olen; i++) {
-        if (!isspace((unsigned char)old[i])) {
-            empty = false;
-            break;
-        }
-    }
-    char frag[CBM_SZ_64];
-    int fn = snprintf(frag, sizeof(frag), "%s\"importance\":%s}", empty ? "" : ",", val);
-    if (fn < 0 || (size_t)fn >= sizeof(frag)) {
-        return;
-    }
-    size_t keep = empty ? 1 : olen - 1; /* drop the trailing '}' (and any inner blanks) */
-    char *neu = (char *)malloc(keep + (size_t)fn + 1);
-    if (!neu) {
-        return;
-    }
-    memcpy(neu, old, keep);
-    memcpy(neu + keep, frag, (size_t)fn + 1);
-    free(node->properties_json);
-    node->properties_json = neu;
+    props_upsert(node, "importance", val);
 }
 
 typedef struct {

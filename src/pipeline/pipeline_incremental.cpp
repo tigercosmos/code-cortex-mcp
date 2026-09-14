@@ -975,8 +975,10 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
      * incoming CALLS/USAGE/TESTS degree of every symbol, and until the re-link
      * above, a re-extracted symbol has lost every caller that lives in an
      * unchanged file: scored there, a helper with 25 callers persists as 0.
-     * Nodes outside the changed set already carry the key from the previous
-     * run; cbm_pipeline_importance_append_prop overwrites it in place. */
+     * Every symbol is rescored (scores are global), but nodes outside the
+     * changed set already carry the key from the previous run:
+     * cbm_pipeline_importance_append_prop overwrites it in place, and leaves
+     * the properties untouched when the formatted score is unchanged. */
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
     cbm_pipeline_pass_importance(&ctx);
     cbm_log_info("pass.timing", "pass", "incr_importance", "elapsed_ms",
