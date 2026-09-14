@@ -6247,13 +6247,10 @@ static int supervisor_remaining_ms(uint64_t deadline_ms) {
 static int index_restart_cap(void) {
     enum { INDEX_RESTART_CAP_DEFAULT = 100 };
     long v = 0;
-    if (!cbm_env_long("CBM_INDEX_MAX_RESTARTS", &v)) {
-        /* Unset is the ordinary case and says nothing. A value that is set but
-         * unreadable is a person's intent being dropped, so name it. */
-        char raw[CBM_SZ_64] = {0};
-        if (cbm_safe_getenv("CBM_INDEX_MAX_RESTARTS", raw, sizeof(raw), NULL) && raw[0]) {
-            cbm_log_warn("index.restart_cap.ignored", "value", raw, "action", "using_default");
-        }
+    /* Unset is the ordinary case and says nothing. A value that is set but
+     * unreadable is a person's intent being dropped, so name it. */
+    if (!cbm_env_long_warn("CBM_INDEX_MAX_RESTARTS", LONG_MIN, LONG_MAX, &v,
+                           "index.restart_cap.ignored")) {
         return INDEX_RESTART_CAP_DEFAULT;
     }
     /* Zero is a real answer. The old reader kept the default unless the number

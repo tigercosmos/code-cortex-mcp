@@ -135,6 +135,13 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
  * read, and 0 is a real setting at every call site in this project. */
 bool cbm_env_long(const char *name, long *out);
 
+/* cbm_env_long for a setting with a fallback: true only when the variable reads
+ * cleanly and lies in [min, max]. When it is set but dropped — unreadable or out
+ * of range — logs a warning `ignored_event` with "value" (the raw text) and
+ * "action"="using_default", so a person's intent is never dropped silently. An
+ * unset or empty variable is the ordinary case and logs nothing. */
+bool cbm_env_long_warn(const char *name, long min, long max, long *out, const char *ignored_event);
+
 /* ── Home directory ─────────────────────────────────────────────── */
 
 /* Cross-platform home directory: tries HOME first, then USERPROFILE (Windows).

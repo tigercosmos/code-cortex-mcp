@@ -6,6 +6,7 @@
 #include "platform.h"
 
 #include "foundation/constants.h"
+#include "foundation/log.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -435,6 +436,21 @@ bool cbm_env_long(const char *name, long *out) {
     }
     *out = value;
     return true;
+}
+
+/* See platform.h. Re-reads the raw text only on the rare path where it is
+ * dropped, so the warning can quote what the person actually typed. */
+bool cbm_env_long_warn(const char *name, long min, long max, long *out, const char *ignored_event) {
+    long value = 0;
+    if (out && cbm_env_long(name, &value) && value >= min && value <= max) {
+        *out = value;
+        return true;
+    }
+    char raw[CBM_SZ_64] = {0};
+    if (cbm_safe_getenv(name, raw, sizeof(raw), NULL) && raw[0]) {
+        cbm_log_warn(ignored_event, "value", raw, "action", "using_default");
+    }
+    return false;
 }
 
 /* ── Home directory (cross-platform) ──────────────────────────── */
