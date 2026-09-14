@@ -4047,39 +4047,85 @@ static void execute_with_clause(cbm_query_t *q, binding_t **bindings_ptr, int *b
 
 /* ── Execute a single query (no UNION recursion) ──────────────── */
 
-/* Project RETURN * — all bound variable properties */
-/* Has this variable already been collected? A query may name the same variable
- * in more than one pattern, and RETURN * must give it one set of columns. */
-static bool star_var_seen(const char **vars, int vc, const char *name) {
-    for (int i = 0; i < vc; i++) {
-        if (strcmp(vars[i], name) == 0) {
+static bool scope_holds(const char *const *names, int count, const char *want) {
+    for (int i = 0; i < count; i++) {
+        if (names[i] && strcmp(names[i], want) == 0) {
             return true;
         }
     }
     return false;
 }
 
-/* Collect the variables a RETURN * projects, in the order the query names them
- * and with no repeats. Without the repeat check, `MATCH (f) OPTIONAL MATCH
- * (f)-[:CALLS]->(g)` names f in two patterns and f gets its four columns
- * twice. */
-static int collect_pattern_vars(cbm_query_t *q, const char **vars, int max_vars) {
-    int vc = 0;
+/* The distinct variables a query's patterns name, walked in query order:
+ * pattern by pattern, node variables then relationship variables. Node and
+ * edge names are de-duplicated separately, because a binding keeps them in
+ * separate arrays — so a name used as both kinds is listed once per kind.
+ * `order` interleaves both kinds in walk order.
+ *
+ * Collection stops at the first name that would overflow its kind's binding
+ * capacity (CYP_MAX_VARS / CYP_MAX_EDGE_VARS) and records which kind did. */
+typedef struct {
+    const char *nodes[CYP_MAX_VARS];
+    const char *edges[CYP_MAX_EDGE_VARS];
+    int node_n;
+    int edge_n;
+    const char *order[CYP_MAX_VARS + CYP_MAX_EDGE_VARS];
+    int order_n;
+    const char *overflow_kind; /* "node", "edge", or NULL */
+} pattern_vars_t;
+
+static bool pattern_vars_add(pattern_vars_t *pv, const char *var, bool is_edge) {
+    const char **names = is_edge ? pv->edges : pv->nodes;
+    int *n = is_edge ? &pv->edge_n : &pv->node_n;
+    int cap = is_edge ? CYP_MAX_EDGE_VARS : CYP_MAX_VARS;
+    if (!var || scope_holds(names, *n, var)) {
+        return true;
+    }
+    if (*n >= cap) {
+        pv->overflow_kind = is_edge ? "edge" : "node";
+        return false;
+    }
+    names[(*n)++] = var;
+    pv->order[pv->order_n++] = var;
+    return true;
+}
+
+/* `head_placeholder`: the head of the first pattern takes a node slot even
+ * when unnamed (execute_single binds it under CYP_ANON_HEAD_VAR), which only
+ * the capacity check counts; it is not listed in `order`. */
+static void collect_pattern_vars(const cbm_query_t *q, bool head_placeholder, pattern_vars_t *pv) {
+    memset(pv, 0, sizeof(*pv));
+    if (head_placeholder && q->pattern_count > 0 && q->patterns[0].node_count > 0 &&
+        !q->patterns[0].nodes[0].variable) {
+        pv->nodes[pv->node_n++] = CYP_ANON_HEAD_VAR;
+    }
     for (int pi = 0; pi < q->pattern_count; pi++) {
-        for (int ni = 0; ni < q->patterns[pi].node_count && vc < max_vars; ni++) {
-            const char *var = q->patterns[pi].nodes[ni].variable;
-            if (var && !star_var_seen(vars, vc, var)) {
-                vars[vc++] = var;
+        const cbm_pattern_t *pat = &q->patterns[pi];
+        for (int ni = 0; ni < pat->node_count; ni++) {
+            if (!pattern_vars_add(pv, pat->nodes[ni].variable, false)) {
+                return;
             }
         }
-        for (int ri = 0; ri < q->patterns[pi].rel_count && vc < max_vars; ri++) {
-            const char *var = q->patterns[pi].rels[ri].variable;
-            if (var && !star_var_seen(vars, vc, var)) {
-                vars[vc++] = var;
+        for (int ri = 0; ri < pat->rel_count; ri++) {
+            if (!pattern_vars_add(pv, pat->rels[ri].variable, true)) {
+                return;
             }
         }
     }
-    return vc;
+}
+
+/* The pattern variables once each regardless of kind, in walk order: the
+ * names RETURN * projects and the names a RETURN/WITH may read. Without the
+ * repeat check, `MATCH (f) OPTIONAL MATCH (f)-[:CALLS]->(g)` names f in two
+ * patterns and RETURN * gives f its four columns twice. */
+static int pattern_vars_distinct_names(const pattern_vars_t *pv, const char **out) {
+    int n = 0;
+    for (int i = 0; i < pv->order_n; i++) {
+        if (!scope_holds(out, n, pv->order[i])) {
+            out[n++] = pv->order[i];
+        }
+    }
+    return n;
 }
 
 /* Build star-projection columns: var.name, var.qualified_name, var.label, var.file_path */
@@ -4162,8 +4208,10 @@ static void execute_return_star(cbm_query_t *q, binding_t *bindings, int bind_co
         execute_return_star_after_with(q, bindings, bind_count, max_rows, rb);
         return;
     }
-    const char *vars[CBM_SZ_32];
-    int vc = collect_pattern_vars(q, vars, CBM_SZ_32);
+    pattern_vars_t pv;
+    collect_pattern_vars(q, false, &pv);
+    const char *vars[CYP_MAX_VARS + CYP_MAX_EDGE_VARS];
+    int vc = pattern_vars_distinct_names(&pv, vars);
     build_star_columns(rb, vars, vc);
     for (int bi = 0; bi < bind_count && rb->row_count < max_rows; bi++) {
         const char *vals[CBM_SZ_128];
@@ -4716,49 +4764,16 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
  * bindings: it asks whether the query DECLARED the name, so an OPTIONAL MATCH
  * target that did not match is still declared, still legal, still "". */
 
-/* Cap for one query's declared names. check_pattern_var_capacity bounds the
- * patterns at CYP_MAX_VARS + CYP_MAX_EDGE_VARS names, plus one UNWIND alias,
- * which is well inside this. */
-enum { CYP_SCOPE_MAX_NAMES = 32 };
+/* Cap for one query's declared names: every pattern variable the collector
+ * can hold, plus one UNWIND alias. A WITH (at most CYP_MAX_VARS items, which
+ * parse_return_or_with enforces) fits as well. */
+enum { CYP_SCOPE_MAX_NAMES = CYP_MAX_VARS + CYP_MAX_EDGE_VARS + 1 };
 
-static bool scope_holds(const char *const *names, int count, const char *want) {
-    for (int i = 0; i < count; i++) {
-        if (names[i] && strcmp(names[i], want) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* Every name the query's patterns declare, plus an UNWIND alias.
- * Answers -1 when there are more names than the cap holds. */
-static int collect_declared_names(const cbm_query_t *q, const char **out, int cap) {
-    int n = 0;
-    for (int pi = 0; pi < q->pattern_count; pi++) {
-        const cbm_pattern_t *pat = &q->patterns[pi];
-        for (int ni = 0; ni < pat->node_count; ni++) {
-            const char *var = pat->nodes[ni].variable;
-            if (var && !scope_holds(out, n, var)) {
-                if (n >= cap) {
-                    return CBM_NOT_FOUND;
-                }
-                out[n++] = var;
-            }
-        }
-        for (int ri = 0; ri < pat->rel_count; ri++) {
-            const char *var = pat->rels[ri].variable;
-            if (var && !scope_holds(out, n, var)) {
-                if (n >= cap) {
-                    return CBM_NOT_FOUND;
-                }
-                out[n++] = var;
-            }
-        }
-    }
+/* Every name the query's patterns declare, plus an UNWIND alias. */
+static int collect_declared_names(const cbm_query_t *q, const pattern_vars_t *pv,
+                                  const char **out) {
+    int n = pattern_vars_distinct_names(pv, out);
     if (q->unwind_alias && !scope_holds(out, n, q->unwind_alias)) {
-        if (n >= cap) {
-            return CBM_NOT_FOUND;
-        }
         out[n++] = q->unwind_alias;
     }
     return n;
@@ -4769,7 +4784,7 @@ static int collect_declared_names(const cbm_query_t *q, const char **out, int ca
  * `caller` and nothing else — `f` is gone. */
 static int collect_with_names(const cbm_return_clause_t *wc, const char **out, int cap) {
     int n = 0;
-    for (int i = 0; i < wc->count; i++) {
+    for (int i = 0; i < wc->count && n < cap; i++) {
         const cbm_return_item_t *item = &wc->items[i];
         const char *name = NULL;
         if (item->alias) {
@@ -4778,9 +4793,6 @@ static int collect_with_names(const cbm_return_clause_t *wc, const char **out, i
             name = item->variable;
         }
         if (name && !scope_holds(out, n, name)) {
-            if (n >= cap) {
-                return CBM_NOT_FOUND;
-            }
             out[n++] = name;
         }
     }
@@ -4829,40 +4841,13 @@ static char *var_capacity_error(const char *kind, int limit) {
  * node and an edge variable of the same name each take a slot, because the
  * binding keeps them in separate arrays. */
 static char *check_pattern_var_capacity(const cbm_query_t *q) {
-    const char *node_vars[CYP_MAX_VARS] = {NULL};
-    const char *edge_vars[CYP_MAX_EDGE_VARS] = {NULL};
-    int node_n = 0;
-    int edge_n = 0;
-    /* The head of the first pattern always takes a node slot, named or not:
-     * execute_single binds it under CYP_ANON_HEAD_VAR when it is unnamed. */
-    if (q->pattern_count > 0 && q->patterns[0].node_count > 0 &&
-        !q->patterns[0].nodes[0].variable) {
-        node_vars[node_n++] = CYP_ANON_HEAD_VAR;
+    pattern_vars_t pv;
+    collect_pattern_vars(q, true, &pv);
+    if (!pv.overflow_kind) {
+        return NULL;
     }
-    for (int pi = 0; pi < q->pattern_count; pi++) {
-        const cbm_pattern_t *pat = &q->patterns[pi];
-        for (int ni = 0; ni < pat->node_count; ni++) {
-            const char *var = pat->nodes[ni].variable;
-            if (!var || scope_holds(node_vars, node_n, var)) {
-                continue;
-            }
-            if (node_n >= CYP_MAX_VARS) {
-                return var_capacity_error("node", CYP_MAX_VARS);
-            }
-            node_vars[node_n++] = var;
-        }
-        for (int ri = 0; ri < pat->rel_count; ri++) {
-            const char *var = pat->rels[ri].variable;
-            if (!var || scope_holds(edge_vars, edge_n, var)) {
-                continue;
-            }
-            if (edge_n >= CYP_MAX_EDGE_VARS) {
-                return var_capacity_error("edge", CYP_MAX_EDGE_VARS);
-            }
-            edge_vars[edge_n++] = var;
-        }
-    }
-    return NULL;
+    bool edge = strcmp(pv.overflow_kind, "edge") == 0;
+    return var_capacity_error(pv.overflow_kind, edge ? CYP_MAX_EDGE_VARS : CYP_MAX_VARS);
 }
 
 /* Answers NULL when the query is fine, or a heap message naming the first
@@ -4873,13 +4858,10 @@ static char *check_projection_scope(const cbm_query_t *q) {
         return capacity_err;
     }
 
+    pattern_vars_t pv;
+    collect_pattern_vars(q, false, &pv);
     const char *declared[CYP_SCOPE_MAX_NAMES];
-    int declared_n = collect_declared_names(q, declared, CYP_SCOPE_MAX_NAMES);
-    if (declared_n < 0) {
-        /* Unreachable while the capacity check above holds; kept so the guard
-         * still stands if either bound ever moves. */
-        return NULL;
-    }
+    int declared_n = collect_declared_names(q, &pv, declared);
 
     /* A WITH still reads the pattern variables. */
     if (q->with_clause && !q->with_clause->star) {
@@ -4901,9 +4883,6 @@ static char *check_projection_scope(const cbm_query_t *q) {
     int scope_n = declared_n;
     if (q->with_clause) {
         scope_n = collect_with_names(q->with_clause, after_with, CYP_SCOPE_MAX_NAMES);
-        if (scope_n < 0) {
-            return NULL; /* unreachable: a WITH holds at most CYP_MAX_VARS items */
-        }
         scope = after_with;
     }
 
