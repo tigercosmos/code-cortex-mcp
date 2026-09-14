@@ -372,8 +372,9 @@ static const char *cbm_string_read(void *payload, uint32_t byte, TSPoint point,
 enum { CBM_PARSE_WALL_CEILING_FACTOR = 12 }; /* ~60 s ceiling for the 5 s CPU budget */
 
 typedef struct {
-    uint64_t cpu_deadline_ns; // trip once this thread's CPU time passes it
-    uint64_t wall_ceiling_ns; // hard wall backstop for a spinning/stuck parse
+    uint64_t cpu_deadline_ns;   // trip once this thread's CPU time passes it
+    uint64_t cpu_idle_until_ns; // wall time before which the CPU budget cannot be spent
+    uint64_t wall_ceiling_ns;   // hard wall backstop for a spinning/stuck parse
 } CBMParseBudget;
 
 #ifdef CBM_ENABLE_TEST_SEAMS
@@ -388,11 +389,22 @@ static thread_local uint64_t tl_parse_wall_seam_offset_ns = 0;
 // cppcheck-suppress constParameterCallback
 static bool cbm_timeout_cb(TSParseState *state) {
     const CBMParseBudget *budget = (const CBMParseBudget *)state->payload;
-    uint64_t wall = now_ns();
+    uint64_t real_wall = now_ns();
+    uint64_t wall = real_wall;
 #ifdef CBM_ENABLE_TEST_SEAMS
     wall += tl_parse_wall_seam_offset_ns;
 #endif
-    return cbm_thread_cpu_time_ns() > budget->cpu_deadline_ns || wall > budget->wall_ceiling_ns;
+    if (wall > budget->wall_ceiling_ns) {
+        return true;
+    }
+    /* A thread cannot burn more CPU than the wall time that passed, so until the
+     * budget has elapsed in real wall time the CPU clock (a syscall) need not be
+     * read. The seam offset is deliberately not applied here: it fakes wall time,
+     * not CPU time. */
+    if (real_wall <= budget->cpu_idle_until_ns) {
+        return false;
+    }
+    return cbm_thread_cpu_time_ns() > budget->cpu_deadline_ns;
 }
 
 // --- Thread-local parser pool ---
@@ -2145,13 +2157,16 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     };
 
     TSParseOptions opts = {0};
-    CBMParseBudget budget = {0, 0}; // cppcheck-suppress unreadVariable
+    CBMParseBudget budget = {0, 0, 0}; // cppcheck-suppress unreadVariable
     if (timeout_micros > 0) {
         uint64_t budget_ns = (uint64_t)timeout_micros * USEC_TO_NSEC;
         // Descheduling burns wall time but not CPU: gate on this thread's CPU
         // time so a starved-but-parseable file is not abandoned, with a generous
         // wall ceiling as a backstop against a genuinely spinning/stuck parse.
         budget.cpu_deadline_ns = cbm_thread_cpu_time_ns() + budget_ns;
+        /* now_ns() >= t0, so CPU spent since the deadline was set is at most
+         * wall elapsed since t0: the CPU deadline cannot pass before this. */
+        budget.cpu_idle_until_ns = t0 + budget_ns;
         budget.wall_ceiling_ns = t0 + budget_ns * (uint64_t)CBM_PARSE_WALL_CEILING_FACTOR;
         opts.payload = &budget;
         opts.progress_callback = cbm_timeout_cb;
