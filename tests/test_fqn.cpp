@@ -52,6 +52,23 @@ TEST(fqn_compute_basic_c) {
     PASS();
 }
 
+TEST(fqn_relative_js_import_preserves_dotted_basename_issue1682) {
+    ASSERT_FQN(
+        cbm_pipeline_resolve_relative_import(
+            "packages/api/src/modules/consumer/consumer.service.ts", "../featureX/featureX.engine"),
+        "packages/api/src/modules/featureX/featureX.engine");
+    ASSERT_FQN(
+        cbm_pipeline_resolve_relative_import("packages/api/src/modules/moduleA/moduleA.service.ts",
+                                             "../moduleQ/moduleQ.service"),
+        "packages/api/src/modules/moduleQ/moduleQ.service");
+    ASSERT_FQN(cbm_pipeline_resolve_relative_import(
+                   "packages/api/src/modules/moduleA/moduleA.service.ts", "./create-thing.dto"),
+               "packages/api/src/modules/moduleA/create-thing.dto");
+    /* An explicit JS/TS extension is still stripped. */
+    ASSERT_FQN(cbm_pipeline_resolve_relative_import("src/a.ts", "./helpers.ts"), "src/helpers");
+    PASS();
+}
+
 TEST(fqn_compute_basic_rs) {
     ASSERT_FQN(cbm_pipeline_fqn_compute("proj", "lib.rs", "new"), "proj.lib.new");
     PASS();
@@ -564,6 +581,7 @@ SUITE(fqn) {
     RUN_TEST(fqn_compute_basic_ts);
     RUN_TEST(fqn_compute_basic_js);
     RUN_TEST(fqn_compute_basic_c);
+    RUN_TEST(fqn_relative_js_import_preserves_dotted_basename_issue1682);
     RUN_TEST(fqn_compute_basic_rs);
     RUN_TEST(fqn_compute_file_sibling_distinct);
     RUN_TEST(fqn_compute_symbol_still_strips);
