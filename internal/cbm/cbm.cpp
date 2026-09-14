@@ -1019,8 +1019,8 @@ static bool cbm_is_eof_terminator_miss(TSNode n, const char *source, int source_
 /* Walks to the end even after the cap is full, so `dropped` is the real number
  * of ranges lost rather than a lower bound. Cheap: the walk never descends into
  * an ERROR subtree, so it only visits the spine of nodes containing an error. */
-static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc, const char *source,
-                                      int source_len) {
+template <typename Visit>
+static void cbm_walk_error_nodes(TSNode n, const char *source, int source_len, const Visit &visit) {
     uint32_t k = ts_node_child_count(n);
     for (uint32_t i = 0; i < k; i++) {
         TSNode c = ts_node_child(n, i);
@@ -1028,11 +1028,29 @@ static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc, const 
             if (cbm_is_eof_terminator_miss(c, source, source_len)) {
                 continue; /* absent final newline only — nothing was dropped */
             }
-            cbm_error_regions_push(acc, c); /* top-most region; do not descend */
+            visit(c); /* top-most region; do not descend */
         } else if (ts_node_has_error(c)) {
-            cbm_collect_error_regions(c, acc, source, source_len);
+            cbm_walk_error_nodes(c, source, source_len, visit);
         }
     }
+}
+
+static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc, const char *source,
+                                      int source_len) {
+    cbm_walk_error_nodes(n, source, source_len,
+                         [acc](TSNode c) { cbm_error_regions_push(acc, c); });
+}
+
+/* 1-based line count of `src` where every newline starts a new line, so a
+ * trailing newline opens an (empty) last line. */
+static uint32_t cbm_newline_line_count(const char *src, int src_len) {
+    uint32_t n = 1;
+    for (int i = 0; i < src_len; i++) {
+        if (src[i] == '\n') {
+            n++;
+        }
+    }
+    return n;
 }
 
 /* ── Preprocessed-parse line map (#963) ───────────────────────────────────
@@ -1119,28 +1137,6 @@ static void cbm_mark_no_code_lines(const char *src, int src_len, uint8_t *map,
     }
 }
 
-/* Mark the EXPANDED rows that sit under an ERROR/MISSING node of the
- * preprocessed tree. */
-static void cbm_mark_pp_error_rows(TSNode n, uint8_t *rows, uint32_t row_count, const char *src,
-                                   int src_len) {
-    uint32_t k = ts_node_child_count(n);
-    for (uint32_t i = 0; i < k; i++) {
-        TSNode c = ts_node_child(n, i);
-        if (ts_node_is_missing(c) || strcmp(ts_node_type(c), "ERROR") == 0) {
-            if (cbm_is_eof_terminator_miss(c, src, src_len)) {
-                continue; /* absent final newline only — nothing was dropped */
-            }
-            uint32_t s = ts_node_start_point(c).row + 1;
-            uint32_t e = ts_node_end_point(c).row + 1;
-            for (uint32_t r = s; r <= e && r <= row_count; r++) {
-                rows[r] = 1;
-            }
-        } else if (ts_node_has_error(c)) {
-            cbm_mark_pp_error_rows(c, rows, row_count, src, src_len);
-        }
-    }
-}
-
 /* Build the original-line map from the preprocessed parse. Returns NULL when
  * the expanded parse is itself a total loss (root is ERROR — it vouches for
  * nothing) or on allocation failure; the caller then keeps the raw ranges, so
@@ -1154,12 +1150,7 @@ static uint8_t *cbm_build_pp_line_map(CBMArena *a, const char *source, int sourc
         pp->expanded_line_count <= 0 || strcmp(ts_node_type(pp_root), "ERROR") == 0) {
         return nullptr;
     }
-    uint32_t orig_lines = 1;
-    for (int ci = 0; ci < source_len; ci++) {
-        if (source[ci] == '\n') {
-            orig_lines++;
-        }
-    }
+    uint32_t orig_lines = cbm_newline_line_count(source, source_len);
     auto *map = (uint8_t *)cbm_arena_alloc(a, (size_t)orig_lines + 2);
     int exp_lines = pp->expanded_line_count;
     auto *bad_rows = (uint8_t *)calloc((size_t)exp_lines + 2, 1);
@@ -1169,7 +1160,15 @@ static uint8_t *cbm_build_pp_line_map(CBMArena *a, const char *source, int sourc
     }
     memset(map, 0, (size_t)orig_lines + 2);
     cbm_mark_no_code_lines(source, source_len, map, orig_lines);
-    cbm_mark_pp_error_rows(pp_root, bad_rows, (uint32_t)exp_lines, expanded, expanded_len);
+    /* Mark the EXPANDED rows that sit under an ERROR/MISSING node of the
+     * preprocessed tree. Not the region collector: its cap would stop marking. */
+    cbm_walk_error_nodes(pp_root, expanded, expanded_len, [bad_rows, exp_lines](TSNode c) {
+        uint32_t s = ts_node_start_point(c).row + 1;
+        uint32_t e = ts_node_end_point(c).row + 1;
+        for (uint32_t r = s; r <= e && r <= (uint32_t)exp_lines; r++) {
+            bad_rows[r] = 1;
+        }
+    });
     /* An expanded line only vouches for its original line when it HAS text:
      * the preprocessor emits a blank line where it dropped a branch, and a blank
      * line proves nothing about the code that used to be there. */
@@ -1457,34 +1456,93 @@ static void cbm_subtract_recovered_regions(cbm_error_regions_t *regs, const CBMD
  * missing from the graph; it's a benign call the grammar can't parse without the
  * preprocessor. True if the [start_line, end_line] span contains a call `NAME(` to
  * a file-defined function-like macro (Macro label + a parameter signature). */
+typedef struct {
+    const char *name;
+    int len;
+} cbm_macro_name_t;
+
+/* The names of this file's function-like macros, gathered once per file so the
+ * per-line checks below do not rescan every definition. If the names could not
+ * be copied, items is NULL while count stays non-zero, and the checks read the
+ * definitions directly — slower, same answer. */
+typedef struct {
+    cbm_macro_name_t *items;
+    int count;
+    const CBMDefArray *defs;
+} cbm_macro_names_t;
+
+static bool cbm_is_function_like_macro(const CBMDefinition *d) {
+    /* Function-like macros only: an object-like macro (#define PI 3.14) has no
+     * parameter signature and can't be mistaken for a call. */
+    return d->label && strcmp(d->label, "Macro") == 0 && d->signature && d->name && d->name[0];
+}
+
+static void cbm_collect_function_like_macros(CBMArena *arena, const CBMDefArray *defs,
+                                             cbm_macro_names_t *out) {
+    *out = {nullptr, 0, defs};
+    int n = 0;
+    for (int di = 0; di < defs->count; di++) {
+        if (cbm_is_function_like_macro(&defs->items[di])) {
+            n++;
+        }
+    }
+    if (n == 0) {
+        return;
+    }
+    out->count = n;
+    out->items = (cbm_macro_name_t *)cbm_arena_alloc(arena, (size_t)n * sizeof(cbm_macro_name_t));
+    if (!out->items) {
+        return; /* checks read defs directly */
+    }
+    int k = 0;
+    for (int di = 0; di < defs->count; di++) {
+        const CBMDefinition *d = &defs->items[di];
+        if (cbm_is_function_like_macro(d)) {
+            out->items[k++] = {d->name, (int)strlen(d->name)};
+        }
+    }
+}
+
+/* True if [span_start, span_end) holds `NAME(` with NAME a whole identifier. */
+static bool cbm_span_calls_name(const char *src, int src_len, int span_start, int span_end,
+                                const char *name, int nlen) {
+    for (int pos = span_start; pos + nlen <= span_end; pos++) {
+        if (strncmp(src + pos, name, (size_t)nlen) != 0 ||
+            (pos > 0 && cbm_identifier_char(src[pos - 1])) ||
+            (pos + nlen < src_len && cbm_identifier_char(src[pos + nlen]))) {
+            continue;
+        }
+        int open = pos + nlen;
+        while (open < span_end && isspace((unsigned char)src[open])) {
+            open++;
+        }
+        if (open < span_end && src[open] == '(') {
+            return true; /* NAME( ... ) — an invocation of this file's macro */
+        }
+    }
+    return false;
+}
+
 static bool cbm_byte_span_is_macro_invocation(const char *src, int src_len, int span_start,
-                                              int span_end, const CBMDefArray *defs) {
-    if (!src || src_len <= 0 || !defs || span_start < 0 || span_end > src_len ||
+                                              int span_end, const cbm_macro_names_t *macros) {
+    if (!src || src_len <= 0 || macros->count == 0 || span_start < 0 || span_end > src_len ||
         span_start >= span_end) {
         return false;
     }
-    for (int di = 0; di < defs->count; di++) {
-        const CBMDefinition *d = &defs->items[di];
-        /* Function-like macros only: an object-like macro (#define PI 3.14) has no
-         * parameter signature and can't be mistaken for a call. */
-        if (!d->label || strcmp(d->label, "Macro") != 0 || !d->signature || !d->name ||
-            !d->name[0]) {
-            continue;
+    if (macros->items) {
+        for (int mi = 0; mi < macros->count; mi++) {
+            if (cbm_span_calls_name(src, src_len, span_start, span_end, macros->items[mi].name,
+                                    macros->items[mi].len)) {
+                return true;
+            }
         }
-        int nlen = (int)strlen(d->name);
-        for (int pos = span_start; pos + nlen <= span_end; pos++) {
-            if (strncmp(src + pos, d->name, (size_t)nlen) != 0 ||
-                (pos > 0 && cbm_identifier_char(src[pos - 1])) ||
-                (pos + nlen < src_len && cbm_identifier_char(src[pos + nlen]))) {
-                continue;
-            }
-            int open = pos + nlen;
-            while (open < span_end && isspace((unsigned char)src[open])) {
-                open++;
-            }
-            if (open < span_end && src[open] == '(') {
-                return true; /* NAME( ... ) — an invocation of this file's macro */
-            }
+        return false;
+    }
+    for (int di = 0; di < macros->defs->count; di++) {
+        const CBMDefinition *d = &macros->defs->items[di];
+        if (cbm_is_function_like_macro(d) && cbm_span_calls_name(src, src_len, span_start, span_end,
+                                                                 d->name, (int)strlen(d->name))) {
+            return true;
         }
     }
     return false;
@@ -1494,10 +1552,12 @@ static bool cbm_byte_span_is_macro_invocation(const char *src, int src_len, int 
  * one table read instead of a walk from byte 0. line_count + 2 entries: [L] is
  * where line L starts and the last entry is the end of the source. A line the
  * file never reaches starts at the end, so its span is empty — the same answer
- * the walk gives. Returns NULL on allocation failure; callers fall back to the
- * walk, so the answer never changes. */
-static int *cbm_build_line_offsets(const char *src, int src_len, uint32_t line_count) {
-    auto *offsets = (int *)malloc(((size_t)line_count + 2) * sizeof(int));
+ * the walk gives. line_count must be cbm_newline_line_count(src, src_len).
+ * Returns NULL on allocation failure; callers fall back to the walk, so the
+ * answer never changes. */
+static int *cbm_build_line_offsets(CBMArena *arena, const char *src, int src_len,
+                                   uint32_t line_count) {
+    auto *offsets = (int *)cbm_arena_alloc(arena, ((size_t)line_count + 2) * sizeof(int));
     if (!offsets) {
         return nullptr;
     }
@@ -1520,12 +1580,22 @@ static int *cbm_build_line_offsets(const char *src, int src_len, uint32_t line_c
     return offsets;
 }
 
-/* Same question by line number, for callers asking about one whole region;
- * this form walks the source to find the span. */
+/* Same question by line number, for callers asking about one whole region.
+ * Reads the span from line_offsets (built for line_count lines) when there is
+ * one, and walks the source to find it otherwise. */
 static bool cbm_span_is_macro_invocation(const char *src, int src_len, uint32_t start_line,
-                                         uint32_t end_line, const CBMDefArray *defs) {
-    if (!src || src_len <= 0 || !defs || start_line == 0 || end_line < start_line) {
+                                         uint32_t end_line, const cbm_macro_names_t *macros,
+                                         const int *line_offsets, uint32_t line_count) {
+    if (!src || src_len <= 0 || macros->count == 0 || start_line == 0 || end_line < start_line) {
         return false;
+    }
+    if (line_offsets) {
+        if (start_line > line_count) {
+            return false; /* the file never reaches the first line */
+        }
+        int span_end = end_line < line_count ? line_offsets[end_line + 1] : src_len;
+        return cbm_byte_span_is_macro_invocation(src, src_len, line_offsets[start_line], span_end,
+                                                 macros);
     }
     int span_start = 0;
     uint32_t line = 1;
@@ -1543,7 +1613,7 @@ static bool cbm_span_is_macro_invocation(const char *src, int src_len, uint32_t 
             line++;
         }
     }
-    return cbm_byte_span_is_macro_invocation(src, src_len, span_start, span_end, defs);
+    return cbm_byte_span_is_macro_invocation(src, src_len, span_start, span_end, macros);
 }
 
 /* True if [rs, re] is fully enclosed by an extracted callable definition (a
@@ -1570,13 +1640,18 @@ static bool cbm_region_inside_callable(uint32_t rs, uint32_t re, const CBMDefArr
 }
 
 static void cbm_subtract_macro_invocation_regions(cbm_error_regions_t *regs,
-                                                  const CBMDefArray *defs, const char *src,
-                                                  int src_len) {
+                                                  const CBMDefArray *defs,
+                                                  const cbm_macro_names_t *macros, const char *src,
+                                                  int src_len, const int *line_offsets,
+                                                  uint32_t line_count) {
+    if (macros->count == 0) {
+        return; /* no function-like macro, so no region is a benign invocation */
+    }
     int kept = 0;
     for (int i = 0; i < regs->count; i++) {
-        bool benign =
-            cbm_span_is_macro_invocation(src, src_len, regs->starts[i], regs->ends[i], defs) &&
-            cbm_region_inside_callable(regs->starts[i], regs->ends[i], defs);
+        bool benign = cbm_span_is_macro_invocation(src, src_len, regs->starts[i], regs->ends[i],
+                                                   macros, line_offsets, line_count) &&
+                      cbm_region_inside_callable(regs->starts[i], regs->ends[i], defs);
         if (!benign) {
             regs->starts[kept] = regs->starts[i];
             regs->ends[kept] = regs->ends[i];
@@ -1615,12 +1690,13 @@ static void cbm_push_trimmed_run(cbm_error_regions_t *out, uint32_t start, uint3
  * in-body invocation is the benign #1071 case, handled later by
  * cbm_subtract_macro_invocation_regions. */
 static bool cbm_line_is_toplevel_macro_call(const char *src, int src_len, uint32_t line,
-                                            const int *line_offsets, const CBMDefArray *defs) {
-    bool is_call = line_offsets
-                       ? cbm_byte_span_is_macro_invocation(src, src_len, line_offsets[line],
-                                                           line_offsets[line + 1], defs)
-                       : cbm_span_is_macro_invocation(src, src_len, line, line, defs);
-    return is_call && !cbm_region_inside_callable(line, line, defs);
+                                            const int *line_offsets, uint32_t line_count,
+                                            const CBMDefArray *defs,
+                                            const cbm_macro_names_t *macros) {
+    return macros->count > 0 &&
+           cbm_span_is_macro_invocation(src, src_len, line, line, macros, line_offsets,
+                                        line_count) &&
+           !cbm_region_inside_callable(line, line, defs);
 }
 
 /* Cut every raw region down to the runs of lines the preprocessed parse could
@@ -1629,20 +1705,18 @@ static bool cbm_line_is_toplevel_macro_call(const char *src, int src_len, uint32
  * the branch the preprocessor discarded is genuinely absent from the graph. */
 static void cbm_refine_regions_with_pp_lines(cbm_error_regions_t *regs, const uint8_t *map,
                                              uint32_t line_count, const char *src, int src_len,
-                                             const CBMDefArray *defs) {
+                                             const int *line_offsets, const CBMDefArray *defs,
+                                             const cbm_macro_names_t *macros) {
     cbm_error_regions_t out = {};
     out.dropped = regs->dropped;
-    /* One offset table for the whole file: the macro check runs once per line,
-     * and without it each call walks the source from byte 0 — bytes x lines, on
-     * exactly the whole-file-error shape this refinement exists to narrow. */
-    int *line_offsets = cbm_build_line_offsets(src, src_len, line_count);
     for (int i = 0; i < regs->count; i++) {
         uint32_t run_start = 0;
         uint32_t run_end = 0;
         uint32_t end = regs->ends[i] < line_count ? regs->ends[i] : line_count;
         for (uint32_t line = regs->starts[i]; line <= end; line++) {
             if ((map[line] & CBM_LINE_PP_PARSED) &&
-                !cbm_line_is_toplevel_macro_call(src, src_len, line, line_offsets, defs)) {
+                !cbm_line_is_toplevel_macro_call(src, src_len, line, line_offsets, line_count, defs,
+                                                 macros)) {
                 if (run_start != 0) {
                     cbm_push_trimmed_run(&out, run_start, run_end, map, line_count);
                     run_start = 0;
@@ -1658,7 +1732,6 @@ static void cbm_refine_regions_with_pp_lines(cbm_error_regions_t *regs, const ui
             cbm_push_trimmed_run(&out, run_start, run_end, map, line_count);
         }
     }
-    free(line_offsets);
     *regs = out;
 }
 
@@ -1666,16 +1739,11 @@ static void cbm_refine_regions_with_pp_lines(cbm_error_regions_t *regs, const ui
  * becomes noise ("look at lines 1 to 13047" of a 13046-line file). */
 enum { CBM_UNUSABLE_PCT = 80 };
 
-/* Number of 1-based lines in `src`; a missing final newline still leaves a
- * last line. */
-static uint32_t cbm_count_lines(const char *src, int src_len) {
-    uint32_t n = 1;
-    for (int i = 0; i < src_len; i++) {
-        if (src[i] == '\n' && i + 1 < src_len) {
-            n++;
-        }
-    }
-    return n;
+/* Number of 1-based lines in `src` given its cbm_newline_line_count: a final
+ * newline closes the last line rather than opening another, and a missing one
+ * still leaves a last line. */
+static uint32_t cbm_count_lines(const char *src, int src_len, uint32_t newline_lines) {
+    return src_len > 0 && src[src_len - 1] == '\n' ? newline_lines - 1 : newline_lines;
 }
 
 /* Serialize collected regions as "start-end,start-end,...", with a trailing
@@ -2622,17 +2690,35 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
          * definition that STARTS inside the range, so it must be asked while the
          * range still matches the construct. */
         cbm_subtract_recovered_regions(&regs, &result->defs);
+        /* Shared by the two macro-invocation rules below. The line count comes
+         * from the pp line map when there is one (same definition), and 0 means
+         * not counted yet. The offset table is built once, only when a
+         * function-like macro can make the checks run: without it every check
+         * walks the source from byte 0 — bytes x lines on a whole-file error. A
+         * failed allocation leaves the table NULL, and the checks walk instead. */
+        CBMArena *cov_arena = scratch ? scratch : a;
+        uint32_t newline_lines = pp_line_map ? pp_line_map_lines : 0;
+        cbm_macro_names_t macros = {};
+        int *line_offsets = nullptr;
+        cbm_collect_function_like_macros(cov_arena, &result->defs, &macros);
+        if (macros.count > 0 && regs.count > 0) {
+            if (newline_lines == 0) {
+                newline_lines = cbm_newline_line_count(source, source_len);
+            }
+            line_offsets = cbm_build_line_offsets(cov_arena, source, source_len, newline_lines);
+        }
         /* #963: cut what is left down to the lines the preprocessed parse could
          * not explain. */
         if (pp_line_map) {
             cbm_refine_regions_with_pp_lines(&regs, pp_line_map, pp_line_map_lines, source,
-                                             source_len, &result->defs);
+                                             source_len, line_offsets, &result->defs, &macros);
         }
         /* #1071: don't flag a benign function-like-macro call (defined in-file)
          * that tree-sitter can't parse without the preprocessor. Runs AFTER the
          * refinement — its evidence is per-line, so a narrow range points at the
          * call itself. */
-        cbm_subtract_macro_invocation_regions(&regs, &result->defs, source, source_len);
+        cbm_subtract_macro_invocation_regions(&regs, &result->defs, &macros, source, source_len,
+                                              line_offsets, newline_lines);
         /* A file whose kept list is empty but whose cap still bound is NOT clean:
          * the dropped ranges were never judged by the rules above. */
         if (regs.count > 0 || regs.dropped > 0) {
@@ -2641,7 +2727,10 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
             result->error_ranges = cbm_error_ranges_str(a, &regs);
             /* One range over nearly the whole file is noise, not advice. */
             if (regs.count == 1 && regs.dropped == 0) {
-                uint32_t total = cbm_count_lines(source, source_len);
+                if (newline_lines == 0) {
+                    newline_lines = cbm_newline_line_count(source, source_len);
+                }
+                uint32_t total = cbm_count_lines(source, source_len, newline_lines);
                 uint32_t span = regs.ends[0] - regs.starts[0] + 1;
                 if (total > 0 && (uint64_t)span * 100 >= (uint64_t)total * CBM_UNUSABLE_PCT) {
                     result->parse_unusable = true;
