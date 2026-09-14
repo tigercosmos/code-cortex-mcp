@@ -2572,6 +2572,12 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             cbm_suppress_cross_language_suffix_match(lang, target_node->file_path, res.strategy)) {
             continue;
         }
+        /* A textual Go call match never binds a struct Field node. Mirrors
+         * pass_calls.cpp. */
+        if (target_node && cbm_go_suppress_textual_field_call(lang == CBM_LANG_GO,
+                                                              target_node->label, res.strategy)) {
+            continue;
+        }
         if (!target_node || source_node->id == target_node->id) {
             /* HTTP/ASYNC calls to an EXTERNAL client library (`requests.get(url)`)
              * resolve to an unindexed QN (target_node == NULL), but their edge

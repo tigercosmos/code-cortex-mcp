@@ -456,6 +456,22 @@ bool cbm_weak_short_name_strategy(const char *strategy) {
            strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
 }
 
+bool cbm_go_suppress_textual_field_call(bool is_go, const char *target_label,
+                                        const char *strategy) {
+    /* Companion of the #1942 reference guard, for CALLS. Once Go struct fields
+     * are graph nodes (#1935) the short-name registry offers them as call
+     * targets, so `ctx.Err()` bound a project struct's `Err` field and
+     * `strings.Count()` a `Count` field by unique_name / suffix_match /
+     * field_type_hint. A Go call can reach a field only through a selector on
+     * a func-typed field, and the type-aware Go LSP resolves that shape; every
+     * textual (non-lsp_*) strategy is a bare-name guess here. Go only: other
+     * languages keep their existing member-call guards. */
+    if (!is_go || !target_label || strcmp(target_label, "Field") != 0) {
+        return false;
+    }
+    return !strategy || strncmp(strategy, "lsp_", 4) != 0;
+}
+
 bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const char *target_label) {
     /* #1942/#1962: a bare Go identifier can never denote a struct field --
      * field access is always a selector expression (x.f). The extractor

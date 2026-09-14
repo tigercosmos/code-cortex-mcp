@@ -486,6 +486,22 @@ TEST(go_bare_ref_never_binds_field) {
     PASS();
 }
 
+TEST(go_textual_call_never_binds_field) {
+    /* Textual strategies cannot bind a Go call to a struct Field. */
+    ASSERT_TRUE(cbm_go_suppress_textual_field_call(true, "Field", "unique_name"));
+    ASSERT_TRUE(cbm_go_suppress_textual_field_call(true, "Field", "suffix_match"));
+    ASSERT_TRUE(cbm_go_suppress_textual_field_call(true, "Field", "field_type_hint"));
+    ASSERT_TRUE(cbm_go_suppress_textual_field_call(true, "Field", "same_module"));
+    ASSERT_TRUE(cbm_go_suppress_textual_field_call(true, "Field", NULL));
+    /* The type-aware LSP may (a call through a func-typed field). */
+    ASSERT_FALSE(cbm_go_suppress_textual_field_call(true, "Field", "lsp_type_dispatch"));
+    /* Non-field targets and other languages are untouched. */
+    ASSERT_FALSE(cbm_go_suppress_textual_field_call(true, "Method", "unique_name"));
+    ASSERT_FALSE(cbm_go_suppress_textual_field_call(true, NULL, "unique_name"));
+    ASSERT_FALSE(cbm_go_suppress_textual_field_call(false, "Field", "unique_name"));
+    PASS();
+}
+
 TEST(cross_language_suffix_match_drops_py_vs_js) {
     ASSERT_TRUE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "web/src/pages/Editor.js",
                                                          "suffix_match"));
@@ -878,6 +894,7 @@ SUITE(registry) {
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
     RUN_TEST(cross_language_ref_drops_go_vs_c);
     RUN_TEST(go_bare_ref_never_binds_field);
+    RUN_TEST(go_textual_call_never_binds_field);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(local_binding_suppress_drops_weak_shadowed_bare_calls);

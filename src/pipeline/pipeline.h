@@ -234,6 +234,13 @@ bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target
  * unit-tested in test_registry.cpp. */
 bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const char *target_label);
 
+/* CALLS companion of the above: a Go CALLS edge onto a Field node is kept only
+ * when a type-aware lsp_* strategy produced it. Textual registry strategies
+ * (unique_name, suffix_match, field_type_hint, same_module, ...) bind a call to
+ * a same-named struct field by spelling alone. Pure; unit-tested in
+ * test_registry.cpp. */
+bool cbm_go_suppress_textual_field_call(bool is_go, const char *target_label, const char *strategy);
+
 /* Relation-permitting resolve, for SQL FROM/JOIN lineage ONLY. The default
  * cbm_registry_resolve vetoes Table/View results because common relation names
  * collide with code identifiers in every language. Uncached by design — see the

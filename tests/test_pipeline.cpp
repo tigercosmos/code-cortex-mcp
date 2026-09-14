@@ -7841,6 +7841,56 @@ TEST(pipeline_go_cross_package_field_chain_resolves_parallel) {
     PASS();
 }
 
+/* Fields-as-call-targets fixture: struct fields spelled like stdlib calls
+ * (`Count`, `Err`) must not attract CALLS from `strings.Count()` / `ctx.Err()`,
+ * while a genuine cross-package function call still resolves. */
+static const char *const k_go_field_call_names[] = {"go.mod", "model/model.go", "util/util.go",
+                                                    "app/app.go"};
+static const char *const k_go_field_call_bodies[] = {
+    "module example.com/fxcall\n\ngo 1.22\n",
+    "package model\n\ntype JobGroup struct {\n\tCount int\n\tErr   error\n}\n",
+    "package util\n\nfunc Tag() string { return \"t\" }\n",
+    "package app\n\nimport (\n\t\"context\"\n\t\"strings\"\n\n\t\"example.com/fxcall/util\"\n)\n\n"
+    "func Use(ctx context.Context) int {\n\t_ = ctx.Err()\n\t_ = util.Tag()\n"
+    "\treturn strings.Count(\"a\", \"b\")\n}\n"};
+
+/* 0 = no CALLS onto a Field and the util.Tag control kept. */
+static int go_field_call_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p = index_fixture_with_padding(k_go_field_call_names, k_go_field_call_bodies, 4,
+                                                   pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -9;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -8;
+    if (s) {
+        int bad = named_edge_count(s, proj, "CALLS", "Use", "Count") +
+                  named_edge_count(s, proj, "CALLS", "Use", "Err");
+        int keep = named_edge_count(s, proj, "CALLS", "Use", "Tag");
+        printf("  go field call probe pad=%d: calls onto fields=%d control=%d\n", pad, bad, keep);
+        rc = bad != 0 ? -1 : (keep < 1 ? -2 : 0);
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+/* Sequential twin (pass_calls.cpp). */
+TEST(pipeline_go_textual_call_never_binds_field) {
+    ASSERT_EQ(go_field_call_probe(0), 0);
+    PASS();
+}
+
+/* Parallel twin (pass_parallel.cpp). */
+TEST(pipeline_go_textual_call_never_binds_field_parallel) {
+    ASSERT_EQ(go_field_call_probe(52), 0);
+    PASS();
+}
+
 TEST(pipeline_go_rw_usage_never_cross_into_c_parallel) {
     ASSERT_EQ(go_c_ref_guard_probe(52), 0);
     PASS();
@@ -8583,6 +8633,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
     RUN_TEST(pipeline_go_cross_package_field_chain_resolves);
     RUN_TEST(pipeline_go_cross_package_field_chain_resolves_parallel);
+    RUN_TEST(pipeline_go_textual_call_never_binds_field);
+    RUN_TEST(pipeline_go_textual_call_never_binds_field_parallel);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

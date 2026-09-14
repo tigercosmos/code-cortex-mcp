@@ -691,6 +691,10 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     if (cbm_suppress_cross_language_suffix_match(lang, target_node->file_path, res.strategy)) {
         return 0;
     }
+    /* A textual Go call match never binds a struct Field node. */
+    if (cbm_go_suppress_textual_field_call(lang == CBM_LANG_GO, target_node->label, res.strategy)) {
+        return 0;
+    }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
                          imp_count, drop_plain_call);
     return SKIP_ONE;
