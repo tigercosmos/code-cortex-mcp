@@ -4454,10 +4454,18 @@ static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
             return body;
         }
     }
-    // Go: type_spec -> type field (interface_type or struct_type)
+    // Go: type_spec -> type field (interface_type or struct_type). interface_type
+    // holds its method specs directly, but a struct keeps its field_declaration
+    // nodes one level lower, in the struct_type's field_declaration_list (#1935).
     if (lang == CBM_LANG_GO) {
         TSNode type_inner = ts_node_child_by_field_name(class_node, TS_FIELD("type"));
         if (!ts_node_is_null(type_inner)) {
+            if (strcmp(ts_node_type(type_inner), "struct_type") == 0) {
+                TSNode list = cbm_find_child_by_kind(type_inner, "field_declaration_list");
+                if (!ts_node_is_null(list)) {
+                    return list;
+                }
+            }
             return type_inner;
         }
     }
@@ -6088,19 +6096,6 @@ static TSNode resolve_field_name_node(TSNode child) {
     return name_node;
 }
 
-/* Go structs keep their field_declaration nodes one level below the body that
- * find_class_body() returns: type_spec's `type` child is a struct_type whose
- * only named child is a field_declaration_list. Interfaces need no such step --
- * interface_type holds its method specs directly, which is why interface members
- * extracted while every struct field was silently skipped (#1935). */
-static TSNode go_normalize_struct_body(TSNode body) {
-    if (ts_node_is_null(body) || strcmp(ts_node_type(body), "struct_type") != 0) {
-        return body;
-    }
-    TSNode list = cbm_find_child_by_kind(body, "field_declaration_list");
-    return ts_node_is_null(list) ? body : list;
-}
-
 static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
                                  const CBMLangSpec *spec) {
     if (!spec->field_node_types || !spec->field_node_types[0]) {
@@ -6108,9 +6103,6 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
     }
 
     TSNode body = find_class_body(class_node, ctx->language);
-    if (ctx->language == CBM_LANG_GO) {
-        body = go_normalize_struct_body(body);
-    }
     if (ts_node_is_null(body)) {
         return;
     }
