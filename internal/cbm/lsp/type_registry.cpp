@@ -168,14 +168,29 @@ static void build_type_embed_index(CBMTypeRegistry* reg, CBMArena* idx_arena) {
 
 /* Index: short_name -> chain of FREE-function (receiver_type==NULL) indices.
  * Descending-iterate + prepend for ascending chain order (as above). */
-/* Index: short_name -> chain of TYPE indices. The type-side twin of the free-
- * function short-name index below; added because cs_resolve_type_name's
- * last-resort fallback scanned type_count for every unresolved name, which is
- * quadratic against a SHARED registry holding the whole corpus. */
-static void build_type_short_index(CBMTypeRegistry* reg, CBMArena* idx_arena) {
+/* Index: key -> chain of TYPE indices. The type-side twin of the free-function
+ * short-name index below; added because cs_resolve_type_name's last-resort
+ * fallback scanned type_count for every unresolved name, which is quadratic
+ * against a SHARED registry holding the whole corpus. `key` returns the
+ * spelling a type is indexed under, or NULL to leave it out. On allocation
+ * failure the index stays absent, so lookups degrade to the full scan. */
+using TypeShortKeyFn = const char* (*)(const CBMRegisteredType* t);
+
+static const char* type_key_short_name(const CBMRegisteredType* t) {
+    return t->short_name;
+}
+
+static const char* type_key_qn_last_segment(const CBMRegisteredType* t) {
+    const char* qn = t->qualified_name;
+    if (!qn) return NULL;
+    const char* dot = strrchr(qn, '.');
+    return dot ? dot + 1 : qn;
+}
+
+static void build_type_short_index(CBMTypeRegistry* reg, CBMArena* idx_arena, TypeShortKeyFn key) {
     int tcount = 0;
     for (int i = 0; i < reg->type_count; i++) {
-        if (reg->types[i].short_name) tcount++;
+        if (key(&reg->types[i])) tcount++;
     }
     if (tcount == 0) return;
     int bucket_count = next_pow2(tcount * 2);
@@ -189,9 +204,9 @@ static void build_type_short_index(CBMTypeRegistry* reg, CBMArena* idx_arena) {
     /* Reverse insertion so each chain yields ASCENDING types[] order — callers
      * that relied on first-match-in-registration-order keep their tie-breaks. */
     for (int i = reg->type_count - 1; i >= 0; i--) {
-        const CBMRegisteredType* t = &reg->types[i];
-        if (!t->short_name) continue;
-        uint64_t h = fnv1a(t->short_name);
+        const char* k = key(&reg->types[i]);
+        if (!k) continue;
+        uint64_t h = fnv1a(k);
         int slot = (int)(h & (uint64_t)(bucket_count - 1));
         entries[idx].hash = h;
         entries[idx].payload_index = i;
@@ -219,36 +234,7 @@ void cbm_registry_build_type_short_index(CBMTypeRegistry* reg) {
     reg->type_short_bucket_count = 0;
     reg->type_short_entry_count = 0;
     if (!reg->arena || !reg->type_qn_buckets || reg->type_qn_bucket_count <= 0) return;
-    int count = 0;
-    for (int i = 0; i < reg->type_count; i++) {
-        if (reg->types[i].qualified_name) count++;
-    }
-    if (count == 0) return;
-    int bucket_count = next_pow2(count * 2);
-    if (bucket_count < 16) bucket_count = 16;
-    int* buckets = (int*)cbm_arena_alloc(reg->arena, (size_t)bucket_count * sizeof(int));
-    CBMRegistryHashEntry* entries = (CBMRegistryHashEntry*)cbm_arena_alloc(
-        reg->arena, (size_t)count * sizeof(CBMRegistryHashEntry));
-    if (!buckets || !entries) return;
-    for (int i = 0; i < bucket_count; i++) buckets[i] = -1;
-    int idx = 0;
-    for (int i = reg->type_count - 1; i >= 0; i--) {
-        const char* qn = reg->types[i].qualified_name;
-        if (!qn) continue;
-        const char* dot = strrchr(qn, '.');
-        uint64_t h = fnv1a(dot ? dot + 1 : qn);
-        int slot = (int)(h & (uint64_t)(bucket_count - 1));
-        entries[idx].hash = h;
-        entries[idx].payload_index = i;
-        entries[idx].next_index = buckets[slot];
-        entries[idx].slot = slot;
-        buckets[slot] = idx;
-        idx++;
-    }
-    reg->type_short_buckets = buckets;
-    reg->type_short_entries = entries;
-    reg->type_short_bucket_count = bucket_count;
-    reg->type_short_entry_count = idx;
+    build_type_short_index(reg, reg->arena, type_key_qn_last_segment);
 }
 
 static void build_ffunc_short_index(CBMTypeRegistry* reg, CBMArena* idx_arena) {
@@ -403,7 +389,7 @@ void cbm_registry_finalize_into(CBMTypeRegistry* reg, CBMArena* idx_arena) {
     build_method_index(reg, idx_arena);
     build_type_embed_index(reg, idx_arena);
     build_ffunc_short_index(reg, idx_arena);
-    build_type_short_index(reg, idx_arena);
+    build_type_short_index(reg, idx_arena, type_key_short_name);
 }
 
 void cbm_registry_finalize(CBMTypeRegistry* reg) {
