@@ -15610,6 +15610,120 @@ TEST(clsp_golden_func_ptr_via_dispatch) {
     PASS();
 }
 
+/* Exact-predicate collection over the type short-name iterator: the index is a
+ * hash prefilter, so production consumers re-check, and so does this. */
+static int clsp_collect_qn_segment(const CBMTypeRegistry *reg, const char *short_name, int *out,
+                                   int cap) {
+    CBMTypeShortIter it;
+    cbm_registry_types_by_short_name(reg, short_name, &it);
+    int n = 0;
+    int candidate;
+    while ((candidate = cbm_type_short_iter_next(&it)) >= 0) {
+        const char *qn = reg->types[candidate].qualified_name;
+        const char *dot = qn ? strrchr(qn, '.') : nullptr;
+        const char *seg = dot ? dot + 1 : qn;
+        if (!seg || strcmp(seg, short_name) != 0)
+            continue;
+        if (n < cap)
+            out[n] = candidate;
+        n++;
+    }
+    return n;
+}
+
+/* #1677 + da61c81a: the C++ namespaced-type fallback reads candidates from the
+ * type short-name index, keyed on the QN's final segment. The iterator must
+ * yield exactly the old linear scan's matches in the same ascending order,
+ * cover the post-finalize tail, and — the defect upstream found in the C#
+ * twin of this iterator — degrade to a FULL scan when the auxiliary index is
+ * absent, not start at type_qn_entry_count and silently skip every finalized
+ * type. */
+TEST(clsp_type_short_index_matches_linear_scan_and_degrades) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMTypeRegistry reg;
+    cbm_registry_init(&reg, &arena);
+    const char *seed[] = {"other.Trait", "pkg.A", "pkg.B", "Trait", "ns.deep.Trait"};
+    for (const char *qn : seed) {
+        CBMRegisteredType t = {};
+        t.qualified_name = qn;
+        const char *dot = strrchr(qn, '.');
+        t.short_name = dot ? dot + 1 : qn;
+        cbm_registry_add_type(&reg, t);
+    }
+    for (int i = 0; i < 512; i++) {
+        CBMRegisteredType t = {};
+        t.qualified_name = cbm_arena_sprintf(&arena, "bulk.mod%d.Name%d", i, i % 23);
+        ASSERT_NOT_NULL(t.qualified_name);
+        t.short_name = strrchr(t.qualified_name, '.') + 1;
+        cbm_registry_add_type(&reg, t);
+    }
+    cbm_registry_finalize(&reg);
+    cbm_registry_build_type_short_index(&reg);
+    ASSERT_NOT_NULL(reg.type_short_buckets);
+
+    int got[64];
+    ASSERT_EQ(clsp_collect_qn_segment(&reg, "Trait", got, 64), 3);
+    ASSERT_EQ(got[0], 0);
+    ASSERT_EQ(got[1], 3);
+    ASSERT_EQ(got[2], 4);
+    ASSERT_EQ(clsp_collect_qn_segment(&reg, "Missing", got, 64), 0);
+
+    /* Differential against the linear scan for every colliding bulk name. */
+    for (int name_i = 0; name_i < 23; name_i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "Name%d", name_i);
+        int n = clsp_collect_qn_segment(&reg, name, got, 64);
+        int k = 0;
+        for (int i = 0; i < reg.type_count; i++) {
+            const char *seg = strrchr(reg.types[i].qualified_name, '.');
+            seg = seg ? seg + 1 : reg.types[i].qualified_name;
+            if (strcmp(seg, name) != 0)
+                continue;
+            ASSERT(k < n);
+            ASSERT_EQ(got[k], i);
+            k++;
+        }
+        ASSERT_EQ(k, n);
+    }
+
+    /* Post-finalize tail is covered. */
+    int tail_i = reg.type_count;
+    CBMRegisteredType tail = {};
+    tail.qualified_name = "tail.Trait";
+    tail.short_name = "Trait";
+    cbm_registry_add_type(&reg, tail);
+    ASSERT_EQ(clsp_collect_qn_segment(&reg, "Trait", got, 64), 4);
+    ASSERT_EQ(got[3], tail_i);
+
+    /* Absent auxiliary index on a FINALIZED registry: full scan, same answer. */
+    int *saved = reg.type_short_buckets;
+    reg.type_short_buckets = nullptr;
+    ASSERT_EQ(clsp_collect_qn_segment(&reg, "Trait", got, 64), 4);
+    ASSERT_EQ(got[0], 0);
+    ASSERT_EQ(got[3], tail_i);
+    reg.type_short_buckets = saved;
+
+    /* A failed rebuild clears the stale index and still answers completely. */
+    cbm_registry_finalize(&reg);
+    int saved_nblocks = arena.nblocks;
+    size_t saved_used = arena.used;
+    arena.nblocks = CBM_ARENA_MAX_BLOCKS;
+    arena.used = arena.block_size;
+    cbm_registry_build_type_short_index(&reg);
+    arena.nblocks = saved_nblocks;
+    arena.used = saved_used;
+    ASSERT_NULL(reg.type_short_buckets);
+    ASSERT_NULL(reg.type_short_entries);
+    ASSERT_EQ(reg.type_short_bucket_count, 0);
+    ASSERT_EQ(clsp_collect_qn_segment(&reg, "Trait", got, 64), 4);
+    ASSERT_EQ(got[0], 0);
+    ASSERT_EQ(got[3], tail_i);
+
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(c_lsp) {
@@ -16368,4 +16482,5 @@ SUITE(c_lsp) {
     RUN_TEST(clsp_dll_multiple_functions);
     RUN_TEST(clsp_dll_func_ptr_typedef);
     RUN_TEST(clsp_easy_win_sfinaeconditional_return);
+    RUN_TEST(clsp_type_short_index_matches_linear_scan_and_degrades);
 }

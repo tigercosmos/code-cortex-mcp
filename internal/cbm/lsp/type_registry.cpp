@@ -206,6 +206,51 @@ static void build_type_short_index(CBMTypeRegistry* reg, CBMArena* idx_arena) {
     reg->type_short_entry_count = idx;
 }
 
+/* Rebuild the type short-name index keyed on the LAST '.'-SEGMENT OF THE
+ * QUALIFIED NAME instead of the registered short_name. The C/C++ namespaced-type
+ * fallback matches on that segment, which is not guaranteed to equal short_name,
+ * so its registries opt in after finalize (#1677). Any previous index is dropped
+ * first: a failed rebuild must fall back to the full scan, never keep a stale
+ * index keyed on the other spelling or on a pre-tail boundary. */
+void cbm_registry_build_type_short_index(CBMTypeRegistry* reg) {
+    if (!reg) return;
+    reg->type_short_buckets = NULL;
+    reg->type_short_entries = NULL;
+    reg->type_short_bucket_count = 0;
+    reg->type_short_entry_count = 0;
+    if (!reg->arena || !reg->type_qn_buckets || reg->type_qn_bucket_count <= 0) return;
+    int count = 0;
+    for (int i = 0; i < reg->type_count; i++) {
+        if (reg->types[i].qualified_name) count++;
+    }
+    if (count == 0) return;
+    int bucket_count = next_pow2(count * 2);
+    if (bucket_count < 16) bucket_count = 16;
+    int* buckets = (int*)cbm_arena_alloc(reg->arena, (size_t)bucket_count * sizeof(int));
+    CBMRegistryHashEntry* entries = (CBMRegistryHashEntry*)cbm_arena_alloc(
+        reg->arena, (size_t)count * sizeof(CBMRegistryHashEntry));
+    if (!buckets || !entries) return;
+    for (int i = 0; i < bucket_count; i++) buckets[i] = -1;
+    int idx = 0;
+    for (int i = reg->type_count - 1; i >= 0; i--) {
+        const char* qn = reg->types[i].qualified_name;
+        if (!qn) continue;
+        const char* dot = strrchr(qn, '.');
+        uint64_t h = fnv1a(dot ? dot + 1 : qn);
+        int slot = (int)(h & (uint64_t)(bucket_count - 1));
+        entries[idx].hash = h;
+        entries[idx].payload_index = i;
+        entries[idx].next_index = buckets[slot];
+        entries[idx].slot = slot;
+        buckets[slot] = idx;
+        idx++;
+    }
+    reg->type_short_buckets = buckets;
+    reg->type_short_entries = entries;
+    reg->type_short_bucket_count = bucket_count;
+    reg->type_short_entry_count = idx;
+}
+
 static void build_ffunc_short_index(CBMTypeRegistry* reg, CBMArena* idx_arena) {
     int fcount = 0;
     for (int i = 0; i < reg->func_count; i++) {
@@ -286,10 +331,15 @@ void cbm_registry_types_by_short_name(const CBMTypeRegistry* reg, const char* sh
         if (reg->type_short_buckets && reg->type_short_bucket_count > 0) {
             int slot = (int)(out->hash & (uint64_t)(reg->type_short_bucket_count - 1));
             out->chain_idx = reg->type_short_buckets[slot];
+            out->tail_i = reg->type_qn_entry_count;
         } else {
+            /* Finalized, but the auxiliary index is absent (its allocation
+             * failed, or a rebuild cleared it). Starting at type_qn_entry_count
+             * here would SKIP every finalized type and silently shrink the
+             * candidate set; scan them all instead (upstream da61c81a). */
             out->chain_idx = -1;
+            out->tail_i = 0;
         }
-        out->tail_i = reg->type_qn_entry_count;
         out->tail_end = reg->type_count;
     } else {
         /* Unfinalized registry: fall back to a full types[] scan. Same answers,

@@ -160,6 +160,12 @@ void cbm_registry_finalize(CBMTypeRegistry *reg);
 // there add GBs across a large repo (FastAPI incremental test: +1.1 GB RSS).
 void cbm_registry_finalize_into(CBMTypeRegistry *reg, CBMArena *idx_arena);
 
+// Rebuild the type short-name index keyed on each qualified name's final
+// '.'-segment (finalize keys it on short_name). Call immediately after
+// finalization; the C/C++ registries opt in. Allocation failure clears the
+// index, so the iterator degrades to its full linear scan.
+void cbm_registry_build_type_short_index(CBMTypeRegistry *reg);
+
 // Register a function/method.
 void cbm_registry_add_func(CBMTypeRegistry *reg, CBMRegisteredFunc func);
 
