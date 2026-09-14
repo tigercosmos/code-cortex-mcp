@@ -21,6 +21,11 @@ typedef struct {
     uint64_t bitlen;
     uint8_t buf[64];
     size_t buflen;
+    /* Message-schedule scratch for the block transform. Kept here rather than
+     * as a 256-byte local in the transform: a local that size is fake-stacked
+     * by ASan's use-after-return mode on EVERY 64-byte block, turning one hash
+     * of a large file into millions of allocations. Allocated once per hash. */
+    uint32_t sched[64];
 } cbm_sha256_ctx;
 
 void cbm_sha256_init(cbm_sha256_ctx *c);

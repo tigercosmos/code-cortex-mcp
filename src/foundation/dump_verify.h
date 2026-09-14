@@ -25,6 +25,8 @@ enum { CBM_DUMP_VERIFY_MIN_FLOOR = 50 };
  *
  * Returns false when ratio <= 0 (gate disabled), committed_nodes < 0 (no dump),
  * committed_nodes <= min_floor (sparse repo), or persisted >= committed * ratio.
+ * Sparse repositories skip only the ratio gate: a complete persistence loss
+ * (committed > 0, persisted == 0) is degraded at every size.
  * Returns true when persisted_nodes < 0 (count error).
  */
 bool cbm_dump_verify_is_degraded(int committed_nodes, int persisted_nodes, double ratio,

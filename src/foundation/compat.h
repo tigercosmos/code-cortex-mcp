@@ -86,6 +86,7 @@ char *cbm_strcasestr(const char *haystack, const char *needle);
 #endif
 
 /* ── clock_gettime / nanosleep (Windows lacks them) ──────────── */
+#include <errno.h>
 #include <time.h>
 #ifdef _WIN32
 #ifndef CLOCK_MONOTONIC
@@ -116,6 +117,23 @@ static inline int cbm_clock_gettime(int clk_id, struct timespec *tp) {
  * CLOCK_THREAD_CPUTIME_ID. Windows: GetThreadTimes kernel+user. Returns 0 if
  * the platform clock is unavailable. Implemented in compat.cpp. */
 uint64_t cbm_thread_cpu_time_ns(void);
+
+/* Sleep for the FULL requested duration, resuming after a POSIX signal
+ * interrupts it (EINTR). A bare nanosleep returns early on any signal, which
+ * cut the spawn back-off short under a periodic timer. */
+static inline int cbm_nanosleep_full(const struct timespec *req) {
+#ifdef _WIN32
+    return cbm_nanosleep(req, NULL);
+#else
+    struct timespec remaining = *req;
+    while (nanosleep(&remaining, &remaining) != 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    return 0;
+#endif
+}
 
 /* ── gmtime_r (Windows lacks it) ─────────────────────────────── */
 #ifdef _WIN32

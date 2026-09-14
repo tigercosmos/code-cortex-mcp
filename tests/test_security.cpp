@@ -18,6 +18,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #ifndef _WIN32
+#include <signal.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -477,6 +479,58 @@ TEST(subprocess_retries_transient_spawn_refusal) {
     PASS();
 }
 
+#ifndef _WIN32
+static volatile sig_atomic_t g_spawn_backoff_alarm_count = 0;
+
+static void spawn_backoff_alarm_handler(int signal_number) {
+    (void)signal_number;
+    g_spawn_backoff_alarm_count = g_spawn_backoff_alarm_count + 1;
+}
+#endif
+
+/* A periodic signal must not cut the spawn back-off short: nanosleep returns
+ * early with EINTR, and the ladder then retried almost immediately, burning
+ * its budget on a machine that needed the wait (upstream c537bf0f). Three
+ * refusals sleep 10+20+40 ms; a 1 ms interval timer interrupts every one. */
+TEST(subprocess_spawn_backoff_resumes_after_eintr) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX signal interruption");
+#else
+    struct sigaction action = {};
+    struct sigaction previous_action = {};
+    action.sa_handler = spawn_backoff_alarm_handler;
+    (void)sigemptyset(&action.sa_mask);
+    bool handler_installed = sigaction(SIGALRM, &action, &previous_action) == 0;
+
+    struct itimerval timer = {};
+    timer.it_interval.tv_usec = 1000;
+    timer.it_value.tv_usec = 1000;
+    g_spawn_backoff_alarm_count = 0;
+    bool timer_started = handler_installed && setitimer(ITIMER_REAL, &timer, NULL) == 0;
+
+    uint64_t started_at = cbm_now_ms();
+    cbm_proc_result_t result;
+    cbm_subprocess_force_spawn_eagain_for_testing(3);
+    int rc = subprocess_spawn_exit_zero(&result);
+    uint64_t elapsed_ms = cbm_now_ms() - started_at;
+    cbm_subprocess_force_spawn_eagain_for_testing(0); /* never leak into later tests */
+
+    struct itimerval disabled = {};
+    (void)setitimer(ITIMER_REAL, &disabled, NULL);
+    if (handler_installed) {
+        (void)sigaction(SIGALRM, &previous_action, NULL);
+    }
+
+    ASSERT_TRUE(handler_installed);
+    ASSERT_TRUE(timer_started);
+    ASSERT_TRUE(g_spawn_backoff_alarm_count > 0);
+    ASSERT_TRUE(elapsed_ms >= 50);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(result.outcome, CBM_PROC_CLEAN);
+    PASS();
+#endif
+}
+
 TEST(subprocess_gives_up_after_the_retry_budget) {
     /* More refusals than the budget: it must fail rather than retry forever.
      * A machine still refusing after ~0.6s is genuinely out of capacity, and
@@ -579,6 +633,7 @@ SUITE(security) {
 #ifdef CBM_ENABLE_TEST_SEAMS
     /* Transient spawn-refusal retry (test-seam builds only) */
     RUN_TEST(subprocess_retries_transient_spawn_refusal);
+    RUN_TEST(subprocess_spawn_backoff_resumes_after_eintr);
     RUN_TEST(subprocess_gives_up_after_the_retry_budget);
     RUN_TEST(subprocess_spawn_retry_respects_the_caller_deadline);
 #endif

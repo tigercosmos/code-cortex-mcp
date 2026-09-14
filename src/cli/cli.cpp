@@ -2845,9 +2845,15 @@ static int remove_indexes_in_dir(const char *cache_dir) {
             snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target);
             if (cbm_unlink(target) == 0) {
                 cbm_unlink(tmp_path);
-                cbm_remove_db_sidecars(target);
                 count++;
             }
+            /* Remove the SQLite sidecars (-wal/-shm/-journal) of both the live
+             * and the temporary generation (#2054). Idempotent and
+             * ENOENT-tolerant, so it runs even when the .db unlink failed: an
+             * orphan -wal can outlive its .db. Sidecars are not indexes, so the
+             * count is unchanged. */
+            cbm_remove_db_sidecars(target);
+            cbm_remove_db_sidecars(tmp_path);
             cbm_db_lease_release(lease);
         }
     }

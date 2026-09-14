@@ -496,7 +496,7 @@ static bool cbm_spawn_backoff_within_budget(int attempt, const cbm_proc_opts_t *
     long ms = cbm_spawn_backoff_ms(attempt);
     struct timespec delay = {static_cast<time_t>(ms / CBM_SPAWN_MS_PER_SEC),
                              static_cast<long>(ms % CBM_SPAWN_MS_PER_SEC) * CBM_SPAWN_NS_PER_MS};
-    (void)cbm_nanosleep(&delay, nullptr);
+    (void)cbm_nanosleep_full(&delay);
     return true;
 }
 

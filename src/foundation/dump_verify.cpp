@@ -17,6 +17,11 @@ bool cbm_dump_verify_is_degraded(int committed_nodes, int persisted_nodes, doubl
     if (committed_nodes < 0) {
         return false;
     }
+    /* A sparse repository skips the ratio gate, but losing EVERY committed
+     * node is degraded at any positive size. */
+    if (committed_nodes > 0 && persisted_nodes == 0) {
+        return true;
+    }
     if (committed_nodes <= min_floor) {
         return false;
     }

@@ -4,6 +4,7 @@
 #include "test_framework.h"
 #include "../src/foundation/compat.h" /* cbm_setenv / cbm_unsetenv (Windows-portable) */
 #include "../src/foundation/platform.h"
+#include "../src/foundation/dump_verify.h"
 #include "../src/foundation/system_info_internal.h"
 #include <stdlib.h>
 #include <unistd.h>
@@ -436,7 +437,48 @@ TEST(platform_resolve_self_exe_survives_deleted_image_issue1204) {
 #endif
 }
 
+/* atoi/atol answer 0 for text they cannot read, and 0 is a real setting at
+ * every caller. cbm_env_long answers true only for a clean whole number. */
+TEST(platform_env_long_refuses_unreadable_values) {
+    const char *name = "CBM_TEST_ENV_LONG_PROBE";
+    long v = 7;
+    cbm_unsetenv(name);
+    ASSERT_FALSE(cbm_env_long(name, &v));
+    ASSERT_EQ(v, 7);
+    const char *unreadable[] = {"", "abc", "30s", " 5", "5 ", "99999999999999999999999"};
+    for (size_t i = 0; i < sizeof(unreadable) / sizeof(unreadable[0]); i++) {
+        cbm_setenv(name, unreadable[i], 1);
+        v = 7;
+        ASSERT_FALSE(cbm_env_long(name, &v));
+        ASSERT_EQ(v, 7); /* untouched */
+    }
+    cbm_setenv(name, "0", 1);
+    ASSERT_TRUE(cbm_env_long(name, &v));
+    ASSERT_EQ(v, 0);
+    cbm_setenv(name, "-12", 1);
+    ASSERT_TRUE(cbm_env_long(name, &v));
+    ASSERT_EQ(v, -12);
+    cbm_setenv(name, "30", 1);
+    ASSERT_TRUE(cbm_env_long(name, &v));
+    ASSERT_EQ(v, 30);
+    ASSERT_FALSE(cbm_env_long(name, NULL));
+    cbm_unsetenv(name);
+    PASS();
+}
+
+/* A sparse repository skips the ratio gate, but losing every committed node
+ * is degraded at any positive size (upstream ffc29f73). */
+TEST(platform_dump_verify_sparse_zero_persisted) {
+    ASSERT_TRUE(cbm_dump_verify_is_degraded(12, 0, 0.5, CBM_DUMP_VERIFY_MIN_FLOOR));
+    ASSERT_FALSE(cbm_dump_verify_is_degraded(12, 11, 0.5, CBM_DUMP_VERIFY_MIN_FLOOR));
+    ASSERT_FALSE(cbm_dump_verify_is_degraded(12, 0, 0.0, CBM_DUMP_VERIFY_MIN_FLOOR));
+    ASSERT_FALSE(cbm_dump_verify_is_degraded(0, 0, 0.5, CBM_DUMP_VERIFY_MIN_FLOOR));
+    PASS();
+}
+
 SUITE(platform) {
+    RUN_TEST(platform_env_long_refuses_unreadable_values);
+    RUN_TEST(platform_dump_verify_sparse_zero_persisted);
     RUN_TEST(platform_now_ns);
     RUN_TEST(platform_resolve_self_exe_survives_deleted_image_issue1204);
     RUN_TEST(platform_now_ms);
