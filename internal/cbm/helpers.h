@@ -131,6 +131,10 @@ char *cbm_cpp_out_of_line_parent_class(CBMArena *a, TSNode node, const char *sou
 // Find a child node by kind string.
 TSNode cbm_find_child_by_kind(TSNode parent, const char *kind);
 
+// The arguments node of an Elixir call. tree-sitter-elixir gives it no field
+// name, so it falls back to the second child. Null when there is none.
+TSNode cbm_elixir_call_args(TSNode node);
+
 // Find every child node matching `kind` (unlike cbm_find_child_by_kind,
 // which stops at the first match). Writes up to `max` nodes into `out`;
 // returns how many were found. Repeated sibling nodes of the same kind are

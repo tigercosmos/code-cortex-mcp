@@ -179,10 +179,9 @@ enum { NULL_TERM = 1 };
 
 // String operations.
 enum {
-    SKIP_CHAR = 1,        // skip one character (dot, quote, prefix)
-    PAIR_CHARS = 2,       // pair of delimiters (quotes, parens)
-    SECOND_CHILD_IDX = 1, // index of second child
-    FIRST_LINE = 1,       // first line number
+    SKIP_CHAR = 1,  // skip one character (dot, quote, prefix)
+    PAIR_CHARS = 2, // pair of delimiters (quotes, parens)
+    FIRST_LINE = 1, // first line number
 };
 
 // Return type pair array size.
@@ -4845,19 +4844,10 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 
 // --- Elixir def/defp/defmodule ---
 
-// Get the "arguments" node for an Elixir call, with fallback to second child.
-static TSNode elixir_call_args(TSNode node) {
-    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-    if (ts_node_is_null(args) && ts_node_child_count(node) > SECOND_CHILD_IDX) {
-        args = ts_node_child(node, SECOND_CHILD_IDX);
-    }
-    return args;
-}
-
 // Handle Elixir def/defp/defmacro — extract function definition.
 static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char *macro) {
     CBMArena *a = ctx->arena;
-    TSNode args = elixir_call_args(node);
+    TSNode args = cbm_elixir_call_args(node);
     if (ts_node_is_null(args)) {
         return;
     }
@@ -4894,7 +4884,7 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
 static TSNode emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur) {
     CBMArena *a = ctx->arena;
     TSNode null_node = {0};
-    TSNode args = elixir_call_args(cur);
+    TSNode args = cbm_elixir_call_args(cur);
     if (ts_node_is_null(args)) {
         return null_node;
     }

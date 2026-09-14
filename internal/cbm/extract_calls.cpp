@@ -444,17 +444,6 @@ static bool perl_is_identifier_callee(const char *name) {
     return true;
 }
 
-/* tree-sitter-elixir gives a call's arguments node no field name, so it is
- * found positionally. Mirrors elixir_call_args() in extract_defs.cpp, which the
- * definition side has always used for the same reason. */
-static TSNode elixir_call_arguments_fallback(TSNode node) {
-    TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
-    if (ts_node_is_null(args) && ts_node_child_count(node) > 1) {
-        args = ts_node_child(node, 1);
-    }
-    return args;
-}
-
 /* Swift models a call as a target expression plus a call_suffix, and its grammar
  * declares no "arguments" field at all. Reach the argument list through the
  * suffix. A trailing closure has a call_suffix with no value_arguments, which
@@ -2290,16 +2279,15 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                 }
             }
 
-            TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
             /* tree-sitter-elixir attaches NO field name to a call's arguments
-             * node, so the lookup above is always null for Elixir and
+             * node, so a plain field lookup is always null for Elixir and
              * first_string_arg was never populated for any Elixir call
              * (Phoenix route paths, service URLs, config keys). Positional
              * second-child fallback, restricted to `call` nodes (upstream). */
-            if (ts_node_is_null(args) && ctx->language == CBM_LANG_ELIXIR &&
-                strcmp(ts_node_type(node), "call") == 0) {
-                args = elixir_call_arguments_fallback(node);
-            }
+            TSNode args =
+                ctx->language == CBM_LANG_ELIXIR && strcmp(ts_node_type(node), "call") == 0
+                    ? cbm_elixir_call_args(node)
+                    : ts_node_child_by_field_name(node, TS_FIELD("arguments"));
             /* Swift declares no "arguments" field; its args hang off call_suffix
              * (upstream #1892). */
             if (ts_node_is_null(args) && ctx->language == CBM_LANG_SWIFT) {
