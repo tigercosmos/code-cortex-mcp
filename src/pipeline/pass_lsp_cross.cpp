@@ -242,11 +242,101 @@ static const char *pxc_infer_jvm_namespace(CBMArena *arena, const char *rel_path
     return ns;
 }
 
+/* ── Cross-file base-class QN resolution ──────────────────────────
+ *
+ * CBMDefinition.base_classes carries the SOURCE SPELLING of each base
+ * ("Base", "django.db.Model"): extraction cannot know WHERE the name is
+ * declared. The Python and TS cross-file registrars, however, consume
+ * CBMLSPDef.embedded_types as fully-qualified names — py_lookup_attribute
+ * and ts_lookup_member feed each entry straight into
+ * cbm_registry_lookup_type. An unqualified spelling therefore matched
+ * nothing declared in ANOTHER file: `class Child(Base)` in child.py never
+ * saw Base in base.py, so a call to an inherited method through a typed
+ * receiver found no member and fell through to the weak textual cascade
+ * (where the receiver-aware guard correctly kills it).
+ *
+ * Resolve each base name ONCE per definition here, from exactly the inputs
+ * the INHERITS edge uses (pass_semantic / pass_parallel resolve_as_class):
+ * the project registry, the declaring module, and the file's import map. The
+ * LSP's inheritance view is then the relation the graph records, and the
+ * binding is import- or module-backed rather than a short-name guess, so the
+ * CALLS edge it enables is one the weak-member guard keeps.
+ *
+ * Cost: O(defs) hash lookups + ONE import map per file. */
+static bool pxc_lang_resolves_base_qns(CBMLanguage lang) {
+    switch (lang) {
+    case CBM_LANG_PYTHON:
+    case CBM_LANG_JAVASCRIPT:
+    case CBM_LANG_TYPESCRIPT:
+    case CBM_LANG_TSX:
+        return true;
+    default:
+        /* Go / JVM / C# / C++ / Rust registrars qualify their own embedded
+         * types already; re-resolving here would fight those paths. */
+        return false;
+    }
+}
+
+/* Resolve one base-class spelling to a project QN: same registry lookup and
+ * type-like veto as the INHERITS resolver, plus a refusal of weak short-name
+ * strategies — a base bound because some project type merely shares its name
+ * is the fabricated relation #606 removed, and inheritance multiplies it
+ * (every inherited member of the wrong base becomes a callable target).
+ * Returns NULL for stdlib / third-party / unknown bases, which then keep their
+ * raw spelling and the pre-existing behaviour. */
+static const char *pxc_resolve_base_qn(const cbm_registry_t *reg, const char *raw,
+                                       const char *module_qn, const char **imp_keys,
+                                       const char **imp_vals, int imp_count) {
+    if (!reg || !raw || !raw[0]) {
+        return NULL;
+    }
+    cbm_resolution_t res = cbm_registry_resolve(reg, raw, module_qn, imp_keys, imp_vals, imp_count);
+    if (!res.qualified_name || !res.qualified_name[0]) {
+        return NULL;
+    }
+    if (!res.strategy || !res.strategy[0] || cbm_weak_short_name_strategy(res.strategy)) {
+        return NULL;
+    }
+    if (!cbm_label_is_type_like(cbm_registry_label_of(reg, res.qualified_name))) {
+        return NULL;
+    }
+    return res.qualified_name;
+}
+
+/* pxc_join_pipe over base_classes, substituting each resolved QN for its
+ * source spelling. Unresolved entries pass through verbatim. */
+static const char *pxc_join_base_qns(CBMArena *arena, const char *const *bases,
+                                     const cbm_registry_t *reg, const char *module_qn,
+                                     const char **imp_keys, const char **imp_vals, int imp_count) {
+    if (!bases || !bases[0]) {
+        return NULL;
+    }
+    int count = 0;
+    while (bases[count]) {
+        count++;
+    }
+    auto **resolved =
+        (const char **)cbm_arena_alloc(arena, (size_t)(count + 1) * sizeof(const char *));
+    if (!resolved) {
+        return pxc_join_pipe(arena, bases);
+    }
+    for (int i = 0; i < count; i++) {
+        const char *qn =
+            pxc_resolve_base_qn(reg, bases[i], module_qn, imp_keys, imp_vals, imp_count);
+        resolved[i] = qn ? qn : bases[i];
+    }
+    resolved[count] = NULL;
+    return pxc_join_pipe(arena, resolved);
+}
+
 /* Convert one CBMDefinition into a CBMLSPDef. Returns 0 on success, -1
  * to skip (unsupported label or missing required field). dst gets borrowed
- * pointers into src and into `arena` for synthesised composites. */
+ * pointers into src and into `arena` for synthesised composites. A non-NULL
+ * `reg` resolves Python/TS base-class spellings to project QNs (see above). */
 static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const char *module_qn,
-                             const char *namespace_name, CBMLanguage lang, CBMLSPDef *dst) {
+                             const char *namespace_name, CBMLanguage lang, CBMLSPDef *dst,
+                             const cbm_registry_t *reg, const char **imp_keys,
+                             const char **imp_vals, int imp_count) {
     const char *label = pxc_map_label(src->label);
     if (!label && src->label && strcmp(src->label, "Declaration") == 0 &&
         (lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA))
@@ -272,7 +362,10 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
     dst->return_types = src->return_type;
     if (lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA)
         dst->parameter_types = src->param_types;
-    dst->embedded_types = pxc_join_pipe(arena, src->base_classes);
+    dst->embedded_types = (reg && pxc_lang_resolves_base_qns(lang))
+                              ? pxc_join_base_qns(arena, src->base_classes, reg, module_qn,
+                                                  imp_keys, imp_vals, imp_count)
+                              : pxc_join_pipe(arena, src->base_classes);
     dst->lang = lang;
     dst->cpp_declaration_key = src->declaration_key;
     return 0;
@@ -590,9 +683,14 @@ static void pxc_attach_cpp_identity(CBMFileResult **cache, const cbm_file_info_t
 /* Collect a project-wide CBMLSPDef[] from all cached results. Returns a
  * malloc'd array (caller frees) of length *out_count. String fields are
  * borrowed from cache[i]->arena and from def_modules[i] (also borrowed). */
-CBMLSPDef *cbm_pxc_collect_all_defs(CBMFileResult **cache, const cbm_file_info_t *files,
-                                    int file_count, const char *project_name, char **def_modules,
-                                    int *out_count) {
+static int pxc_build_import_map(const cbm_gbuf_t *gbuf, const char *project_name,
+                                const char *rel_path, const char ***out_keys,
+                                const char ***out_vals, int *out_count);
+static void pxc_free_import_map(const char **keys, const char **vals, int count);
+
+CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult **cache,
+                                    const cbm_file_info_t *files, int file_count,
+                                    const char *project_name, char **def_modules, int *out_count) {
     int total = 0;
     for (int i = 0; i < file_count; i++) {
         if (cache[i])
@@ -625,14 +723,29 @@ CBMLSPDef *cbm_pxc_collect_all_defs(CBMFileResult **cache, const cbm_file_info_t
                 cache[fi]->namespace_name = namespace_name;
             }
         }
+        /* One import map per FILE (not per def or base name) for the cross-file
+         * base-class resolution; built only for the languages that consume
+         * resolved base QNs, and only when the caller supplied a pipeline
+         * context with a registry (NULL keeps the raw spelling). */
+        const cbm_registry_t *base_reg = NULL;
+        const char **imp_keys = NULL;
+        const char **imp_vals = NULL;
+        int imp_count = 0;
+        if (ctx && ctx->registry && ctx->gbuf && pxc_lang_resolves_base_qns(files[fi].language)) {
+            base_reg = ctx->registry;
+            pxc_build_import_map(ctx->gbuf, project_name, files[fi].rel_path, &imp_keys, &imp_vals,
+                                 &imp_count);
+        }
         int first_def = idx;
         for (int di = 0; di < cache[fi]->defs.count; di++) {
             if (pxc_build_lsp_def(&cache[fi]->arena, &cache[fi]->defs.items[di], def_modules[fi],
-                                  namespace_name, files[fi].language, &defs[idx]) == 0) {
+                                  namespace_name, files[fi].language, &defs[idx], base_reg,
+                                  imp_keys, imp_vals, imp_count) == 0) {
                 def_files.push_back(fi);
                 idx++;
             }
         }
+        pxc_free_import_map(imp_keys, imp_vals, imp_count); /* NULL-safe */
         if (files[fi].language == CBM_LANG_C || files[fi].language == CBM_LANG_CPP ||
             files[fi].language == CBM_LANG_CUDA)
             pxc_attach_cpp_fields(cache[fi], defs + first_def, idx - first_def);
@@ -1263,7 +1376,7 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
     }
 
     int def_count = 0;
-    CBMLSPDef *all_defs = cbm_pxc_collect_all_defs(cache, files, file_count, ctx->project_name,
+    CBMLSPDef *all_defs = cbm_pxc_collect_all_defs(ctx, cache, files, file_count, ctx->project_name,
                                                    def_modules, &def_count);
 
     /* Shared prepare (mirrors run_parallel_pipeline): inverted module-def

@@ -1214,7 +1214,7 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     if (run_cross_lsp) {
         def_modules = (char **)calloc((size_t)file_count, sizeof(char *));
         all_defs = def_modules
-                       ? cbm_pxc_collect_all_defs(cache, files, file_count, ctx->project_name,
+                       ? cbm_pxc_collect_all_defs(ctx, cache, files, file_count, ctx->project_name,
                                                   def_modules, &def_count)
                        : NULL;
     }

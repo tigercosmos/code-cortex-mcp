@@ -65,7 +65,7 @@ TEST(registry_summary_owns_definition_and_infrastructure_strings) {
     char file_path[]="src/main/java/sample/Widget.java";
     cbm_file_info_t file={}; file.rel_path=file_path; file.language=CBM_LANG_JAVA;
     CBMFileResult *cache[]={summary}; char *modules[]={nullptr}; int count=0;
-    auto *defs=cbm_pxc_collect_all_defs(cache,&file,1,"p",modules,&count);
+    auto *defs=cbm_pxc_collect_all_defs(nullptr,cache,&file,1,"p",modules,&count);
     ASSERT_NOT_NULL(defs); ASSERT_EQ(count,1);
     ASSERT_STR_EQ(defs[0].qualified_name,"sample.Widget.run");
     ASSERT_STR_EQ(defs[0].receiver_type,"sample.Widget");
