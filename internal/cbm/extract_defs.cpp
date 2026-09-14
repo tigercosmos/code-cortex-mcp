@@ -6901,13 +6901,10 @@ static bool cbm_path_is_razor(const char *rel_path) {
     }
     static const char *const suffixes[] = {".razor", ".cshtml"};
     size_t len = strlen(rel_path);
-    for (const char *suffix : suffixes) {
+    return std::any_of(std::begin(suffixes), std::end(suffixes), [&](const char *suffix) {
         size_t slen = strlen(suffix);
-        if (len > slen && strcmp(rel_path + (len - slen), suffix) == 0) {
-            return true;
-        }
-    }
-    return false;
+        return len > slen && strcmp(rel_path + (len - slen), suffix) == 0;
+    });
 }
 
 /* Match `@page "/route"` on ONE line; returns the route text or NULL.

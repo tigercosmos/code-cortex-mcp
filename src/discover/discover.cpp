@@ -917,7 +917,8 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
         /* The repository root's .gitignore (merged with info/exclude) heads the
          * chain, so nested files take git's precedence over it too. On OOM the
          * root falls back to no chain rather than silently mis-ignoring. */
-        ws.frames[0].ignore_chain = gitignore_link_new(gitignore, rel_prefix, nullptr, &owned_links);
+        ws.frames[0].ignore_chain =
+            gitignore_link_new(gitignore, rel_prefix, nullptr, &owned_links);
     }
     ws.top++;
 
@@ -1216,8 +1217,8 @@ int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm
                      int *count, char ***excluded_out, int *excluded_count_out,
                      cbm_ignored_file_t **ignored_out, int *ignored_count_out,
                      int *ignored_total_out) {
-    return discover_impl(repo_path, opts, out, count, excluded_out, excluded_count_out,
-                         ignored_out, ignored_count_out, ignored_total_out, false, -1, 0);
+    return discover_impl(repo_path, opts, out, count, excluded_out, excluded_count_out, ignored_out,
+                         ignored_count_out, ignored_total_out, false, -1, 0);
 }
 
 cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,

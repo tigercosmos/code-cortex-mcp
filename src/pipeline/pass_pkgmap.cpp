@@ -1673,6 +1673,25 @@ static const cbm_gbuf_node_t *resolve_header_include(const cbm_pipeline_ctx_t *c
         return NULL;
     }
 
+    /* A dot-relative include ("../c_lsp.h") names a header by its path from the
+     * includer's directory. Normalize the ".." segments before matching: the
+     * raw spelling ends no file path, so without this the include fell through
+     * to module resolution, which only ever matched a same-stem source file's
+     * Module (and matches nothing once relative JS/TS resolution stopped
+     * stripping non-JS extensions, 48cb94f6). */
+    if (source_rel && module_path[0] == '.' &&
+        (module_path[1] == '/' || (module_path[1] == '.' && module_path[2] == '/'))) {
+        char *normalized = cbm_pipeline_resolve_relative_import(source_rel, module_path);
+        if (normalized) {
+            const cbm_gbuf_node_t *rel_hit =
+                resolve_exact_file_node(ctx, normalized, source_file_qn);
+            free(normalized);
+            if (rel_hit) {
+                return rel_hit;
+            }
+        }
+    }
+
     const char *base = module_path;
     if (base[0] == '.' && base[1] == '/') {
         base += 2;

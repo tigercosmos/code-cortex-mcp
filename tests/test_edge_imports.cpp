@@ -636,6 +636,43 @@ TEST(ei_go_import_never_binds_symbol) {
     PASS();
 }
 
+/* C++: a dot-relative include ("../a.h") names the header by its path from the
+ * includer's directory. The raw spelling ends no file path, so it used to fall
+ * through to module resolution, which only reached a same-stem SOURCE file's
+ * Module and, once relative JS/TS resolution stopped stripping non-JS
+ * extensions (48cb94f6), reached nothing at all. It must land on the header. */
+TEST(ei_cpp_dot_relative_include_targets_header_file) {
+    static const EILangFile f[] = {
+        {"lib/a.h", "#pragma once\nint a_fn(void);\n"},
+        {"lib/a.cpp", "#include \"a.h\"\nint a_fn(void) { return 1; }\n"},
+        {"lib/gen/data.cpp", "#include \"../a.h\"\nint data_fn(void) { return a_fn(); }\n"},
+    };
+    EILangProj lp;
+    cbm_store_t *store = ei_index_files(&lp, f, 3);
+    ASSERT_NOT_NULL(store);
+    int64_t data_id = ei_node_id_for_file_label(store, lp.project, "lib/gen/data.cpp", "File");
+    int64_t header_id = ei_node_id_for_file_label(store, lp.project, "lib/a.h", "File");
+    ASSERT_GT(data_id, 0);
+    ASSERT_GT(header_id, 0);
+
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    ASSERT_EQ(cbm_store_find_edges_by_source_type(store, data_id, "IMPORTS", &edges, &edge_count),
+              CBM_STORE_OK);
+    int to_header = 0;
+    for (int i = 0; i < edge_count; i++) {
+        if (edges[i].target_id == header_id) {
+            to_header++;
+        }
+    }
+    int total = edge_count;
+    cbm_store_free_edges(edges, edge_count);
+    ei_cleanup(&lp, store);
+    ASSERT_EQ(total, 1);
+    ASSERT_EQ(to_header, 1);
+    PASS();
+}
+
 /* C++: header include should resolve to the header file node, not the same-stem
  * source node. Also exercises angle-bracket include resolution. */
 TEST(ei_cpp_header_include_targets_header_file) {
@@ -1162,6 +1199,7 @@ SUITE(edge_imports) {
     RUN_TEST(ei_go_blank_import);
     RUN_TEST(ei_go_two_consumers_same_package);
     RUN_TEST(ei_go_import_never_binds_symbol);
+    RUN_TEST(ei_cpp_dot_relative_include_targets_header_file);
     RUN_TEST(ei_cpp_header_include_targets_header_file);
 
     /* ── RED REPRODUCTIONS — Rust (expected to FAIL until pipeline fixed) ── */
