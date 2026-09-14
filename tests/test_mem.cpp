@@ -13,6 +13,8 @@
 #include "graph_buffer/graph_buffer.h"
 #include "discover/discover.h"
 #include "cbm.h"
+#include "lang_specs.h"           /* cbm_ts_language */
+#include "foundation/constants.h" /* CBM_SZ_* */
 
 #include "../src/foundation/cbm_atomic.h"
 #include <mimalloc.h>
@@ -593,6 +595,53 @@ static void teardown_mem_test_repo(void) {
     }
 }
 
+/* #2010 (upstream 40f2722d), the lifetime half. traversal_stack_not_in_result_arena
+ * in test_extraction.cpp pins the byte budget of the result arena, but a smaller
+ * CHAN_STACK_CAP would satisfy that too. This pins where the bytes actually
+ * went: the scratch arena takes the two 128 KB channel walks and the result
+ * arena does not. Builds the extraction context directly, since a completed
+ * cbm_extract_file has already destroyed its scratch. */
+TEST(extract_traversal_stacks_come_from_ctx_scratch_issue2010) {
+    enum { CHANNEL_WALK_BYTES = 2 * 4096 * (int)sizeof(TSNode) };
+    const char *src = "export const x = 1;\n";
+    const TSLanguage *ts_lang = cbm_ts_language(CBM_LANG_TYPESCRIPT);
+    ASSERT_NOT_NULL((void *)ts_lang);
+
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    ts_parser_set_language(parser, ts_lang);
+    TSTree *tree = ts_parser_parse_string(parser, NULL, src, (uint32_t)strlen(src));
+    ASSERT_NOT_NULL(tree);
+
+    CBMFileResult result;
+    memset(&result, 0, sizeof(result));
+    cbm_arena_init(&result.arena);
+    CBMArena scratch;
+    cbm_arena_init_sized(&scratch, (size_t)CBM_SZ_512 * CBM_SZ_1K);
+
+    CBMExtractCtx ctx = {
+        .arena = &result.arena,
+        .scratch = &scratch,
+        .result = &result,
+        .source = src,
+        .source_len = (int)strlen(src),
+        .language = CBM_LANG_TYPESCRIPT,
+        .project = "t",
+        .rel_path = "a.ts",
+        .root = ts_tree_root_node(tree),
+    };
+    cbm_extract_channels(&ctx);
+
+    ASSERT_GTE(cbm_arena_total(&scratch), (size_t)CHANNEL_WALK_BYTES);
+    ASSERT_LT(cbm_arena_total(&result.arena), (size_t)CBM_SZ_64 * CBM_SZ_1K);
+
+    cbm_arena_destroy(&scratch);
+    cbm_arena_destroy(&result.arena);
+    ts_tree_delete(tree);
+    ts_parser_delete(parser);
+    PASS();
+}
+
 TEST(parallel_extract_with_slab) {
     cbm_mem_init(0.5);
 
@@ -696,4 +745,6 @@ SUITE(mem) {
     RUN_TEST(slab_mixed_alloc_free_stress);
     /* Integration */
     RUN_TEST(parallel_extract_with_slab);
+    /* extraction scratch arena (#2010) */
+    RUN_TEST(extract_traversal_stacks_come_from_ctx_scratch_issue2010);
 }

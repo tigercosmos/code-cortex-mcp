@@ -1067,6 +1067,47 @@ TEST(extract_r_dollar_call_issue219) {
     PASS();
 }
 
+/* #2010 (upstream 40f2722d): AST traversal stacks were allocated from
+ * result->arena, which the parallel pass holds for every file until the whole
+ * result cache is freed, so a one-file scratch structure was retained for the
+ * length of the index. cbm_extract_channels runs for every file and dispatches
+ * TypeScript to extract_channels_js, whose two walks take a 4096-entry TSNode
+ * stack each, and the ES import walk takes a 512-entry one:
+ * 2 * 4096 * 32 + 512 * 32 = 278528 bytes charged to the arena of a one-line
+ * file. The bound sits well above what remains once the stacks move to the
+ * scratch arena and well below the old figure. It is a byte budget, not a proof
+ * of lifetime; that is extract_traversal_stacks_come_from_ctx_scratch_issue2010
+ * in test_mem.cpp. */
+TEST(traversal_stack_not_in_result_arena_issue2010) {
+    CBMFileResult *r = extract("export const x = 1;\n", CBM_LANG_TYPESCRIPT, "t", "a.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    bool found_x = false;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, "x") == 0) {
+            found_x = true;
+        }
+    }
+    ASSERT_TRUE(found_x);
+    ASSERT_LT(r->arena.total_alloc, (size_t)CBM_SZ_128 * CBM_SZ_1K);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Not a scratch test. The C/C++ preprocessed second pass builds its own
+ * extraction context (pp_ctx), which now carries ctx->scratch too. This guards
+ * the macro-expansion path itself: a call that exists only after expansion. */
+TEST(extract_c_macro_hidden_call_survives_preprocessed_pass_issue2010) {
+    CBMFileResult *r = extract("void target(void) {}\n"
+                               "#define INVOKE() target()\n"
+                               "void caller(void) { INVOKE(); }\n",
+                               CBM_LANG_C, "t", "macro_call.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_call(r, "target"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- TS: object-literal arrow methods from a factory (Zustand, #341) --- */
 TEST(extract_ts_factory_object_methods_issue341) {
     CBMFileResult *r = extract("export function createItemActions(set, get) {\n"
@@ -5538,6 +5579,8 @@ SUITE(extraction) {
     RUN_TEST(result_snapshot_rejects_truncation_corruption_and_limits);
     RUN_TEST(extract_r_box_use_imports_issue218);
     RUN_TEST(extract_r_dollar_call_issue219);
+    RUN_TEST(traversal_stack_not_in_result_arena_issue2010);
+    RUN_TEST(extract_c_macro_hidden_call_survives_preprocessed_pass_issue2010);
     RUN_TEST(extract_ts_factory_object_methods_issue341);
     RUN_TEST(extract_c_macros_issue375);
     RUN_TEST(extract_cpp_macros_issue375);

@@ -101,8 +101,8 @@ static const char *literal_from_first_child(CBMExtractCtx *ctx, TSNode node) {
  * const table per file is sufficient for the common Socket.IO pattern). */
 static void scan_string_consts_js(CBMExtractCtx *ctx, chan_const_table_t *tbl) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0 && tbl->count < CHAN_CONST_CAP) {
         TSNode node = ts_nstack_pop(&stack);
@@ -128,15 +128,15 @@ static void scan_string_consts_js(CBMExtractCtx *ctx, chan_const_table_t *tbl) {
             }
         }
 
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
 /* Python constant resolution: NAME = "value" (assignment node). */
 static void scan_string_consts_python(CBMExtractCtx *ctx, chan_const_table_t *tbl) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0 && tbl->count < CHAN_CONST_CAP) {
         TSNode node = ts_nstack_pop(&stack);
@@ -161,7 +161,7 @@ static void scan_string_consts_python(CBMExtractCtx *ctx, chan_const_table_t *tb
             }
         }
 
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -370,15 +370,15 @@ static void extract_channels_js(CBMExtractCtx *ctx) {
 
     /* Second pass: walk the tree looking for call_expression nodes. */
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "call_expression") == 0) {
             js_process_call(ctx, node, &consts);
         }
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -546,8 +546,8 @@ static void extract_channels_python(CBMExtractCtx *ctx) {
     scan_string_consts_python(ctx, &consts);
 
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
@@ -557,7 +557,7 @@ static void extract_channels_python(CBMExtractCtx *ctx) {
         } else if (strcmp(kind, "decorator") == 0) {
             py_process_decorator(ctx, node, &consts);
         }
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -621,15 +621,15 @@ static void go_process_call(CBMExtractCtx *ctx, TSNode call) {
 
 static void extract_channels_go(CBMExtractCtx *ctx) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "call_expression") == 0) {
             go_process_call(ctx, node);
         }
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -715,8 +715,8 @@ static void java_process_annotation(CBMExtractCtx *ctx, TSNode annotation) {
 
 static void extract_channels_java(CBMExtractCtx *ctx) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
@@ -726,7 +726,7 @@ static void extract_channels_java(CBMExtractCtx *ctx) {
         } else if (strcmp(kind, "marker_annotation") == 0 || strcmp(kind, "annotation") == 0) {
             java_process_annotation(ctx, node);
         }
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -781,15 +781,15 @@ static void csharp_process_call(CBMExtractCtx *ctx, TSNode call) {
 
 static void extract_channels_csharp(CBMExtractCtx *ctx) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "invocation_expression") == 0) {
             csharp_process_call(ctx, node);
         }
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -841,15 +841,15 @@ static void ruby_process_call(CBMExtractCtx *ctx, TSNode call) {
 
 static void extract_channels_ruby(CBMExtractCtx *ctx) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "call") == 0) {
             ruby_process_call(ctx, node);
         }
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -940,8 +940,8 @@ static void elixir_process_function_def(CBMExtractCtx *ctx, TSNode func_def) {
 
 static void extract_channels_elixir(CBMExtractCtx *ctx) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
@@ -951,7 +951,7 @@ static void extract_channels_elixir(CBMExtractCtx *ctx) {
         } else if (strcmp(kind, "def") == 0) {
             elixir_process_function_def(ctx, node);
         }
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 
@@ -1013,15 +1013,15 @@ static void rust_process_call(CBMExtractCtx *ctx, TSNode call) {
 
 static void extract_channels_rust(CBMExtractCtx *ctx) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CHAN_STACK_CAP);
-    ts_nstack_push(&stack, ctx->arena, ctx->root);
+    ts_nstack_init(&stack, ctx, CHAN_STACK_CAP);
+    ts_nstack_push(&stack, ctx->root);
 
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (strcmp(ts_node_type(node), "call_expression") == 0) {
             rust_process_call(ctx, node);
         }
-        ts_nstack_push_children(&stack, ctx->arena, node);
+        ts_nstack_push_children(&stack, node);
     }
 }
 

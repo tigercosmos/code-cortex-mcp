@@ -125,14 +125,14 @@ static void process_throw_node(CBMExtractCtx *ctx, TSNode node, const CBMLangSpe
 // Iterative throw walker
 static void walk_throws(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CBM_SZ_512);
-    ts_nstack_push(&stack, ctx->arena, root);
+    ts_nstack_init(&stack, ctx, CBM_SZ_512);
+    ts_nstack_push(&stack, root);
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         process_throw_node(ctx, node, spec);
         uint32_t count = ts_node_child_count(node);
         for (int i = (int)count - LAST_IDX; i >= 0; i--) {
-            ts_nstack_push(&stack, ctx->arena, ts_node_child(node, (uint32_t)i));
+            ts_nstack_push(&stack, ts_node_child(node, (uint32_t)i));
         }
     }
 }
@@ -263,8 +263,8 @@ static void try_emit_assignment_write(CBMExtractCtx *ctx, TSNode node, const cha
 
 static void walk_readwrites(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
     TSNodeStack stack;
-    ts_nstack_init(&stack, ctx->arena, CBM_SZ_512);
-    ts_nstack_push(&stack, ctx->arena, root);
+    ts_nstack_init(&stack, ctx, CBM_SZ_512);
+    ts_nstack_push(&stack, root);
     while (stack.count > 0) {
         TSNode node = ts_nstack_pop(&stack);
         if (cbm_kind_in_set(node, spec->assignment_node_types)) {
@@ -272,7 +272,7 @@ static void walk_readwrites(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *
         }
         uint32_t count = ts_node_child_count(node);
         for (int i = (int)count - LAST_IDX; i >= 0; i--) {
-            ts_nstack_push(&stack, ctx->arena, ts_node_child(node, (uint32_t)i));
+            ts_nstack_push(&stack, ts_node_child(node, (uint32_t)i));
         }
     }
 }

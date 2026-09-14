@@ -1663,11 +1663,18 @@ static void lsp_scratch_reclaim(CBMFileResult *result, CBMArena *dst, const CBMA
     }
 }
 
-static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
-                                            CBMLanguage language, const char *project,
-                                            const char *rel_path, int64_t timeout_micros,
-                                            const char **extra_defines, const char **include_paths,
-                                            const CBMExtractOptions *options) {
+/* Initial block for the per-file traversal scratch arena. Upstream measured
+ * arena_grow on a 14k-file TypeScript tree: it fires on one file in 12,000 at
+ * both this size and at 1 MB, and on most files at 256 KB, where the two
+ * channel walks alone are exactly 262144 bytes. 512 KB is also exactly
+ * mimalloc's MI_LARGE_MAX_OBJ_SIZE, so the block is still bin-allocated. */
+enum { CBM_EXTRACT_SCRATCH_BLOCK = CBM_SZ_512 * CBM_SZ_1K };
+
+static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
+                                             CBMLanguage language, const char *project,
+                                             const char *rel_path, int64_t timeout_micros,
+                                             const char **extra_defines, const char **include_paths,
+                                             const CBMExtractOptions *options, CBMArena *scratch) {
     // Allocate result on heap (arena inside for all string data)
     enum { SINGLE = 1 };
     CBMFileResult *result = (CBMFileResult *)calloc(SINGLE, sizeof(CBMFileResult));
@@ -1772,6 +1779,7 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
     // Build extraction context
     CBMExtractCtx ctx = {
         .arena = a,
+        .scratch = scratch,
         .result = result,
         .source = source,
         .source_len = source_len,
@@ -1915,6 +1923,7 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                     // Build context for expanded source — extract only calls via unified extractor
                     CBMExtractCtx pp_ctx = {
                         .arena = a,
+                        .scratch = scratch,
                         .result = result,
                         .source = expanded,
                         .source_len = expanded_len,
@@ -2193,6 +2202,28 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
     // Retain tree for cross-file LSP reuse (caller frees via cbm_free_tree)
     result->cached_tree = tree;
     result->cached_lang = language;
+    return result;
+}
+
+/* Owns the traversal scratch arena for the whole of one file's extraction:
+ * created here, handed to the body as ctx->scratch, destroyed on the way out.
+ * The body has many early returns, so bracketing it in a wrapper keeps that to
+ * one create and one destroy. If the arena cannot be created, the body is
+ * handed NULL and the traversal stacks fall back to the result arena, which is
+ * what shipped before #1997. Traversal stacks were previously cut from the
+ * result arena, which the parallel pass retains for every file until the
+ * result cache is freed (#2010). */
+static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
+                                            CBMLanguage language, const char *project,
+                                            const char *rel_path, int64_t timeout_micros,
+                                            const char **extra_defines, const char **include_paths,
+                                            const CBMExtractOptions *options) {
+    CBMArena scratch;
+    cbm_arena_init_sized(&scratch, CBM_EXTRACT_SCRATCH_BLOCK);
+    CBMFileResult *result = extract_file_impl_body(source, source_len, language, project, rel_path,
+                                                   timeout_micros, extra_defines, include_paths,
+                                                   options, scratch.nblocks > 0 ? &scratch : NULL);
+    cbm_arena_destroy(&scratch);
     return result;
 }
 

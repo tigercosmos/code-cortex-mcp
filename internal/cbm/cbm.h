@@ -526,6 +526,13 @@ typedef struct {
 
 typedef struct {
     CBMArena *arena;
+    /* Scratch for AST traversal, owned by the cbm_extract_file_impl call that
+     * built this context and destroyed when it returns. Nothing a
+     * CBMFileResult points at may be allocated here: `arena` is the result's
+     * own, and it outlives extraction by the whole pipeline (#1997). NULL in a
+     * context built without one, in which case the stacks fall back to
+     * `arena`. */
+    CBMArena *scratch;
     CBMFileResult *result;
     const char *source;
     int source_len;
