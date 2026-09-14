@@ -49,6 +49,17 @@ Guarded by the `contract_all_grammars_in_graph` graph-breadth test in
 | slang    | added to the C-family declarator-name gate (tree-sitter-cpp/hlsl fork) |
 | squirrel | `resolve_func_name`: `function_declaration` → `identifier` child |
 
+## Local patches to vendored sources
+
+The grammars below carry a small local patch on top of the pinned upstream
+commit recorded in the vendoring table. Re-vendoring must re-apply these,
+unless the reason column names an upstream commit that already carries the
+change — then drop the row instead.
+
+| grammar | location | patch | reason |
+|---|---|---|---|
+| swift | `swift/scanner.c`, `OP_SYMBOL_SUPPRESSOR` + `eat_operators` | `1UL <<` / `1 <<` → `1ULL <<` | UBSan: `1 << suppressor` shifts an `int` by up to `TOKEN_COUNT` bits (UB once the index reaches 31) while the mask is `uint64_t`; `1UL << FAKE_TRY_BANG` is the same defect where `unsigned long` is 32 bits. Upstream already carries both: `fb63a7004f07` (eat_operators) and `6ab8d1d74ebd` (OP_SYMBOL_SUPPRESSOR); our pin `8abb3e8b3325` predates both, so a re-vendor past 2026-08-10 should delete this row. Ported from DeusData/codebase-memory-mcp@3f831936 + a2ea711c. |
+
 ## Vendored from verified upstream
 
 | grammar | cur ABI | upstream repo | pinned commit | verdict | LICENSE |
