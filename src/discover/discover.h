@@ -161,7 +161,7 @@ typedef struct {
     char *rel_path; /* heap-allocated, relative to repo root */
     char *reason;   /* heap-allocated: "gitignore" | "cbmignore" |
                      * "skip-list" | "ignored-suffix" | "fast-pattern" |
-                     * "size-cap" */
+                     * "size-cap" | "symlink" */
 } cbm_ignored_file_t;
 
 /* Stored per-file ignore entries are capped (the walk still counts ALL of
@@ -179,6 +179,22 @@ int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm
                      int *count, char ***excluded_out, int *excluded_count_out,
                      cbm_ignored_file_t **ignored_out, int *ignored_count_out,
                      int *ignored_total_out);
+
+typedef enum {
+    CBM_DISCOVER_ERROR = -1,
+    CBM_DISCOVER_OK = 0,
+    CBM_DISCOVER_LIMIT_EXCEEDED = 1,
+} cbm_discover_status_t;
+
+/* Apply the exact same discovery/filter policy as cbm_discover() without
+ * retaining a file array (#713). Stops before counting more than max_files and
+ * performs no per-file allocation. deadline_ms is an absolute cbm_now_ms()
+ * deadline; zero disables it. Returns LIMIT_EXCEEDED when at least
+ * max_files + 1 indexable files exist (*count_out == max_files), ERROR on a bad
+ * root or an expired deadline (*count_out == -1), or OK with the exact count. */
+cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
+                                                 const cbm_discover_opts_t *opts, int max_files,
+                                                 uint64_t deadline_ms, int *count_out);
 
 /* Free an array of file info results. NULL-safe. */
 void cbm_discover_free(cbm_file_info_t *files, int count);

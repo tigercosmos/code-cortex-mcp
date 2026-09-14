@@ -412,6 +412,14 @@ typedef struct {
     cbm_file_info_t *files;
     int count;
     int capacity;
+    /* Bounded count mode (#713): count indexable files without retaining
+     * them, stop as soon as max_files is passed or deadline_ms (absolute
+     * cbm_now_ms, 0 = none) expires. max_files < 0 means unbounded. */
+    int max_files;
+    uint64_t deadline_ms;
+    bool count_only;
+    bool limit_exceeded;
+    bool failed;
     /* Directories skipped during the walk (rel paths), so callers can surface
      * which subtrees were dropped (#411). strdup'd; freed by the caller via
      * cbm_discover_free_excluded or internally when not requested. */
@@ -429,8 +437,17 @@ typedef struct {
     int ignored_total;
 } file_list_t;
 
+/* True once the walk must stop: the bounded count passed its limit, the
+ * deadline expired (latched as a failure), or an earlier step failed. */
+static bool file_list_should_stop(file_list_t *fl) {
+    if (!fl->failed && fl->deadline_ms != 0 && cbm_now_ms() >= fl->deadline_ms) {
+        fl->failed = true;
+    }
+    return fl->failed || fl->limit_exceeded;
+}
+
 static void file_list_add_excluded(file_list_t *fl, const char *rel_path) {
-    if (!rel_path || rel_path[0] == '\0') {
+    if (fl->count_only || !rel_path || rel_path[0] == '\0') {
         return;
     }
     if (fl->excluded_count >= fl->excluded_cap) {
@@ -481,6 +498,14 @@ static void file_list_add_ignored(file_list_t *fl, const char *rel_path, const c
 
 static void fl_add(file_list_t *fl, const char *abs_path, const char *rel_path, CBMLanguage lang,
                    int64_t size) {
+    if (fl->max_files >= 0 && fl->count >= fl->max_files) {
+        fl->limit_exceeded = true;
+        return;
+    }
+    if (fl->count_only) {
+        fl->count++;
+        return;
+    }
     if (fl->count >= fl->capacity) {
         int new_cap = fl->capacity ? fl->capacity * PAIR_LEN : CBM_SZ_256;
         cbm_file_info_t *new_files =
@@ -514,6 +539,68 @@ static const char *local_rel_path(const char *rel_path, const char *local_prefix
     return rel_path;
 }
 
+/* One .gitignore on the path from the repository root down to a walk frame.
+ * Links form a root->leaf chain; every frame below the directory that owns a
+ * matcher borrows a pointer to the deepest link governing it, so a directory
+ * without a .gitignore of its own simply shares its parent's link. Links live
+ * on the heap (the frame stack is realloc'd and popped) and walk_dir owns them
+ * through the `owned_next` list. A nested matcher is owned by its link
+ * (`owned_gi`); the root matcher belongs to cbm_discover. `prefix` is the
+ * walk-relative directory the matcher was loaded from ("" for the root). */
+struct gitignore_link_t {
+    const cbm_gitignore_t *gi;
+    cbm_gitignore_t *owned_gi; /* == gi for nested files, NULL for the root */
+    const gitignore_link_t *parent;
+    gitignore_link_t *owned_next;
+    char *prefix;
+};
+
+static gitignore_link_t *gitignore_link_new(const cbm_gitignore_t *gi, const char *prefix,
+                                            const gitignore_link_t *parent,
+                                            gitignore_link_t **owned_links) {
+    auto *link = (gitignore_link_t *)calloc(1, sizeof(gitignore_link_t));
+    if (!link) {
+        return nullptr;
+    }
+    link->prefix = strdup(prefix);
+    if (!link->prefix) {
+        free(link);
+        return nullptr;
+    }
+    link->gi = gi;
+    link->parent = parent;
+    link->owned_next = *owned_links;
+    *owned_links = link;
+    return link;
+}
+
+static void gitignore_links_free(gitignore_link_t *link) {
+    while (link) {
+        gitignore_link_t *next = link->owned_next;
+        cbm_gitignore_free(link->owned_gi);
+        free(link->prefix);
+        free(link);
+        link = next;
+    }
+}
+
+/* Verdict of every .gitignore between the repository root and the directory
+ * being walked, with git's precedence: the deepest file that has an opinion
+ * wins (a lower-level file takes precedence over every higher-level one), and
+ * within one file the last matching pattern wins. Returns >0 ignored, <0
+ * re-included by a negation, 0 when no file mentions the path. Cost is one
+ * match per .gitignore on the path — O(depth), never a rescan (#1973). */
+static int gitignore_chain_result(const gitignore_link_t *link, const char *rel_path, bool is_dir) {
+    for (; link; link = link->parent) {
+        int verdict =
+            cbm_gitignore_match_result(link->gi, local_rel_path(rel_path, link->prefix), is_dir);
+        if (verdict != 0) {
+            return verdict;
+        }
+    }
+    return 0;
+}
+
 /* Non-negatable safety core: built-in skip dirs that a .cbmignore negation
  * can NEVER un-skip. A repo-committed .cbmignore must not be able to defeat
  * OOM/safety skips: .git holds VCS internals (and the info/exclude sources,
@@ -529,10 +616,10 @@ static bool is_safety_core_dir(const char *name) {
 
 /* Check if a directory entry should be skipped (hardcoded dirs + gitignore). */
 static bool should_skip_directory(const char *entry_name, const char *rel_path,
-                                  const cbm_discover_opts_t *opts, const cbm_gitignore_t *gitignore,
+                                  const cbm_discover_opts_t *opts,
+                                  const gitignore_link_t *ignore_chain,
                                   const cbm_gitignore_t *global_gi,
-                                  const cbm_gitignore_t *cbmignore, const cbm_gitignore_t *local_gi,
-                                  const char *local_gi_prefix) {
+                                  const cbm_gitignore_t *cbmignore) {
     if (cbm_should_skip_dir(entry_name, opts ? opts->mode : CBM_MODE_FULL)) {
         /* #500: a .cbmignore negation (e.g. "!obj/") whose rule is the last
          * match for this dir un-skips a built-in skip-list dir — except the
@@ -544,16 +631,10 @@ static bool should_skip_directory(const char *entry_name, const char *rel_path,
             return true;
         }
     }
-    if (gitignore && cbm_gitignore_matches(gitignore, rel_path, true)) {
+    if (gitignore_chain_result(ignore_chain, rel_path, true) > 0) {
         return true;
     }
     bool global_ignored = global_gi && cbm_gitignore_matches(global_gi, rel_path, true);
-    if (local_gi) {
-        const char *lrel = local_rel_path(rel_path, local_gi_prefix);
-        if (cbm_gitignore_matches(local_gi, lrel, true)) {
-            return true;
-        }
-    }
     if (cbmignore) {
         int cbm_result = cbm_gitignore_match_result(cbmignore, rel_path, true);
         if (cbm_result > 0) {
@@ -572,11 +653,9 @@ static bool should_skip_directory(const char *entry_name, const char *rel_path,
  * match — are IDENTICAL to the original boolean predicate. */
 static const char *file_skip_reason(const char *entry_name, const char *rel_path,
                                     const cbm_discover_opts_t *opts,
-                                    const cbm_gitignore_t *gitignore,
+                                    const gitignore_link_t *ignore_chain,
                                     const cbm_gitignore_t *global_gi,
-                                    const cbm_gitignore_t *cbmignore,
-                                    const cbm_gitignore_t *local_gi, const char *local_gi_prefix,
-                                    off_t file_size) {
+                                    const cbm_gitignore_t *cbmignore, off_t file_size) {
     cbm_index_mode_t mode = opts ? opts->mode : CBM_MODE_FULL;
     if (cbm_has_ignored_suffix(entry_name, mode)) {
         return "ignored-suffix";
@@ -587,16 +666,10 @@ static const char *file_skip_reason(const char *entry_name, const char *rel_path
     if (cbm_matches_fast_pattern(entry_name, mode)) {
         return "fast-pattern";
     }
-    if (gitignore && cbm_gitignore_matches(gitignore, rel_path, false)) {
+    if (gitignore_chain_result(ignore_chain, rel_path, false) > 0) {
         return "gitignore";
     }
     bool global_ignored = global_gi && cbm_gitignore_matches(global_gi, rel_path, false);
-    if (local_gi) {
-        const char *lrel = local_rel_path(rel_path, local_gi_prefix);
-        if (cbm_gitignore_matches(local_gi, lrel, false)) {
-            return "gitignore";
-        }
-    }
     if (cbmignore) {
         int cbm_result = cbm_gitignore_match_result(cbmignore, rel_path, false);
         if (cbm_result > 0) {
@@ -669,14 +742,18 @@ static int wide_stat(const char *path, struct stat *st) {
 /* Stat a path, skipping symlinks (POSIX) and junctions / reparse points
  * (Windows). Returns 0 on success, -1 to skip. Skipping reparse points keeps
  * discovery from walking through a junction that points outside the project
- * root, mirroring the POSIX S_ISLNK skip. */
-static int safe_stat(const char *abs_path, struct stat *st) {
+ * root, mirroring the POSIX S_ISLNK skip. *is_symlink reports whether the
+ * skip (if any) was specifically the symlink/reparse-point check, as opposed
+ * to some other stat failure (permissions, a race with a delete). */
+static int safe_stat(const char *abs_path, struct stat *st, bool *is_symlink) {
+    *is_symlink = false;
 #ifdef _WIN32
     wchar_t *wpath = cbm_utf8_to_wide(abs_path);
     if (wpath) {
         DWORD attr = GetFileAttributesW(wpath);
         free(wpath);
         if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            *is_symlink = true;
             return CBM_NOT_FOUND;
         }
     }
@@ -686,6 +763,7 @@ static int safe_stat(const char *abs_path, struct stat *st) {
         return CBM_NOT_FOUND;
     }
     if (S_ISLNK(st->st_mode)) {
+        *is_symlink = true;
         return CBM_NOT_FOUND;
     }
     return 0;
@@ -694,12 +772,12 @@ static int safe_stat(const char *abs_path, struct stat *st) {
 
 /* Process a single regular file entry during directory walk. */
 static void walk_dir_process_file(const char *abs_path, const char *rel_path, const char *name,
-                                  const cbm_discover_opts_t *opts, const cbm_gitignore_t *gitignore,
+                                  const cbm_discover_opts_t *opts,
+                                  const gitignore_link_t *ignore_chain,
                                   const cbm_gitignore_t *global_gi,
-                                  const cbm_gitignore_t *cbmignore, const cbm_gitignore_t *local_gi,
-                                  const char *local_gi_prefix, off_t size, file_list_t *out) {
-    const char *skip_reason = file_skip_reason(name, rel_path, opts, gitignore, global_gi,
-                                               cbmignore, local_gi, local_gi_prefix, size);
+                                  const cbm_gitignore_t *cbmignore, off_t size, file_list_t *out) {
+    const char *skip_reason =
+        file_skip_reason(name, rel_path, opts, ignore_chain, global_gi, cbmignore, size);
     if (skip_reason) {
         /* Deliberately not indexed (#963) — record so callers can surface it.
          * Unsupported-language files below are NOT recorded: "no grammar for
@@ -718,8 +796,7 @@ static void walk_dir_process_file(const char *abs_path, const char *rel_path, co
 typedef struct {
     char dir[CBM_SZ_4K];
     char prefix[CBM_SZ_4K];
-    cbm_gitignore_t *local_gi;       /* nested .gitignore for this subtree */
-    char local_gi_prefix[CBM_SZ_4K]; /* rel_prefix when local_gi was loaded */
+    const gitignore_link_t *ignore_chain; /* deepest .gitignore governing this dir */
 } walk_frame_t;
 /* Initial capacity only — the stack grows on demand. A single directory can
  * hold more pending sibling frames than any fixed cap (dotnet/runtime has 855
@@ -733,9 +810,15 @@ typedef struct {
     int cap;
 } walk_stack_t;
 /* Build abs/rel paths and process one directory entry. */
-/* Try to load a nested .gitignore from this directory. Returns owned pointer or NULL. */
+/* Try to load a nested .gitignore from this directory. Returns owned pointer or
+ * NULL. Every directory below the root is probed, whether or not an ancestor
+ * already contributed a matcher: git stacks ALL .gitignore files on a path, and
+ * skipping the deeper ones once a shallower one existed was the #1973 blow-up
+ * (an EMPTY storage/.gitignore hid storage/dump/.gitignore's "*", so thousands
+ * of git-ignored dumps were discovered and indexed until the OOM killer hit).
+ * The root's own .gitignore is loaded by cbm_discover (merged with info/exclude). */
 static cbm_gitignore_t *try_load_nested_gitignore(const walk_frame_t *frame) {
-    if (frame->local_gi || frame->prefix[0] == '\0') {
+    if (frame->prefix[0] == '\0') {
         return NULL;
     }
     char gi_path[CBM_SZ_4K];
@@ -766,15 +849,13 @@ static bool walk_push_subdir(walk_stack_t *ws, const char *abs_path, const char 
     walk_frame_t *slot = &ws->frames[ws->top];
     snprintf(slot->dir, CBM_SZ_4K, "%s", abs_path);
     snprintf(slot->prefix, CBM_SZ_4K, "%s", rel_path);
-    slot->local_gi = parent->local_gi;
-    snprintf(slot->local_gi_prefix, CBM_SZ_4K, "%s", parent->local_gi_prefix);
+    slot->ignore_chain = parent->ignore_chain;
     ws->top++;
     return true;
 }
 
 static void walk_dir_process_entry(cbm_dirent_t *entry, const walk_frame_t *frame,
                                    const cbm_discover_opts_t *opts,
-                                   const cbm_gitignore_t *gitignore,
                                    const cbm_gitignore_t *global_gi,
                                    const cbm_gitignore_t *cbmignore, walk_stack_t *ws,
                                    file_list_t *out) {
@@ -788,13 +869,20 @@ static void walk_dir_process_entry(cbm_dirent_t *entry, const walk_frame_t *fram
     }
 
     struct stat st;
-    if (safe_stat(abs_path, &st) != 0) {
+    bool is_symlink = false;
+    if (safe_stat(abs_path, &st, &is_symlink) != 0) {
+        if (is_symlink) {
+            /* Deliberately not indexed (#963/#1815): record so callers can
+             * surface it, matching the directory-exclusion and file
+             * skip_reason paths below. */
+            file_list_add_ignored(out, rel_path, "symlink");
+        }
         return;
     }
 
     if (S_ISDIR(st.st_mode)) {
-        if (!should_skip_directory(entry->name, rel_path, opts, gitignore, global_gi, cbmignore,
-                                   frame->local_gi, frame->local_gi_prefix)) {
+        if (!should_skip_directory(entry->name, rel_path, opts, frame->ignore_chain, global_gi,
+                                   cbmignore)) {
             if (!walk_push_subdir(ws, abs_path, rel_path, frame)) {
                 /* Growth failed (OOM). This tree has no discover-level failure
                  * flag, so record the subtree as dropped rather than skipping
@@ -806,12 +894,10 @@ static void walk_dir_process_entry(cbm_dirent_t *entry, const walk_frame_t *fram
             file_list_add_excluded(out, rel_path);
         }
     } else if (S_ISREG(st.st_mode)) {
-        walk_dir_process_file(abs_path, rel_path, entry->name, opts, gitignore, global_gi,
-                              cbmignore, frame->local_gi, frame->local_gi_prefix, st.st_size, out);
+        walk_dir_process_file(abs_path, rel_path, entry->name, opts, frame->ignore_chain, global_gi,
+                              cbmignore, st.st_size, out);
     }
 }
-
-enum { GI_OWNED_CAP = 64 };
 
 static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_discover_opts_t *opts,
                      const cbm_gitignore_t *gitignore, const cbm_gitignore_t *global_gi,
@@ -821,24 +907,32 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
     if (!ws.frames) {
         return;
     }
-    /* Collect all owned gitignores — freed at the end because child frames
-     * on the stack hold borrowed pointers to them. */
-    cbm_gitignore_t *owned_gis[GI_OWNED_CAP];
-    int owned_count = 0;
+    /* Every chain link (and the nested matcher it owns) is freed at the end,
+     * because child frames on the stack hold borrowed pointers to them. */
+    gitignore_link_t *owned_links = nullptr;
 
     snprintf(ws.frames[0].dir, CBM_SZ_4K, "%s", dir_path);
     snprintf(ws.frames[0].prefix, CBM_SZ_4K, "%s", rel_prefix);
+    if (gitignore) {
+        /* The repository root's .gitignore (merged with info/exclude) heads the
+         * chain, so nested files take git's precedence over it too. On OOM the
+         * root falls back to no chain rather than silently mis-ignoring. */
+        ws.frames[0].ignore_chain = gitignore_link_new(gitignore, rel_prefix, nullptr, &owned_links);
+    }
     ws.top++;
 
-    while (ws.top > 0) {
+    while (ws.top > 0 && !file_list_should_stop(out)) {
         walk_frame_t frame = ws.frames[--ws.top];
 
         cbm_gitignore_t *loaded = try_load_nested_gitignore(&frame);
         if (loaded) {
-            frame.local_gi = loaded;
-            snprintf(frame.local_gi_prefix, sizeof(frame.local_gi_prefix), "%s", frame.prefix);
-            if (owned_count < GI_OWNED_CAP) {
-                owned_gis[owned_count++] = loaded;
+            gitignore_link_t *link =
+                gitignore_link_new(loaded, frame.prefix, frame.ignore_chain, &owned_links);
+            if (link) {
+                link->owned_gi = loaded;
+                frame.ignore_chain = link;
+            } else {
+                cbm_gitignore_free(loaded);
             }
         }
 
@@ -848,14 +942,12 @@ static void walk_dir(const char *dir_path, const char *rel_prefix, const cbm_dis
         }
 
         cbm_dirent_t *entry;
-        while ((entry = cbm_readdir(d)) != NULL) {
-            walk_dir_process_entry(entry, &frame, opts, gitignore, global_gi, cbmignore, &ws, out);
+        while (!file_list_should_stop(out) && (entry = cbm_readdir(d)) != NULL) {
+            walk_dir_process_entry(entry, &frame, opts, global_gi, cbmignore, &ws, out);
         }
         cbm_closedir(d);
     }
-    for (int i = 0; i < owned_count; i++) {
-        cbm_gitignore_free(owned_gis[i]);
-    }
+    gitignore_links_free(owned_links);
     free(ws.frames);
 }
 
@@ -974,10 +1066,15 @@ int cbm_discover_ex(const char *repo_path, const cbm_discover_opts_t *opts, cbm_
                             NULL, NULL);
 }
 
-int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
-                     int *count, char ***excluded_out, int *excluded_count_out,
-                     cbm_ignored_file_t **ignored_out, int *ignored_count_out,
-                     int *ignored_total_out) {
+/* Shared walk for full discovery and the bounded count (#713), so both apply
+ * the identical filter policy. Returns 0 (CBM_DISCOVER_OK) on success,
+ * CBM_DISCOVER_LIMIT_EXCEEDED when a bounded count passed max_files, and
+ * CBM_NOT_FOUND on a bad root, an expired deadline or a failed walk. */
+static int discover_impl(const char *repo_path, const cbm_discover_opts_t *opts,
+                         cbm_file_info_t **out, int *count, char ***excluded_out,
+                         int *excluded_count_out, cbm_ignored_file_t **ignored_out,
+                         int *ignored_count_out, int *ignored_total_out, bool count_only,
+                         int max_files, uint64_t deadline_ms) {
     if (excluded_out) {
         *excluded_out = NULL;
     }
@@ -1064,14 +1161,28 @@ int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm
     }
 
     /* Walk */
-    file_list_t fl = {0};
-    fl.collect_ignored = ignored_out != NULL;
+    file_list_t fl = {};
+    fl.max_files = count_only ? max_files : -1;
+    fl.deadline_ms = count_only ? deadline_ms : 0;
+    fl.count_only = count_only;
+    fl.collect_ignored = !count_only && ignored_out != NULL;
     walk_dir(repo_path, "", opts, gitignore, global_gi, cbmignore, &fl);
 
     /* Cleanup */
     cbm_gitignore_free(gitignore);
     cbm_gitignore_free(global_gi);
     cbm_gitignore_free(cbmignore);
+
+    if (count_only) {
+        cbm_discover_free(fl.files, 0);
+        cbm_discover_free_excluded(fl.excluded, fl.excluded_count);
+        cbm_discover_free_ignored(fl.ignored, fl.ignored_count);
+        *count = fl.count;
+        if (fl.failed) {
+            return CBM_NOT_FOUND;
+        }
+        return fl.limit_exceeded ? CBM_DISCOVER_LIMIT_EXCEEDED : CBM_DISCOVER_OK;
+    }
 
     *out = fl.files;
     *count = fl.count;
@@ -1099,6 +1210,34 @@ int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm
         cbm_discover_free_ignored(fl.ignored, fl.ignored_count);
     }
     return 0;
+}
+
+int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
+                     int *count, char ***excluded_out, int *excluded_count_out,
+                     cbm_ignored_file_t **ignored_out, int *ignored_count_out,
+                     int *ignored_total_out) {
+    return discover_impl(repo_path, opts, out, count, excluded_out, excluded_count_out,
+                         ignored_out, ignored_count_out, ignored_total_out, false, -1, 0);
+}
+
+cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
+                                                 const cbm_discover_opts_t *opts, int max_files,
+                                                 uint64_t deadline_ms, int *count_out) {
+    if (count_out) {
+        *count_out = -1;
+    }
+    if (!repo_path || !count_out || max_files < 0) {
+        return CBM_DISCOVER_ERROR;
+    }
+    cbm_file_info_t *files = nullptr;
+    int count = 0;
+    int rc = discover_impl(repo_path, opts, &files, &count, nullptr, nullptr, nullptr, nullptr,
+                           nullptr, true, max_files, deadline_ms);
+    if (rc == CBM_DISCOVER_OK || rc == CBM_DISCOVER_LIMIT_EXCEEDED) {
+        *count_out = count;
+        return (cbm_discover_status_t)rc;
+    }
+    return CBM_DISCOVER_ERROR;
 }
 
 void cbm_discover_free(cbm_file_info_t *files, int count) {
