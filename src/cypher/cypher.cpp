@@ -34,6 +34,10 @@ enum {
     /* search miss sentinel */ /* mask for ebuf ring buffer (8 entries) */
 };
 #define CYP_DBL_MAX 1e308
+/* execute_single binds the first pattern's leading node even when the query
+ * leaves it unnamed, so the engine needs a name for it. The binding slot is
+ * real, which is why check_pattern_var_capacity counts it. */
+#define CYP_ANON_HEAD_VAR "_n0"
 
 #include <ctype.h>
 #include "foundation/compat_regex.h"
@@ -1674,8 +1678,14 @@ static int parse_return_or_with(parser_t *p, cbm_return_clause_t **out, bool is_
     /* Projection is materialized per row into fixed-width stack arrays sized at
      * CBM_SZ_32 columns (execute_return_simple and its siblings). Bound the
      * parsed item count to that width so an over-wide RETURN is rejected here
-     * instead of writing past those arrays downstream. */
-    if (r->count > CBM_SZ_32) {
+     * instead of writing past those arrays downstream.
+     *
+     * WITH is bounded tighter, by CYP_MAX_VARS. Every item a WITH projects
+     * becomes one variable of the binding that carries the rest of the query,
+     * and binding_t holds exactly CYP_MAX_VARS variables. A wider WITH used to
+     * parse, then lose every alias past the 16th in with_add_vbinding_var and
+     * answer with silently blank or missing columns. Refuse it here instead. */
+    if (r->count > (is_with ? CYP_MAX_VARS : CBM_SZ_32)) {
         free_return_clause(r);
         return CBM_NOT_FOUND;
     }
@@ -1868,6 +1878,13 @@ static int parse_post_where(parser_t *p, cbm_query_t *q, // NOLINT(misc-no-recur
         q->union_next = sub.query;
         sub.query = NULL;
         cbm_parse_free(&sub);
+        /* The branch after UNION was parsed by a SEPARATE parser over a slice
+         * of these tokens, so this parser's cursor never moved past the UNION
+         * keyword. That sub-parse refuses to succeed with anything left over,
+         * so everything from here to the end is accounted for. Move the cursor
+         * to the end to say so, or cbm_parse's end-of-input check reads a fully
+         * parsed UNION query as unfinished. */
+        p->pos = p->count;
     }
     return 0;
 }
@@ -1927,6 +1944,32 @@ int cbm_parse(const cbm_token_t *tokens, int token_count, // NOLINT(misc-no-recu
 
     if (parse_post_where(&p, q, &pat_cap) < 0) {
         out->error = heap_strdup(p.error[0] ? p.error : "failed to parse query");
+        cbm_query_free(q);
+        return CBM_NOT_FOUND;
+    }
+
+    /* Every token must be consumed. The grammar accepts at most one WITH and
+     * treats RETURN as optional, so a query with a second WITH stage, or any
+     * typo after RETURN, used to stop parsing there and succeed anyway. The
+     * dropped tail took the filter and the RETURN with it, and the engine
+     * answered from the fragment it had parsed with its default projection:
+     * success with wrong rows, which is worse than a refusal. */
+    if (peek(&p)->type != TOK_EOF) {
+        /* Mention the one-WITH limit only when a standalone WITH really sits in
+         * the unread tail; a WITH straight after STARTS is the STARTS WITH
+         * operator, the same guard parse_post_where uses. */
+        const char *hint = "";
+        for (int i = p.pos; i < p.count; i++) {
+            if (p.tokens[i].type == TOK_WITH &&
+                (i == 0 || p.tokens[i - SKIP_ONE].type != TOK_STARTS)) {
+                hint = " Note that only one WITH clause is supported.";
+                break;
+            }
+        }
+        snprintf(p.error, sizeof(p.error),
+                 "unexpected input at pos %d ('%s') — the query was not fully parsed.%s",
+                 peek(&p)->pos, peek(&p)->text ? peek(&p)->text : "", hint);
+        out->error = heap_strdup(p.error);
         cbm_query_free(q);
         return CBM_NOT_FOUND;
     }
@@ -4005,18 +4048,34 @@ static void execute_with_clause(cbm_query_t *q, binding_t **bindings_ptr, int *b
 /* ── Execute a single query (no UNION recursion) ──────────────── */
 
 /* Project RETURN * — all bound variable properties */
-/* Collect all variable names from query patterns */
+/* Has this variable already been collected? A query may name the same variable
+ * in more than one pattern, and RETURN * must give it one set of columns. */
+static bool star_var_seen(const char **vars, int vc, const char *name) {
+    for (int i = 0; i < vc; i++) {
+        if (strcmp(vars[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Collect the variables a RETURN * projects, in the order the query names them
+ * and with no repeats. Without the repeat check, `MATCH (f) OPTIONAL MATCH
+ * (f)-[:CALLS]->(g)` names f in two patterns and f gets its four columns
+ * twice. */
 static int collect_pattern_vars(cbm_query_t *q, const char **vars, int max_vars) {
     int vc = 0;
     for (int pi = 0; pi < q->pattern_count; pi++) {
         for (int ni = 0; ni < q->patterns[pi].node_count && vc < max_vars; ni++) {
-            if (q->patterns[pi].nodes[ni].variable) {
-                vars[vc++] = q->patterns[pi].nodes[ni].variable;
+            const char *var = q->patterns[pi].nodes[ni].variable;
+            if (var && !star_var_seen(vars, vc, var)) {
+                vars[vc++] = var;
             }
         }
         for (int ri = 0; ri < q->patterns[pi].rel_count && vc < max_vars; ri++) {
-            if (q->patterns[pi].rels[ri].variable) {
-                vars[vc++] = q->patterns[pi].rels[ri].variable;
+            const char *var = q->patterns[pi].rels[ri].variable;
+            if (var && !star_var_seen(vars, vc, var)) {
+                vars[vc++] = var;
             }
         }
     }
@@ -4068,8 +4127,41 @@ static void project_star_row(binding_t *b, const char **vars, int vc, const char
     }
 }
 
+/* RETURN * after a WITH.
+ *
+ * The pattern's variables are out of scope by this point — the WITH replaced
+ * them with the names it made. Each of those names holds one value, not a
+ * node, so each is ONE column rather than the four a node variable gets.
+ * Reading the pattern here instead named variables the bindings no longer
+ * hold and answered a full result of empty strings with no error. */
+static void execute_return_star_after_with(cbm_query_t *q, binding_t *bindings, int bind_count,
+                                           int max_rows, result_builder_t *rb) {
+    cbm_return_clause_t *wc = q->with_clause;
+    char name_bufs[CYP_MAX_VARS][CBM_SZ_128];
+    const char *cols[CYP_MAX_VARS];
+    /* parse_return_or_with refuses a WITH wider than CYP_MAX_VARS, so this
+     * clamp cannot fire. It stays as the bound this function relies on. */
+    int col_n = wc->count < CYP_MAX_VARS ? wc->count : CYP_MAX_VARS;
+    for (int i = 0; i < col_n; i++) {
+        cols[i] = resolve_item_alias(&wc->items[i], name_bufs[i], sizeof(name_bufs[i]));
+    }
+    rb_set_columns(rb, cols, col_n);
+    for (int bi = 0; bi < bind_count && rb->row_count < max_rows; bi++) {
+        const char *vals[CYP_MAX_VARS];
+        for (int i = 0; i < col_n; i++) {
+            cbm_node_t *vn = binding_get(&bindings[bi], cols[i]);
+            vals[i] = vn && vn->name ? vn->name : "";
+        }
+        rb_add_row(rb, vals);
+    }
+}
+
 static void execute_return_star(cbm_query_t *q, binding_t *bindings, int bind_count, int max_rows,
                                 result_builder_t *rb) {
+    if (q->with_clause) {
+        execute_return_star_after_with(q, bindings, bind_count, max_rows, rb);
+        return;
+    }
     const char *vars[CBM_SZ_32];
     int vc = collect_pattern_vars(q, vars, CBM_SZ_32);
     build_star_columns(rb, vars, vc);
@@ -4564,7 +4656,7 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     int bind_cap = scan_count > 0 ? scan_count : SKIP_ONE;
     binding_t *bindings = (binding_t *)malloc((bind_cap + SKIP_ONE) * sizeof(binding_t));
     int bind_count = 0;
-    const char *var_name = pat0->nodes[0].variable ? pat0->nodes[0].variable : "_n0";
+    const char *var_name = pat0->nodes[0].variable ? pat0->nodes[0].variable : CYP_ANON_HEAD_VAR;
 
     for (int i = 0; i < scan_count && bind_count < bind_cap; i++) {
         if ((i & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
@@ -4613,6 +4705,219 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
 
 /* ── Main entry point ─────────────────────────────────────────── */
 
+/* ── Is every name a RETURN or WITH item uses actually in scope? ──
+ *
+ * An unbound variable resolves to NULL and renders as "" on purpose: an
+ * OPTIONAL MATCH target that found no row has to project a blank rather than
+ * drop the row. The cost of that convention is that a name the query NEVER
+ * carried through looks exactly the same, and reads as "the graph holds no
+ * such data" instead of "your query named something that is not there"
+ * (upstream #1919). The check runs on the parsed query, not on the run-time
+ * bindings: it asks whether the query DECLARED the name, so an OPTIONAL MATCH
+ * target that did not match is still declared, still legal, still "". */
+
+/* Cap for one query's declared names. check_pattern_var_capacity bounds the
+ * patterns at CYP_MAX_VARS + CYP_MAX_EDGE_VARS names, plus one UNWIND alias,
+ * which is well inside this. */
+enum { CYP_SCOPE_MAX_NAMES = 32 };
+
+static bool scope_holds(const char *const *names, int count, const char *want) {
+    for (int i = 0; i < count; i++) {
+        if (names[i] && strcmp(names[i], want) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Every name the query's patterns declare, plus an UNWIND alias.
+ * Answers -1 when there are more names than the cap holds. */
+static int collect_declared_names(const cbm_query_t *q, const char **out, int cap) {
+    int n = 0;
+    for (int pi = 0; pi < q->pattern_count; pi++) {
+        const cbm_pattern_t *pat = &q->patterns[pi];
+        for (int ni = 0; ni < pat->node_count; ni++) {
+            const char *var = pat->nodes[ni].variable;
+            if (var && !scope_holds(out, n, var)) {
+                if (n >= cap) {
+                    return CBM_NOT_FOUND;
+                }
+                out[n++] = var;
+            }
+        }
+        for (int ri = 0; ri < pat->rel_count; ri++) {
+            const char *var = pat->rels[ri].variable;
+            if (var && !scope_holds(out, n, var)) {
+                if (n >= cap) {
+                    return CBM_NOT_FOUND;
+                }
+                out[n++] = var;
+            }
+        }
+    }
+    if (q->unwind_alias && !scope_holds(out, n, q->unwind_alias)) {
+        if (n >= cap) {
+            return CBM_NOT_FOUND;
+        }
+        out[n++] = q->unwind_alias;
+    }
+    return n;
+}
+
+/* What a WITH leaves behind: its alias where it made one, and the plain
+ * variable where it carried one through whole. `WITH f.name AS caller` leaves
+ * `caller` and nothing else — `f` is gone. */
+static int collect_with_names(const cbm_return_clause_t *wc, const char **out, int cap) {
+    int n = 0;
+    for (int i = 0; i < wc->count; i++) {
+        const cbm_return_item_t *item = &wc->items[i];
+        const char *name = NULL;
+        if (item->alias) {
+            name = item->alias;
+        } else if (item->variable && !item->property && !item->func) {
+            name = item->variable;
+        }
+        if (name && !scope_holds(out, n, name)) {
+            if (n >= cap) {
+                return CBM_NOT_FOUND;
+            }
+            out[n++] = name;
+        }
+    }
+    return n;
+}
+
+/* Names the variable and the clause: an error that does not say WHICH name is
+ * wrong sends the reader back to guessing. */
+static char *scope_error(const char *var, const char *clause, const char *why) {
+    char buf[CBM_SZ_256];
+    snprintf(buf, sizeof(buf), "variable '%s' is not in scope for %s — %s", var, clause, why);
+    return heap_strdup(buf);
+}
+
+/* The variable this item really references, or NULL when it references none.
+ * `count(*)` stores "*" and a CASE expression stores "CASE" in that field;
+ * neither names anything the query declared. */
+static const char *scope_checkable_var(const cbm_return_item_t *item) {
+    if (item->kase || !item->variable) {
+        return NULL;
+    }
+    if (strcmp(item->variable, "*") == 0) {
+        return NULL;
+    }
+    return item->variable;
+}
+
+/* Says which limit the query passed and how to get under it. An unnamed node
+ * takes no slot — except the head of the first pattern, which the engine binds
+ * either way. Splitting the MATCH does NOT help: every pattern of one query
+ * shares one binding. Separate queries do. */
+static char *var_capacity_error(const char *kind, int limit) {
+    char buf[CBM_SZ_256];
+    snprintf(buf, sizeof(buf),
+             "too many %s variables: a query can name at most %d — "
+             "leave the name off the ones you do not use, or run separate queries",
+             kind, limit);
+    return heap_strdup(buf);
+}
+
+/* A binding holds CYP_MAX_VARS node variables and CYP_MAX_EDGE_VARS edge
+ * variables in plain arrays, and binding_set / binding_set_edge drop anything
+ * past those without a word — the extra names project as empty strings. Refuse
+ * such a query before any row is touched. Counts DISTINCT variables across
+ * every pattern (they all land in the same binding, OPTIONAL ones included); a
+ * node and an edge variable of the same name each take a slot, because the
+ * binding keeps them in separate arrays. */
+static char *check_pattern_var_capacity(const cbm_query_t *q) {
+    const char *node_vars[CYP_MAX_VARS] = {NULL};
+    const char *edge_vars[CYP_MAX_EDGE_VARS] = {NULL};
+    int node_n = 0;
+    int edge_n = 0;
+    /* The head of the first pattern always takes a node slot, named or not:
+     * execute_single binds it under CYP_ANON_HEAD_VAR when it is unnamed. */
+    if (q->pattern_count > 0 && q->patterns[0].node_count > 0 &&
+        !q->patterns[0].nodes[0].variable) {
+        node_vars[node_n++] = CYP_ANON_HEAD_VAR;
+    }
+    for (int pi = 0; pi < q->pattern_count; pi++) {
+        const cbm_pattern_t *pat = &q->patterns[pi];
+        for (int ni = 0; ni < pat->node_count; ni++) {
+            const char *var = pat->nodes[ni].variable;
+            if (!var || scope_holds(node_vars, node_n, var)) {
+                continue;
+            }
+            if (node_n >= CYP_MAX_VARS) {
+                return var_capacity_error("node", CYP_MAX_VARS);
+            }
+            node_vars[node_n++] = var;
+        }
+        for (int ri = 0; ri < pat->rel_count; ri++) {
+            const char *var = pat->rels[ri].variable;
+            if (!var || scope_holds(edge_vars, edge_n, var)) {
+                continue;
+            }
+            if (edge_n >= CYP_MAX_EDGE_VARS) {
+                return var_capacity_error("edge", CYP_MAX_EDGE_VARS);
+            }
+            edge_vars[edge_n++] = var;
+        }
+    }
+    return NULL;
+}
+
+/* Answers NULL when the query is fine, or a heap message naming the first
+ * problem. Checks one query; the caller walks a UNION. */
+static char *check_projection_scope(const cbm_query_t *q) {
+    char *capacity_err = check_pattern_var_capacity(q);
+    if (capacity_err) {
+        return capacity_err;
+    }
+
+    const char *declared[CYP_SCOPE_MAX_NAMES];
+    int declared_n = collect_declared_names(q, declared, CYP_SCOPE_MAX_NAMES);
+    if (declared_n < 0) {
+        /* Unreachable while the capacity check above holds; kept so the guard
+         * still stands if either bound ever moves. */
+        return NULL;
+    }
+
+    /* A WITH still reads the pattern variables. */
+    if (q->with_clause && !q->with_clause->star) {
+        for (int i = 0; i < q->with_clause->count; i++) {
+            const char *var = scope_checkable_var(&q->with_clause->items[i]);
+            if (var && !scope_holds(declared, declared_n, var)) {
+                return scope_error(var, "WITH", "no pattern in this query names it");
+            }
+        }
+    }
+
+    if (!q->ret || q->ret->star) {
+        return NULL;
+    }
+
+    /* A RETURN after a WITH reads only what the WITH left behind. */
+    const char *after_with[CYP_SCOPE_MAX_NAMES];
+    const char *const *scope = declared;
+    int scope_n = declared_n;
+    if (q->with_clause) {
+        scope_n = collect_with_names(q->with_clause, after_with, CYP_SCOPE_MAX_NAMES);
+        if (scope_n < 0) {
+            return NULL; /* unreachable: a WITH holds at most CYP_MAX_VARS items */
+        }
+        scope = after_with;
+    }
+
+    for (int i = 0; i < q->ret->count; i++) {
+        const char *var = scope_checkable_var(&q->ret->items[i]);
+        if (var && !scope_holds(scope, scope_n, var)) {
+            return scope_error(var, "RETURN",
+                               q->with_clause ? "the WITH clause did not carry it through"
+                                              : "no pattern in this query names it");
+        }
+    }
+    return NULL;
+}
+
 int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *project, int max_rows,
                        cbm_cypher_result_t *out) {
     memset(out, 0, sizeof(*out));
@@ -4628,6 +4933,15 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
     if (cbm_cypher_parse(query, &q, &err) < 0) {
         out->error = err;
         return CBM_NOT_FOUND;
+    }
+
+    for (const cbm_query_t *sq = q; sq; sq = sq->union_next) {
+        char *scope_err = check_projection_scope(sq);
+        if (scope_err) {
+            cbm_query_free(q);
+            out->error = scope_err;
+            return CBM_NOT_FOUND;
+        }
     }
 
     result_builder_t rb = {0};
