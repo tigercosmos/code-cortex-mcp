@@ -977,6 +977,9 @@ static void predump_cfg(cbm_pipeline_ctx_t *ctx) {
 static void predump_complexity(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_pass_complexity(ctx);
 }
+static void predump_importance(cbm_pipeline_ctx_t *ctx) {
+    cbm_pipeline_pass_importance(ctx);
+}
 
 static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
     static const struct {
@@ -984,11 +987,20 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
         const char *name;
         bool moderate_only; /* true = skip in fast mode */
     } passes[] = {
-        {predump_deco, "decorator_tags", false}, {predump_cfg, "configlink", false},
-        {predump_route, "route_match", false},   {predump_sim, "similarity", true},
-        {predump_sem, "semantic_edges", true},   {predump_complexity, "complexity", false},
+        {predump_deco, "decorator_tags", false},
+        {predump_cfg, "configlink", false},
+        {predump_route, "route_match", false},
+        {predump_sim, "similarity", true},
+        {predump_sem, "semantic_edges", true},
+        {predump_complexity, "complexity", false},
+        /* Importance runs LAST: it reads CALLS/USAGE (extraction) and TESTS
+         * (pass_tests, which run_post_extraction runs before this loop), so
+         * every edge type its score depends on already exists here. */
+        {predump_importance, "importance", false},
     };
-    enum { PREDUMP_PASS_COUNT = 6 };
+    /* Derived from the table, never hand-written: a count that lags a newly
+     * appended entry silently skips the LAST pass while every test stays green. */
+    enum { PREDUMP_PASS_COUNT = (int)(sizeof(passes) / sizeof(passes[0])) };
     struct timespec t;
     for (int i = 0; i < PREDUMP_PASS_COUNT && !check_cancel(p); i++) {
         /* "moderate_only" passes (similarity/semantic edges) run in FULL,
@@ -1504,21 +1516,12 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
                          itoa_buf(p->ignored_total));
         }
 
-        /* FTS5 backfill: populate nodes_fts with camelCase-split names.
-         * Contentless FTS5 requires the special 'delete-all' command instead of
-         * DELETE FROM to wipe prior rows (there's no underlying content table).
-         * Falls back to plain names if cbm_camel_split is unavailable (which
-         * shouldn't happen because we always register it, but we stay defensive). */
+        /* FTS5 backfill (camelCase-split names + docstring prose in `body`).
+         * The column list lives in cbm_store_fts_rebuild() alone, shared with
+         * the incremental dump, so the two routes cannot index different
+         * columns. It degrades on its own (no body column, no camel splitter). */
         CBM_PROF_START(t_fts);
-        cbm_store_exec(hash_store, "INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');");
-        if (cbm_store_exec(hash_store,
-                           "INSERT INTO nodes_fts(rowid, name, qualified_name, label, file_path) "
-                           "SELECT id, cbm_camel_split(name), qualified_name, label, file_path "
-                           "FROM nodes;") != CBM_STORE_OK) {
-            cbm_store_exec(hash_store,
-                           "INSERT INTO nodes_fts(rowid, name, qualified_name, label, file_path) "
-                           "SELECT id, name, qualified_name, label, file_path FROM nodes;");
-        }
+        (void)cbm_store_fts_rebuild(hash_store, NULL, 0);
         CBM_PROF_END("persist", "5_fts_backfill", t_fts);
 
         cbm_store_close(hash_store);

@@ -319,12 +319,20 @@ static int init_schema(cbm_store_t *s) {
      * not a copy of the source text — required for camelCase tokenization
      * because we feed it `cbm_camel_split(name)` at insert time but want
      * queries to match against the split tokens, not the original.
-     * Fails silently if FTS5 is not compiled in (SQLITE_ENABLE_FTS5). */
+     * Fails silently if FTS5 is not compiled in (SQLITE_ENABLE_FTS5).
+     *
+     * `body` (#518/#519) carries each node's prose — its docstring — so a
+     * question phrased in words rather than identifiers still finds the node.
+     * Deliberately NOT an index-format change: IF NOT EXISTS leaves a legacy
+     * four-column table as it is, cbm_store_fts_rebuild() probes for the column
+     * before naming it, and bm25()'s surplus weight is inert on a table with no
+     * fifth column. An older database keeps opening and searching, just
+     * without prose. */
     {
         char *fts_err = NULL;
         int fts_rc = sqlite3_exec(s->db,
                                   "CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5("
-                                  "  name, qualified_name, label, file_path,"
+                                  "  name, qualified_name, label, file_path, body,"
                                   "  content='',"
                                   "  tokenize='unicode61 remove_diacritics 2'"
                                   ");",
@@ -334,6 +342,96 @@ static int init_schema(cbm_store_t *s) {
         }
     }
     return CBM_STORE_OK;
+}
+
+/* ── FTS backfill ───────────────────────────────────────────────── */
+
+/* Prose source for nodes_fts.body: the docstring each node already carries in
+ * its properties JSON — no new column on `nodes`, so no format bump.
+ *   - the LIKE prefilter keeps the JSON parse off the many nodes with no
+ *     docstring;
+ *   - json_valid() guards the parse because json_extract() RAISES on malformed
+ *     properties, and one bad row would otherwise abort the whole backfill.
+ * `body` is prose and is indexed RAW: only `name` goes through cbm_camel_split. */
+#define FTS_BODY_EXPR                                                         \
+    "CASE WHEN properties LIKE '%\"docstring\"%' AND json_valid(properties) " \
+    "THEN json_extract(properties, '$.docstring') END"
+
+enum { FTS_SQL_BUF = 512 };
+
+/* Does nodes_fts carry `body`? CREATE VIRTUAL TABLE IF NOT EXISTS never widens
+ * an older four-column table, and naming a missing column fails the backfill. */
+static bool fts_has_body_column(cbm_store_t *s) {
+    sqlite3_stmt *probe = NULL;
+    if (sqlite3_prepare_v2(s->db, "SELECT body FROM nodes_fts LIMIT 0;", CBM_NOT_FOUND, &probe,
+                           NULL) != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_finalize(probe);
+    return true;
+}
+
+/* One backfill attempt. CBM_STORE_NOT_FOUND: the statement would not prepare
+ * (missing table, column or SQL function) so the caller may retry narrower;
+ * CBM_STORE_ERR: the write itself failed. */
+static int fts_backfill_try(cbm_store_t *s, const char *project, int64_t after_id, bool with_body,
+                            bool camel) {
+    char sql[FTS_SQL_BUF];
+    int n = snprintf(sql, sizeof(sql),
+                     "INSERT INTO nodes_fts (rowid, name, qualified_name, label, file_path%s)"
+                     " SELECT id, %s, qualified_name, label, file_path%s FROM nodes%s;",
+                     with_body ? ", body" : "", camel ? "cbm_camel_split(name)" : "name",
+                     with_body ? ", " FTS_BODY_EXPR : "",
+                     project ? " WHERE project = ?1 AND id > ?2" : "");
+    if (n <= 0 || (size_t)n >= sizeof(sql)) {
+        return CBM_STORE_ERR;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        return CBM_STORE_NOT_FOUND;
+    }
+    if (project) {
+        sqlite3_bind_text(stmt, ST_COL_1, project, CBM_NOT_FOUND, BIND_TRANSIENT);
+        sqlite3_bind_int64(stmt, ST_COL_2, after_id);
+    }
+    int rc = sqlite3_step(stmt) == SQLITE_DONE ? CBM_STORE_OK : CBM_STORE_ERR;
+    if (rc != CBM_STORE_OK) {
+        store_set_error_sqlite(s, "fts_backfill");
+    }
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id) {
+    if (!s || !s->db) {
+        return CBM_STORE_ERR;
+    }
+    /* Wholesale only: the incremental form adds rows to a live index. A
+     * delete-all that fails to prepare means FTS5 is absent entirely. */
+    if (!project &&
+        exec_sql(s, "INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');") != CBM_STORE_OK) {
+        return CBM_STORE_NOT_FOUND;
+    }
+    /* Degrade one capability at a time, widest first: dropping `body` covers a
+     * legacy four-column table or a build without JSON1; dropping
+     * cbm_camel_split covers a connection without the function registered.
+     * Each attempt is one statement, so a failed one rolls itself back. */
+    const bool with_body = fts_has_body_column(s);
+    static const struct {
+        bool body;
+        bool camel;
+    } ladder[] = {{true, true}, {true, false}, {false, true}, {false, false}};
+    int rc = CBM_STORE_NOT_FOUND;
+    for (const auto &step : ladder) {
+        if (step.body && !with_body) {
+            continue;
+        }
+        rc = fts_backfill_try(s, project, after_id, step.body, step.camel);
+        if (rc == CBM_STORE_OK) {
+            return rc;
+        }
+    }
+    return rc;
 }
 
 static int create_user_indexes(cbm_store_t *s) {

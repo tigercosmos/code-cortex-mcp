@@ -820,6 +820,20 @@ int cbm_store_count_vectors(cbm_store_t *s, const char *project);
  * Returns CBM_STORE_OK on success. */
 int cbm_store_exec(cbm_store_t *s, const char *sql);
 
+/* Populate nodes_fts from the `nodes` table — the single writer for the BM25
+ * index, so the column list (name, qualified_name, label, file_path, body) is
+ * decided in exactly ONE place. A hand-written INSERT naming only the
+ * identifier columns silently leaves `body` NULL for every node it writes.
+ *
+ *   project == NULL → wholesale rebuild: clears the index, then reindexes every
+ *                     node in the database.
+ *   project != NULL → incremental: indexes only that project's nodes with
+ *                     id > after_id, leaving existing rows untouched.
+ *
+ * Returns CBM_STORE_OK; CBM_STORE_NOT_FOUND when nodes_fts cannot be written at
+ * all (FTS5 compiled out); CBM_STORE_ERR on a genuine write failure. */
+int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id);
+
 #ifdef __cplusplus
 }
 #endif

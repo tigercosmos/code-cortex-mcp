@@ -642,6 +642,29 @@ int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx);
  * cycles (recursive). Runs on the graph buffer before the dump. */
 void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx);
 
+/* Pre-dump pass: per-symbol importance score (weighted degree), in
+ * pass_complexity.cpp.
+ *   importance = sqrt(num_refs) * priv * generic * distinct * test_penalty
+ * Stored as a numeric "importance" key inside the node's EXISTING
+ * properties_json — no schema change and no index-format bump; indexes written
+ * by older builds simply lack the key and consumers must tolerate its absence.
+ * MUST run over the COMPLETE graph: after pass_tests, after CALLS/USAGE
+ * extraction, and — on the incremental route — after the inbound cross-file
+ * edges of re-extracted files have been re-linked. Scored earlier, a symbol's
+ * callers in unchanged files are invisible and its score persists as 0. */
+void cbm_pipeline_pass_importance(cbm_pipeline_ctx_t *ctx);
+
+/* Write the numeric "importance" key into a node's properties JSON object.
+ * IDEMPOTENT: an existing key is overwritten in place, never appended twice —
+ * the incremental path re-scores nodes rehydrated from the store that already
+ * carry the key. A blob that is not a JSON object is left untouched. */
+void cbm_pipeline_importance_append_prop(cbm_gbuf_node_t *node, double score);
+
+/* Work counter: same-name-group member visits made by distinct-file counting
+ * (monotonic; callers diff before/after). Goes superlinear if the
+ * per-distinct-name memoization is ever lost. */
+uint64_t cbm_pipeline_importance_name_visits(void);
+
 /* ── Env URL scanner (pass_envscan.c) ────────────────────────────── */
 
 typedef struct {

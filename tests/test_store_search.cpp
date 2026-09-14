@@ -8,6 +8,7 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include <store/store.h>
+#include "sqlite3.h" /* vendored/sqlite3 — raw nodes_fts MATCH probes */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -1445,6 +1446,170 @@ TEST(store_impact_summary_empty) {
     PASS();
 }
 
+/* ── nodes_fts prose column (#518 / #519) ──────────────────────────
+ *
+ * nodes_fts is CONTENTLESS, so a column's value cannot be selected back — a
+ * MATCH with a column filter is the only way to prove a token landed in `body`
+ * rather than in an identifier column. A four-column INSERT still "works"; it
+ * just silently indexes no prose. */
+
+static int fts_match_count(cbm_store_t *s, const char *match) {
+    sqlite3 *db = cbm_store_get_db(s);
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM nodes_fts WHERE nodes_fts MATCH ?1", -1, &st,
+                           NULL) != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, match, -1, SQLITE_TRANSIENT);
+    int n = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+    sqlite3_finalize(st);
+    return n;
+}
+
+/* One Section carrying prose (with a camelCase identifier in it), one Function
+ * carrying none. */
+static void seed_prose_nodes(cbm_store_t *s) {
+    cbm_store_upsert_project(s, "p", "/tmp/p");
+    cbm_node_t sec = {};
+    sec.project = "p";
+    sec.label = "Section";
+    sec.name = "Installation";
+    sec.qualified_name = "p.README.Installation";
+    sec.file_path = "README.md";
+    sec.properties_json = "{\"docstring\":\"provisions an ephemeral workstation runner via "
+                          "getUserById\"}";
+    cbm_store_upsert_node(s, &sec);
+    cbm_node_t fn = {};
+    fn.project = "p";
+    fn.label = "Function";
+    fn.name = "plainFunction";
+    fn.qualified_name = "p.main.plainFunction";
+    fn.file_path = "main.c";
+    cbm_store_upsert_node(s, &fn);
+}
+
+TEST(store_fts_rebuild_indexes_docstring_as_body_issue518) {
+    cbm_store_t *s = cbm_store_open_memory();
+    seed_prose_nodes(s);
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+
+    ASSERT_EQ(fts_match_count(s, "body:ephemeral"), 1);
+    ASSERT_EQ(fts_match_count(s, "body:workstation"), 1);
+    ASSERT_EQ(fts_match_count(s, "name:ephemeral"), 0); /* not smeared into identifiers */
+    ASSERT_EQ(fts_match_count(s, "body:plainFunction"), 0);
+    ASSERT_EQ(fts_match_count(s, "name:plainFunction"), 1);
+
+    /* `body` is PROSE, indexed RAW — only `name` gets cbm_camel_split, which
+     * turns "getUserById" into "getUserById get User By Id". A split body would
+     * match the fragment "User"; the mirror assertion pins that `name` IS split
+     * so the guard cannot pass by indexing nothing (upstream dc23628c). */
+    ASSERT_EQ(fts_match_count(s, "body:getUserById"), 1);
+    ASSERT_EQ(fts_match_count(s, "body:User"), 0);
+    ASSERT_EQ(fts_match_count(s, "name:plain"), 1);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_fts_rebuild_survives_malformed_properties_json) {
+    /* json_extract() RAISES on malformed properties; unguarded, one bad row
+     * would abort the backfill and leave the whole index empty. */
+    cbm_store_t *s = cbm_store_open_memory();
+    seed_prose_nodes(s);
+    cbm_node_t broken = {};
+    broken.project = "p";
+    broken.label = "Function";
+    broken.name = "brokenProps";
+    broken.qualified_name = "p.main.brokenProps";
+    broken.file_path = "main.c";
+    broken.properties_json = "{\"docstring\":\"unterminated";
+    ASSERT_TRUE(cbm_store_upsert_node(s, &broken) > 0);
+
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(fts_match_count(s, "name:brokenProps"), 1);
+    ASSERT_EQ(fts_match_count(s, "body:ephemeral"), 1);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_fts_rebuild_tolerates_legacy_four_column_table) {
+    /* No index-format bump, so real users open databases whose nodes_fts
+     * predates `body`. Lay down the four-column table first; the current store
+     * must open it, backfill it, and search it with the five-weight bm25(). */
+    char *td = th_mktempdir("cbm_fts_legacy");
+    ASSERT_NOT_NULL(td);
+    char dir[256];
+    snprintf(dir, sizeof(dir), "%s", td);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/legacy.db", dir);
+
+    sqlite3 *raw = NULL;
+    ASSERT_EQ(sqlite3_open(path, &raw), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(raw,
+                           "CREATE VIRTUAL TABLE nodes_fts USING fts5("
+                           "  name, qualified_name, label, file_path,"
+                           "  content='', tokenize='unicode61 remove_diacritics 2');",
+                           NULL, NULL, NULL),
+              SQLITE_OK);
+    sqlite3_close(raw);
+
+    cbm_store_t *s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s);
+    seed_prose_nodes(s);
+
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(fts_match_count(s, "name:plainFunction"), 1);
+    ASSERT_EQ(fts_match_count(s, "qualified_name:Installation"), 1);
+    ASSERT_EQ(fts_match_count(s, "ephemeral"), 0); /* no prose, as promised */
+
+    sqlite3_stmt *ranked = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(s),
+                                 "SELECT rowid, bm25(nodes_fts, 1.0, 1.0, 1.0, 1.0, 0.3) AS r"
+                                 " FROM nodes_fts WHERE nodes_fts MATCH ?1 ORDER BY r LIMIT 10",
+                                 -1, &ranked, NULL),
+              SQLITE_OK);
+    sqlite3_bind_text(ranked, 1, "plainFunction", -1, SQLITE_TRANSIENT);
+    ASSERT_EQ(sqlite3_step(ranked), SQLITE_ROW);
+    ASSERT_EQ(sqlite3_step(ranked), SQLITE_DONE);
+    sqlite3_finalize(ranked);
+
+    cbm_store_close(s);
+    th_rmtree(dir);
+    PASS();
+}
+
+TEST(store_fts_rebuild_incremental_adds_only_nodes_above_watermark) {
+    cbm_store_t *s = cbm_store_open_memory();
+    seed_prose_nodes(s);
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+
+    sqlite3_stmt *st = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(s), "SELECT COALESCE(MAX(id),0) FROM nodes", -1,
+                                 &st, NULL),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+    int64_t watermark = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+
+    cbm_node_t added = {};
+    added.project = "p";
+    added.label = "Section";
+    added.name = "Upgrading";
+    added.qualified_name = "p.README.Upgrading";
+    added.file_path = "README.md";
+    added.properties_json = "{\"docstring\":\"migrates the retention ledger\"}";
+    ASSERT_TRUE(cbm_store_upsert_node(s, &added) > 0);
+
+    ASSERT_EQ(cbm_store_fts_rebuild(s, "p", watermark), CBM_STORE_OK);
+    ASSERT_EQ(fts_match_count(s, "body:retention"), 1);
+    ASSERT_EQ(fts_match_count(s, "body:ephemeral"), 1); /* not duplicated */
+    ASSERT_EQ(fts_match_count(s, "name:plainFunction"), 1);
+
+    cbm_store_close(s);
+    PASS();
+}
+
 SUITE(store_search) {
     RUN_TEST(store_search_by_label);
     RUN_TEST(store_search_by_name_pattern);
@@ -1511,4 +1676,9 @@ SUITE(store_search) {
     RUN_TEST(store_hop_to_risk_all_levels);
     RUN_TEST(store_risk_label_all_levels);
     RUN_TEST(store_impact_summary_empty);
+    /* #518/#519 — nodes_fts prose column */
+    RUN_TEST(store_fts_rebuild_indexes_docstring_as_body_issue518);
+    RUN_TEST(store_fts_rebuild_survives_malformed_properties_json);
+    RUN_TEST(store_fts_rebuild_tolerates_legacy_four_column_table);
+    RUN_TEST(store_fts_rebuild_incremental_adds_only_nodes_above_watermark);
 }

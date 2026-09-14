@@ -2804,6 +2804,19 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
 /* Run the BM25 full-text search path and return the JSON result string.
  * Returns NULL if FTS5 is unavailable or the query produced no usable tokens,
  * in which case the caller falls back to the regex-based search path. */
+/* Column weights for nodes_fts (name, qualified_name, label, file_path, body).
+ * The four identifier columns stay at parity; prose sits well below them, so a
+ * prose-only hit surfaces but never outranks a node whose IDENTIFIER matches.
+ * FTS5 applies them to per-column term frequency before tf saturation
+ * (BM25F-correct, not a post-hoc rescale).
+ *
+ * Used by BOTH the ranked query and the count query — they share an inner
+ * candidate window, so different weights would desynchronise total from rows.
+ *
+ * Safe on a legacy four-column nodes_fts: bm25() reads a weight only for a
+ * column an instance actually landed in, so the fifth is never consulted. */
+#define BM25_WEIGHTS "bm25(nodes_fts, 1.0, 1.0, 1.0, 1.0, 0.3)"
+
 static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
                          const char *file_pattern, int limit, int offset) {
     sqlite3 *db = cbm_store_get_db(store);
@@ -2842,13 +2855,16 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         "               WHEN n.label IN (" CBM_SQL_RELATION_LABELS ") THEN 5.0 "
         "               ELSE 0.0 END) AS rank "
         "FROM ("
-        "    SELECT rowid, bm25(nodes_fts) AS base_rank"
+        "    SELECT rowid, " BM25_WEIGHTS " AS base_rank"
         "    FROM nodes_fts WHERE nodes_fts MATCH ?1"
         "    ORDER BY base_rank LIMIT ?5"
         ") fts "
         "JOIN nodes n ON n.id = fts.rowid "
         "WHERE n.project = ?2 "
-        "  AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project') "
+        /* Section and Module are NO LONGER excluded (#518/#519): they carry the
+         * prose — a Markdown section's body, a config file's description.
+         * MIRRORED in the count query below; change the two together. */
+        "  AND n.label NOT IN ('File','Folder','Variable','Project') "
         "  AND (?6 IS NULL OR n.file_path LIKE ?6) "
         "ORDER BY rank "
         "LIMIT ?3 OFFSET ?4";
@@ -2877,11 +2893,12 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
             "SELECT COUNT(*) FROM ("
             "    SELECT fts.rowid FROM ("
             "        SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1"
-            "        ORDER BY bm25(nodes_fts) LIMIT ?3"
+            "        ORDER BY " BM25_WEIGHTS " LIMIT ?3"
             "    ) fts "
             "    JOIN nodes n ON n.id = fts.rowid "
             "    WHERE n.project = ?2 "
-            "      AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project')"
+            /* MIRRORS the ranked query verbatim: same weights, same exclusions. */
+            "      AND n.label NOT IN ('File','Folder','Variable','Project')"
             "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
             ")";
         sqlite3_stmt *cs = NULL;

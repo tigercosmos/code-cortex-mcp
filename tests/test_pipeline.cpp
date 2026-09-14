@@ -13,11 +13,14 @@
 #include "store/store.h"
 #include "foundation/subprocess.h"
 #include "foundation/constants.h"
+#include "foundation/log.h" // cbm_log_set_sink — incremental-route observation
 #include "mcp/mcp.h"
 #include "git/git_context.h"
 #include <yyjson/yyjson.h> // properties-JSON validity (oversized-props regression)
 #include <sqlite3.h>       // json_valid()/quick_check over every dumped row
 
+#include <atomic>
+#include <cmath>
 #include <stdlib.h>
 #include <string.h>
 #include <string>
@@ -8321,4 +8324,505 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_incremental_preserves_classified_version);
     RUN_TEST(pipeline_initial_preserves_extracted_version);
 #endif
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Importance scoring (upstream e5f3aab0; pass in pass_complexity.cpp)
+ *
+ *   importance = sqrt(num_refs) * priv * generic * distinct * test_penalty
+ *
+ * Several of these bind failure modes that are SILENT — a wrong index with a
+ * fully green build: a miscounted predump table skipping the pass, a duplicate
+ * key on the rehydrated incremental graph, an O(k^3) same-name scan, and (this
+ * fork's own shape) scoring the incremental graph before the inbound edges of
+ * re-extracted files are re-linked, which persists 0 for a busy symbol.
+ * ══════════════════════════════════════════════════════════════════ */
+
+static double imp_value(const char *json) {
+    if (!json) {
+        return -999.0;
+    }
+    const char *p = strstr(json, "\"importance\":");
+    return p ? strtod(p + strlen("\"importance\":"), NULL) : -999.0;
+}
+
+static int imp_key_count(const char *json) {
+    int n = 0;
+    for (const char *p = json; p && (p = strstr(p, "\"importance\":")) != NULL;
+         p += strlen("\"importance\":")) {
+        n++;
+    }
+    return n;
+}
+
+static void imp_run_pass(cbm_gbuf_t *gb) {
+    std::atomic<int> cancelled{0};
+    cbm_pipeline_ctx_t ctx = {};
+    ctx.project_name = "test-proj";
+    ctx.repo_path = "/tmp/test";
+    ctx.gbuf = gb;
+    ctx.cancelled = &cancelled;
+    cbm_pipeline_pass_importance(&ctx);
+}
+
+/* Every stored node of `label` carries exactly `expect` keys. Returns the node
+ * count checked, or -1 on a mismatch or store error. */
+static int imp_check_label(cbm_store_t *s, const char *project, const char *label, int expect) {
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    if (cbm_store_find_nodes_by_label(s, project, label, &nodes, &count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int bad = 0;
+    for (int i = 0; i < count; i++) {
+        if (imp_key_count(nodes[i].properties_json) != expect) {
+            bad++;
+            printf("    %s node '%s' props=%s\n", label, nodes[i].name ? nodes[i].name : "?",
+                   nodes[i].properties_json ? nodes[i].properties_json : "(null)");
+        }
+    }
+    cbm_store_free_nodes(nodes, count);
+    return bad == 0 ? count : -1;
+}
+
+static int64_t imp_add(cbm_gbuf_t *gb, const char *label, const char *name, const char *qn,
+                       const char *file, int line) {
+    return cbm_gbuf_upsert_node(gb, label, name, qn, file, line, line, "{}");
+}
+
+static int64_t imp_add_caller(cbm_gbuf_t *gb, const char *tag, int i, int64_t target,
+                              const char *type) {
+    char name[CBM_SZ_32];
+    char qn[CBM_SZ_64];
+    snprintf(name, sizeof(name), "%s%d", tag, i);
+    snprintf(qn, sizeof(qn), "z.%s%d", tag, i);
+    int64_t c = imp_add(gb, "Function", name, qn, "z/main.go", 100 + i);
+    cbm_gbuf_insert_edge(gb, c, target, type, "{}");
+    return c;
+}
+
+TEST(importance_pass_actually_runs_in_full_pipeline) {
+    char *tmp = th_mktempdir("cbm_imp_run");
+    ASSERT_NOT_NULL(tmp);
+    char root[512];
+    snprintf(root, sizeof(root), "%s", tmp);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "main.py"),
+                            "def helper():\n    return 1\n\n"
+                            "def caller():\n    return helper() + helper()\n\n"
+                            "class Widget:\n    def render(self):\n        return helper()\n"),
+              0);
+    char db_path[600];
+    snprintf(db_path, sizeof(db_path), "%s/graph.db", root);
+    cbm_pipeline_t *p = cbm_pipeline_new(root, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    char project[256];
+    snprintf(project, sizeof(project), "%s", cbm_pipeline_project_name(p));
+    cbm_pipeline_free(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    int fc = imp_check_label(s, project, "Function", 1);
+    int mc = imp_check_label(s, project, "Method", 1);
+    int cc = imp_check_label(s, project, "Class", 1);
+    printf("    scored Function=%d Method=%d Class=%d\n", fc, mc, cc);
+    ASSERT_GT(fc, 0);
+    ASSERT_GT(mc, 0);
+    ASSERT_GT(cc, 0);
+    ASSERT_EQ(imp_check_label(s, project, "File", 0) >= 0, true); /* files unscored */
+    cbm_store_close(s);
+    th_rmtree(root);
+    PASS();
+}
+
+TEST(importance_base_is_sqrt_of_incoming_refs) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gb);
+    int64_t target = imp_add(gb, "Function", "target", "pkg.target", "pkg/main.go", 1);
+    int64_t lonely = imp_add(gb, "Function", "lonely", "pkg.lonely", "pkg/main.go", 5);
+    imp_add_caller(gb, "c", 1, target, "CALLS");
+    imp_add_caller(gb, "c", 2, target, "CALLS");
+    imp_add_caller(gb, "c", 3, target, "USAGE"); /* spans BOTH edge types */
+    imp_run_pass(gb);
+
+    const cbm_gbuf_node_t *tn = cbm_gbuf_find_by_id(gb, target);
+    ASSERT_NOT_NULL(tn);
+    ASSERT_EQ(imp_key_count(tn->properties_json), 1);
+    ASSERT_FLOAT_EQ(imp_value(tn->properties_json), sqrt(3.0), 1e-6);
+    const cbm_gbuf_node_t *ln = cbm_gbuf_find_by_id(gb, lonely);
+    ASSERT_EQ(imp_key_count(ln->properties_json), 1); /* 0 refs -> 0, still written */
+    ASSERT_FLOAT_EQ(imp_value(ln->properties_json), 0.0, 1e-9);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+TEST(importance_private_names_are_demoted) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gb);
+    int64_t priv = imp_add(gb, "Function", "_run", "pkg._run", "pkg/main.go", 1);
+    int64_t pub = imp_add(gb, "Function", "run", "pkg.run", "pkg/main.go", 2);
+    for (int i = 0; i < 4; i++) {
+        imp_add_caller(gb, "p", i, priv, "CALLS");
+        imp_add_caller(gb, "q", i, pub, "CALLS");
+    }
+    imp_run_pass(gb);
+    ASSERT_FLOAT_EQ(imp_value(cbm_gbuf_find_by_id(gb, priv)->properties_json), 2.0 * 0.1, 1e-6);
+    ASSERT_FLOAT_EQ(imp_value(cbm_gbuf_find_by_id(gb, pub)->properties_json), 2.0, 1e-6);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+/* Generic = defined in >= 5 DISTINCT FILES; two defs in one file count once. */
+TEST(importance_generic_names_are_demoted_on_distinct_files) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gb);
+    int64_t generic = 0;
+    for (int i = 0; i < 5; i++) {
+        char qn[CBM_SZ_64];
+        char file[CBM_SZ_64];
+        snprintf(qn, sizeof(qn), "pkg%d.generic", i);
+        snprintf(file, sizeof(file), "pkg%d/main.go", i);
+        int64_t id = imp_add(gb, "Function", "generic", qn, file, 1);
+        generic = i == 0 ? id : generic;
+    }
+    int64_t narrow = 0; /* 6 nodes, but only 4 distinct files */
+    for (int i = 0; i < 4; i++) {
+        char qn[CBM_SZ_64];
+        char file[CBM_SZ_64];
+        snprintf(qn, sizeof(qn), "n%d.narrow", i);
+        snprintf(file, sizeof(file), "n%d/main.go", i);
+        int64_t id = imp_add(gb, "Function", "narrow", qn, file, 1);
+        narrow = i == 0 ? id : narrow;
+    }
+    imp_add(gb, "Function", "narrow", "n0.narrow_b", "n0/main.go", 9);
+    imp_add(gb, "Function", "narrow", "n1.narrow_b", "n1/main.go", 9);
+    for (int i = 0; i < 9; i++) {
+        imp_add_caller(gb, "z", i, i < 4 ? generic : narrow, "CALLS");
+    }
+    imp_run_pass(gb);
+    ASSERT_FLOAT_EQ(imp_value(cbm_gbuf_find_by_id(gb, generic)->properties_json), 2.0 * 0.1, 1e-6);
+    ASSERT_FLOAT_EQ(imp_value(cbm_gbuf_find_by_id(gb, narrow)->properties_json), sqrt(5.0), 1e-6);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+TEST(importance_distinctive_names_are_promoted) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gb);
+    const int64_t targets[] = {
+        imp_add(gb, "Function", "load_user_profile", "pkg.load_user_profile", "pkg/a.go", 1),
+        imp_add(gb, "Function", "loadUserProfile", "pkg.loadUserProfile", "pkg/b.go", 1),
+        imp_add(gb, "Function", "aggregate", "pkg.aggregate", "pkg/c.go", 1), /* no hump/_ */
+        imp_add(gb, "Function", "get_x", "pkg.get_x", "pkg/d.go", 1),         /* too short */
+    };
+    for (int t = 0; t < 4; t++) {
+        imp_add_caller(gb, "cc", t, targets[t], "CALLS");
+    }
+    imp_run_pass(gb);
+    const double want[] = {10.0, 10.0, 1.0, 1.0};
+    for (int t = 0; t < 4; t++) {
+        ASSERT_FLOAT_EQ(imp_value(cbm_gbuf_find_by_id(gb, targets[t])->properties_json), want[t],
+                        1e-6);
+    }
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+TEST(importance_test_scaffolding_is_demoted) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gb);
+    const int64_t targets[] = {
+        imp_add(gb, "Function", "fixture", "t.fixture", "pkg/thing_test.go", 1),
+        imp_add(gb, "Function", "helper", "pkg.helper", "pkg/util.go", 1),
+        imp_add(gb, "Function", "worker", "pkg.worker", "pkg/util.go", 2),
+        /* a production file whose NAME merely contains "test" is not demoted */
+        imp_add(gb, "Function", "spawn", "pkg.spawn", "pkg/testutil_helpers.go", 1),
+    };
+    for (int t = 0; t < 4; t++) {
+        imp_add_caller(gb, "d", t, targets[t], "CALLS");
+    }
+    int64_t tfn = imp_add(gb, "Function", "TestHelper", "t.TestHelper", "pkg/util_test.go", 5);
+    cbm_gbuf_insert_edge(gb, tfn, targets[1], "TESTS", "{}");
+    imp_run_pass(gb);
+    const double want[] = {0.1, 0.1, 1.0, 1.0};
+    for (int t = 0; t < 4; t++) {
+        ASSERT_FLOAT_EQ(imp_value(cbm_gbuf_find_by_id(gb, targets[t])->properties_json), want[t],
+                        1e-6);
+    }
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+TEST(importance_append_prop_overwrites_instead_of_duplicating) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gb);
+    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "f", "p.f", "p/a.go", 1, 1,
+                                      "{\"loop_depth\":2,\"recursive\":false}");
+    auto *n = (cbm_gbuf_node_t *)cbm_gbuf_find_by_id(gb, id);
+    ASSERT_NOT_NULL(n);
+
+    cbm_pipeline_importance_append_prop(n, 1.5);
+    ASSERT_EQ(imp_key_count(n->properties_json), 1);
+    cbm_pipeline_importance_append_prop(n, 42.25);
+    ASSERT_EQ(imp_key_count(n->properties_json), 1);
+    ASSERT_FLOAT_EQ(imp_value(n->properties_json), 42.25, 1e-6);
+    ASSERT_NOT_NULL(strstr(n->properties_json, "\"loop_depth\":2"));
+    ASSERT_NOT_NULL(strstr(n->properties_json, "\"recursive\":false"));
+
+    /* A key that is NOT last: the overwrite must not truncate the tail. */
+    free(n->properties_json);
+    n->properties_json = strdup("{\"importance\":0.000000,\"tail\":7}");
+    cbm_pipeline_importance_append_prop(n, 3.0);
+    ASSERT_STR_EQ(n->properties_json, "{\"importance\":3.000000,\"tail\":7}");
+
+    /* A string VALUE that merely contains the key text is not a key. */
+    free(n->properties_json);
+    n->properties_json = strdup("{\"doc\":\"see \\\"importance\\\": below\"}");
+    cbm_pipeline_importance_append_prop(n, 2.0);
+    ASSERT_STR_EQ(n->properties_json,
+                  "{\"doc\":\"see \\\"importance\\\": below\",\"importance\":2.000000}");
+
+    /* Empty objects (incl. whitespace-only), a non-object, a non-finite score. */
+    free(n->properties_json);
+    n->properties_json = strdup("{}");
+    cbm_pipeline_importance_append_prop(n, 0.5);
+    ASSERT_STR_EQ(n->properties_json, "{\"importance\":0.500000}");
+    free(n->properties_json);
+    n->properties_json = strdup("{ }");
+    cbm_pipeline_importance_append_prop(n, 0.5);
+    ASSERT_STR_EQ(n->properties_json, "{\"importance\":0.500000}");
+    cbm_pipeline_importance_append_prop(n, NAN); /* would print `nan`: invalid JSON */
+    ASSERT_STR_EQ(n->properties_json, "{\"importance\":0.500000}");
+    free(n->properties_json);
+    n->properties_json = strdup("not json");
+    cbm_pipeline_importance_append_prop(n, 9.0);
+    ASSERT_STR_EQ(n->properties_json, "not json");
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+TEST(importance_pass_is_idempotent_across_reruns) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gb);
+    int64_t t = imp_add(gb, "Function", "target", "pkg.target", "pkg/main.go", 1);
+    imp_add_caller(gb, "caller", 0, t, "CALLS");
+    imp_run_pass(gb);
+    char first[CBM_SZ_512];
+    snprintf(first, sizeof(first), "%s", cbm_gbuf_find_by_id(gb, t)->properties_json);
+    imp_run_pass(gb);
+    const char *second = cbm_gbuf_find_by_id(gb, t)->properties_json;
+    ASSERT_EQ(imp_key_count(second), 1);
+    ASSERT_STR_EQ(first, second);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+/* Doubling a same-name group must double the pass's name work, not quadruple
+ * it: memoized per distinct NAME, visits == k exactly. Counter, not wall time. */
+TEST(importance_distinct_file_count_is_linear_in_group_size) {
+    enum { K = 200 };
+    uint64_t visits[2];
+    for (int leg = 0; leg < 2; leg++) {
+        int k = leg == 0 ? K : 2 * K;
+        cbm_gbuf_t *gb = cbm_gbuf_new("test-proj", "/tmp/test");
+        ASSERT_NOT_NULL(gb);
+        for (int i = 0; i < k; i++) {
+            char qn[CBM_SZ_64];
+            char file[CBM_SZ_64];
+            snprintf(qn, sizeof(qn), "pkg%d.toString", i);
+            snprintf(file, sizeof(file), "pkg%d/a.java", i);
+            ASSERT_GT(imp_add(gb, "Method", "toString", qn, file, 1), 0);
+        }
+        uint64_t v0 = cbm_pipeline_importance_name_visits();
+        imp_run_pass(gb);
+        visits[leg] = cbm_pipeline_importance_name_visits() - v0;
+        cbm_gbuf_free(gb);
+    }
+    printf("    name visits k=%d -> %llu, k=%d -> %llu\n", K, (unsigned long long)visits[0], 2 * K,
+           (unsigned long long)visits[1]);
+    ASSERT_EQ((long long)visits[0], (long long)K);
+    ASSERT_EQ((long long)visits[1], (long long)(2 * K));
+    PASS();
+}
+
+static std::atomic<int> g_imp_saw_incremental{0};
+static void imp_route_sink(const char *line) {
+    if (line && strstr(line, "incr_importance")) {
+        g_imp_saw_incremental.fetch_add(1);
+    }
+}
+
+/* Read `helper`'s stored importance; -1 when absent. */
+static double imp_stored_helper(const char *db_path, const char *project) {
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    if (!s) {
+        return -1.0;
+    }
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    double v = -1.0;
+    if (cbm_store_find_nodes_by_label(s, project, "Function", &nodes, &count) == CBM_STORE_OK) {
+        for (int i = 0; i < count; i++) {
+            if (nodes[i].name && strcmp(nodes[i].name, "helper") == 0) {
+                v = imp_value(nodes[i].properties_json);
+            }
+        }
+        cbm_store_free_nodes(nodes, count);
+    }
+    cbm_store_close(s);
+    return v;
+}
+
+/* Fork-specific trap. This tree's incremental route purges the re-extracted
+ * files, re-resolves them, runs post-passes, and only THEN re-links inbound
+ * edges from unchanged files. Scoring importance with the other post-passes
+ * would see `helper` — whose file changed — with none of its 25 callers, and
+ * persist 0. The score after an edit to helper's own file must equal the full
+ * index. Run below and above MIN_FILES_FOR_PARALLEL so both extraction paths are
+ * covered, and sweep json_valid() over every node and edge after each run. */
+static int imp_incremental_matches_full(int pad_files) {
+    char *tmp = th_mktempdir("cbm_imp_incr");
+    if (!tmp) {
+        return 1;
+    }
+    char root[512];
+    snprintf(root, sizeof(root), "%s", tmp);
+    char rel[64];
+    char body[256];
+    if (th_write_file(TH_PATH(root, "lib.py"), "def helper():\n    return 1\n") != 0) {
+        return 2;
+    }
+    for (int i = 0; i < 25; i++) {
+        snprintf(rel, sizeof(rel), "caller_%02d.py", i);
+        snprintf(body, sizeof(body),
+                 "from lib import helper\n\n\ndef call_%02d():\n    return helper()\n", i);
+        th_write_file(TH_PATH(root, rel), body);
+    }
+    for (int i = 0; i < pad_files; i++) {
+        snprintf(rel, sizeof(rel), "pad_%02d.py", i);
+        snprintf(body, sizeof(body), "def pad_%02d():\n    return %d\n", i, i);
+        th_write_file(TH_PATH(root, rel), body);
+    }
+    char db_path[600];
+    snprintf(db_path, sizeof(db_path), "%s/graph.db", root);
+
+    cbm_pipeline_t *p1 = cbm_pipeline_new(root, db_path, CBM_MODE_FULL);
+    if (!p1 || cbm_pipeline_run(p1) != 0) {
+        return 3;
+    }
+    char project[256];
+    snprintf(project, sizeof(project), "%s", cbm_pipeline_project_name(p1));
+    cbm_pipeline_free(p1);
+    double full = imp_stored_helper(db_path, project);
+
+    /* Edit helper's OWN file so helper is purged and re-created. */
+    th_write_file(TH_PATH(root, "lib.py"), "def helper():\n    return 2\n\n\ndef extra():\n"
+                                           "    return 3\n");
+    g_imp_saw_incremental.store(0);
+    cbm_log_set_sink(imp_route_sink);
+    cbm_pipeline_t *p2 = cbm_pipeline_new(root, db_path, CBM_MODE_FULL);
+    int rc2 = p2 ? cbm_pipeline_run(p2) : -1;
+    cbm_pipeline_free(p2);
+    cbm_log_set_sink(NULL);
+    double incr = imp_stored_helper(db_path, project);
+
+    int invalid = -1;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(db_path, &db) == SQLITE_OK) {
+        invalid = pg_invalid_rows(db, "nodes", "label") + pg_invalid_rows(db, "edges", "type");
+    }
+    sqlite3_close(db);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    int one_key = s ? imp_check_label(s, project, "Function", 1) : -1;
+    cbm_store_close(s);
+    printf("    pad=%d full=%.6f incremental=%.6f incr_route=%d invalid_json=%d one_key=%d\n",
+           pad_files, full, incr, g_imp_saw_incremental.load(), invalid, one_key);
+    th_rmtree(root);
+
+    if (rc2 != 0) {
+        return 4;
+    }
+    if (g_imp_saw_incremental.load() == 0) {
+        return 5; /* not incremental: the trap would be untested */
+    }
+    if (!(full > 0.0) || fabs(full - incr) > 1e-6) {
+        return 6;
+    }
+    if (invalid != 0 || one_key <= 0) {
+        return 7;
+    }
+    return 0;
+}
+
+TEST(importance_incremental_edit_matches_full_index) {
+    ASSERT_EQ(imp_incremental_matches_full(0), 0);  /* sequential extraction */
+    ASSERT_EQ(imp_incremental_matches_full(40), 0); /* > MIN_FILES_FOR_PARALLEL */
+    PASS();
+}
+
+/* End-to-end for #518/#519: source -> docstring -> properties JSON -> nodes_fts
+ * `body` -> findable (upstream b493b644). Also guards the size budget: an
+ * oversized field is dropped ATOMICALLY by the props builder, so a 500-byte
+ * section body that did not fit would vanish while every narrower test passed. */
+TEST(pipeline_markdown_and_config_prose_reaches_fts_body) {
+    char *td = th_mktempdir("cbm_prose");
+    ASSERT_NOT_NULL(td);
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s", td);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/prose.db", tmp);
+
+    std::string readme = "# Installation\n\nThe phlogiston bootstrap provisions a workstation.\n";
+    for (int i = 0; i < 40; i++) {
+        readme +=
+            "Filler prose line " + std::to_string(i) + " that pads the section past the cap.\n";
+    }
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "README.md"), readme.c_str()), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "META.yaml"),
+                            "name: widget\ndescription: Aggregates quicksilver telemetry per "
+                            "shard.\n"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "main.go"), "package main\n\nfunc main() {}\n"), 0);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, dbpath, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    cbm_pipeline_free(p);
+
+    cbm_store_t *s = cbm_store_open_path(dbpath);
+    ASSERT_NOT_NULL(s);
+    sqlite3_stmt *st = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(s),
+                                 "SELECT COUNT(*) FROM nodes_fts WHERE nodes_fts MATCH ?1", -1, &st,
+                                 NULL),
+              SQLITE_OK);
+    for (const char *match : {"body:phlogiston", "body:quicksilver"}) {
+        sqlite3_reset(st);
+        sqlite3_bind_text(st, 1, match, -1, SQLITE_TRANSIENT);
+        ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+        if (sqlite3_column_int(st, 0) <= 0) {
+            printf("    no body match for %s\n", match);
+        }
+        ASSERT_GT(sqlite3_column_int(st, 0), 0);
+    }
+    sqlite3_finalize(st);
+    cbm_store_close(s);
+    th_rmtree(tmp);
+    PASS();
+}
+
+SUITE(importance) {
+    RUN_TEST(importance_pass_actually_runs_in_full_pipeline);
+    RUN_TEST(importance_base_is_sqrt_of_incoming_refs);
+    RUN_TEST(importance_private_names_are_demoted);
+    RUN_TEST(importance_generic_names_are_demoted_on_distinct_files);
+    RUN_TEST(importance_distinctive_names_are_promoted);
+    RUN_TEST(importance_test_scaffolding_is_demoted);
+    RUN_TEST(importance_append_prop_overwrites_instead_of_duplicating);
+    RUN_TEST(importance_pass_is_idempotent_across_reruns);
+    RUN_TEST(importance_distinct_file_count_is_linear_in_group_size);
+    RUN_TEST(importance_incremental_edit_matches_full_index);
+    /* #518/#519 end to end (kept beside the importance suite, which shares
+     * this file's tail) */
+    RUN_TEST(pipeline_markdown_and_config_prose_reaches_fts_body);
 }

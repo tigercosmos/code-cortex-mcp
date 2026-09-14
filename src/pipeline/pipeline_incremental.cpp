@@ -683,16 +683,9 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
         /* FTS5 rebuild after incremental dump.  The btree dump path bypasses
          * any triggers that could have kept nodes_fts synchronized, so we
          * rebuild from the nodes table here.  See the full-dump path in
-         * pipeline.c for the matching logic. */
-        cbm_store_exec(hash_store, "INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');");
-        if (cbm_store_exec(hash_store,
-                           "INSERT INTO nodes_fts(rowid, name, qualified_name, label, file_path) "
-                           "SELECT id, cbm_camel_split(name), qualified_name, label, file_path "
-                           "FROM nodes;") != CBM_STORE_OK) {
-            cbm_store_exec(hash_store,
-                           "INSERT INTO nodes_fts(rowid, name, qualified_name, label, file_path) "
-                           "SELECT id, name, qualified_name, label, file_path FROM nodes;");
-        }
+         * pipeline.cpp for the matching logic — both route through the one
+         * writer, so a node re-dumped here keeps its prose `body` column. */
+        (void)cbm_store_fts_rebuild(hash_store, NULL, 0);
 
         cbm_store_close(hash_store);
     }
@@ -977,6 +970,17 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_log_info("incremental.edge_relink", "relinked", itoa_buf(relinked), "captured",
                  itoa_buf(edge_cap.count), "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
     incr_free_edge_capture(&edge_cap);
+
+    /* Importance LAST — deliberately NOT inside run_postpasses. It reads the
+     * incoming CALLS/USAGE/TESTS degree of every symbol, and until the re-link
+     * above, a re-extracted symbol has lost every caller that lives in an
+     * unchanged file: scored there, a helper with 25 callers persists as 0.
+     * Nodes outside the changed set already carry the key from the previous
+     * run; cbm_pipeline_importance_append_prop overwrites it in place. */
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    cbm_pipeline_pass_importance(&ctx);
+    cbm_log_info("pass.timing", "pass", "incr_importance", "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(t)));
 
     /* Step 7: Dump to disk (preserves mode-skipped hash rows so the next
      * reindex can correctly classify those files instead of seeing them

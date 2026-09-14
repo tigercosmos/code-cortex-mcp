@@ -172,6 +172,7 @@ extern void suite_discover(void);
 extern void suite_graph_buffer(void);
 extern void suite_registry(void);
 extern void suite_pipeline(void);
+extern void suite_importance(void);
 extern void suite_fqn(void);
 extern void suite_path_alias(void);
 extern void suite_watcher(void);
@@ -325,6 +326,7 @@ int main(int argc, char **argv) {
     /* Pipeline (M8) */
     RUN_SUITE(registry);
     RUN_SUITE(pipeline);
+    RUN_SUITE(importance);
     RUN_SUITE(fqn);
     RUN_SUITE(path_alias);
 

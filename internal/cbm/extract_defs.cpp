@@ -3702,8 +3702,118 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
 
 // --- Class definition extraction ---
 
-// Push a simple class definition (used by config language extractors).
-static void push_simple_class_def(CBMExtractCtx *ctx, TSNode node, char *name, const char *label) {
+/* UTF-8 sequence classification: a lead byte's high bits name the sequence
+ * length, and every continuation byte matches 10xxxxxx. */
+enum {
+    PROSE_UTF8_CONT_MASK = 0xC0,
+    PROSE_UTF8_CONT_MARK = 0x80,
+    PROSE_UTF8_LEAD2_MASK = 0xE0,
+    PROSE_UTF8_LEAD2_MARK = 0xC0,
+    PROSE_UTF8_LEAD3_MASK = 0xF0,
+    PROSE_UTF8_LEAD3_MARK = 0xE0,
+    PROSE_UTF8_LEAD4_MASK = 0xF8,
+    PROSE_UTF8_LEAD4_MARK = 0xF0,
+    PROSE_UTF8_LEN_1 = 1,
+    PROSE_UTF8_LEN_2 = 2,
+    PROSE_UTF8_LEN_3 = 3,
+    PROSE_UTF8_LEN_4 = 4,
+};
+
+static size_t prose_utf8_sequence_len(unsigned char lead) {
+    if ((lead & PROSE_UTF8_LEAD2_MASK) == PROSE_UTF8_LEAD2_MARK) {
+        return PROSE_UTF8_LEN_2;
+    }
+    if ((lead & PROSE_UTF8_LEAD3_MASK) == PROSE_UTF8_LEAD3_MARK) {
+        return PROSE_UTF8_LEN_3;
+    }
+    if ((lead & PROSE_UTF8_LEAD4_MASK) == PROSE_UTF8_LEAD4_MARK) {
+        return PROSE_UTF8_LEN_4;
+    }
+    return PROSE_UTF8_LEN_1;
+}
+
+/* Drop a trailing PARTIAL UTF-8 sequence left by a byte-length cut, so capped
+ * prose never ends mid-codepoint (#1017's rule, applied to prose bodies). */
+static void prose_utf8_trim_partial_tail(char *text) {
+    size_t n = strlen(text);
+    if (n == 0) {
+        return;
+    }
+    size_t i = n;
+    while (i > 0 && ((unsigned char)text[i - PROSE_UTF8_LEN_1] & PROSE_UTF8_CONT_MASK) ==
+                        PROSE_UTF8_CONT_MARK) {
+        i--;
+    }
+    if (i == 0) {
+        text[0] = '\0'; /* continuation bytes only — not decodable */
+        return;
+    }
+    size_t need = prose_utf8_sequence_len((unsigned char)text[i - PROSE_UTF8_LEN_1]);
+    if (i - PROSE_UTF8_LEN_1 + need > n) {
+        text[i - PROSE_UTF8_LEN_1] = '\0';
+    }
+}
+
+/* Collapse `len` bytes of raw prose into a single-spaced value capped at
+ * MAX_COMMENT_LEN (the 500-byte docstring ceiling, which fits the 2 KB
+ * properties buffer). The output buffer is fixed at the cap, so a section of
+ * any size costs a bounded copy. NULL when there was only whitespace. */
+static char *collapse_prose(CBMArena *a, const char *src, size_t len) {
+    if (!src || len == 0) {
+        return NULL;
+    }
+    char *out = (char *)cbm_arena_alloc(a, MAX_COMMENT_LEN + NULL_TERM);
+    if (!out) {
+        return NULL;
+    }
+    size_t w = 0;
+    bool in_ws = true; /* swallow leading whitespace */
+    for (size_t i = 0; i < len && w < MAX_COMMENT_LEN; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            in_ws = true;
+            continue;
+        }
+        if (in_ws && w > 0) {
+            out[w++] = ' ';
+            if (w >= MAX_COMMENT_LEN) {
+                break;
+            }
+        }
+        in_ws = false;
+        out[w++] = (char)c;
+    }
+    out[w] = '\0';
+    prose_utf8_trim_partial_tail(out);
+    return out[0] ? out : NULL;
+}
+
+/* #518: a Markdown heading node is only the title line — the section's prose
+ * lives in the blocks that FOLLOW it. tree-sitter-markdown wraps a heading and
+ * its content in a `section`, with nested subsections as further `section`
+ * children; stopping at a `section` or another heading gives each Section
+ * exactly its OWN body under both that shape and a flat one. */
+static const char *extract_markdown_section_body(CBMArena *a, TSNode heading, const char *source) {
+    uint32_t start = ts_node_end_byte(heading);
+    uint32_t end = start;
+    for (TSNode sib = ts_node_next_sibling(heading); !ts_node_is_null(sib);
+         sib = ts_node_next_sibling(sib)) {
+        const char *sk = ts_node_type(sib);
+        if (strcmp(sk, "section") == 0 || strcmp(sk, "atx_heading") == 0 ||
+            strcmp(sk, "setext_heading") == 0) {
+            break;
+        }
+        end = ts_node_end_byte(sib);
+    }
+    if (end <= start) {
+        return NULL;
+    }
+    return collapse_prose(a, source + start, (size_t)(end - start));
+}
+
+// Push a config-language definition that may carry prose (docstring).
+static void push_simple_class_def_doc(CBMExtractCtx *ctx, TSNode node, char *name,
+                                      const char *label, const char *docstring) {
     CBMArena *a = ctx->arena;
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
@@ -3714,7 +3824,13 @@ static void push_simple_class_def(CBMExtractCtx *ctx, TSNode node, char *name, c
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
     def.is_exported = true;
+    def.docstring = docstring;
     cbm_defs_push(&ctx->result->defs, a, def);
+}
+
+// Push a simple class definition without prose.
+static void push_simple_class_def(CBMExtractCtx *ctx, TSNode node, char *name, const char *label) {
+    push_simple_class_def_doc(ctx, node, name, label, NULL);
 }
 
 // Find TOML table key name from children.
@@ -3865,6 +3981,7 @@ static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char
     CBMArena *a = ctx->arena;
     char *name = NULL;
     const char *label = "Class";
+    const char *docstring = NULL;
 
     if (ctx->language == CBM_LANG_TOML &&
         (strcmp(kind, "table") == 0 || strcmp(kind, "table_array_element") == 0)) {
@@ -3877,6 +3994,8 @@ static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char
                (strcmp(kind, "atx_heading") == 0 || strcmp(kind, "setext_heading") == 0)) {
         name = extract_markdown_heading_name(a, node, kind, ctx->source);
         label = "Section";
+        // #518: index what the section SAYS, not just its title.
+        docstring = extract_markdown_section_body(a, node, ctx->source);
     } else if (ctx->language == CBM_LANG_HCL && strcmp(kind, "block") == 0) {
         name = find_hcl_block_name(a, node, ctx->source);
     } else {
@@ -3884,7 +4003,7 @@ static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char
     }
 
     if (name && name[0]) {
-        push_simple_class_def(ctx, node, name, label);
+        push_simple_class_def_doc(ctx, node, name, label, docstring);
     }
     return true;
 }
@@ -5696,9 +5815,30 @@ static bool is_helm_values_file(const char *rel) {
 // Extract ONLY top-level keys of a YAML document (no leaf explosion). Used for
 // Helm values.yaml so each chart's tunables surface as a handful of structured
 // Variables instead of one node per nested leaf (#338).
+static TSNode find_yaml_toplevel_mapping(TSNode root);
+
 static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
     CBMArena *a = ctx->arena;
-    // Descend stream -> document -> block_node down to the first block_mapping.
+    TSNode bm = find_yaml_toplevel_mapping(root);
+    if (ts_node_is_null(bm)) {
+        return;
+    }
+    uint32_t n = ts_node_named_child_count(bm);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode pair = ts_node_named_child(bm, i);
+        if (strcmp(ts_node_type(pair), "block_mapping_pair") != 0) {
+            continue;
+        }
+        TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+        if (!ts_node_is_null(key)) {
+            push_var_def(ctx, cbm_node_text(a, key, ctx->source), pair);
+        }
+    }
+}
+
+// Descend stream -> document -> block_node to a YAML document's top-level
+// block_mapping. Returns a null node when the document has none.
+static TSNode find_yaml_toplevel_mapping(TSNode root) {
     TSNode bm = {0};
     TSNode cur = root;
     for (int depth = 0; depth < 6 && ts_node_is_null(bm); depth++) {
@@ -5722,20 +5862,116 @@ static void extract_yaml_toplevel_keys(CBMExtractCtx *ctx, TSNode root) {
         }
         cur = next;
     }
-    if (ts_node_is_null(bm)) {
-        return;
+    return bm;
+}
+
+// Descend to a JSON document's top-level object. Returns a null node if absent.
+static TSNode find_json_toplevel_object(TSNode root) {
+    if (strcmp(ts_node_type(root), "object") == 0) {
+        return root;
     }
-    uint32_t n = ts_node_named_child_count(bm);
+    TSNode obj = cbm_find_child_by_kind(root, "object");
+    if (!ts_node_is_null(obj)) {
+        return obj;
+    }
+    uint32_t n = ts_node_named_child_count(root);
     for (uint32_t i = 0; i < n; i++) {
-        TSNode pair = ts_node_named_child(bm, i);
-        if (strcmp(ts_node_type(pair), "block_mapping_pair") != 0) {
-            continue;
-        }
-        TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
-        if (!ts_node_is_null(key)) {
-            push_var_def(ctx, cbm_node_text(a, key, ctx->source), pair);
+        TSNode inner = cbm_find_child_by_kind(ts_node_named_child(root, i), "object");
+        if (!ts_node_is_null(inner)) {
+            return inner;
         }
     }
+    TSNode null_node = {};
+    return null_node;
+}
+
+/* #519: a config file's own prose sits in a top-level `description` (or one of
+ * its usual synonyms) — META.yaml, action.yml, an OpenAPI document,
+ * package.json. The VALUE is not a definition, so nothing indexed it. Checked
+ * in priority order; the first key present wins. */
+static const char *const config_desc_keys[] = {"description", "summary", "purpose", NULL};
+
+// Strip one layer of matching surrounding quotes. Operates on arena text.
+static char *strip_surrounding_quotes(char *t) {
+    if (!t) {
+        return t;
+    }
+    size_t n = strlen(t);
+    if (n >= PAIR_CHARS && (t[0] == '"' || t[0] == '\'') && t[n - SKIP_CHAR] == t[0]) {
+        t[n - SKIP_CHAR] = '\0';
+        return t + SKIP_CHAR;
+    }
+    return t;
+}
+
+// Normalise a config scalar into indexable prose: drop a YAML block-scalar
+// header (`|`/`>` plus modifiers), collapse whitespace under MAX_COMMENT_LEN,
+// then unquote.
+static const char *config_scalar_value(CBMArena *a, const char *raw) {
+    if (!raw) {
+        return NULL;
+    }
+    while (*raw == ' ' || *raw == '\t' || *raw == '\n' || *raw == '\r') {
+        raw++;
+    }
+    if (*raw == '|' || *raw == '>') {
+        while (*raw && *raw != '\n') {
+            raw++;
+        }
+    }
+    char *v = collapse_prose(a, raw, strlen(raw));
+    return v ? strip_surrounding_quotes(v) : NULL;
+}
+
+// Value of `pair` when its key is `want`, else NULL. A YAML block_mapping_pair
+// and a JSON pair both expose key/value fields, so one reader serves both.
+static const char *config_pair_value_if_key(CBMExtractCtx *ctx, TSNode pair, const char *want) {
+    TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+    TSNode val = ts_node_child_by_field_name(pair, TS_FIELD("value"));
+    if (ts_node_is_null(key) || ts_node_is_null(val)) {
+        return NULL;
+    }
+    char *kt = cbm_node_text(ctx->arena, key, ctx->source);
+    if (!kt || strcmp(strip_surrounding_quotes(kt), want) != 0) {
+        return NULL;
+    }
+    return config_scalar_value(ctx->arena, cbm_node_text(ctx->arena, val, ctx->source));
+}
+
+// First non-empty description among `container`'s direct pairs, in
+// config_desc_keys priority order.
+static const char *config_container_description(CBMExtractCtx *ctx, TSNode container,
+                                                const char *pair_kind) {
+    uint32_t n = ts_node_named_child_count(container);
+    for (const char *const *k = config_desc_keys; *k; k++) {
+        for (uint32_t i = 0; i < n; i++) {
+            TSNode pair = ts_node_named_child(container, i);
+            if (strcmp(ts_node_type(pair), pair_kind) != 0) {
+                continue;
+            }
+            const char *v = config_pair_value_if_key(ctx, pair, *k);
+            if (v && v[0]) {
+                return v;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* #519 entry point: the file-level description a config document declares about
+ * itself, promoted onto the Module node so nodes_fts.body indexes it. NULL for
+ * every other language. */
+static const char *extract_config_module_description(CBMExtractCtx *ctx) {
+    if (ctx->language == CBM_LANG_YAML) {
+        TSNode bm = find_yaml_toplevel_mapping(ctx->root);
+        return ts_node_is_null(bm) ? NULL
+                                   : config_container_description(ctx, bm, "block_mapping_pair");
+    }
+    if (ctx->language == CBM_LANG_JSON) {
+        TSNode obj = find_json_toplevel_object(ctx->root);
+        return ts_node_is_null(obj) ? NULL : config_container_description(ctx, obj, "pair");
+    }
+    return NULL;
 }
 
 static void extract_variables(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
@@ -6651,6 +6887,8 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     mod.end_line = ts_node_end_point(ctx->root).row + TS_LINE_OFFSET;
     mod.is_exported = true;
     mod.is_test = ctx->result->is_test_file;
+    // #519: index what a config file declares itself to be, not only its path.
+    mod.docstring = extract_config_module_description(ctx);
     cbm_defs_push(&ctx->result->defs, a, mod);
 
     cbm_extract_definitions_without_module(ctx);

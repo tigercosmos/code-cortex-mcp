@@ -19,8 +19,13 @@
 #include "foundation/log.h"
 #include "foundation/platform.h"
 #include "foundation/compat.h"
+#include "foundation/hash_table.h"
 #include "cbm.h"
 
+#include <atomic>
+#include <cctype>
+#include <cmath>
+#include <cstdint>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -324,4 +329,311 @@ void cbm_pipeline_pass_complexity(cbm_pipeline_ctx_t *ctx) {
     free(cx.callees);
     free(seeds);
     free(written);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * Importance — index-time per-symbol score (weighted degree).
+ *
+ * Computes an importance score for every Function/Method/Class node and stores
+ * it as a numeric "importance" key inside the node's EXISTING properties_json —
+ * no new column, no schema change, no CBM_INDEX_FORMAT_VERSION bump.
+ *
+ *   importance = sqrt(num_refs) * priv * generic * distinct * test_penalty
+ *
+ *     num_refs      incoming CALLS + USAGE edges. 0 -> sqrt(0) = 0.
+ *     priv     0.1  name is private (leading underscore)
+ *     generic  0.1  the name is defined in >= 5 DISTINCT files
+ *     distinct 10   name is snake_case or camelCase AND len >= 8
+ *     test     0.1  target of an incoming TESTS edge, or lives in a test file
+ *                   per cbm_is_test_path() (the classifier pass_tests uses)
+ *
+ * Cost: the generic multiplier needs |{files a name is defined in}|. Computed
+ * per NODE by walking the whole same-name group and comparing paths pairwise,
+ * that is O(k^3) per group of size k (upstream measured 85 s -> 481 s on a
+ * 666 MB Java corpus). Here the count is memoized once per DISTINCT name and
+ * paths are deduplicated through a hash set, so the total is linear.
+ *
+ * Ordering is load-bearing: see cbm_pipeline_pass_importance in
+ * pipeline_internal.h. (Ported from DeusData/codebase-memory-mcp@e5f3aab0.)
+ * ══════════════════════════════════════════════════════════════════════ */
+
+static std::atomic<uint64_t> g_importance_name_visits{0};
+
+uint64_t cbm_pipeline_importance_name_visits(void) {
+    return g_importance_name_visits.load(std::memory_order_relaxed);
+}
+
+enum {
+    CBM_IMPORTANCE_GENERIC_MIN_FILES = 5, /* name defined in >= N files -> generic */
+    CBM_IMPORTANCE_DISTINCT_MIN_LEN = 8,  /* distinctive-identifier length floor */
+    CBM_IMPORTANCE_NAME_MEMO_CAP = 4096,  /* initial buckets: one entry per distinct name */
+    CBM_IMPORTANCE_PATH_SET_CAP = 256,
+};
+static const double CBM_IMPORTANCE_PRIV_MUL = 0.1;
+static const double CBM_IMPORTANCE_GENERIC_MUL = 0.1;
+static const double CBM_IMPORTANCE_DISTINCT_MUL = 10.0;
+static const double CBM_IMPORTANCE_TEST_MUL = 0.1;
+
+static const char *const CBM_IMPORTANCE_LABELS[] = {"Function", "Method", "Class"};
+
+static bool imp_name_is_private(const char *name) {
+    return name != nullptr && name[0] == '_';
+}
+
+/* snake_case is an embedded '_'; camelCase is a lower->upper hump. A plain
+ * long lowercase word is NOT distinctive. */
+static bool imp_name_is_distinctive(const char *name) {
+    if (!name) {
+        return false;
+    }
+    size_t len = strlen(name);
+    if (len < (size_t)CBM_IMPORTANCE_DISTINCT_MIN_LEN) {
+        return false;
+    }
+    if (strchr(name, '_') != nullptr) {
+        return true;
+    }
+    for (size_t i = 1; i < len; i++) {
+        if (islower((unsigned char)name[i - 1]) && isupper((unsigned char)name[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Pointer just past the JSON value starting at p, or NULL if unterminated. */
+static const char *imp_value_end(const char *p) {
+    if (*p == '"') {
+        for (p++; *p; p++) {
+            if (*p == '\\' && p[1]) {
+                p++;
+                continue;
+            }
+            if (*p == '"') {
+                return p + 1;
+            }
+        }
+        return nullptr;
+    }
+    if (*p == '{' || *p == '[') {
+        int depth = 0;
+        bool in_str = false;
+        for (; *p; p++) {
+            if (in_str) {
+                if (*p == '\\' && p[1]) {
+                    p++;
+                } else if (*p == '"') {
+                    in_str = false;
+                }
+            } else if (*p == '"') {
+                in_str = true;
+            } else if (*p == '{' || *p == '[') {
+                depth++;
+            } else if ((*p == '}' || *p == ']') && --depth == 0) {
+                return p + 1;
+            }
+        }
+        return nullptr;
+    }
+    while (*p && *p != ',' && *p != '}' && *p != ']') {
+        p++;
+    }
+    return p;
+}
+
+/* `"key"` genuinely in KEY position — preceded by '{' or ',' and followed by
+ * ':' (modulo whitespace). A bare strstr would also match text inside a string
+ * VALUE. Returns the opening quote, or NULL. */
+static const char *imp_find_key(const char *json, const char *key) {
+    char pat[CBM_SZ_64];
+    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(pat)) {
+        return nullptr;
+    }
+    for (const char *p = json; (p = strstr(p, pat)) != nullptr; p += n) {
+        const char *before = p;
+        while (before > json && isspace((unsigned char)before[-1])) {
+            before--;
+        }
+        char prev = (before > json) ? before[-1] : '\0';
+        const char *after = p + n;
+        while (isspace((unsigned char)*after)) {
+            after++;
+        }
+        if ((prev == '{' || prev == ',') && *after == ':') {
+            return p;
+        }
+    }
+    return nullptr;
+}
+
+/* IDEMPOTENT BY CONTRACT: the incremental path rehydrates nodes that already
+ * carry "importance"; a pure append would write {"importance":1,...,
+ * "importance":2}. Overwrite in place; append only when absent. A blob that is
+ * not a JSON object — or a non-finite score, which "%f" renders as the invalid
+ * JSON token `nan`/`inf` — leaves the node untouched: properties feed generated
+ * columns, and one malformed blob gets the whole database quarantined. */
+void cbm_pipeline_importance_append_prop(cbm_gbuf_node_t *node, double score) {
+    if (!node || !std::isfinite(score)) {
+        return;
+    }
+    const char *old = node->properties_json ? node->properties_json : "{}";
+    size_t olen = strlen(old);
+    if (olen < 2 || old[0] != '{' || old[olen - 1] != '}') {
+        return;
+    }
+    char val[CBM_SZ_32];
+    int vn = snprintf(val, sizeof(val), "%.6f", score);
+    if (vn < 0 || (size_t)vn >= sizeof(val)) {
+        return;
+    }
+
+    const char *k = imp_find_key(old, "importance");
+    if (k) {
+        const char *v = strchr(k, ':');
+        if (!v) {
+            return;
+        }
+        v++;
+        while (isspace((unsigned char)*v)) {
+            v++;
+        }
+        const char *vend = imp_value_end(v);
+        if (!vend) {
+            return;
+        }
+        size_t head = (size_t)(v - old);
+        size_t tail = strlen(vend);
+        char *neu = (char *)malloc(head + (size_t)vn + tail + 1);
+        if (!neu) {
+            return;
+        }
+        memcpy(neu, old, head);
+        memcpy(neu + head, val, (size_t)vn);
+        memcpy(neu + head + (size_t)vn, vend, tail + 1);
+        free(node->properties_json);
+        node->properties_json = neu;
+        return;
+    }
+
+    /* An object holding only whitespace ("{ }") takes no leading comma. */
+    bool empty = true;
+    for (size_t i = 1; i + 1 < olen; i++) {
+        if (!isspace((unsigned char)old[i])) {
+            empty = false;
+            break;
+        }
+    }
+    char frag[CBM_SZ_64];
+    int fn = snprintf(frag, sizeof(frag), "%s\"importance\":%s}", empty ? "" : ",", val);
+    if (fn < 0 || (size_t)fn >= sizeof(frag)) {
+        return;
+    }
+    size_t keep = empty ? 1 : olen - 1; /* drop the trailing '}' (and any inner blanks) */
+    char *neu = (char *)malloc(keep + (size_t)fn + 1);
+    if (!neu) {
+        return;
+    }
+    memcpy(neu, old, keep);
+    memcpy(neu + keep, frag, (size_t)fn + 1);
+    free(node->properties_json);
+    node->properties_json = neu;
+}
+
+typedef struct {
+    CBMHashTable *counts; /* name -> (void *)(intptr_t)(distinct_files + 1) */
+    CBMHashTable *paths;  /* scratch path set, cleared between names */
+} imp_name_index_t;
+
+/* Distinct files a name is DEFINED in — once per distinct name, then a hash
+ * hit. Keys are borrowed from gbuf nodes, which outlive the pass. */
+static int imp_distinct_file_count(const cbm_gbuf_t *gb, const char *name, imp_name_index_t *ix) {
+    if (!name || !*name || !ix->counts) {
+        return 0;
+    }
+    void *cached = cbm_ht_get(ix->counts, name);
+    if (cached) {
+        return (int)((intptr_t)cached - 1);
+    }
+    const cbm_gbuf_node_t **nodes = nullptr;
+    int count = 0;
+    int distinct = 0;
+    if (cbm_gbuf_find_by_name(gb, name, &nodes, &count) == 0 && count > 0) {
+        g_importance_name_visits.fetch_add((uint64_t)count, std::memory_order_relaxed);
+        if (ix->paths) {
+            cbm_ht_clear(ix->paths);
+            for (int i = 0; i < count; i++) {
+                const char *fp = nodes[i]->file_path;
+                if (!fp || cbm_ht_has(ix->paths, fp)) {
+                    continue;
+                }
+                cbm_ht_set(ix->paths, fp, (void *)(intptr_t)1);
+                distinct++;
+            }
+        }
+        /* No scratch set (allocation failure): degrade to "never generic"
+         * rather than a pairwise scan — a silent quadratic is worse than a
+         * missing 0.1 multiplier. */
+    }
+    cbm_ht_set(ix->counts, name, (void *)(intptr_t)(distinct + 1));
+    return distinct;
+}
+
+static int imp_incoming_edge_count(const cbm_gbuf_t *gb, int64_t id, const char *type) {
+    const cbm_gbuf_edge_t **edges = nullptr;
+    int ne = 0;
+    if (cbm_gbuf_find_edges_by_target_type(gb, id, type, &edges, &ne) != 0) {
+        return 0;
+    }
+    return ne;
+}
+
+void cbm_pipeline_pass_importance(cbm_pipeline_ctx_t *ctx) {
+    if (!ctx || !ctx->gbuf) {
+        return;
+    }
+    cbm_gbuf_t *gb = ctx->gbuf;
+    /* Modest reservations, not sized from node_count: the memo holds one entry
+     * per DISTINCT name, and sizing for every node would cost hundreds of MB of
+     * transient peak on a multi-million-node graph. */
+    imp_name_index_t ix = {cbm_ht_create(CBM_IMPORTANCE_NAME_MEMO_CAP),
+                           cbm_ht_create(CBM_IMPORTANCE_PATH_SET_CAP)};
+    if (!ix.counts) {
+        cbm_ht_free(ix.paths);
+        cbm_log_error("pass.importance", "msg", "name_index_alloc_failed");
+        return;
+    }
+
+    int updated = 0;
+    for (const char *label : CBM_IMPORTANCE_LABELS) {
+        const cbm_gbuf_node_t **nodes = nullptr;
+        int count = 0;
+        if (cbm_gbuf_find_by_label(gb, label, &nodes, &count) != 0) {
+            continue;
+        }
+        for (int i = 0; i < count; i++) {
+            auto *n = (cbm_gbuf_node_t *)nodes[i];
+            int num_refs = imp_incoming_edge_count(gb, n->id, "CALLS") +
+                           imp_incoming_edge_count(gb, n->id, "USAGE");
+            double score = std::sqrt((double)num_refs);
+            if (imp_name_is_private(n->name)) {
+                score *= CBM_IMPORTANCE_PRIV_MUL;
+            }
+            if (imp_distinct_file_count(gb, n->name, &ix) >= CBM_IMPORTANCE_GENERIC_MIN_FILES) {
+                score *= CBM_IMPORTANCE_GENERIC_MUL;
+            }
+            if (imp_name_is_distinctive(n->name)) {
+                score *= CBM_IMPORTANCE_DISTINCT_MUL;
+            }
+            if (cbm_is_test_path(n->file_path) || imp_incoming_edge_count(gb, n->id, "TESTS") > 0) {
+                score *= CBM_IMPORTANCE_TEST_MUL;
+            }
+            cbm_pipeline_importance_append_prop(n, score);
+            updated++;
+        }
+    }
+
+    cbm_ht_free(ix.paths);
+    cbm_ht_free(ix.counts);
+    cbm_log_info("pass.importance", "symbols", itoa_cx(updated));
 }
