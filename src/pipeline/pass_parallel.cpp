@@ -2489,18 +2489,9 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * main-identical by construction. res.strategy may carry an lsp_* value
          * here (LSP-resolved calls keep res through this point); the helper's
          * EXPLICIT drop-list leaves lsp_ts_method / lsp_cross untouched.
-         *
-         * Both language gates MUST match the ones in pass_calls.cpp exactly — a
-         * gate on only one resolver diverges the sequential and parallel paths.
-         * The bare-call local-binding gate is Python-only because only Python
-         * extraction sets callee_is_locally_bound. */
-        bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
-                                    lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
-        bool suppress_weak_local_binding = lang == CBM_LANG_PYTHON;
-        bool drop_plain_call =
-            cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy) ||
-            cbm_suppress_weak_local_binding_call(suppress_weak_local_binding,
-                                                 call->callee_is_locally_bound, res.strategy);
+         * cbm_suppress_weak_call owns the language set, shared with
+         * pass_calls.cpp. */
+        bool drop_plain_call = cbm_suppress_weak_call(lang, call, res.strategy);
 
         /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the
          * service signal lives in the callee_name. The registry can mis-resolve
@@ -2565,18 +2556,12 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         }
         atomic_fetch_add_explicit(&rc->time_ns_rc_target, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
-        /* #725: same guard as the sequential twin in pass_calls.cpp — do not
-         * emit a suffix_match CALLS edge across a language boundary. Placed
-         * BEFORE the external-client bypass below, which only fires when
-         * target_node is NULL and so cannot reach this case. */
-        if (target_node && source_node->id != target_node->id &&
-            cbm_suppress_cross_language_suffix_match(lang, target_node->file_path, res.strategy)) {
-            continue;
-        }
-        /* A textual Go call match never binds a struct Field node. Mirrors
-         * pass_calls.cpp. */
-        if (target_node && cbm_go_suppress_textual_field_call(lang == CBM_LANG_GO,
-                                                              target_node->label, res.strategy)) {
+        /* #725: same guard as the sequential twin in pass_calls.cpp — no
+         * suffix_match CALLS edge across a language boundary, and no textual Go
+         * match onto a struct Field node. Placed BEFORE the external-client
+         * bypass below, which only fires when target_node is NULL and so cannot
+         * reach this case (a self-edge target skips emission either way). */
+        if (target_node && cbm_suppress_call_target(lang, target_node, res.strategy)) {
             continue;
         }
         if (!target_node || source_node->id == target_node->id) {
@@ -2619,6 +2604,7 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
                                 CBMFileResult *result, const char *rel, const char *module_qn,
                                 const char **imp_keys, const char **imp_vals, int imp_count,
                                 CBMLanguage lang) {
+    cbm_lang_memo_t lang_memo = {};
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
         if (!usage->ref_name) {
@@ -2647,15 +2633,10 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* #1928: the registry answer is a bare-name guess -- never let it bind
-         * a reference across a language boundary. Mirrors pass_usages.cpp. */
-        if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
-            continue;
-        }
-        /* #1942/#1962: a bare Go reference can never denote a struct field;
-         * the member half of a selector may. Mirrors pass_usages.cpp. */
-        if (cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, usage->is_member_access,
-                                           tgt->label)) {
+        /* #1928 / #1942 / #1962: the registry answer is a bare-name guess --
+         * never bind a reference across a language boundary, nor a bare Go
+         * reference to a struct field. Shared with pass_usages.cpp. */
+        if (cbm_suppress_ref_edge(lang, usage->is_member_access, tgt, &lang_memo)) {
             continue;
         }
         /* uprops must exceed the escaped value + wrapper (the sequential twin in
@@ -2706,6 +2687,7 @@ static void resolve_file_throws(resolve_ctx_t *rc, resolve_worker_state_t *ws,
 static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFileResult *result,
                             const char *rel, const char *module_qn, const char **imp_keys,
                             const char **imp_vals, int imp_count, CBMLanguage lang) {
+    cbm_lang_memo_t lang_memo = {};
     for (int r = 0; r < result->rw.count; r++) {
         CBMReadWrite *rw = &result->rw.items[r];
         if (!rw->var_name) {
@@ -2725,14 +2707,11 @@ static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFi
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* #1928: bare-name registry guess -- never cross a language boundary.
-         * Mirrors pass_usages.cpp resolve_rw_edges. */
-        if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
-            continue;
-        }
-        /* #1942/#1962: a bare Go reference can never denote a struct field;
-         * a selector-LHS write (`t.err = x`) may bind it. */
-        if (cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, rw->is_member_access, tgt->label)) {
+        /* #1928 / #1942 / #1962: bare-name registry guess -- never cross a
+         * language boundary; a bare Go reference never binds a struct field,
+         * though a selector-LHS write (`t.err = x`) may. Shared with
+         * pass_usages.cpp resolve_rw_edges. */
+        if (cbm_suppress_ref_edge(lang, rw->is_member_access, tgt, &lang_memo)) {
             continue;
         }
         const char *etype = rw->is_write ? "WRITES" : "READS";

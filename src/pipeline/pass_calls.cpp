@@ -648,18 +648,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
      * Bare-call local-binding suppression rides the same flag: a bare `run()`
      * has no receiver for the member guard to reason about, but when `run` is a
      * parameter of an enclosing scope it cannot be the module-level `run`.
-     * Python-only because only Python extraction sets callee_is_locally_bound.
-     *
-     * Both language gates MUST match the ones in pass_parallel.cpp exactly — a
-     * gate on only one resolver produces an edge on the sequential path and not
-     * the parallel one (or vice versa), breaking MT determinism. */
-    bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
-                                lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
-    bool suppress_weak_local_binding = lang == CBM_LANG_PYTHON;
-    bool drop_plain_call =
-        cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy) ||
-        cbm_suppress_weak_local_binding_call(suppress_weak_local_binding,
-                                             call->callee_is_locally_bound, res.strategy);
+     * cbm_suppress_weak_call owns the language set for both guards. */
+    bool drop_plain_call = cbm_suppress_weak_call(lang, call, res.strategy);
 
     /* Service-pattern HTTP/ASYNC calls to an EXTERNAL client library (e.g.
      * `requests.get("/api/orders/{id}")`) resolve to a QN containing the library
@@ -687,12 +677,8 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     }
     /* #725: suffix_match is language-agnostic and will attach a Python
      * Store.commit() call to a JS function named commit (or a Bash main to a
-     * Python main). Drop that weak cross-language edge. */
-    if (cbm_suppress_cross_language_suffix_match(lang, target_node->file_path, res.strategy)) {
-        return 0;
-    }
-    /* A textual Go call match never binds a struct Field node. */
-    if (cbm_go_suppress_textual_field_call(lang == CBM_LANG_GO, target_node->label, res.strategy)) {
+     * Python main); a textual Go call match never binds a struct Field node. */
+    if (cbm_suppress_call_target(lang, target_node, res.strategy)) {
         return 0;
     }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,

@@ -18,8 +18,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "discover/discover.h"    /* cbm_ignored_file_t (#963) */
-#include "foundation/constants.h" /* CBM_SZ_512 */
+#include "discover/discover.h"         /* cbm_ignored_file_t (#963) */
+#include "foundation/constants.h"      /* CBM_SZ_512 */
+#include "graph_buffer/graph_buffer.h" /* cbm_gbuf_node_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -243,6 +244,30 @@ bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const cha
  * test_registry.cpp. */
 bool cbm_go_suppress_textual_field_call(bool is_go, const char *target_label, const char *strategy);
 
+/* Caller-owned memo of the last target file's language, for the per-edge
+ * reference guard. Zero-initialize one per file loop ({}); never share it
+ * across files or threads. */
+typedef struct {
+    char base[CBM_SZ_64];
+    CBMLanguage lang;
+    bool valid;
+} cbm_lang_memo_t;
+
+/* One guard for a resolved USAGE/READS/WRITES edge: true when the edge crosses
+ * a language boundary (cbm_suppress_cross_language_ref) or binds a bare Go
+ * reference to a Field (cbm_go_suppress_bare_field_ref). Shared by the
+ * sequential (pass_usages.cpp) and parallel (pass_parallel.cpp) resolvers.
+ * memo may be NULL; it changes cost, never the answer. */
+bool cbm_suppress_ref_edge(CBMLanguage lang, bool is_member_access, const cbm_gbuf_node_t *target,
+                           cbm_lang_memo_t *memo);
+
+/* One guard for a resolved CALLS target: true when a suffix_match edge crosses
+ * a language boundary (cbm_suppress_cross_language_suffix_match) or a textual
+ * Go match binds a Field (cbm_go_suppress_textual_field_call). Shared by
+ * pass_calls.cpp and pass_parallel.cpp. */
+bool cbm_suppress_call_target(CBMLanguage lang, const cbm_gbuf_node_t *target,
+                              const char *strategy);
+
 /* Relation-permitting resolve, for SQL FROM/JOIN lineage ONLY. The default
  * cbm_registry_resolve vetoes Table/View results because common relation names
  * collide with code identifiers in every language. Uncached by design — see the
@@ -307,19 +332,24 @@ bool cbm_weak_short_name_strategy(const char *strategy);
  * guard applies (`enabled`), only for a member call with an unresolved receiver
  * (is_method), and only when the match used a weak short-name strategy.
  * Explicit drop-list keeps every lsp_* / import / same-module / qualified match.
- * The language set lives at the call sites (pass_calls.cpp / pass_parallel.cpp)
- * and must be identical in both, or the sequential and parallel resolvers
- * diverge. Pure; unit-tested in test_registry.cpp. */
+ * The language set lives in cbm_suppress_weak_call. Pure; unit-tested in
+ * test_registry.cpp. */
 bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *strategy);
 
 /* Bare-call counterpart of the guard above. True when a resolved BARE call edge
  * binds a callee that is shadowed by an enclosing parameter, and the match came
  * from a weak short-name strategy — so the edge is fabricated by construction
  * (`def f(run): run()` must not bind an unrelated `SatoriLive.run`). Keyed on
- * the SCOPE FACT, not on the callee's spelling. Same call-site language-gate
- * contract as above. Pure; unit-tested in test_registry.cpp. */
+ * the SCOPE FACT, not on the callee's spelling. The language gate comes from
+ * cbm_suppress_weak_call. Pure; unit-tested in test_registry.cpp. */
 bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_bound,
                                           const char *strategy);
+
+/* True when a resolved call's plain CALLS edge is weak-strategy noise: the
+ * member guard (Python, JS/TS/TSX) or the bare-call local-binding guard
+ * (Python). The one owner of both language sets; the sequential and parallel
+ * resolvers both call it. */
+bool cbm_suppress_weak_call(CBMLanguage lang, const CBMCall *call, const char *strategy);
 
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);

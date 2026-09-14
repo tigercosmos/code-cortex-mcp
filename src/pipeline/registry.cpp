@@ -501,12 +501,8 @@ bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const cha
  * a default-drop would silently kill lsp_ts_method. Pure + side-effect-free so
  * the contract is unit-testable without a full pipeline.
  *
- * `enabled` is the CALLER's per-language gate, deliberately kept OUT of this
- * helper: the guard applies only to the language set each call site enumerates
- * (today Python plus the JS/TS family). Widening it is a per-language decision
- * made at the call sites in pass_calls.cpp and pass_parallel.cpp, which MUST
- * stay in lockstep — a gate added to only one of them diverges the sequential
- * and parallel resolvers. */
+ * `enabled` is the per-language gate; cbm_suppress_weak_call below owns the
+ * language set, so both resolvers read it from one place. */
 bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *strategy) {
     if (!enabled || !is_method) {
         return false;
@@ -527,14 +523,29 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
  * what the resolver knew — and it ages invisibly. A parameter binding is a fact
  * about THIS file's scope, decidable outright.
  *
- * `enabled` is the caller's per-language gate, kept out of the helper for the
- * same reason as the member guard. Pure; unit-tested in test_registry.cpp. */
+ * `enabled` is the per-language gate, set by cbm_suppress_weak_call below.
+ * Pure; unit-tested in test_registry.cpp. */
 bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_bound,
                                           const char *strategy) {
     if (!enabled || !callee_is_locally_bound) {
         return false;
     }
     return cbm_weak_short_name_strategy(strategy);
+}
+
+/* The weak-call guards above, with their language set in ONE place. Both the
+ * sequential (pass_calls.cpp) and parallel (pass_parallel.cpp) resolvers call
+ * this, so a language added here reaches both and they cannot diverge. The
+ * member guard covers Python and the JS/TS family; the bare-call local-binding
+ * guard is Python-only because only Python extraction sets
+ * callee_is_locally_bound. */
+bool cbm_suppress_weak_call(CBMLanguage lang, const CBMCall *call, const char *strategy) {
+    bool member_lang = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
+                       lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+    bool local_binding_lang = lang == CBM_LANG_PYTHON;
+    return cbm_suppress_weak_member_match(member_lang, call->is_method, strategy) ||
+           cbm_suppress_weak_local_binding_call(local_binding_lang, call->callee_is_locally_bound,
+                                                strategy);
 }
 
 /* ── Lifecycle ──────────────────────────────────────────────────── */
@@ -813,6 +824,23 @@ static cbm_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const 
  * as trustworthy as a same-module hit. */
 #define CONF_QUALIFIED_SUFFIX 0.90
 
+/* Copy callee_name into out (capacity cap, always NUL-terminated, truncated to
+ * fit), normalizing "::" to "." so a qualified callee composes with dotted
+ * candidate QNs. Returns the written length. */
+static size_t dotted_callee(const char *callee_name, char *out, size_t cap) {
+    size_t w = 0;
+    for (const char *s = callee_name; *s && w + SKIP_ONE < cap;) {
+        if (s[0] == ':' && s[1] == ':') {
+            out[w++] = '.';
+            s += 2;
+        } else {
+            out[w++] = *s++;
+        }
+    }
+    out[w] = '\0';
+    return w;
+}
+
 /* When a callee is package/namespace-qualified (Foo::Bar::sub or Foo.Bar.sub),
  * disambiguate among same-simple-name candidates by matching the FULL qualified
  * tail against each candidate QN at a segment boundary. Returns the sole
@@ -825,18 +853,8 @@ static cbm_resolution_t resolve_multi_with_imports(const qn_array_t *arr, const 
  * single winner. Language agnostic: callees with no separator return NULL and
  * leave behavior unchanged. */
 static const char *qualified_suffix_match(const qn_array_t *arr, const char *callee_name) {
-    /* Normalize "::" → "." so the tail composes with dotted candidate QNs. */
     char dotted[CBM_SZ_512];
-    size_t w = 0;
-    for (const char *s = callee_name; *s && w + SKIP_ONE < sizeof(dotted);) {
-        if (s[0] == ':' && s[1] == ':') {
-            dotted[w++] = '.';
-            s += 2;
-        } else {
-            dotted[w++] = *s++;
-        }
-    }
-    dotted[w] = '\0';
+    size_t w = dotted_callee(callee_name, dotted, sizeof(dotted));
     /* Must be qualified (contain a '.') — a bare name matches every candidate
      * and carries no disambiguating signal. */
     if (!strchr(dotted, '.')) {
@@ -881,26 +899,20 @@ static const char *qualified_suffix_match(const qn_array_t *arr, const char *cal
  * Language agnostic by design: the registry holds no language, and every
  * language that writes receiver chains gains the same protection. */
 static bool receiver_chain_admits(const char *callee_name, const char *candidate_qn) {
-    /* Normalize "::" -> "." so the chain composes with dotted candidate QNs,
-     * the same way qualified_suffix_match does. */
-    char dotted[CBM_SZ_512];
-    size_t w = 0;
-    for (const char *s = callee_name; *s && w + SKIP_ONE < sizeof(dotted);) {
-        if (s[0] == ':' && s[1] == ':') {
-            dotted[w++] = '.';
-            s += 2;
-        } else {
-            dotted[w++] = *s++;
-        }
+    /* Cheap rejects before the copy. A root that is not an upper-case letter
+     * (including a leading "::", which normalizes to '.') names a value, not a
+     * type. */
+    if (callee_name[0] < 'A' || callee_name[0] > 'Z') {
+        return true;
     }
-    dotted[w] = '\0';
-
-    const char *last_dot = strrchr(dotted, '.');
-    if (!last_dot) {
+    if (!strchr(callee_name, '.') && !strstr(callee_name, "::")) {
         return true; /* bare name — no receiver chain to judge */
     }
-    if (dotted[0] < 'A' || dotted[0] > 'Z') {
-        return true; /* lower-case root names a value, not a type */
+    char dotted[CBM_SZ_512];
+    dotted_callee(callee_name, dotted, sizeof(dotted));
+    const char *last_dot = strrchr(dotted, '.');
+    if (!last_dot) {
+        return true; /* the separator fell past the truncation point */
     }
     /* A name written in capitals with underscores is a constant holding a
      * value, not a type: ISO_4217_URL.lower is a string's own method. JSON and
@@ -1278,6 +1290,46 @@ static bool cbm_c_cpp_family(CBMLanguage lang) {
     return lang == CBM_LANG_C || lang == CBM_LANG_CPP;
 }
 
+/* True when a and b count as one language for the cross-language guards. The
+ * JS/TS/TSX family is one language for both guards. C and C++ are one family
+ * only when c_cpp_is_one_family is set (the reference guard): .h maps to
+ * CBM_LANG_CPP, so a .c file referencing its own header would otherwise read as
+ * a boundary. */
+static bool same_language_family(CBMLanguage a, CBMLanguage b, bool c_cpp_is_one_family) {
+    if (a == b) {
+        return true;
+    }
+    if (cbm_js_ts_family(a) && cbm_js_ts_family(b)) {
+        return true;
+    }
+    return c_cpp_is_one_family && cbm_c_cpp_family(a) && cbm_c_cpp_family(b);
+}
+
+/* Language of a target file, from its basename. cbm_language_for_filename
+ * scans the special-filename and extension tables (hundreds of strcmp calls),
+ * and the guards run once per resolved edge. Consecutive edges from one file
+ * mostly land in the same few target files, so a caller-owned memo of the last
+ * basename skips the table scan. The answer is identical: the lookup is a pure
+ * function of the basename for the lifetime of one per-file loop. memo may be
+ * NULL. */
+static CBMLanguage target_file_language(const char *target_file_path, cbm_lang_memo_t *memo) {
+    const char *base = cbm_reg_path_basename(target_file_path);
+    if (!memo) {
+        return cbm_language_for_filename(base);
+    }
+    if (memo->valid && strcmp(memo->base, base) == 0) {
+        return memo->lang;
+    }
+    CBMLanguage lang = cbm_language_for_filename(base);
+    size_t len = strlen(base);
+    if (len < sizeof(memo->base)) {
+        memcpy(memo->base, base, len + SKIP_ONE);
+        memo->lang = lang;
+        memo->valid = true;
+    }
+    return lang;
+}
+
 bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const char *target_file_path,
                                               const char *strategy) {
     if (!strategy || strcmp(strategy, "suffix_match") != 0) {
@@ -1286,40 +1338,40 @@ bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const cha
     if (caller_lang == CBM_LANG_COUNT || !target_file_path || !target_file_path[0]) {
         return false;
     }
-    CBMLanguage target_lang = cbm_language_for_filename(cbm_reg_path_basename(target_file_path));
-    if (target_lang == CBM_LANG_COUNT) {
-        return false;
-    }
-    if (caller_lang == target_lang) {
-        return false;
-    }
-    if (cbm_js_ts_family(caller_lang) && cbm_js_ts_family(target_lang)) {
-        return false;
-    }
-    return true;
+    CBMLanguage target_lang = target_file_language(target_file_path, NULL);
+    return target_lang != CBM_LANG_COUNT &&
+           !same_language_family(caller_lang, target_lang, /*c_cpp_is_one_family=*/false);
 }
 
-bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target_file_path) {
-    /* #1928: USAGE / WRITES / READS analog of the CALLS guard above. A
-     * variable or field reference resolved by the short-name registry must
-     * not cross a language boundary: unlike CALLS, a reference edge carries
-     * no import-closure evidence at all -- a Go test's local `event` and an
-     * eBPF C probe's automatic `event` share nothing but the spelling, so
-     * EVERY registry strategy is a bare-name guess here and none is exempt.
-     * The JS/TS family keeps its exemption, and C/C++ count as one family
-     * (.h maps to CBM_LANG_CPP). */
+/* #1928: USAGE / WRITES / READS analog of the CALLS guard above. A variable or
+ * field reference resolved by the short-name registry must not cross a
+ * language boundary: unlike CALLS, a reference edge carries no import-closure
+ * evidence at all -- a Go test's local `event` and an eBPF C probe's automatic
+ * `event` share nothing but the spelling, so EVERY registry strategy is a
+ * bare-name guess here and none is exempt. The JS/TS family keeps its
+ * exemption, and C/C++ count as one family (.h maps to CBM_LANG_CPP). */
+static bool cross_language_ref(CBMLanguage caller_lang, const char *target_file_path,
+                               cbm_lang_memo_t *memo) {
     if (caller_lang == CBM_LANG_COUNT || !target_file_path || !target_file_path[0]) {
         return false;
     }
-    CBMLanguage target_lang = cbm_language_for_filename(cbm_reg_path_basename(target_file_path));
-    if (target_lang == CBM_LANG_COUNT || caller_lang == target_lang) {
-        return false;
-    }
-    if (cbm_js_ts_family(caller_lang) && cbm_js_ts_family(target_lang)) {
-        return false;
-    }
-    if (cbm_c_cpp_family(caller_lang) && cbm_c_cpp_family(target_lang)) {
-        return false;
-    }
-    return true;
+    CBMLanguage target_lang = target_file_language(target_file_path, memo);
+    return target_lang != CBM_LANG_COUNT &&
+           !same_language_family(caller_lang, target_lang, /*c_cpp_is_one_family=*/true);
+}
+
+bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target_file_path) {
+    return cross_language_ref(caller_lang, target_file_path, NULL);
+}
+
+bool cbm_suppress_ref_edge(CBMLanguage lang, bool is_member_access, const cbm_gbuf_node_t *target,
+                           cbm_lang_memo_t *memo) {
+    return cross_language_ref(lang, target->file_path, memo) ||
+           cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, is_member_access, target->label);
+}
+
+bool cbm_suppress_call_target(CBMLanguage lang, const cbm_gbuf_node_t *target,
+                              const char *strategy) {
+    return cbm_suppress_cross_language_suffix_match(lang, target->file_path, strategy) ||
+           cbm_go_suppress_textual_field_call(lang == CBM_LANG_GO, target->label, strategy);
 }

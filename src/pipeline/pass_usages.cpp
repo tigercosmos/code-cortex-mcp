@@ -217,6 +217,7 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
                                const char *rel, const char *module_qn, const char **imp_keys,
                                const char **imp_vals, int imp_count, CBMLanguage lang) {
     int resolved = 0;
+    cbm_lang_memo_t lang_memo = {};
     for (int u = 0; u < result->usages.count; u++) {
         CBMUsage *usage = &result->usages.items[u];
         if (!usage->ref_name) {
@@ -246,15 +247,10 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* #1928: the registry answer is a bare-name guess -- never let it bind
-         * a reference across a language boundary. */
-        if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
-            continue;
-        }
-        /* #1942/#1962: a bare Go reference can never denote a struct field;
-         * the member half of a selector may. */
-        if (cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, usage->is_member_access,
-                                           tgt->label)) {
+        /* #1928 / #1942 / #1962: the registry answer is a bare-name guess --
+         * never bind a reference across a language boundary, nor a bare Go
+         * reference to a struct field (the member half of a selector may). */
+        if (cbm_suppress_ref_edge(lang, usage->is_member_access, tgt, &lang_memo)) {
             continue;
         }
 
@@ -309,6 +305,7 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
                             const char *module_qn, const char **imp_keys, const char **imp_vals,
                             int imp_count, CBMLanguage lang) {
     int resolved = 0;
+    cbm_lang_memo_t lang_memo = {};
     for (int r = 0; r < result->rw.count; r++) {
         CBMReadWrite *rw = &result->rw.items[r];
         if (!rw->var_name) {
@@ -330,14 +327,11 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* #1928: every resolution here is a bare-name registry guess -- never
-         * let it bind a read/write across a language boundary. */
-        if (cbm_suppress_cross_language_ref(lang, tgt->file_path)) {
-            continue;
-        }
-        /* #1942/#1962: a bare Go reference can never denote a struct field;
-         * a selector-LHS write (`t.err = x`) may bind it. */
-        if (cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, rw->is_member_access, tgt->label)) {
+        /* #1928 / #1942 / #1962: every resolution here is a bare-name registry
+         * guess -- never bind a read/write across a language boundary; a bare
+         * Go reference never binds a struct field, though a selector-LHS write
+         * (`t.err = x`) may. */
+        if (cbm_suppress_ref_edge(lang, rw->is_member_access, tgt, &lang_memo)) {
             continue;
         }
 

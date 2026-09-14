@@ -513,17 +513,17 @@ TEST(cross_language_suffix_match_drops_py_vs_js) {
     ASSERT_FALSE(
         cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "store.py", "suffix_match"));
     /* Other strategies: keep, whatever the languages. */
-    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON,
-                                                          "web/src/pages/Editor.js", "unique_name"));
-    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON,
-                                                          "web/src/pages/Editor.js", "same_module"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(
+        CBM_LANG_PYTHON, "web/src/pages/Editor.js", "unique_name"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(
+        CBM_LANG_PYTHON, "web/src/pages/Editor.js", "same_module"));
     ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON,
                                                           "web/src/pages/Editor.js", "import_map"));
     /* JS/TS/TSX are ONE family. */
-    ASSERT_FALSE(
-        cbm_suppress_cross_language_suffix_match(CBM_LANG_JAVASCRIPT, "lib/util.ts", "suffix_match"));
-    ASSERT_FALSE(
-        cbm_suppress_cross_language_suffix_match(CBM_LANG_TYPESCRIPT, "ui/Panel.tsx", "suffix_match"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_JAVASCRIPT, "lib/util.ts",
+                                                          "suffix_match"));
+    ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_TYPESCRIPT, "ui/Panel.tsx",
+                                                          "suffix_match"));
     /* Unknown either side: keep — never guess. */
     ASSERT_FALSE(cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, NULL, "suffix_match"));
     ASSERT_FALSE(
@@ -835,16 +835,96 @@ TEST(local_binding_suppress_keeps_unshadowed_and_strong_strategies) {
 TEST(weak_call_guards_share_one_drop_list) {
     /* The member guard, the local-binding guard and the cross-LSP base-class
      * resolution must agree on what "weak" means; all read one predicate. */
-    static const char *const strategies[] = {
-        "suffix_match",    "unique_name", "field_type_hint", "fuzzy",         "same_module",
-        "import_map",      "import_map_suffix", "qualified_suffix", "callee_suffix",
-        "service_pattern", "lsp_cross",   "lsp_ts_method",   "lsp_py_method", "lsp_direct",
-        "",                NULL};
+    static const char *const strategies[] = {"suffix_match",
+                                             "unique_name",
+                                             "field_type_hint",
+                                             "fuzzy",
+                                             "same_module",
+                                             "import_map",
+                                             "import_map_suffix",
+                                             "qualified_suffix",
+                                             "callee_suffix",
+                                             "service_pattern",
+                                             "lsp_cross",
+                                             "lsp_ts_method",
+                                             "lsp_py_method",
+                                             "lsp_direct",
+                                             "",
+                                             NULL};
     for (int i = 0; strategies[i] != NULL; i++) {
         bool weak = cbm_weak_short_name_strategy(strategies[i]);
         ASSERT_EQ(cbm_suppress_weak_member_match(true, true, strategies[i]), weak);
         ASSERT_EQ(cbm_suppress_weak_local_binding_call(true, true, strategies[i]), weak);
     }
+    PASS();
+}
+
+TEST(weak_call_guard_owns_language_set) {
+    /* cbm_suppress_weak_call is the one owner of both weak-call language sets,
+     * shared by the sequential and parallel resolvers. */
+    CBMCall member = {};
+    member.is_method = true;
+    ASSERT_TRUE(cbm_suppress_weak_call(CBM_LANG_PYTHON, &member, "suffix_match"));
+    ASSERT_TRUE(cbm_suppress_weak_call(CBM_LANG_JAVASCRIPT, &member, "unique_name"));
+    ASSERT_TRUE(cbm_suppress_weak_call(CBM_LANG_TYPESCRIPT, &member, "field_type_hint"));
+    ASSERT_TRUE(cbm_suppress_weak_call(CBM_LANG_TSX, &member, "suffix_match"));
+    ASSERT_FALSE(cbm_suppress_weak_call(CBM_LANG_GO, &member, "suffix_match"));
+    ASSERT_FALSE(cbm_suppress_weak_call(CBM_LANG_PYTHON, &member, "lsp_py_method"));
+
+    CBMCall bound = {};
+    bound.callee_is_locally_bound = true;
+    ASSERT_TRUE(cbm_suppress_weak_call(CBM_LANG_PYTHON, &bound, "unique_name"));
+    /* The local-binding guard is Python-only. */
+    ASSERT_FALSE(cbm_suppress_weak_call(CBM_LANG_JAVASCRIPT, &bound, "unique_name"));
+
+    CBMCall plain = {};
+    ASSERT_FALSE(cbm_suppress_weak_call(CBM_LANG_PYTHON, &plain, "suffix_match"));
+    PASS();
+}
+
+TEST(ref_edge_guard_matches_its_parts) {
+    /* cbm_suppress_ref_edge is exactly the OR of the cross-language reference
+     * guard and the Go bare-field guard, with or without the language memo. */
+    static const CBMLanguage langs[] = {CBM_LANG_GO,     CBM_LANG_C,          CBM_LANG_CPP,
+                                        CBM_LANG_PYTHON, CBM_LANG_JAVASCRIPT, CBM_LANG_COUNT};
+    static const char *const paths[] = {"pkg/a.go",    "pkg/b.go",  "bpf/probe.c", "bpf/probe.h",
+                                        "web/x.ts",    "web/y.tsx", "Makefile",    "",
+                                        "a.blade.php", "b.php",     "pkg/a.go"};
+    static const char *const labels[] = {"Field", "Variable"};
+    for (size_t l = 0; l < sizeof(langs) / sizeof(langs[0]); l++) {
+        cbm_lang_memo_t memo = {};
+        for (size_t p = 0; p < sizeof(paths) / sizeof(paths[0]); p++) {
+            for (size_t b = 0; b < sizeof(labels) / sizeof(labels[0]); b++) {
+                for (int member = 0; member < 2; member++) {
+                    cbm_gbuf_node_t node = {};
+                    node.file_path = (char *)paths[p];
+                    node.label = (char *)labels[b];
+                    bool want = cbm_suppress_cross_language_ref(langs[l], paths[p]) ||
+                                cbm_go_suppress_bare_field_ref(langs[l] == CBM_LANG_GO, member != 0,
+                                                               labels[b]);
+                    ASSERT_EQ(cbm_suppress_ref_edge(langs[l], member != 0, &node, &memo), want);
+                    ASSERT_EQ(cbm_suppress_ref_edge(langs[l], member != 0, &node, NULL), want);
+                }
+            }
+        }
+    }
+    PASS();
+}
+
+TEST(call_target_guard_matches_its_parts) {
+    cbm_gbuf_node_t js = {};
+    js.file_path = (char *)"web/src/pages/Editor.js";
+    js.label = (char *)"Function";
+    ASSERT_TRUE(cbm_suppress_call_target(CBM_LANG_PYTHON, &js, "suffix_match"));
+    ASSERT_FALSE(cbm_suppress_call_target(CBM_LANG_PYTHON, &js, "unique_name"));
+    ASSERT_FALSE(cbm_suppress_call_target(CBM_LANG_TYPESCRIPT, &js, "suffix_match"));
+
+    cbm_gbuf_node_t field = {};
+    field.file_path = (char *)"pkg/state/state.go";
+    field.label = (char *)"Field";
+    ASSERT_TRUE(cbm_suppress_call_target(CBM_LANG_GO, &field, "unique_name"));
+    ASSERT_FALSE(cbm_suppress_call_target(CBM_LANG_GO, &field, "lsp_type_dispatch"));
+    ASSERT_FALSE(cbm_suppress_call_target(CBM_LANG_JAVA, &field, "unique_name"));
     PASS();
 }
 
@@ -900,6 +980,9 @@ SUITE(registry) {
     RUN_TEST(local_binding_suppress_drops_weak_shadowed_bare_calls);
     RUN_TEST(local_binding_suppress_keeps_unshadowed_and_strong_strategies);
     RUN_TEST(weak_call_guards_share_one_drop_list);
+    RUN_TEST(weak_call_guard_owns_language_set);
+    RUN_TEST(ref_edge_guard_matches_its_parts);
+    RUN_TEST(call_target_guard_matches_its_parts);
     RUN_TEST(resolve_import_map_aliased_from_import);
     RUN_TEST(resolve_import_map_suffix);
     /* Import reachability */
