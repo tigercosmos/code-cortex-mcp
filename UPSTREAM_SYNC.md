@@ -43,6 +43,38 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 >    the root on the first one; upstream's version never auto-indexes a repo
 >    containing any symlink.
 >
+> **Post-sync review (same day).** A Codex review (high effort) and a four-angle
+> `/simplify` review (reuse, simplification, efficiency, altitude) ran over the
+> whole branch. **Codex found three graph-accuracy regressions the green suite
+> missed, fixed in `fcba6235`, each guard RED without its fix:** (1) a
+> parent-relative JS/TS import of a non-JS asset (`../styles.css`,
+> `../Widget.vue`) lost its IMPORTS edge because `48cb94f6` strips only JS/TS
+> extensions — a final extension is now also stripped when the indexer maps it
+> to a language, so `featureX.engine` still keeps its dot; (2) a Go field
+> declaration naming several fields (`X, Y int`) emitted only the first;
+> (3) the C/C++ no-code line scanner opened a block comment at a `"/*"` inside a
+> string literal, which could refine a dropped `#ifdef` branch's only error range
+> away and report a partial file as clean. **The `/simplify` findings landed as
+> 19 behaviour-preserving commits** (`a00367cd`..`7a6391c2` + `19646bd2`): one
+> registry owner each for the weak-call, reference-edge and call-target guards
+> (the "MUST stay in lockstep" copies in `pass_calls`/`pass_parallel`/`pass_usages`
+> are gone); a language-neutral relative-path normalizer shared by JS imports and
+> C includes (supersedes the dot-relative special case in divergence 1 — same
+> behaviour, one mechanism); one type short-name index builder; one Cypher
+> pattern-variable collector; rank-ordered complexity DFS; one coverage error walk
+> and line table; the thread CPU clock read only once the wall budget is spent;
+> the auto-index file count moved off the MCP `initialize` path; and fewer
+> per-call copies into whole-index arenas. `cbm_store_fts_rebuild` lost its dead
+> incremental mode and parameters. **Skipped on purpose:** skipping the Go
+> cross-LSP AST walk when nothing looks unresolved (its higher-confidence answers
+> override the fast resolver — measured, two tests and one real edge change);
+> a same-extension shortcut in the cross-language guard (wrong for `.blade.php`,
+> `Makefile`, content-disambiguated `.m`/`.cls`/`.frm`; a per-loop memo is used
+> instead); re-scoring importance only for changed files (scores are global).
+> Every cleanup group was shown graph-identical on a real index (counts, edge list
+> and node properties) and the final branch passes 6004 / 0 failed / 1 skipped
+> with cppcheck, clang-format and NOLINT clean. **Open determinism follow-up:** twice, the first index of the smoke repo right after a full test-suite run bound 17 bare `key` references (tests/*.cpp) to `cbm_idxmemo_slot.key` instead of the other same-named field, `cbm_yaml_node.key` (USAGE 4586 → 4603). It did not reproduce in 20 further runs — 7 quiet and 3 under 12-core CPU load for each of the pre-review and post-review binaries — so it is not attributed to the review commits; an ambiguous-name tie-break somewhere still depends on scheduling (see [graph determinism, 2026-08-26]).
+>
 > **Known limits, recorded rather than fixed:** the Python bare-call parameter
 > tracking rides the fork's fixed 64-slot walk-scope stack, so shadowing past
 > 64 nested scopes is not suppressed (a missed suppression, never a lost
