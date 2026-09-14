@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include "graph_buffer/graph_buffer.h"
 #include "yyjson/yyjson.h"
+#include "service_patterns.h"     // cbm_service_pattern_is_http_route_literal
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 extern "C" bool cbm_test_cpp_sites_need_cross(const CBMFileResult *result);
@@ -4762,6 +4763,167 @@ TEST(registry_confidence_suffix_match) {
     PASS();
 }
 
+/* Issue #1893: a call on a library type bound to a same-named project member.
+ * URLSession is Foundation's, not this project's, so PickedFile.data is the
+ * wrong target — and with one candidate it won the top name-only confidence. */
+TEST(registry_receiver_chain_refuses_library_unique_name_issue1893) {
+    cbm_registry_t *reg = cbm_registry_new();
+    cbm_registry_add(reg, "data", "HomeboxUI.PickedFile.data", "Variable");
+
+    cbm_resolution_t r =
+        cbm_registry_resolve(reg, "URLSession.shared.data", "HomeboxUI.Net", NULL, NULL, 0);
+    ASSERT_NULL(r.qualified_name);
+
+    cbm_registry_free(reg);
+    PASS();
+}
+
+/* The same refusal on the other name-only exit, where several candidates share
+ * the final name and import distance picks the winner. */
+TEST(registry_receiver_chain_refuses_library_suffix_match_issue1893) {
+    cbm_registry_t *reg = cbm_registry_new();
+    cbm_registry_add(reg, "data", "HomeboxUI.PickedFile.data", "Variable");
+    cbm_registry_add(reg, "data", "HomeboxUI.Payload.data", "Variable");
+
+    cbm_resolution_t r =
+        cbm_registry_resolve(reg, "URLSession.shared.data", "HomeboxUI.Net", NULL, NULL, 0);
+    ASSERT_NULL(r.qualified_name);
+
+    cbm_registry_free(reg);
+    PASS();
+}
+
+/* The true positive the gate must not eat: the project extends Calendar itself,
+ * so Calendar really is in the receiver chain. */
+TEST(registry_receiver_chain_keeps_project_extension_issue1893) {
+    cbm_registry_t *reg = cbm_registry_new();
+    cbm_registry_add(reg, "startOfDayUTC", "AuthDTOs.Calendar.startOfDayUTC", "Method");
+
+    cbm_resolution_t r = cbm_registry_resolve(reg, "Calendar.utcGregorian.startOfDayUTC",
+                                              "HomeboxUI.Stats", NULL, NULL, 0);
+    ASSERT_STR_EQ(r.qualified_name, "AuthDTOs.Calendar.startOfDayUTC");
+    ASSERT_STR_EQ(r.strategy, "unique_name");
+
+    cbm_registry_free(reg);
+    PASS();
+}
+
+/* A lower-case root names a value, whose type the chain does not show. The gate
+ * must not look at it, or every ordinary vm.load style call would be refused. */
+TEST(registry_receiver_chain_ignores_lowercase_root_issue1893) {
+    cbm_registry_t *reg = cbm_registry_new();
+    cbm_registry_add(reg, "load", "HomeboxUI.EntityListViewModel.load", "Method");
+
+    cbm_resolution_t r = cbm_registry_resolve(reg, "vm.load", "HomeboxUI.Views", NULL, NULL, 0);
+    ASSERT_STR_EQ(r.qualified_name, "HomeboxUI.EntityListViewModel.load");
+    ASSERT_STR_EQ(r.strategy, "unique_name");
+
+    cbm_registry_free(reg);
+    PASS();
+}
+
+/* An unqualified callee has no chain at all and must pass through unchanged. */
+TEST(registry_receiver_chain_ignores_bare_name_issue1893) {
+    cbm_registry_t *reg = cbm_registry_new();
+    cbm_registry_add(reg, "helper", "proj.pkg.helper", "Function");
+
+    cbm_resolution_t r = cbm_registry_resolve(reg, "helper", "proj.other", NULL, NULL, 0);
+    ASSERT_STR_EQ(r.qualified_name, "proj.pkg.helper");
+    ASSERT_STR_EQ(r.strategy, "unique_name");
+
+    cbm_registry_free(reg);
+    PASS();
+}
+
+/* A regex-replacement operand handed to a string method is not a route. */
+TEST(http_route_literal_guard_rejects_regex_replacement_operands) {
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/html/g", "template.replace"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/<table/i", "pattern.test"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/locations/", "str.split"));
+    ASSERT_TRUE(cbm_service_pattern_is_http_route_literal("/api/orders", "requests.get"));
+    PASS();
+}
+
+static int count_nodes_named_in(cbm_store_t *s, const char *project, const char *name) {
+    cbm_node_t *ns = NULL;
+    int n = 0;
+    cbm_store_find_nodes_by_name(s, project, name, &ns, &n);
+    if (ns) {
+        cbm_store_free_nodes(ns, n);
+    }
+    return n;
+}
+
+/* Slash-prefixed call arguments are not necessarily HTTP routes. Keep the
+ * parallel arg-url heuristic from minting Route nodes for filesystem paths or
+ * regex-replacement operands, while preserving a genuine API path. */
+TEST(pipeline_arg_url_rejects_non_http_slash_arguments) {
+    struct SavedEnv {
+        const char *name;
+        std::string value;
+        bool present;
+        explicit SavedEnv(const char *key)
+            : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+        ~SavedEnv() {
+            if (present) {
+                cbm_setenv(name, value.c_str(), 1);
+            } else {
+                cbm_unsetenv(name);
+            }
+        }
+    } workers_env("CBM_WORKERS"), single_env("CBM_INDEX_SINGLE_THREAD");
+
+    char tmp[256] = "/tmp/cbm_arg_url_guard_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    std::string repo = std::string(tmp) + "/repo";
+    ASSERT_EQ(th_write_file((repo + "/src/args.py").c_str(),
+                            "import requests\n"
+                            "TMP = '/tmp/pgv_fuzz.bin'\n"
+                            "def run_copy(path):\n"
+                            "    return path\n"
+                            "def write_fixture():\n"
+                            "    return run_copy(TMP)\n"
+                            "def load_api():\n"
+                            "    return requests.get('/api/data')\n"),
+              0);
+    ASSERT_EQ(th_write_file((repo + "/src/regex.js").c_str(),
+                            "function sink(value) { return value; }\n"
+                            "export function sanitize(template) {\n"
+                            "  sink(/<table/i);\n"
+                            "  return template.replace('/html/g', '');\n"
+                            "}\n"),
+              0);
+    for (int i = 0; i < 52; i++) {
+        std::string body = "export function filler" + std::to_string(i) + "(): number { return " +
+                           std::to_string(i) + "; }\n";
+        ASSERT_EQ(
+            th_write_file((repo + "/src/filler" + std::to_string(i) + ".ts").c_str(), body.c_str()),
+            0);
+    }
+
+    cbm_setenv("CBM_WORKERS", "4", 1);
+    cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+
+    std::string db_path = std::string(tmp) + "/arg_url_guard.db";
+    cbm_pipeline_t *p = cbm_pipeline_new(repo.c_str(), db_path.c_str(), CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path.c_str());
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_EQ(count_nodes_named_in(s, project, "/html/g"), 0);
+    ASSERT_EQ(count_nodes_named_in(s, project, "/<table/i"), 0);
+    ASSERT_EQ(count_nodes_named_in(s, project, "/tmp/pgv_fuzz.bin"), 0);
+    ASSERT_GTE(count_nodes_named_in(s, project, "/api/data"), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
 TEST(registry_fuzzy_confidence_single) {
     cbm_registry_t *reg = cbm_registry_new();
     cbm_registry_add(reg, "Handler", "proj.svc.Handler", "Function");
@@ -7886,6 +8048,13 @@ SUITE(pipeline) {
     RUN_TEST(registry_confidence_same_module);
     RUN_TEST(registry_confidence_unique_name);
     RUN_TEST(registry_confidence_suffix_match);
+    RUN_TEST(registry_receiver_chain_refuses_library_unique_name_issue1893);
+    RUN_TEST(registry_receiver_chain_refuses_library_suffix_match_issue1893);
+    RUN_TEST(registry_receiver_chain_keeps_project_extension_issue1893);
+    RUN_TEST(registry_receiver_chain_ignores_lowercase_root_issue1893);
+    RUN_TEST(registry_receiver_chain_ignores_bare_name_issue1893);
+    RUN_TEST(http_route_literal_guard_rejects_regex_replacement_operands);
+    RUN_TEST(pipeline_arg_url_rejects_non_http_slash_arguments);
     RUN_TEST(registry_fuzzy_confidence_single);
     RUN_TEST(registry_fuzzy_confidence_distance);
     RUN_TEST(registry_negative_import_rejects);

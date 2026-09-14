@@ -155,6 +155,66 @@ static int et_edge_present(const EtFile *files, int nfiles, const char *edge, in
     return got >= floor;
 }
 
+enum { ET_ROUTE_ASSERT_MAX = 16 };
+
+/* Assert the exact Route node set. Edge-count smoke tests cannot catch partial
+ * Spring paths such as "/orders" when the real route is "/api/orders", and a
+ * presence-only assertion would still allow stale partial Route nodes to leak. */
+static int et_routes_exact(const EtFile *files, int nfiles, const char **routes) {
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, nfiles);
+    cbm_node_t *nodes = NULL;
+    int node_count = 0;
+    int wanted = 0;
+    int found[ET_ROUTE_ASSERT_MAX] = {0};
+    int ok = store != NULL;
+
+    while (wanted < ET_ROUTE_ASSERT_MAX && routes[wanted]) {
+        wanted++;
+    }
+    if (wanted == ET_ROUTE_ASSERT_MAX && routes[wanted]) {
+        ok = 0;
+    }
+
+    if (!store || cbm_store_find_nodes_by_label(store, lp.project, "Route", &nodes, &node_count) !=
+                      CBM_STORE_OK) {
+        ok = 0;
+    } else {
+        if (node_count != wanted) {
+            ok = 0;
+        }
+        for (int wi = 0; wi < wanted; wi++) {
+            for (int ni = 0; ni < node_count; ni++) {
+                if (nodes[ni].name && strcmp(nodes[ni].name, routes[wi]) == 0) {
+                    found[wi] = 1;
+                    break;
+                }
+            }
+            if (!found[wi]) {
+                ok = 0;
+            }
+        }
+    }
+
+    if (!ok) {
+        fprintf(stderr, "  [ET-ROUTE] FAIL expected=%d actual=%d missing:", wanted, node_count);
+        for (int wi = 0; wi < wanted; wi++) {
+            if (!found[wi]) {
+                fprintf(stderr, " %s", routes[wi]);
+            }
+        }
+        fprintf(stderr, " available:");
+        for (int ni = 0; ni < node_count && ni < ET_ROUTE_ASSERT_MAX; ni++) {
+            fprintf(stderr, " %s", nodes[ni].name ? nodes[ni].name : "<null>");
+        }
+        fprintf(stderr, "\n");
+    }
+
+    cbm_store_free_nodes(nodes, node_count);
+    et_cleanup(&lp, store);
+    return ok;
+}
+
 /* Index meaningful[] plus PARALLEL_PAD_FILES trivial pad files to force the
  * parallel pipeline path (MIN_FILES_FOR_PARALLEL = 50). */
 enum { ET_PARALLEL_PAD = 52, ET_PAD_MAX = 68 /* 52 pad + 16 meaningful */ };
@@ -290,6 +350,33 @@ TEST(handles_spring_java) {
                                 "    public String getOrder(int id) {\n"
                                 "        return \"order:\" + id;\n    }\n}\n"}};
     ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    PASS();
+}
+
+/* Spring (Java) — the path attribute may sit anywhere in the annotation.
+ * Java puts no order on annotation attributes, so `path` after `name`,
+ * `produces` and `consumes` is ordinary source. The argument scan stopped
+ * after the third attribute, so the path was never read and no Route node
+ * formed. A HANDLES count alone cannot catch that: before the fix a bogus "/"
+ * Route still formed and took the HANDLES edge.
+ *
+ * Fork-side: upstream asserts "/api/orders". This tree does not compose a
+ * class-level @RequestMapping prefix into method routes (nor emit the class
+ * route on its own), so the exact set here is the method path alone. */
+TEST(handles_spring_java_path_attribute_fourth) {
+    static const char *routes[] = {"/orders", NULL};
+    static const EtFile f[] = {{"OrderController.java",
+                                "package com.example;\n\n"
+                                "import org.springframework.web.bind.annotation.RequestMapping;\n"
+                                "import org.springframework.web.bind.annotation.GetMapping;\n\n"
+                                "@RequestMapping(\"/api\")\npublic class OrderController {\n"
+                                "    @GetMapping(name = \"listOrders\",\n"
+                                "                produces = \"application/json\",\n"
+                                "                consumes = \"application/json\",\n"
+                                "                path = \"/orders\")\n"
+                                "    public String listOrders() {\n"
+                                "        return \"orders\";\n    }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
     PASS();
 }
 
@@ -1355,6 +1442,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_fastify_js);
     RUN_TEST(handles_gin_go);
     RUN_TEST(handles_spring_java);
+    RUN_TEST(handles_spring_java_path_attribute_fourth);
     RUN_TEST(handles_aspnet_csharp);
     RUN_TEST(handles_laravel_php);
     RUN_TEST(handles_rails_ruby);
