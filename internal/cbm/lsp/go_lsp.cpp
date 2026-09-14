@@ -861,6 +861,35 @@ const CBMType* go_eval_builtin_call(GoLSPContext* ctx, const char* name, TSNode 
     return cbm_type_unknown();
 }
 
+// --- Import-alias re-qualification ---
+//
+// parse_field_defs_into_type qualifies struct field type texts as
+// "<def_module>.<text>". When the author wrote the text through an import
+// alias ("Svc:svc.Svc" in module test.main), that yields a QN
+// ("test.main.svc.Svc") that exists nowhere in the project-wide registry --
+// the real QN is "<import_qn>.Svc" and only the calling file's import map can
+// say so. On an exact-QN miss this rewrites the LAST "<dot>alias<dot>" segment
+// through the file's imports; returns NULL when no alias segment is involved.
+static const char* go_requalify_via_imports(GoLSPContext* ctx, const char* type_qn) {
+    if (!ctx || !type_qn || !type_qn[0] || ctx->import_count <= 0) return NULL;
+    for (int j = 0; j < ctx->import_count; j++) {
+        const char* alias = ctx->import_local_names[j];
+        const char* alias_qn = ctx->import_package_qns[j];
+        if (!alias || !alias[0] || !alias_qn || strchr(alias, '.')) continue;
+        size_t alias_len = strlen(alias);
+        const char* hit = NULL;
+        for (const char* p = strchr(type_qn, '.'); p; p = strchr(p + 1, '.')) {
+            if (strncmp(p + 1, alias, alias_len) == 0 && p[1 + alias_len] == '.') {
+                hit = p + 1;
+            }
+        }
+        if (hit) {
+            return cbm_arena_sprintf(ctx->arena, "%s.%s", alias_qn, hit + alias_len + 1);
+        }
+    }
+    return NULL;
+}
+
 // --- go_lookup_field: struct field lookup with embedding recursion ---
 
 static const CBMType* go_lookup_field(GoLSPContext* ctx,
@@ -868,6 +897,12 @@ static const CBMType* go_lookup_field(GoLSPContext* ctx,
     if (!type_qn || !field_name || depth > 5) return NULL;
 
     const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, type_qn);
+    if (!rt && depth == 0) {
+        // Field texts from cross-package defs may embed an import-alias
+        // segment only this file's import map resolves.
+        const char* alt_qn = go_requalify_via_imports(ctx, type_qn);
+        if (alt_qn) rt = cbm_registry_lookup_type(ctx->registry, alt_qn);
+    }
     if (!rt) return NULL;
 
     // Follow alias chain
@@ -903,6 +938,16 @@ static const CBMRegisteredFunc* go_lookup_field_or_method_depth(GoLSPContext* ct
     // Direct method lookup
     const CBMRegisteredFunc* f = cbm_registry_lookup_method(ctx->registry, type_qn, member_name);
     if (f) return f;
+
+    // NAMED receivers built from cross-package field type texts can carry a
+    // "<module>.svc.Svc" QN; retry on the import-resolved QN.
+    if (depth == 0) {
+        const char* alt_qn = go_requalify_via_imports(ctx, type_qn);
+        if (alt_qn) {
+            f = go_lookup_field_or_method_depth(ctx, alt_qn, member_name, depth + 1);
+            if (f) return f;
+        }
+    }
 
     const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, type_qn);
     if (rt) {
@@ -1170,12 +1215,22 @@ static void resolve_calls_in_node_inner(GoLSPContext* ctx, TSNode node) {
                         if (base && base->kind == CBM_TYPE_POINTER) base = cbm_type_deref(base);
 
                         if (base && base->kind == CBM_TYPE_NAMED) {
+                            // Re-qualify a NAMED receiver that embeds an import-alias
+                            // segment (cross-package field type text): the real type
+                            // exists only under the import QN.
+                            const char* recv_qn = base->data.named.qualified_name;
+                            if (!cbm_registry_lookup_type(ctx->registry, recv_qn)) {
+                                const char* alt_qn = go_requalify_via_imports(ctx, recv_qn);
+                                if (alt_qn && cbm_registry_lookup_type(ctx->registry, alt_qn)) {
+                                    recv_qn = alt_qn;
+                                }
+                            }
                             const CBMRegisteredFunc* method = go_lookup_field_or_method(ctx,
-                                base->data.named.qualified_name, field_name);
+                                recv_qn, field_name);
                             if (method) {
                                 const char* strategy = "lsp_type_dispatch";
                                 if (method->receiver_type &&
-                                    strcmp(method->receiver_type, base->data.named.qualified_name) != 0) {
+                                    strcmp(method->receiver_type, recv_qn) != 0) {
                                     strategy = "lsp_embed_dispatch";
                                 }
                                 emit_resolved_call(ctx, method->qualified_name, strategy, 0.95f);
@@ -1190,9 +1245,14 @@ static void resolve_calls_in_node_inner(GoLSPContext* ctx, TSNode node) {
                             if (!is_iface && base->kind == CBM_TYPE_NAMED) {
                                 const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry,
                                     base->data.named.qualified_name);
+                                if (!rt) {
+                                    const char* alt_qn = go_requalify_via_imports(
+                                        ctx, base->data.named.qualified_name);
+                                    if (alt_qn) rt = cbm_registry_lookup_type(ctx->registry, alt_qn);
+                                }
                                 if (rt && rt->is_interface) {
                                     is_iface = true;
-                                    iface_qn = base->data.named.qualified_name;
+                                    iface_qn = rt->qualified_name;
                                 }
                             }
                             if (is_iface) {
@@ -1501,42 +1561,15 @@ static void process_function(GoLSPContext* ctx, TSNode func_node) {
     char* func_name = lsp_node_text(ctx, name_node);
     if (!func_name || !func_name[0]) return;
 
-    // For methods, the enclosing-function QN must include the receiver type
-    // (package.Type.Method), matching how the textual extractor and the
-    // registry qualify the method. Building it as package.Method (no receiver)
-    // here made the LSP-resolved call's caller_qn disagree with the textual
-    // call's enclosing_func_qn, so cbm_pipeline_find_lsp_resolution never
-    // joined them — every call inside a method body silently lost its
-    // type-aware LSP strategy. Derive the bare receiver type name the same way
-    // the receiver binding below does.
-    char* recv_type_name = NULL;
-    {
-        TSNode recv0 = ts_node_child_by_field_name(func_node, "receiver", 8);
-        if (!ts_node_is_null(recv0)) {
-            uint32_t rnc0 = ts_node_child_count(recv0);
-            for (uint32_t i = 0; i < rnc0 && !recv_type_name; i++) {
-                TSNode rp = ts_node_child(recv0, i);
-                if (ts_node_is_null(rp) || !ts_node_is_named(rp)) continue;
-                if (strcmp(ts_node_type(rp), "parameter_declaration") != 0) continue;
-                TSNode rtype = ts_node_child_by_field_name(rp, "type", 4);
-                if (ts_node_is_null(rtype)) continue;
-                // Unwrap a pointer receiver (*Type) to the bare type identifier.
-                const char* rtk = ts_node_type(rtype);
-                if (strcmp(rtk, "pointer_type") == 0 && ts_node_named_child_count(rtype) > 0) {
-                    rtype = ts_node_named_child(rtype, 0);
-                }
-                char* tn = lsp_node_text(ctx, rtype);
-                if (tn && tn[0]) recv_type_name = tn;
-            }
-        }
-    }
-
-    if (recv_type_name) {
-        ctx->enclosing_func_qn =
-            cbm_arena_sprintf(ctx->arena, "%s.%s.%s", ctx->package_qn, recv_type_name, func_name);
-    } else {
-        ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, func_name);
-    }
+    // Enclosing-function QN must be the BARE package.Func form (no receiver
+    // type segment). The textual call events source calls as
+    // package_qn.func_name -- methods included -- and the defs pass creates
+    // the graph Method node under the same QN, so any other form breaks the
+    // caller-QN join in cbm_pipeline_find_lsp_resolution and the LSP-resolved
+    // call silently falls back to the registry short-name resolver. The
+    // receiver type still reaches the registry via the def's parent_class /
+    // method->receiver_type; it just does not appear in the caller QN.
+    ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, func_name);
 
     // Push function scope
     CBMScope* saved_scope = ctx->current_scope;

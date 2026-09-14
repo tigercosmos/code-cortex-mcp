@@ -7691,8 +7691,7 @@ static const char *const k_go_bare_field_bodies[] = {
     "module example.com/fxbare\n\ngo 1.22\n",
     "package state\n\ntype Tracker struct {\n\terr error\n\tn   int\n}\n",
     "package state\n\nfunc (t *Tracker) Reset() int {\n\tt.err = nil\n\treturn t.n\n}\n",
-    "package app\n\nimport \"errors\"\n\nfunc Run() error {\n\terr := errors.New(\"x\")\n\treturn "
-    "err\n}\n"};
+    "package app\n\nfunc Run() error {\n\terr := error(nil)\n\treturn err\n}\n"};
 
 /* 0 = bare local binds no Field and both selector references do; negative
  * values name the first violated property. */
@@ -7755,6 +7754,90 @@ TEST(pipeline_go_bare_ref_never_binds_field) {
  * resolvers and must consult the same predicate. */
 TEST(pipeline_go_bare_ref_never_binds_field_parallel) {
     ASSERT_EQ(go_bare_field_probe(52), 0);
+    PASS();
+}
+
+/* Cross-package field-chain fixture: handler.OrderHandler holds an
+ * import-qualified field (`orderSvc *service.OrderService`) and calls through
+ * it. Go struct fields were never folded into the LSP registry and the Go
+ * dispatch skipped the AST walk, so the call fell through to suffix_match. */
+static const char *const k_go_field_chain_names[] = {"go.mod", "internal/service/order_service.go",
+                                                     "internal/handler/order_handler.go"};
+static const char *const k_go_field_chain_bodies[] = {
+    "module acme-order\n\ngo 1.22\n",
+    "package service\n\nimport \"context\"\n\ntype OrderService struct{}\n\n"
+    "func (s *OrderService) PlaceOrder(ctx context.Context, id int) (int, error) {\n"
+    "\treturn id, nil\n}\n",
+    "package handler\n\nimport (\n\t\"context\"\n\n\t\"acme-order/internal/service\"\n)\n\n"
+    "type OrderHandler struct {\n\torderSvc *service.OrderService\n}\n\n"
+    "func (h *OrderHandler) PlaceOrder(ctx context.Context, id int) (int, error) {\n"
+    "\treturn h.orderSvc.PlaceOrder(ctx, id)\n}\n"};
+
+/* Returns 1 when handler PlaceOrder -CALLS-> service PlaceOrder carries the
+ * lsp_type_dispatch strategy, 0 when the edge exists with another strategy,
+ * negative on setup failure or a missing edge. */
+static int go_field_chain_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p = index_fixture_with_padding(k_go_field_chain_names, k_go_field_chain_bodies,
+                                                   3, pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -9;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -1;
+    if (s) {
+        cbm_node_t *nodes = NULL;
+        int n = 0;
+        cbm_store_find_nodes_by_name(s, proj, "PlaceOrder", &nodes, &n);
+        int64_t caller = 0;
+        int64_t callee = 0;
+        for (int i = 0; i < n; i++) {
+            if (!nodes[i].file_path) {
+                continue;
+            }
+            if (strstr(nodes[i].file_path, "handler")) {
+                caller = nodes[i].id;
+            } else if (strstr(nodes[i].file_path, "service")) {
+                callee = nodes[i].id;
+            }
+        }
+        cbm_store_free_nodes(nodes, n);
+        cbm_edge_t *edges = NULL;
+        int ne = 0;
+        if (caller && callee) {
+            cbm_store_find_edges_by_source_type(s, caller, "CALLS", &edges, &ne);
+        }
+        for (int e = 0; e < ne; e++) {
+            if (edges[e].target_id != callee) {
+                continue;
+            }
+            const char *props = edges[e].properties_json ? edges[e].properties_json : "{}";
+            printf("  go field chain pad=%d: %s\n", pad, props);
+            rc = strstr(props, "\"strategy\":\"lsp_type_dispatch\"") ? 1 : 0;
+        }
+        if (edges) {
+            cbm_store_free_edges(edges, ne);
+        }
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+/* Cross-package field chains (h.orderSvc.PlaceOrder()) resolve through the
+ * Go type dispatch, not the fuzzy suffix matcher. Sequential twin. */
+TEST(pipeline_go_cross_package_field_chain_resolves) {
+    ASSERT_EQ(go_field_chain_probe(0), 1);
+    PASS();
+}
+
+/* Parallel twin: the parallel resolver drives the same cbm_pxc_dispatch_file
+ * over the shared prebuilt Go registry. */
+TEST(pipeline_go_cross_package_field_chain_resolves_parallel) {
+    ASSERT_EQ(go_field_chain_probe(52), 1);
     PASS();
 }
 
@@ -8498,6 +8581,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
     RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
+    RUN_TEST(pipeline_go_cross_package_field_chain_resolves);
+    RUN_TEST(pipeline_go_cross_package_field_chain_resolves_parallel);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

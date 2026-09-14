@@ -746,8 +746,12 @@ CBMLSPDef *cbm_pxc_collect_all_defs(const cbm_pipeline_ctx_t *ctx, CBMFileResult
             }
         }
         pxc_free_import_map(imp_keys, imp_vals, imp_count); /* NULL-safe */
+        /* Go too: struct fields are extracted as flat "Field" defs that
+         * pxc_map_label drops, so without this fold every Go struct registers
+         * with zero fields and field chains (h.svc.Handle()) never resolve.
+         * Fields are always declared in their struct's own file. */
         if (files[fi].language == CBM_LANG_C || files[fi].language == CBM_LANG_CPP ||
-            files[fi].language == CBM_LANG_CUDA)
+            files[fi].language == CBM_LANG_CUDA || files[fi].language == CBM_LANG_GO)
             pxc_attach_cpp_fields(cache[fi], defs + first_def, idx - first_def);
     }
     pxc_attach_cpp_identity(cache, files, file_count, defs, idx, def_files);
@@ -1164,8 +1168,16 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         switch (lang) {
         case CBM_LANG_GO:
             /* Tier 3 (metadata-driven): pure lookup over the Tier-1
-             * lsp_unresolved entries — no parse, no AST walk. */
+             * lsp_unresolved entries — no parse, no AST walk. Then the AST
+             * walk on the shared Tier-2 registry (mirroring every other
+             * language) so NAMED receivers evaluated against project-wide
+             * defs -- field selectors in particular -- also resolve. The walk
+             * variant is read-only, so the sealed registry is safe for
+             * parallel workers. */
             cbm_go_fast_resolve_qualified_calls(result, prebuilt, imp_keys, imp_vals, imp_count);
+            cbm_run_go_lsp_cross_with_registry(&result->arena, source, source_len, def_module,
+                                               prebuilt, imp_keys, imp_vals, imp_count,
+                                               result->cached_tree, &result->resolved_calls);
             used_prebuilt = true;
             break;
         case CBM_LANG_PYTHON:

@@ -1068,6 +1068,97 @@ TEST(golsp_crossfile_stdlib_interface) {
     PASS();
 }
 
+/* Cross-package receiver-method resolution when struct field type texts are
+ * written through import aliases. parse_field_defs_into_type qualifies the
+ * text with the defining module ("Svc:svc.Svc" in module test.main becomes
+ * "test.main.svc.Svc") -- a QN that exists nowhere in the project-wide
+ * registry, so the dispatch must re-qualify the alias segment through the
+ * calling file's import map and land on the real receiver type. Covers a
+ * concrete struct field and an interface-typed field. */
+TEST(golsp_crossfile_aliased_field_requal) {
+    const char *source = "package main\n\n"
+                         "func callSvc(h *Handler) error {\n"
+                         "\th.Svc.Ping()\n\treturn nil\n}\n\n"
+                         "func callPb(h *Holder) error {\n"
+                         "\th.C.Ping()\n\treturn nil\n}\n";
+
+    CBMLSPDef defs[] = {
+        {.qualified_name = "myapp/svc.Svc",
+         .short_name = "Svc",
+         .label = "Struct",
+         .def_module_qn = "myapp/svc"},
+        /* Receiver structs whose field texts use import aliases -- the trigger
+         * for the wrong qualification. */
+        {.qualified_name = "test.main.Handler",
+         .short_name = "Handler",
+         .label = "Struct",
+         .def_module_qn = "test.main",
+         .field_defs = "Svc:svc.Svc"},
+        {.qualified_name = "test.main.Holder",
+         .short_name = "Holder",
+         .label = "Struct",
+         .def_module_qn = "test.main",
+         .field_defs = "C:pb.Client"},
+        {.qualified_name = "myapp/pb.Client",
+         .short_name = "Client",
+         .label = "Interface",
+         .def_module_qn = "myapp/pb",
+         .method_names_str = "Ping",
+         .is_interface = true},
+        {.qualified_name = "myapp/svc.Svc.Ping",
+         .short_name = "Ping",
+         .label = "Method",
+         .receiver_type = "myapp/svc.Svc",
+         .def_module_qn = "myapp/svc",
+         .return_types = "error"},
+        {.qualified_name = "myapp/pb.Client.Ping",
+         .short_name = "Ping",
+         .label = "Method",
+         .receiver_type = "myapp/pb.Client",
+         .def_module_qn = "myapp/pb",
+         .return_types = "error"},
+    };
+    for (auto &d : defs) {
+        d.lang = CBM_LANG_GO;
+    }
+    const char *imp_names[] = {"svc", "pb"};
+    const char *imp_qns[] = {"myapp/svc", "myapp/pb"};
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+
+    CBMTypeRegistry *reg = cbm_go_build_cross_registry(&arena, defs, 6);
+    ASSERT_NOT_NULL(reg);
+
+    cbm_run_go_lsp_cross_with_registry(&arena, source, (int)strlen(source), "test.main", reg,
+                                       imp_names, imp_qns, 2, NULL, &out);
+
+    int svc_idx = find_resolved_arr_confident(&out, "callSvc", "Svc.Ping");
+    if (svc_idx < 0) {
+        for (int i = 0; i < out.count; i++) {
+            const CBMResolvedCall *rc = &out.items[i];
+            printf("    %s -> %s [%s %.2f]\n", rc->caller_qn ? rc->caller_qn : "(null)",
+                   rc->callee_qn ? rc->callee_qn : "(null)", rc->strategy ? rc->strategy : "(null)",
+                   rc->confidence);
+        }
+    }
+    ASSERT_GTE(svc_idx, 0);
+    ASSERT_STR_EQ(out.items[svc_idx].callee_qn, "myapp/svc.Svc.Ping");
+    ASSERT_STR_EQ(out.items[svc_idx].strategy, "lsp_type_dispatch");
+    ASSERT_TRUE(out.items[svc_idx].confidence >= 0.9f);
+
+    int pb_idx = find_resolved_arr_confident(&out, "callPb", "Client.Ping");
+    ASSERT_GTE(pb_idx, 0);
+    ASSERT_STR_EQ(out.items[pb_idx].callee_qn, "myapp/pb.Client.Ping");
+    ASSERT_TRUE(strcmp(out.items[pb_idx].strategy, "lsp_interface_dispatch") == 0 ||
+                strcmp(out.items[pb_idx].strategy, "lsp_type_dispatch") == 0);
+    ASSERT_TRUE(out.items[pb_idx].confidence >= 0.8f);
+
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 TEST(golsp_crossfile_local_interface_single_impl) {
     const char *source =
         "package main\n\n"
@@ -1234,6 +1325,7 @@ SUITE(go_lsp) {
     RUN_TEST(golsp_crossfile_return_type_chain);
     RUN_TEST(golsp_crossfile_interface_dispatch);
     RUN_TEST(golsp_crossfile_interface_field_chain);
+    RUN_TEST(golsp_crossfile_aliased_field_requal);
     RUN_TEST(golsp_crossfile_map_index);
     RUN_TEST(golsp_crossfile_stdlib_interface);
     RUN_TEST(golsp_crossfile_local_interface_single_impl);
