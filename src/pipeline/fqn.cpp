@@ -296,9 +296,11 @@ static size_t strip_js_module_ext(const char *seg_start, size_t seg_len) {
     return seg_len;
 }
 
-/* JS/TS relative import: "./foo", "../bar/baz" → resolve against source dir. */
-static char *resolve_js_relative(char *buf, size_t buf_size, const char *module_path) {
-    const char *p = module_path;
+/* Append a slash-separated relative path to the directory already in `buf`,
+ * collapsing "." and ".." segments (".." at the root stays at the root).
+ * Language-neutral: no extension handling.  Returns false on overflow. */
+static bool normalize_relative_path(char *buf, size_t buf_size, const char *rel_path) {
+    const char *p = rel_path;
     while (*p) {
         while (*p == '/') {
             p++;
@@ -318,12 +320,37 @@ static char *resolve_js_relative(char *buf, size_t buf_size, const char *module_
             path_pop_segment(buf);
             continue;
         }
-        if (*p == '\0') {
-            seg_len = strip_js_module_ext(seg_start, seg_len);
+        if (!path_append_segment(buf, buf_size, seg_start, seg_len)) {
+            return false;
         }
-        if (seg_len > 0 && !path_append_segment(buf, buf_size, seg_start, seg_len)) {
-            return NULL;
-        }
+    }
+    return true;
+}
+
+/* JS/TS relative import: "./foo", "../bar/baz" → resolve against source dir.
+ * An explicit JS/TS extension is dropped from the final segment, but only when
+ * the specifier ends in a name (not "/", "." or ".."). */
+static char *resolve_js_relative(char *buf, size_t buf_size, const char *module_path) {
+    if (!normalize_relative_path(buf, buf_size, module_path)) {
+        return NULL;
+    }
+    const char *slash = strrchr(module_path, '/');
+    const char *leaf = slash ? slash + SKIP_ONE : module_path;
+    size_t leaf_len = strlen(leaf);
+    if (leaf_len > 0 && strcmp(leaf, ".") != 0 && strcmp(leaf, "..") != 0) {
+        buf[strlen(buf) - (leaf_len - strip_js_module_ext(leaf, leaf_len))] = '\0';
+    }
+    return strdup(buf);
+}
+
+char *cbm_pipeline_normalize_relative_path(const char *source_rel, const char *rel_path) {
+    if (!rel_path) {
+        return NULL;
+    }
+    char buf[FQN_PATH_BUF];
+    seed_source_dir(buf, sizeof(buf), source_rel);
+    if (!normalize_relative_path(buf, sizeof(buf), rel_path)) {
+        return NULL;
     }
     return strdup(buf);
 }

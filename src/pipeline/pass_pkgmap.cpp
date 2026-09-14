@@ -1673,53 +1673,28 @@ static const cbm_gbuf_node_t *resolve_header_include(const cbm_pipeline_ctx_t *c
         return NULL;
     }
 
-    /* A dot-relative include ("../c_lsp.h") names a header by its path from the
-     * includer's directory. Normalize the ".." segments before matching: the
-     * raw spelling ends no file path, so without this the include fell through
-     * to module resolution, which only ever matched a same-stem source file's
-     * Module (and matches nothing once relative JS/TS resolution stopped
-     * stripping non-JS extensions, 48cb94f6). */
-    if (source_rel && module_path[0] == '.' &&
+    /* A dot-relative include ("./x.h", "../c_lsp.h") names a header by its path
+     * from the includer's directory: join and collapse the "." / ".." segments
+     * once before matching.  The raw spelling ends no file path, so without this
+     * the include fell through to module resolution, which matches nothing once
+     * relative JS/TS resolution stopped stripping non-JS extensions (48cb94f6). */
+    if (module_path[0] == '.' &&
         (module_path[1] == '/' || (module_path[1] == '.' && module_path[2] == '/'))) {
-        char *normalized = cbm_pipeline_resolve_relative_import(source_rel, module_path);
-        if (normalized) {
-            const cbm_gbuf_node_t *rel_hit =
-                resolve_exact_file_node(ctx, normalized, source_file_qn);
-            free(normalized);
-            if (rel_hit) {
-                return rel_hit;
-            }
+        char *local = cbm_pipeline_normalize_relative_path(source_rel, module_path);
+        const cbm_gbuf_node_t *local_hit = resolve_exact_file_node(ctx, local, source_file_qn);
+        free(local);
+        if (local_hit) {
+            return local_hit;
         }
     }
 
+    /* Otherwise match the spelling as a path suffix.  resolve_exact_file_node
+     * matches by suffix, so this also covers "<includer dir>/<spelling>". */
     const char *base = module_path;
     if (base[0] == '.' && base[1] == '/') {
         base += 2;
     }
-
-    const cbm_gbuf_node_t *exact = resolve_exact_file_node(ctx, base, source_file_qn);
-    if (exact) {
-        return exact;
-    }
-
-    if (source_rel && source_rel[0]) {
-        char *dir = path_dirname(source_rel);
-        if (dir) {
-            char candidate[PKGMAP_PATH_BUF];
-            if (dir[0]) {
-                snprintf(candidate, sizeof(candidate), "%s/%s", dir, base);
-            } else {
-                snprintf(candidate, sizeof(candidate), "%s", base);
-            }
-            free(dir);
-            exact = resolve_exact_file_node(ctx, candidate, source_file_qn);
-            if (exact) {
-                return exact;
-            }
-        }
-    }
-
-    return NULL;
+    return resolve_exact_file_node(ctx, base, source_file_qn);
 }
 
 /* Resolve a sibling-file import: a bare path/name (no leading "./") that names

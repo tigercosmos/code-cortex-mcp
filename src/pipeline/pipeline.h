@@ -187,6 +187,12 @@ char *cbm_pipeline_fqn_folder(const char *project, const char *rel_dir);
  * dot-only segments used by Python relative imports. */
 char *cbm_pipeline_resolve_relative_import(const char *source_rel, const char *module_path);
 
+/* Join the importing file's directory with a slash-separated relative path,
+ * collapsing "." and ".." segments.  Language-neutral: the extension is kept
+ * (e.g. "src/a/b.c" + "../x.h" → "src/x.h").  Returns a malloc'd path, or NULL
+ * on overflow. */
+char *cbm_pipeline_normalize_relative_path(const char *source_rel, const char *rel_path);
+
 /* Derive project name from an absolute path.
  * Replaces / and : with -, collapses --, trims leading -.
  * Caller must free() the returned string. */
