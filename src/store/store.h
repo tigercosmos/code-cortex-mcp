@@ -828,12 +828,11 @@ int cbm_store_exec(cbm_store_t *s, const char *sql);
  * identifier columns silently leaves `body` NULL for every node it writes.
  *
  * Always a wholesale rebuild: clears the index, then reindexes every node in
- * the database. `project` must be NULL and `after_id` 0 — the per-project
- * incremental form is gone, and any other value answers CBM_STORE_ERR.
+ * the database.
  *
  * Returns CBM_STORE_OK; CBM_STORE_NOT_FOUND when nodes_fts cannot be written at
  * all (FTS5 compiled out); CBM_STORE_ERR on a genuine write failure. */
-int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id);
+int cbm_store_fts_rebuild(cbm_store_t *s);
 
 #ifdef __cplusplus
 }

@@ -401,9 +401,8 @@ static bool fts_backfill_try(cbm_store_t *s, bool with_body, bool camel) {
     return ok;
 }
 
-int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id) {
-    /* Wholesale only: the per-project incremental form had no caller. */
-    if (!s || !s->db || project || after_id != 0) {
+int cbm_store_fts_rebuild(cbm_store_t *s) {
+    if (!s || !s->db) {
         return CBM_STORE_ERR;
     }
     /* A delete-all that fails to prepare means FTS5 is absent entirely. */

@@ -1521,7 +1521,7 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
          * the incremental dump, so the two routes cannot index different
          * columns. It degrades on its own (no body column, no camel splitter). */
         CBM_PROF_START(t_fts);
-        (void)cbm_store_fts_rebuild(hash_store, NULL, 0);
+        (void)cbm_store_fts_rebuild(hash_store);
         CBM_PROF_END("persist", "5_fts_backfill", t_fts);
 
         cbm_store_close(hash_store);

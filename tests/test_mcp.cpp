@@ -5083,7 +5083,7 @@ static cbm_mcp_server_t *setup_prose_search_server(const char *proj) {
     cbm_node_t fn = prose_node(proj, "Function", "telemetryCollector",
                                "prose.src.telemetryCollector", "src/collect.c", NULL);
     cbm_store_upsert_node(st, &fn);
-    cbm_store_fts_rebuild(st, NULL, 0);
+    cbm_store_fts_rebuild(st);
     return srv;
 }
 
@@ -5164,7 +5164,7 @@ TEST(bm25_identifier_match_outranks_prose_only_match_issue518) {
     cbm_node_t by_body = prose_node(proj, "Function", "zzz", "pr.b.zzz", "b.c",
                                     "{\"docstring\":\"reconcile the ledger\"}");
     ASSERT_TRUE(cbm_store_upsert_node(st, &by_body) > 0);
-    ASSERT_EQ(cbm_store_fts_rebuild(st, NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_fts_rebuild(st), CBM_STORE_OK);
 
     char *inner = prose_search(srv, proj, "reconcile");
     ASSERT_NOT_NULL(inner);
@@ -5219,7 +5219,7 @@ TEST(bm25_searches_legacy_four_column_fts_without_error_issue518) {
     cbm_node_t fn = prose_node(proj, "Function", "reconcile", "legacy.a.reconcile", "a.c",
                                "{\"docstring\":\"prose that cannot be indexed here\"}");
     ASSERT_TRUE(cbm_store_upsert_node(st, &fn) > 0);
-    ASSERT_EQ(cbm_store_fts_rebuild(st, NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_fts_rebuild(st), CBM_STORE_OK);
 
     char *inner = prose_search(srv, proj, "reconcile");
     ASSERT_NOT_NULL(inner);

@@ -685,7 +685,7 @@ static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *
          * rebuild from the nodes table here.  See the full-dump path in
          * pipeline.cpp for the matching logic — both route through the one
          * writer, so a node re-dumped here keeps its prose `body` column. */
-        (void)cbm_store_fts_rebuild(hash_store, NULL, 0);
+        (void)cbm_store_fts_rebuild(hash_store);
 
         cbm_store_close(hash_store);
     }
