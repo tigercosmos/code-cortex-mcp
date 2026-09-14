@@ -890,19 +890,31 @@ static const char* go_requalify_via_imports(GoLSPContext* ctx, const char* type_
     return NULL;
 }
 
+// Look up a type by QN; on a miss retry on the import-requalified QN (see
+// go_requalify_via_imports). When resolved_qn is non-NULL and the retry hits,
+// *resolved_qn is set to the requalified QN; otherwise it is left unchanged.
+static const CBMRegisteredType* go_lookup_type_requalified(GoLSPContext* ctx,
+    const char* type_qn, const char** resolved_qn) {
+    const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, type_qn);
+    if (rt) return rt;
+    const char* alt_qn = go_requalify_via_imports(ctx, type_qn);
+    if (!alt_qn) return NULL;
+    rt = cbm_registry_lookup_type(ctx->registry, alt_qn);
+    if (rt && resolved_qn) *resolved_qn = alt_qn;
+    return rt;
+}
+
 // --- go_lookup_field: struct field lookup with embedding recursion ---
 
 static const CBMType* go_lookup_field(GoLSPContext* ctx,
     const char* type_qn, const char* field_name, int depth) {
     if (!type_qn || !field_name || depth > 5) return NULL;
 
-    const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, type_qn);
-    if (!rt && depth == 0) {
-        // Field texts from cross-package defs may embed an import-alias
-        // segment only this file's import map resolves.
-        const char* alt_qn = go_requalify_via_imports(ctx, type_qn);
-        if (alt_qn) rt = cbm_registry_lookup_type(ctx->registry, alt_qn);
-    }
+    // Field texts from cross-package defs may embed an import-alias
+    // segment only this file's import map resolves.
+    const CBMRegisteredType* rt = depth == 0
+        ? go_lookup_type_requalified(ctx, type_qn, NULL)
+        : cbm_registry_lookup_type(ctx->registry, type_qn);
     if (!rt) return NULL;
 
     // Follow alias chain
@@ -1217,14 +1229,11 @@ static void resolve_calls_in_node_inner(GoLSPContext* ctx, TSNode node) {
                         if (base && base->kind == CBM_TYPE_NAMED) {
                             // Re-qualify a NAMED receiver that embeds an import-alias
                             // segment (cross-package field type text): the real type
-                            // exists only under the import QN.
+                            // exists only under the import QN. go_lookup_field_or_method
+                            // retries on that QN itself; recv_qn is requalified here so the
+                            // strategy comparison below sees the QN the method was found under.
                             const char* recv_qn = base->data.named.qualified_name;
-                            if (!cbm_registry_lookup_type(ctx->registry, recv_qn)) {
-                                const char* alt_qn = go_requalify_via_imports(ctx, recv_qn);
-                                if (alt_qn && cbm_registry_lookup_type(ctx->registry, alt_qn)) {
-                                    recv_qn = alt_qn;
-                                }
-                            }
+                            go_lookup_type_requalified(ctx, recv_qn, &recv_qn);
                             const CBMRegisteredFunc* method = go_lookup_field_or_method(ctx,
                                 recv_qn, field_name);
                             if (method) {
@@ -1243,13 +1252,8 @@ static void resolve_calls_in_node_inner(GoLSPContext* ctx, TSNode node) {
                             bool is_iface = (base->kind == CBM_TYPE_INTERFACE);
                             const char* iface_qn = NULL;
                             if (!is_iface && base->kind == CBM_TYPE_NAMED) {
-                                const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry,
-                                    base->data.named.qualified_name);
-                                if (!rt) {
-                                    const char* alt_qn = go_requalify_via_imports(
-                                        ctx, base->data.named.qualified_name);
-                                    if (alt_qn) rt = cbm_registry_lookup_type(ctx->registry, alt_qn);
-                                }
+                                const CBMRegisteredType* rt = go_lookup_type_requalified(ctx,
+                                    base->data.named.qualified_name, NULL);
                                 if (rt && rt->is_interface) {
                                     is_iface = true;
                                     iface_qn = rt->qualified_name;
