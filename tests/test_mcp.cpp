@@ -2554,6 +2554,15 @@ TEST(tool_index_repository_unknown_project_name_still_requires_repo_path) {
     PASS();
 }
 
+/* True when an index response reports a parse-coverage gap of either kind. A
+ * one-line fixture whose single range spans the whole file is parse_unusable
+ * rather than parse_partial (#963), and both are the same "recorded a miss" fact
+ * for these tests. */
+static bool mcp_resp_reports_coverage_gap(const char *resp) {
+    return resp && (strstr(resp, "\\\"parse_partial_count\\\":0") == NULL ||
+                    strstr(resp, "\\\"parse_unusable_count\\\":0") == NULL);
+}
+
 /* A partially-parsed file makes indexing write an internal "<name>::missed"
  * miss-graph row into the SAME database as the primary project. Project
  * resolution required exactly ONE row over ALL rows returned by
@@ -2603,7 +2612,7 @@ TEST(tool_list_projects_includes_a_project_with_a_miss_graph) {
     /* Precondition: the fixture really did record a parse miss. Without this the
      * test could pass vacuously on a grammar that happens to accept the file.
      * Captured rather than asserted here, for the teardown reason below. */
-    bool recorded_a_miss = resp && strstr(resp, "\\\"parse_partial_count\\\":0") == NULL;
+    bool recorded_a_miss = mcp_resp_reports_coverage_gap(resp);
     free(resp);
 
     resp = cbm_mcp_handle_tool(srv, "list_projects", "{}");
@@ -2888,7 +2897,7 @@ TEST(index_response_reports_persisted_coverage_on_reindex) {
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp_dir);
     char *resp = cbm_mcp_handle_tool(srv, "index_repository", args);
     ASSERT_NOT_NULL(resp);
-    bool first_saw_gap = strstr(resp, "\\\"parse_partial_count\\\":0") == NULL;
+    bool first_saw_gap = mcp_resp_reports_coverage_gap(resp);
     free(resp);
 
     /* Re-index after changing ONLY the clean neighbour, so the broken file is
@@ -2900,7 +2909,7 @@ TEST(index_response_reports_persisted_coverage_on_reindex) {
 
     resp = cbm_mcp_handle_tool(srv, "index_repository", args);
     ASSERT_NOT_NULL(resp);
-    bool reindex_kept_gap = strstr(resp, "\\\"parse_partial_count\\\":0") == NULL;
+    bool reindex_kept_gap = mcp_resp_reports_coverage_gap(resp);
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -2917,6 +2926,129 @@ TEST(index_response_reports_persisted_coverage_on_reindex) {
 
     ASSERT_TRUE(first_saw_gap);    /* control: the fixture really is partial */
     ASSERT_TRUE(reindex_kept_gap); /* the claim */
+    PASS();
+}
+
+/* #963: a file whose one range covers nearly all of it is reported under its
+ * own kind, parse_unusable — indexed, NOT skipped — and each entry names the END
+ * of its range as "range_end". The number is not the file length (a grammar can
+ * end an error node past the last line) and "lines" already means a definition's
+ * span elsewhere in these responses. Checked on both producers: the per-run
+ * index response and the persisted index_status report must agree. */
+TEST(index_response_reports_parse_unusable_range_end_issue963) {
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-unusable-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        PASS();
+    }
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-unusable-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        cbm_rmdir(tmp_dir);
+        PASS();
+    }
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char bad_path[512];
+    char good_path[512];
+    snprintf(bad_path, sizeof(bad_path), "%s/unparseable.py", tmp_dir);
+    snprintf(good_path, sizeof(good_path), "%s/good.py", tmp_dir);
+    FILE *fp = cbm_fopen(bad_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs(")))\n((( \n]]] [[[\ndef x(:\n", fp);
+    ASSERT_EQ(fclose(fp), 0);
+    fp = cbm_fopen(good_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("def alpha():\n    return 1\n", fp);
+    ASSERT_EQ(fclose(fp), 0);
+
+    char *project = cbm_project_name_from_path(tmp_dir);
+    ASSERT_NOT_NULL(project);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char args[700];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp_dir);
+    char *resp = cbm_mcp_handle_tool(srv, "index_repository", args);
+    char *inner = resp ? extract_text_content(resp) : NULL;
+    free(resp);
+    snprintf(args, sizeof(args), "{\"project\":\"%s\"}", project);
+    resp = cbm_mcp_handle_tool(srv, "index_status", args);
+    char *status = resp ? extract_text_content(resp) : NULL;
+    free(resp);
+
+    /* Parse both before teardown; assert after it (see the neighbours for why). */
+    long run_count = -1;
+    long run_range_end = -1;
+    bool run_has_lines = true;
+    bool run_lists_good = true;
+    long run_skipped = -1;
+    yyjson_doc *d = inner ? yyjson_read(inner, strlen(inner), 0) : NULL;
+    if (d) {
+        yyjson_val *root = yyjson_doc_get_root(d);
+        run_count = (long)yyjson_get_int(yyjson_obj_get(root, "parse_unusable_count"));
+        run_skipped = (long)yyjson_get_int(yyjson_obj_get(root, "skipped_count"));
+        yyjson_val *files = yyjson_obj_get(yyjson_obj_get(root, "parse_unusable"), "files");
+        run_has_lines = false;
+        run_lists_good = false;
+        size_t idx = 0;
+        size_t fmax = 0;
+        yyjson_val *fe = NULL;
+        yyjson_arr_foreach(files, idx, fmax, fe) {
+            const char *path = yyjson_get_str(yyjson_obj_get(fe, "path"));
+            if (path && strstr(path, "good.py")) {
+                run_lists_good = true;
+            }
+            if (path && strstr(path, "unparseable.py")) {
+                run_range_end = (long)yyjson_get_int(yyjson_obj_get(fe, "range_end"));
+                run_has_lines = yyjson_obj_get(fe, "lines") != NULL;
+            }
+        }
+        yyjson_doc_free(d);
+    }
+    long status_count = -1;
+    long status_range_end = -1;
+    d = status ? yyjson_read(status, strlen(status), 0) : NULL;
+    if (d) {
+        yyjson_val *pu = yyjson_obj_get(yyjson_doc_get_root(d), "parse_unusable");
+        status_count = (long)yyjson_get_int(yyjson_obj_get(pu, "count"));
+        yyjson_val *files = yyjson_obj_get(pu, "files");
+        size_t idx = 0;
+        size_t fmax = 0;
+        yyjson_val *fe = NULL;
+        yyjson_arr_foreach(files, idx, fmax, fe) {
+            const char *path = yyjson_get_str(yyjson_obj_get(fe, "path"));
+            if (path && strstr(path, "unparseable.py")) {
+                status_range_end = (long)yyjson_get_int(yyjson_obj_get(fe, "range_end"));
+            }
+        }
+        yyjson_doc_free(d);
+    }
+    free(inner);
+    free(status);
+
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(project);
+    remove(bad_path);
+    remove(good_path);
+    th_rmtree(cache);
+    cbm_rmdir(tmp_dir);
+
+    ASSERT_EQ(run_count, 1);
+    ASSERT_EQ(run_skipped, 0); /* indexed, so never under skipped[] */
+    ASSERT_GT(run_range_end, 0);
+    ASSERT_FALSE(run_has_lines); /* the old name is gone, not kept beside */
+    ASSERT_FALSE(run_lists_good);
+    ASSERT_EQ(status_count, 1);
+    ASSERT_EQ(status_range_end, run_range_end);
     PASS();
 }
 
@@ -5192,6 +5324,7 @@ SUITE(mcp) {
     RUN_TEST(search_code_full_preserves_utf8_source);
     RUN_TEST(search_graph_semantic_only_skips_structural_scan);
     RUN_TEST(index_response_reports_persisted_coverage_on_reindex);
+    RUN_TEST(index_response_reports_parse_unusable_range_end_issue963);
     RUN_TEST(tool_list_projects_pages_deterministically);
     RUN_TEST(search_code_file_pattern_prefilter_boundaries);
     RUN_TEST(search_code_windows_prefilter_precedes_content_scan);

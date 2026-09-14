@@ -277,9 +277,15 @@ static int init_schema(cbm_store_t *s) {
         "  updated_at TEXT NOT NULL"
         ");"
         /* Best-effort indexing-coverage signal (#963). One row per file the
-         * indexer could not fully cover: kind "parse_partial" (indexed, but the
-         * parse tree had ERROR/MISSING regions — detail = 1-based line ranges)
-         * or a skip phase ("read"/"extract"/"oversized" — detail = reason).
+         * indexer could not fully cover:
+         *   "parse_partial"  indexed, but the parse tree had ERROR/MISSING
+         *                    regions; detail = 1-based line ranges
+         *                    "start-end,...", with an optional trailing "+<N>"
+         *                    saying the producer's cap dropped N more.
+         *   "parse_unusable" indexed, but one range covers 80%+ of the file;
+         *                    detail = the same range string. Read the source.
+         *   a skip phase     NOT indexed: "read"/"extract"/"oversized";
+         *                    detail = reason.
          * Deliberately SEPARATE from the graph tables: coverage is metadata
          * about the graph, not part of it. */
         "CREATE TABLE IF NOT EXISTS index_coverage ("

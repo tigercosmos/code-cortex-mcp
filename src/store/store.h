@@ -459,7 +459,9 @@ int cbm_store_delete_file_hashes(cbm_store_t *s, const char *project);
 
 /* One best-effort coverage row: a file the indexer could not fully cover.
  * kind "parse_partial" = indexed but the parse tree had ERROR/MISSING regions
- * (detail = 1-based line ranges "12-40,88-90"); skip kinds "read"/"extract"/
+ * (detail = 1-based line ranges "12-40,88-90", optionally ending ",+<N>" when
+ * the producer's cap dropped N ranges); "parse_unusable" = indexed, but one
+ * range covers 80%+ of the file (same detail shape); skip kinds "read"/"extract"/
  * "oversized" = not indexed at all (detail = reason). Stored in the separate
  * index_coverage table — coverage is metadata ABOUT the graph, never mixed
  * into the graph itself. */

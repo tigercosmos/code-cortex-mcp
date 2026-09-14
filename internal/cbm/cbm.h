@@ -494,6 +494,13 @@ typedef struct {
      * completeness guarantee. Callers should treat a flagged file as "prefer
      * grep here", never treat an unflagged file as provably complete. */
     bool parse_incomplete;
+    /* #963: true when one range covers 80% or more of the file's lines. The file
+     * WAS indexed, but pointing a reader at nearly every line tells them nothing,
+     * so reports say "read the source" instead. Its main customers are non-C
+     * languages: the preprocessed-parse refinement that narrows whole-file
+     * ranges only runs for C, C++ and CUDA. Emitted as phase "parse_unusable"
+     * (the older field emits "parse_partial" — historical, do not copy). */
+    bool parse_unusable;
     const char *error_ranges;
     int error_region_count;
     bool is_test_file;

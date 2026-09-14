@@ -925,9 +925,10 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
              * but its tree contains ERROR/MISSING regions whose constructs are
              * silently absent from the graph. Not a skip — recorded under the
              * distinct "parse_partial" phase (reason = the line-range list) so
-             * the MCP layer reports it separately from skipped[]. */
+             * the MCP layer reports it separately from skipped[]; "parse_unusable"
+             * when one range covers nearly the whole file (see cbm.h). */
             pp_err_add(errs, fi->rel_path, result->error_ranges ? result->error_ranges : "unknown",
-                       "parse_partial");
+                       result->parse_unusable ? "parse_unusable" : "parse_partial");
         }
 
         /* Create definition nodes in local gbuf */

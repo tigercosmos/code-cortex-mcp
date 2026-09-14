@@ -109,7 +109,9 @@ typedef struct {
                    * "parse timeout", "read failed"). For phase "parse_partial"
                    * this carries the 1-based line-range list ("12-40,88-90")
                    * of the unparseable regions. */
-    char *phase;  /* "read" | "extract" | "oversized" | "parse_partial".
+    char *phase;  /* "read" | "extract" | "oversized" | "parse_partial" |
+                   * "parse_unusable" (a parse_partial whose one range covers
+                   * 80%+ of the file — also indexed, also not a skip).
                    * "parse_partial" (#963) is NOT a skip: the file WAS indexed
                    * but contains tree-sitter ERROR/MISSING regions whose
                    * constructs are absent from the graph (best-effort signal —
