@@ -1685,7 +1685,7 @@ static int parse_return_or_with(parser_t *p, cbm_return_clause_t **out, bool is_
      * and binding_t holds exactly CYP_MAX_VARS variables. A wider WITH used to
      * parse, then lose every alias past the 16th in with_add_vbinding_var and
      * answer with silently blank or missing columns. Refuse it here instead. */
-    if (r->count > (is_with ? CYP_MAX_VARS : CBM_SZ_32)) {
+    if (r->count > (is_with ? (int)CYP_MAX_VARS : (int)CBM_SZ_32)) {
         free_return_clause(r);
         return CBM_NOT_FOUND;
     }

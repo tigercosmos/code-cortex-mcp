@@ -288,7 +288,7 @@ static bool tld_callees_reserve(tld_ctx_t *cx, size_t extra) {
     if (need <= cx->callee_cap) {
         return true;
     }
-    size_t cap = cx->callee_cap ? cx->callee_cap : CBM_SZ_64;
+    size_t cap = cx->callee_cap ? cx->callee_cap : (size_t)CBM_SZ_64;
     while (cap < need) {
         cap *= 2;
     }
