@@ -5877,7 +5877,7 @@ static int cov_ranges_dropped_marker(const char *ranges) {
     return atoi(plus + 1);
 }
 
-/* A comment marker inside a string literal ("/*") is code, not a comment
+/* A slash-star comment marker inside a string literal is code, not a comment
  * opener. Treated as one, every following line looks like comment text, so the
  * dropped #ifdef branch is classified as holding no code and its only error
  * range is refined away: the file reports clean while the graph misses it. */

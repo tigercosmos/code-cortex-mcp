@@ -1123,7 +1123,7 @@ static void cbm_mark_no_code_lines(const char *src, int src_len, uint8_t *map,
                 break; /* rest of the line is a comment */
             }
             if (src[j] == '"' || src[j] == '\'') {
-                /* A literal is code, and a comment marker inside it ("/*") must
+                /* A literal is code, and a slash-star comment marker inside it must
                  * not open a block: skip to the closing quote on this line. */
                 char quote = src[j];
                 for (j++; j < end && src[j] != quote; j++) {
