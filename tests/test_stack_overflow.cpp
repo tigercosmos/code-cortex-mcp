@@ -12,6 +12,7 @@
 #include "test_framework.h"
 #include "cbm.h"
 
+#include <sqlite3.h> // sqlite3_malloc/realloc/free — dedicated-heap switch round-trip
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -547,10 +548,61 @@ TEST(lsp_ts_cyclic_types_no_crash) {
  * Suite registration
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════
+ * SQLite's dedicated mimalloc heap is a switch, off by default.
+ *
+ * The index worker turns it on at its entry because its default heap holds
+ * the graph; a thread-per-connection server must leave it off, or every block
+ * the shared connection keeps past a request is pinned to a dead thread's
+ * heap. The switch exists in every build. Where the allocator binds are
+ * compiled out (this fork's CMake build) it changes nothing, so the
+ * round-trip below goes through whichever methods sqlite has configured.
+ * ═══════════════════════════════════════════════════════════════════ */
+
+TEST(sqlite_dedicated_heap_switch_toggles_and_allocations_round_trip) {
+    bool was_on = cbm_sqlite_dedicated_heap_enabled();
+
+    cbm_sqlite_dedicated_heap(false);
+    ASSERT_FALSE(cbm_sqlite_dedicated_heap_enabled());
+
+    cbm_sqlite_dedicated_heap(true);
+    ASSERT_TRUE(cbm_sqlite_dedicated_heap_enabled());
+
+    /* With the switch on, allocations through sqlite's configured methods
+     * must still round-trip: write, grow, read back, free. mi_free is
+     * heap-agnostic, so a block from the dedicated heap frees the same way. */
+    enum { FIRST = 64, GROWN = 4096 };
+    char *block = (char *)sqlite3_malloc(FIRST);
+    ASSERT_NOT_NULL(block);
+    memset(block, 'k', FIRST);
+    char *grown = (char *)sqlite3_realloc(block, GROWN);
+    ASSERT_NOT_NULL(grown);
+    ASSERT_EQ((int)grown[0], (int)'k');
+    ASSERT_EQ((int)grown[FIRST - 1], (int)'k');
+    memset(grown, 'z', GROWN);
+    ASSERT_EQ((int)grown[GROWN - 1], (int)'z');
+    sqlite3_free(grown);
+
+    /* A second allocation on the same thread reuses the heap created above. */
+    void *again = sqlite3_malloc(FIRST);
+    ASSERT_NOT_NULL(again);
+    sqlite3_free(again);
+
+    cbm_sqlite_dedicated_heap(false);
+    ASSERT_FALSE(cbm_sqlite_dedicated_heap_enabled());
+    void *off = sqlite3_malloc(FIRST);
+    ASSERT_NOT_NULL(off);
+    sqlite3_free(off);
+
+    cbm_sqlite_dedicated_heap(was_on); /* restore for the rest of the suite */
+    PASS();
+}
+
 SUITE(stack_overflow) {
     cbm_init();
 
     RUN_TEST(ts_allocator_bound_to_mimalloc_issue424);
+    RUN_TEST(sqlite_dedicated_heap_switch_toggles_and_allocations_round_trip);
     RUN_TEST(cpp_large_templated_header_no_crash_issue424);
     RUN_TEST(lsp_java_deep_nesting_no_crash);
     RUN_TEST(lsp_python_deep_nesting_no_crash);

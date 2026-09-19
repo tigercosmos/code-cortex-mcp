@@ -455,8 +455,44 @@ static TSParser *get_thread_parser(const TSLanguage *ts_lang, CBMLanguage lang) 
  * to mimalloc would mismatch ASan/CRT frees — there these binds compile to
  * no-ops and the build stays unchanged. */
 
+/* SQLite on a dedicated mimalloc heap per thread: ON only in the index worker,
+ * whose default heap holds the graph (SQLite churn on that heap paid mimalloc's
+ * free-page search per allocation: upstream measured the kernel's coverage
+ * publish at 132 s vs 9.4 s). OFF everywhere else: a thread-per-connection
+ * server creates a heap per such thread, and deleting that heap at thread exit
+ * leaves every block the shared connection keeps beyond the request (page
+ * cache, statement cache, schema objects) on pages no heap owns any more --
+ * upstream's Linux soak grew 180 KB per query, 11 -> 144 MB in ten minutes.
+ * The switch exists in every build; where the allocator binds are compiled out
+ * (this fork's CMake build never defines CBM_BIND_TS_ALLOCATOR) it changes
+ * nothing. mi_free is heap-agnostic, so the free path is untouched either way. */
+static cbm_atomic_int g_sqlite_dedicated_heap;
+
+void cbm_sqlite_dedicated_heap(bool on) {
+    atomic_store_explicit(&g_sqlite_dedicated_heap, on ? 1 : 0, memory_order_relaxed);
+}
+
+bool cbm_sqlite_dedicated_heap_enabled(void) {
+    return atomic_load_explicit(&g_sqlite_dedicated_heap, memory_order_relaxed) != 0;
+}
+
 #if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
 #include <assert.h>
+
+/* One heap per thread, created on first use while the switch is on; the
+ * thread's heap is released with the thread. NULL = the calling thread's
+ * default heap (plain mi_malloc), which is the pre-switch behaviour. */
+static thread_local mi_heap_t *tl_sqlite_heap;
+
+static mi_heap_t *sqlite_heap(void) {
+    if (!cbm_sqlite_dedicated_heap_enabled()) {
+        return NULL;
+    }
+    if (!tl_sqlite_heap) {
+        tl_sqlite_heap = mi_heap_new();
+    }
+    return tl_sqlite_heap;
+}
 
 /* sqlite3 mem methods backed by mimalloc. sqlite's xMalloc/xRealloc/xSize use
  * `int` sizes; wrap with size_t casts. xRoundup rounds to an 8-byte boundary
@@ -464,13 +500,15 @@ static TSParser *get_thread_parser(const TSLanguage *ts_lang, CBMLanguage lang) 
  * Field order matches struct sqlite3_mem_methods exactly:
  * xMalloc, xFree, xRealloc, xSize, xRoundup, xInit, xShutdown, pAppData. */
 static void *cbm_sqlite_malloc(int n) {
-    return mi_malloc((size_t)n);
+    mi_heap_t *heap = sqlite_heap();
+    return heap ? mi_heap_malloc(heap, (size_t)n) : mi_malloc((size_t)n);
 }
 static void cbm_sqlite_free(void *p) {
     mi_free(p);
 }
 static void *cbm_sqlite_realloc(void *p, int n) {
-    return mi_realloc(p, (size_t)n);
+    mi_heap_t *heap = sqlite_heap();
+    return heap ? mi_heap_realloc(heap, p, (size_t)n) : mi_realloc(p, (size_t)n);
 }
 static int cbm_sqlite_size(void *p) {
     return (int)mi_usable_size(p);

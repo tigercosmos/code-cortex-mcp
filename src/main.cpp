@@ -356,6 +356,14 @@ static int run_cli(int argc, char **argv) {
     bool supervised_worker = cli_strip_flag(&argc, argv, "--supervised-worker");
     bool tool_server = cli_strip_flag(&argc, argv, "--tool-server");
     const char *response_out = cli_strip_flag_value(&argc, argv, "--response-out");
+    if (index_worker) {
+        /* The graph lives on this process's heaps: SQLite gets a heap of its
+         * own here, and only here. A thread-per-connection server must NOT
+         * turn this on — a heap created per connection thread pins every block
+         * the shared connection keeps past the request to pages nobody owns
+         * once the thread exits (cbm_sqlite_dedicated_heap). */
+        cbm_sqlite_dedicated_heap(true);
+    }
     cbm_index_set_worker_role(index_worker || supervised_worker || tool_server, response_out);
 
 #ifndef _WIN32
