@@ -88,6 +88,10 @@ struct cbm_gbuf {
      * strings at kernel scale, plus a snprintf+strdup+hash on every one of
      * the ~18 hot find_by_id call sites. */
     cbm_gbuf_node_t **by_id;
+    /* Worker buffers (cbm_gbuf_new_worker) keep no by_id array: their ids come
+     * from the shared counter, so a dense array would span the whole global id
+     * space in every worker and all of them would double in lockstep. */
+    bool by_id_off;
     int64_t by_id_cap;
 
     /* Secondary node indexes */
@@ -258,6 +262,9 @@ static void make_src_type_key(char *buf, size_t bufsz, int64_t src, const char *
 
 /* Get or create a node_ptr_array_t in a hash table */
 static node_ptr_array_t *get_or_create_node_array(CBMHashTable *ht, const char *key) {
+    if (!ht) {
+        return NULL; /* worker buffer: no secondary indexes (cbm_gbuf_new_worker) */
+    }
     node_ptr_array_t *arr = (node_ptr_array_t *)cbm_ht_get(ht, key);
     if (!arr) {
         arr = (__typeof__(arr))calloc(CBM_ALLOC_ONE, sizeof(node_ptr_array_t));
@@ -271,6 +278,9 @@ static node_ptr_array_t *get_or_create_node_array(CBMHashTable *ht, const char *
 
 /* Get or create an edge_ptr_array_t in a hash table */
 static edge_ptr_array_t *get_or_create_edge_array(CBMHashTable *ht, const char *key) {
+    if (!ht) {
+        return NULL; /* worker buffer: no secondary indexes (cbm_gbuf_new_worker) */
+    }
     edge_ptr_array_t *arr = (edge_ptr_array_t *)cbm_ht_get(ht, key);
     if (!arr) {
         arr = (__typeof__(arr))calloc(CBM_ALLOC_ONE, sizeof(edge_ptr_array_t));
@@ -400,38 +410,50 @@ static void cascade_delete_edges(cbm_gbuf_t *gb, CBMHashTable *deleted_set) {
     gb->edges.count = write_idx;
 }
 
+static void node_array_push(node_ptr_array_t *arr, const cbm_gbuf_node_t *node);
+
 /* Register a node in primary (QN, ID) and secondary (label, name) indexes. */
 static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     cbm_ht_set(gb->node_by_qn, node->qualified_name, node);
 
-    if (node->id >= gb->by_id_cap) {
-        int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : (int64_t)CBM_SZ_1K;
-        while (nc <= node->id) {
-            nc *= 2;
+    if (!gb->by_id_off) {
+        if (node->id >= gb->by_id_cap) {
+            int64_t nc = gb->by_id_cap > 0 ? gb->by_id_cap : (int64_t)CBM_SZ_1K;
+            while (nc <= node->id) {
+                nc *= 2;
+            }
+            cbm_gbuf_node_t **grown =
+                (cbm_gbuf_node_t **)realloc(gb->by_id, (size_t)nc * sizeof(*grown));
+            if (grown) {
+                memset(grown + gb->by_id_cap, 0, (size_t)(nc - gb->by_id_cap) * sizeof(*grown));
+                gb->by_id = grown;
+                gb->by_id_cap = nc;
+            }
         }
-        cbm_gbuf_node_t **grown =
-            (cbm_gbuf_node_t **)realloc(gb->by_id, (size_t)nc * sizeof(*grown));
-        if (grown) {
-            memset(grown + gb->by_id_cap, 0, (size_t)(nc - gb->by_id_cap) * sizeof(*grown));
-            gb->by_id = grown;
-            gb->by_id_cap = nc;
+        if (node->id >= 0 && node->id < gb->by_id_cap) {
+            gb->by_id[node->id] = node;
         }
     }
-    if (node->id >= 0 && node->id < gb->by_id_cap) {
-        gb->by_id[node->id] = node;
-    }
 
-    node_ptr_array_t *by_label =
-        get_or_create_node_array(gb->nodes_by_label, node->label ? node->label : "");
-    cbm_da_push(by_label, (const cbm_gbuf_node_t *)node);
-
-    node_ptr_array_t *by_name =
-        get_or_create_node_array(gb->nodes_by_name, node->name ? node->name : "");
-    cbm_da_push(by_name, (const cbm_gbuf_node_t *)node);
+    node_array_push(get_or_create_node_array(gb->nodes_by_label, node->label ? node->label : ""),
+                    node);
+    node_array_push(get_or_create_node_array(gb->nodes_by_name, node->name ? node->name : ""),
+                    node);
 }
 
-/* Push an edge pointer into a dynamic array (wraps macro to reduce CC contribution). */
+/* Push a node/edge pointer into a dynamic array (wraps macro to reduce CC
+ * contribution). NULL = the buffer has no such index (worker buffers). */
+static void node_array_push(node_ptr_array_t *arr, const cbm_gbuf_node_t *node) {
+    if (!arr) {
+        return;
+    }
+    cbm_da_push(arr, node);
+}
+
 static void edge_array_push(edge_ptr_array_t *arr, const cbm_gbuf_edge_t *edge) {
+    if (!arr) {
+        return;
+    }
     cbm_da_push(arr, edge);
 }
 
@@ -456,6 +478,9 @@ static void register_edge_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_edge_t *edge) {
 
 /* Rebuild edge secondary indexes from scratch (after bulk deletion). */
 static void rebuild_edge_secondary_indexes(cbm_gbuf_t *gb) {
+    if (!gb->edges_by_type) {
+        return; /* worker buffer: no secondary indexes to rebuild */
+    }
     cbm_ht_foreach(gb->edges_by_source_type, free_edge_array, NULL);
     cbm_ht_free(gb->edges_by_source_type);
     cbm_ht_foreach(gb->edges_by_target_type, free_edge_array, NULL);
@@ -534,6 +559,38 @@ cbm_gbuf_t *cbm_gbuf_new_shared_ids(const char *project, const char *root_path,
     if (gb && id_source) {
         gb->shared_ids = id_source;
     }
+    return gb;
+}
+
+cbm_gbuf_t *cbm_gbuf_new_worker(const char *project, const char *root_path,
+                                std::atomic<int64_t> *id_source) {
+    cbm_gbuf_t *gb = cbm_gbuf_new_shared_ids(project, root_path, id_source);
+    if (!gb) {
+        return NULL;
+    }
+    /* A worker buffer is appended to and merged; it is never asked by label,
+     * name or edge type, and never by id (every cbm_gbuf_find_by_id caller
+     * runs on the main buffer). Its secondary indexes are pure cost: on a
+     * kernel-sized repo the index class peaked at 7.1 GB during resolve
+     * against 2.5 GB live in the main buffer, the difference being the
+     * workers' throwaway indexes, and the dense id array alone stepped 1 GB
+     * at once when the shared counter crossed a power of two (upstream,
+     * 2026-09-14). node_by_qn and edge_by_key stay: upsert and dedup need
+     * them. cbm_gbuf_merge rebuilds every dropped index in the main buffer. */
+    cbm_ht_free(gb->nodes_by_label);
+    cbm_ht_free(gb->nodes_by_name);
+    cbm_ht_free(gb->edges_by_source_type);
+    cbm_ht_free(gb->edges_by_target_type);
+    cbm_ht_free(gb->edges_by_type);
+    gb->nodes_by_label = NULL;
+    gb->nodes_by_name = NULL;
+    gb->edges_by_source_type = NULL;
+    gb->edges_by_target_type = NULL;
+    gb->edges_by_type = NULL;
+    free(gb->by_id);
+    gb->by_id = NULL;
+    gb->by_id_cap = 0;
+    gb->by_id_off = true;
     return gb;
 }
 
@@ -815,14 +872,14 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
             existing->properties_json = new_props;
         }
         if (label_changed) {
-            node_ptr_array_t *by_label = get_or_create_node_array(
-                gb->nodes_by_label, existing->label ? existing->label : "");
-            cbm_da_push(by_label, (const cbm_gbuf_node_t *)existing);
+            node_array_push(get_or_create_node_array(gb->nodes_by_label,
+                                                     existing->label ? existing->label : ""),
+                            existing);
         }
         if (name_changed) {
-            node_ptr_array_t *by_name =
-                get_or_create_node_array(gb->nodes_by_name, existing->name ? existing->name : "");
-            cbm_da_push(by_name, (const cbm_gbuf_node_t *)existing);
+            node_array_push(
+                get_or_create_node_array(gb->nodes_by_name, existing->name ? existing->name : ""),
+                existing);
         }
         return existing->id;
     }
@@ -1719,14 +1776,14 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
                 existing->properties_json = heap_strdup(sn->properties_json);
             }
             if (label_changed) {
-                node_ptr_array_t *by_label = get_or_create_node_array(
-                    dst->nodes_by_label, existing->label ? existing->label : "");
-                cbm_da_push(by_label, (const cbm_gbuf_node_t *)existing);
+                node_array_push(get_or_create_node_array(dst->nodes_by_label,
+                                                         existing->label ? existing->label : ""),
+                                existing);
             }
             if (name_changed) {
-                node_ptr_array_t *by_name = get_or_create_node_array(
-                    dst->nodes_by_name, existing->name ? existing->name : "");
-                cbm_da_push(by_name, (const cbm_gbuf_node_t *)existing);
+                node_array_push(get_or_create_node_array(dst->nodes_by_name,
+                                                         existing->name ? existing->name : ""),
+                                existing);
             }
         }
     }

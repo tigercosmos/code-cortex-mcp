@@ -1243,7 +1243,64 @@ TEST(gbuf_secondary_indexes_grow_delete_and_reinsert) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+/* A worker buffer draws its ids from the shared counter, so a dense id → node
+ * array in it spans the whole GLOBAL id space: 18 workers × (next power of two
+ * above the highest id) × 8 B, doubling in lockstep — a 1 GB step inside one
+ * memory-gate interval on a kernel-sized repo at 8M ids (upstream, 2026-09-14).
+ * A worker buffer is never asked by id before the merge, so it keeps no such
+ * array; the main buffer it merges into still answers by id. One node at id 2M
+ * would cost a 32 MB array; the index accounting must not grow by even 1 MB. */
+TEST(gbuf_worker_buffer_keeps_no_by_id_array) {
+    cbm_atomic_int64 ids = (int64_t)1 << 21;
+    cbm_gbuf_t *w = cbm_gbuf_new_worker("p", "/r", &ids);
+    ASSERT_NOT_NULL(w);
+
+    cbm_gbuf_mem_t before;
+    cbm_gbuf_mem_stats(w, &before);
+    int64_t id = cbm_gbuf_upsert_node(w, "Function", "f", "p.f", "a.c", 1, 2, "{}");
+    ASSERT_TRUE(id >= ((int64_t)1 << 21));
+    cbm_gbuf_mem_t after;
+    cbm_gbuf_mem_stats(w, &after);
+    size_t grown = after.indexes > before.indexes ? after.indexes - before.indexes : 0;
+    ASSERT_TRUE(grown < ((size_t)1 << 20));
+
+    /* The worker answers by QN, never by id, label or name. */
+    ASSERT_TRUE(cbm_gbuf_find_by_id(w, id) == NULL);
+    ASSERT_NOT_NULL(cbm_gbuf_find_by_qn(w, "p.f"));
+    const cbm_gbuf_node_t **found = NULL;
+    int found_count = -1;
+    ASSERT_EQ(cbm_gbuf_find_by_label(w, "Function", &found, &found_count), 0);
+    ASSERT_EQ(found_count, 0);
+    ASSERT_EQ(cbm_gbuf_find_by_name(w, "f", &found, &found_count), 0);
+    ASSERT_EQ(found_count, 0);
+
+    /* Edges still dedup inside the worker, and their secondary indexes are
+     * absent there but present in the main buffer after the merge. */
+    int64_t other = cbm_gbuf_upsert_node(w, "Function", "g", "p.g", "a.c", 4, 5, "{}");
+    cbm_gbuf_insert_edge(w, id, other, "CALLS", "{}");
+    cbm_gbuf_insert_edge(w, id, other, "CALLS", "{}");
+    ASSERT_EQ(cbm_gbuf_edge_count(w), 1);
+    const cbm_gbuf_edge_t **edges = NULL;
+    int edge_count = -1;
+    ASSERT_EQ(cbm_gbuf_find_edges_by_source_type(w, id, "CALLS", &edges, &edge_count), 0);
+    ASSERT_EQ(edge_count, 0);
+
+    cbm_gbuf_t *main_gb = cbm_gbuf_new("p", "/r");
+    ASSERT_NOT_NULL(main_gb);
+    ASSERT_EQ(cbm_gbuf_merge(main_gb, w), 0);
+    ASSERT_NOT_NULL(cbm_gbuf_find_by_id(main_gb, id));
+    ASSERT_EQ(cbm_gbuf_find_by_label(main_gb, "Function", &found, &found_count), 0);
+    ASSERT_EQ(found_count, 2);
+    ASSERT_EQ(cbm_gbuf_find_edges_by_source_type(main_gb, id, "CALLS", &edges, &edge_count), 0);
+    ASSERT_EQ(edge_count, 1);
+
+    cbm_gbuf_free(w);
+    cbm_gbuf_free(main_gb);
+    PASS();
+}
+
 SUITE(graph_buffer) {
+    RUN_TEST(gbuf_worker_buffer_keeps_no_by_id_array);
     RUN_TEST(gbuf_secondary_indexes_grow_delete_and_reinsert);
     /* Original tests */
     RUN_TEST(gbuf_create_free);

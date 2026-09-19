@@ -57,6 +57,25 @@ cbm_gbuf_t *cbm_gbuf_new(const char *project, const char *root_path);
 cbm_gbuf_t *cbm_gbuf_new_shared_ids(const char *project, const char *root_path,
                                     cbm_atomic_int64 *id_source);
 
+/* Create a WORKER graph buffer with a shared atomic ID source: append-only
+ * until cbm_gbuf_merge folds it into the main buffer.
+ *
+ * It keeps only the two indexes the append path itself needs — node_by_qn
+ * (upsert) and the edge dedup index — and builds NEITHER the dense id → node
+ * array NOR the four secondary indexes (nodes_by_label, nodes_by_name,
+ * edges_by_source_type, edges_by_target_type, edges_by_type). Ids come from
+ * the shared counter, so a dense array in every worker spans the WHOLE global
+ * id space (8.5M ids × 8 B × 18 workers on a kernel-sized repo) and all of
+ * them double in the same instant.
+ *
+ * A buffer made this way answers cbm_gbuf_find_by_id with NULL and the
+ * find_by_label / find_by_name / find_edges_by_* queries with an empty result:
+ * do not query it by those keys. The main buffer it merges into answers them
+ * for the merged nodes and edges. If id_source is NULL, ids are buffer-local
+ * (as cbm_gbuf_new), and the indexes are still absent. */
+cbm_gbuf_t *cbm_gbuf_new_worker(const char *project, const char *root_path,
+                                cbm_atomic_int64 *id_source);
+
 /* Free the graph buffer and all owned data. NULL-safe. */
 void cbm_gbuf_free(cbm_gbuf_t *gb);
 

@@ -776,7 +776,11 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
 
     /* Lazy gbuf creation */
     if (!ws->local_gbuf) {
-        ws->local_gbuf = cbm_gbuf_new_shared_ids(ec->project_name, ec->repo_path, ec->shared_ids);
+        /* Worker buffer: append + merge only. It is never queried by id,
+         * label, name or edge type here (the only find_by_id /
+         * find_edges_by_source_type caller, build_import_map, reads
+         * rc->main_gbuf), so it builds none of those indexes. */
+        ws->local_gbuf = cbm_gbuf_new_worker(ec->project_name, ec->repo_path, ec->shared_ids);
     }
 
     /* Pull files from shared atomic counter */
@@ -2926,8 +2930,9 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
     resolve_worker_state_t *ws = &rc->workers[worker_id];
 
     if (!ws->local_edge_buf) {
-        ws->local_edge_buf =
-            cbm_gbuf_new_shared_ids(rc->project_name, rc->repo_path, rc->shared_ids);
+        /* Worker buffer: see extract_worker. This one is read back by QN
+         * (find_source_node) but never by id, label, name or edge type. */
+        ws->local_edge_buf = cbm_gbuf_new_worker(rc->project_name, rc->repo_path, rc->shared_ids);
     }
 
     /* Per-worker service-pattern result cache. The same resolved QN
