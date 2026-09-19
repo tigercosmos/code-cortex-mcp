@@ -8287,6 +8287,173 @@ TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge) {
     PASS();
 }
 
+/* ── Semantic pass, batched == unbatched ─────────────────────────────── */
+
+/* Under memory pressure the semantic pass tokenizes, counts and vectorizes in
+ * headroom-sized batches of functions (tokenizing twice) instead of holding
+ * every function's tokens at once. The graph must not be able to tell: the
+ * same repo indexed with CBM_SEM_BATCH=5 (forced batches, 30 functions -> 6
+ * batches) yields byte-identical node vectors, token vectors and
+ * SEMANTICALLY_RELATED edges. Rows are compared by qualified name, never by
+ * node id: parallel extraction hands out ids in worker order. */
+static void write_sem_family(const std::string &dir, const char *subject) {
+    std::string s(subject);
+    std::string body = "package main\n\n"
+                       "// Parse" +
+                       s + "Config reads the " + s +
+                       " config file and returns the parsed config.\n"
+                       "func Parse" +
+                       s + "Config(path string) (*" + s +
+                       "Config, error) {\n"
+                       "\treturn Load" +
+                       s +
+                       "Config(path)\n}\n\n"
+                       "// Load" +
+                       s + "Config loads the " + s +
+                       " config from disk and validates it.\n"
+                       "func Load" +
+                       s + "Config(path string) (*" + s +
+                       "Config, error) {\n"
+                       "\tcfg := &" +
+                       s + "Config{}\n\tValidate" + s +
+                       "Config(cfg)\n\treturn cfg, nil\n}\n\n"
+                       "// Validate" +
+                       s + "Config checks the " + s +
+                       " config for missing fields.\n"
+                       "func Validate" +
+                       s + "Config(cfg *" + s +
+                       "Config) bool {\n\treturn cfg != nil\n}\n\n"
+                       "// Write" +
+                       s + "Config serializes the " + s +
+                       " config back to disk.\n"
+                       "func Write" +
+                       s + "Config(path string, cfg *" + s +
+                       "Config) error {\n"
+                       "\tValidate" +
+                       s +
+                       "Config(cfg)\n\treturn nil\n}\n\n"
+                       /* A near-duplicate of Load: same doc, same body, same calls — the pair
+                        * the pass must relate, in every venue. */
+                       "// Load" +
+                       s + "ConfigFile loads the " + s +
+                       " config from disk and validates it.\n"
+                       "func Load" +
+                       s + "ConfigFile(path string) (*" + s +
+                       "Config, error) {\n"
+                       "\tcfg := &" +
+                       s + "Config{}\n\tValidate" + s +
+                       "Config(cfg)\n\treturn cfg, nil\n}\n\n"
+                       "type " +
+                       s + "Config struct{ Name string }\n";
+    std::string path = dir + "/" + s + "_config.go";
+    th_write_file(path.c_str(), body.c_str());
+}
+
+/* Step both statements in lockstep; every column of every row must match. */
+static bool sem_same_rows(sqlite3 *a, sqlite3 *b, const char *sql, int *rows) {
+    sqlite3_stmt *sa = NULL;
+    sqlite3_stmt *sb = NULL;
+    bool same = sqlite3_prepare_v2(a, sql, -1, &sa, NULL) == SQLITE_OK &&
+                sqlite3_prepare_v2(b, sql, -1, &sb, NULL) == SQLITE_OK;
+    *rows = 0;
+    while (same) {
+        int ra = sqlite3_step(sa);
+        int rb = sqlite3_step(sb);
+        if (ra != rb) {
+            same = false;
+            break;
+        }
+        if (ra != SQLITE_ROW) {
+            break;
+        }
+        int cols = sqlite3_column_count(sa);
+        for (int c = 0; c < cols && same; c++) {
+            const unsigned char *va = sqlite3_column_text(sa, c);
+            const unsigned char *vb = sqlite3_column_text(sb, c);
+            same = (va == NULL) == (vb == NULL) &&
+                   (!va || strcmp((const char *)va, (const char *)vb) == 0);
+        }
+        (*rows)++;
+    }
+    sqlite3_finalize(sa);
+    sqlite3_finalize(sb);
+    return same;
+}
+
+TEST(pipeline_semantic_batched_matches_unbatched) {
+    ThSavedEnv saved_batch("CBM_SEM_BATCH"), saved_thresh("CBM_SEMANTIC_THRESHOLD");
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_sembatch_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    /* Sources in a subdirectory: the two databases must not become files of
+     * the repo the second run indexes. */
+    std::string repo = std::string(tmp) + "/repo";
+    static const char *const subjects[] = {"User", "Server", "Client", "Cache", "Queue", "Mail"};
+    for (size_t i = 0; i < sizeof(subjects) / sizeof(subjects[0]); i++) {
+        write_sem_family(repo, subjects[i]);
+    }
+
+    std::string db_plain = std::string(tmp) + "/plain.db";
+    std::string db_batched = std::string(tmp) + "/batched.db";
+
+    /* The default threshold admits no pair on a 30-function fixture; 0.3
+     * admits the near-duplicates. The test is about equality, not the bar. */
+    cbm_setenv("CBM_SEMANTIC_THRESHOLD", "0.3", 1);
+    cbm_unsetenv("CBM_SEM_BATCH");
+    cbm_pipeline_t *p = cbm_pipeline_new(repo.c_str(), db_plain.c_str(), CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    cbm_pipeline_free(p);
+
+    p = cbm_pipeline_new(repo.c_str(), db_batched.c_str(), CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    cbm_setenv("CBM_SEM_BATCH", "5", 1); /* read by the pass, once per run */
+    int rc = cbm_pipeline_run(p);
+    cbm_unsetenv("CBM_SEM_BATCH");
+    cbm_pipeline_free(p);
+    ASSERT_EQ(rc, 0);
+
+    cbm_store_t *sp = cbm_store_open_path(db_plain.c_str());
+    cbm_store_t *sb = cbm_store_open_path(db_batched.c_str());
+    ASSERT_NOT_NULL(sp);
+    ASSERT_NOT_NULL(sb);
+    sqlite3 *a = cbm_store_get_db(sp);
+    sqlite3 *b = cbm_store_get_db(sb);
+
+    /* The fixture must exercise batching: more functions than the forced
+     * batch, and a semantic pass that actually stored vectors and edges. */
+    sqlite3_stmt *st = NULL;
+    ASSERT_EQ(
+        sqlite3_prepare_v2(a, "SELECT COUNT(*) FROM nodes WHERE label = 'Function'", -1, &st, NULL),
+        SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+    int functions = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    ASSERT_GT(functions, 5);
+
+    int rows = 0;
+    ASSERT_TRUE(sem_same_rows(a, b,
+                              "SELECT n.qualified_name, hex(v.vector) FROM node_vectors v "
+                              "JOIN nodes n ON n.id = v.node_id ORDER BY n.qualified_name",
+                              &rows));
+    ASSERT_EQ(rows, functions);
+    ASSERT_TRUE(sem_same_rows(
+        a, b, "SELECT token, hex(vector), idf FROM token_vectors ORDER BY token", &rows));
+    ASSERT_GT(rows, 0);
+    ASSERT_TRUE(
+        sem_same_rows(a, b,
+                      "SELECT s.qualified_name, t.qualified_name, e.properties FROM edges e "
+                      "JOIN nodes s ON s.id = e.source_id JOIN nodes t ON t.id = e.target_id "
+                      "WHERE e.type = 'SEMANTICALLY_RELATED' ORDER BY 1, 2",
+                      &rows));
+    ASSERT_GT(rows, 0);
+
+    cbm_store_close(sp);
+    cbm_store_close(sb);
+    th_rmtree(tmp);
+    PASS();
+}
+
 SUITE(pipeline) {
 #ifdef _WIN32
     RUN_TEST(pipeline_lease_windows_ambiguous_missing_and_replaced_names);
@@ -8597,6 +8764,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
     RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
+    RUN_TEST(pipeline_semantic_batched_matches_unbatched);
     RUN_TEST(pipeline_go_cross_package_field_chain_resolves);
     RUN_TEST(pipeline_go_cross_package_field_chain_resolves_parallel);
     RUN_TEST(pipeline_go_textual_call_never_binds_field);

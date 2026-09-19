@@ -10,6 +10,7 @@
  * Runs in moderate and full modes (not fast). Controlled by pipeline mode.
  */
 #include "foundation/constants.h"
+#include "foundation/mem.h"
 #include "pipeline/pipeline.h"
 #include <stdint.h>
 #include "pipeline/pipeline_internal.h"
@@ -1483,6 +1484,117 @@ static void free_funcs_and_tokens(cbm_sem_func_t *funcs, int func_count, char **
     }
 }
 
+/* ── Headroom-sized batches ───────────────────────────────────────── */
+
+/* Phases 2-4 hold, per function, its token pointers, the corpus's per-doc
+ * token ids and the quantized vector being stored. On a large repo that
+ * transient is the pass's peak, and nothing sized it to the headroom. When
+ * the budget says it would not fit, the token phases run per batch of
+ * functions: tokenize -> count into the corpus -> free, then, after finalize,
+ * tokenize again -> vectorize -> store -> free. Tokenization is
+ * deterministic, so both passes see the same tokens and the graph does not
+ * change; the run pays with the second tokenize.
+ *
+ * FORK ADAPTATION: upstream decides on a "charged footprint" metric
+ * (max(phys_footprint, mimalloc commit)) that this fork does not have. The
+ * budget API here is RSS-based (foundation/mem.h), so the decision is
+ * cbm_mem_rss() + estimated transient vs cbm_mem_budget(). RSS over-reports
+ * after mimalloc purges pages, which can only make this batch EARLIER than
+ * upstream would — never later, and the graph is identical either way. */
+enum {
+    SEM_BATCH_BYTES_PER_FUNC = 4096, /* upstream measured ~3 KB, rounded up */
+    SEM_BATCH_MIN_FUNCS = 4096,
+    SEM_BATCH_HEADROOM_SHARE = 2, /* half the headroom is the transient's */
+};
+
+static int sem_batch_size(int func_count) {
+    /* CBM_SEM_BATCH=<n> forces the batch size regardless of budget (the
+     * batched-equals-unbatched test, small-machine iteration). */
+    char forced_buf[CBM_SZ_16];
+    if (cbm_safe_getenv("CBM_SEM_BATCH", forced_buf, sizeof(forced_buf), NULL)) {
+        int forced = atoi(forced_buf);
+        if (forced > 0 && forced < func_count) {
+            cbm_log_info("pass.semantic.batches", "functions", itoa_log(func_count), "batch",
+                         itoa_log(forced), "reason", "env");
+            return forced;
+        }
+    }
+    size_t budget = cbm_mem_budget();
+    if (budget == 0 || func_count <= SEM_BATCH_MIN_FUNCS) {
+        return func_count;
+    }
+    size_t rss = cbm_mem_rss();
+    size_t transient = (size_t)func_count * SEM_BATCH_BYTES_PER_FUNC;
+    if (rss + transient <= budget) {
+        return func_count;
+    }
+    /* Half the remaining headroom is the transient's share; the other half is
+     * what the later phases (signatures, buckets, deferred edges) keep. */
+    size_t headroom = budget > rss ? budget - rss : 0;
+    size_t batch = headroom / SEM_BATCH_HEADROOM_SHARE / SEM_BATCH_BYTES_PER_FUNC;
+    if (batch < SEM_BATCH_MIN_FUNCS) {
+        batch = SEM_BATCH_MIN_FUNCS;
+    }
+    if (batch >= (size_t)func_count) {
+        return func_count;
+    }
+    enum { MB = 1024 * 1024 };
+    cbm_log_info("pass.semantic.batches", "functions", itoa_log(func_count), "batch",
+                 itoa_log((int)batch), "headroom_mb", itoa_log((int)(headroom / MB)),
+                 "transient_mb", itoa_log((int)(transient / MB)));
+    return (int)batch;
+}
+
+/* Phases 2-4 in headroom-sized batches. The corpus is fed batch by batch
+ * (its per-doc token ids are ints, kept for co-occurrence), finalized once,
+ * then vectors are built batch by batch from a second tokenization. */
+static cbm_sem_corpus_t *run_token_phases_batched(cbm_gbuf_t *gbuf, cbm_sem_func_t *funcs,
+                                                  const cbm_gbuf_node_t **node_ptrs,
+                                                  int *token_counts, int func_count, int batch,
+                                                  int worker_count, CBMHashTable **token_pools) {
+    CBM_PROF_START(t_phase2);
+    cbm_sem_corpus_t *corpus = cbm_sem_corpus_new();
+    for (int first = 0; first < func_count; first += batch) {
+        int count = func_count - first < batch ? func_count - first : batch;
+        char **tokens = NULL;
+        size_t *offsets = NULL;
+        phase2_tokenize(node_ptrs + first, gbuf, &tokens, &offsets, token_counts + first, count,
+                        worker_count, token_pools);
+        if (tokens && offsets) {
+            cbm_sem_corpus_add_docs_batch(corpus, tokens, offsets, token_counts + first, count);
+        }
+        free(tokens);
+        free(offsets);
+        cbm_mem_collect(); /* the batch's pages leave the RSS now, not at the pass end */
+    }
+    CBM_PROF_END_N("semantic_edges", "2+3a_tokenize_count_batched", t_phase2, func_count);
+
+    CBM_PROF_START(t_phase3b);
+    cbm_sem_corpus_finalize(corpus);
+    CBM_PROF_END_N("semantic_edges", "3b_corpus_finalize_seq", t_phase3b,
+                   cbm_sem_corpus_token_count(corpus));
+    CBM_PROF_START(t_phase3c);
+    phase3c_export_token_vectors(gbuf, corpus);
+    CBM_PROF_END_N("semantic_edges", "3c_token_vec_export_seq", t_phase3c,
+                   cbm_sem_corpus_token_count(corpus));
+
+    CBM_PROF_START(t_phase4);
+    for (int first = 0; first < func_count; first += batch) {
+        int count = func_count - first < batch ? func_count - first : batch;
+        char **tokens = NULL;
+        size_t *offsets = NULL;
+        phase2_tokenize(node_ptrs + first, gbuf, &tokens, &offsets, token_counts + first, count,
+                        worker_count, token_pools);
+        phase4_build_and_store_vectors(gbuf, funcs + first, tokens, offsets, token_counts + first,
+                                       corpus, count, worker_count);
+        free(tokens);
+        free(offsets);
+        cbm_mem_collect();
+    }
+    CBM_PROF_END_N("semantic_edges", "2+4_tokenize_vectorize_batched", t_phase4, func_count);
+    return corpus;
+}
+
 /* ── Pass entry point ────────────────────────────────────────────── */
 
 int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx) {
@@ -1524,21 +1636,29 @@ int cbm_pipeline_pass_semantic_edges(cbm_pipeline_ctx_t *ctx) {
             token_pools[w] = cbm_ht_create(CBM_SZ_1K);
         }
     }
-    CBM_PROF_START(t_phase2);
-    phase2_tokenize(node_ptrs, gbuf, &all_tokens, &tok_offsets, token_counts, func_count,
-                    worker_count, token_pools);
-    CBM_PROF_END_N("semantic_edges", "2_tokenize_parallel", t_phase2, func_count);
-    free(node_ptrs);
+    cbm_sem_corpus_t *corpus = NULL;
+    int batch = sem_batch_size(func_count);
+    if (batch < func_count) {
+        /* Memory is tight (or CBM_SEM_BATCH forces it): phases 2-4 per batch. */
+        corpus = run_token_phases_batched(gbuf, funcs, node_ptrs, token_counts, func_count, batch,
+                                          worker_count, token_pools);
+        free(node_ptrs);
+    } else {
+        CBM_PROF_START(t_phase2);
+        phase2_tokenize(node_ptrs, gbuf, &all_tokens, &tok_offsets, token_counts, func_count,
+                        worker_count, token_pools);
+        CBM_PROF_END_N("semantic_edges", "2_tokenize_parallel", t_phase2, func_count);
+        free(node_ptrs);
 
-    /* Phase 3: Build corpus (batch add), finalize, export enriched token vectors. */
-    cbm_sem_corpus_t *corpus =
-        run_corpus_phase(gbuf, all_tokens, tok_offsets, token_counts, func_count);
+        /* Phase 3: Build corpus (batch add), finalize, export enriched token vectors. */
+        corpus = run_corpus_phase(gbuf, all_tokens, tok_offsets, token_counts, func_count);
 
-    /* Phase 4: Build per-function TF-IDF + RI vectors (PARALLEL) and store them. */
-    CBM_PROF_START(t_phase4);
-    phase4_build_and_store_vectors(gbuf, funcs, all_tokens, tok_offsets, token_counts, corpus,
-                                   func_count, worker_count);
-    CBM_PROF_END_N("semantic_edges", "4_build_and_store_vec", t_phase4, func_count);
+        /* Phase 4: Build per-function TF-IDF + RI vectors (PARALLEL) and store them. */
+        CBM_PROF_START(t_phase4);
+        phase4_build_and_store_vectors(gbuf, funcs, all_tokens, tok_offsets, token_counts, corpus,
+                                       func_count, worker_count);
+        CBM_PROF_END_N("semantic_edges", "4_build_and_store_vec", t_phase4, func_count);
+    }
 
     cbm_log_info("pass.semantic.vectors_stored", "count", itoa_log(func_count));
 
