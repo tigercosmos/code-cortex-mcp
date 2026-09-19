@@ -2292,8 +2292,14 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
      * extractor's defs stay; the LSP refinement here and the cross-file
      * resolve (cbm_pxc_dispatch_file) skip the file, logged. The budget is
      * the same for every parser, so the rule is too. */
+    /* Thread CPU time, not wall: the parse budget itself is CPU-based (a
+     * descheduled worker under 18-way parallel load burns wall but not CPU),
+     * and a wall-based share would skip LSP for a normal file whenever the
+     * host is busy -- a run-to-run graph difference with no cause in the
+     * source. */
+    uint64_t parse_cpu_ns = cbm_thread_cpu_time_ns() - cpu_start_ns;
     bool lsp_skipped =
-        timeout_micros > 0 && (t1 - t0) * (uint64_t)CBM_LSP_BUDGET_SHARE_DIV > budget_ns;
+        timeout_micros > 0 && parse_cpu_ns * (uint64_t)CBM_LSP_BUDGET_SHARE_DIV > budget_ns;
 #ifdef CBM_ENABLE_TEST_SEAMS
     {
         const char *skip_on = getenv("CBM_TEST_LSP_SKIP_ON");
@@ -2305,9 +2311,9 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     if (lsp_skipped) {
         char parse_ms[CBM_SZ_32];
         snprintf(parse_ms, sizeof(parse_ms), "%llu",
-                 (unsigned long long)((t1 - t0) / CBM_NSEC_PER_MSEC));
-        cbm_log_warn("extract.lsp.skipped", "reason", "parse_budget", "parse_ms", parse_ms, "path",
-                     rel_path ? rel_path : "");
+                 (unsigned long long)(parse_cpu_ns / CBM_NSEC_PER_MSEC));
+        cbm_log_warn("extract.lsp.skipped", "reason", "parse_budget", "parse_cpu_ms", parse_ms,
+                     "path", rel_path ? rel_path : "");
         result->lsp_skipped = true;
     }
 
