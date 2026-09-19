@@ -1243,6 +1243,86 @@ TEST(gbuf_secondary_indexes_grow_delete_and_reinsert) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+/* The dedup key is a 128-bit hash of (source, target, type) plus, for IMPORTS
+ * edges, the imported symbol's local_name (#768). Two named imports from the
+ * same specifier share a (source, target, type) tuple and must both survive;
+ * a genuinely identical edge must still collapse. The local_name is hashed at
+ * full length, so two names sharing a prefix longer than the old 256-byte key
+ * buffer stay distinct instead of being re-keyed or truncated together. */
+TEST(gbuf_edge_dedup_keys_on_import_local_name) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t f = cbm_gbuf_upsert_node(gb, "File", "a.ts", "p.a", "a.ts", 1, 1, "{}");
+    int64_t m = cbm_gbuf_upsert_node(gb, "Module", "lib", "p.lib", "lib.ts", 1, 1, "{}");
+
+    /* Same (source, target, type), different local_name → two edges. */
+    cbm_gbuf_insert_edge(gb, f, m, "IMPORTS", "{\"local_name\":\"alpha\"}");
+    cbm_gbuf_insert_edge(gb, f, m, "IMPORTS", "{\"local_name\":\"beta\"}");
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 2);
+
+    /* Identical edge (same local_name) → deduped onto the first. */
+    cbm_gbuf_insert_edge(gb, f, m, "IMPORTS", "{\"local_name\":\"alpha\"}");
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 2);
+
+    /* Two local_names sharing a 400-char prefix: longer than the old key
+     * buffer, distinct only in the last character. */
+    std::string prefix(400, 'x');
+    std::string long_a = "{\"local_name\":\"" + prefix + "A\"}";
+    std::string long_b = "{\"local_name\":\"" + prefix + "B\"}";
+    cbm_gbuf_insert_edge(gb, f, m, "IMPORTS", long_a.c_str());
+    cbm_gbuf_insert_edge(gb, f, m, "IMPORTS", long_b.c_str());
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 4);
+    cbm_gbuf_insert_edge(gb, f, m, "IMPORTS", long_a.c_str());
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 4);
+
+    /* Non-IMPORTS edges ignore the properties: repeat CALLS collapse. */
+    cbm_gbuf_insert_edge(gb, f, m, "CALLS", "{\"line\":1}");
+    cbm_gbuf_insert_edge(gb, f, m, "CALLS", "{\"line\":9}");
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 5);
+
+    /* Deleting a type unindexes its keys (backward-shift deletion); the
+     * IMPORTS edges keep deduping afterwards. */
+    ASSERT_EQ(cbm_gbuf_delete_edges_by_type(gb, "CALLS"), 0);
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 4);
+    cbm_gbuf_insert_edge(gb, f, m, "IMPORTS", "{\"local_name\":\"beta\"}");
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 4);
+    cbm_gbuf_insert_edge(gb, f, m, "CALLS", "{\"line\":1}");
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 5);
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+/* The dedup index must survive many inserts and deletes: growth re-homes every
+ * live slot, deletion shifts probe runs backwards. Insert well past several
+ * growth steps, delete half, and check every survivor still dedups and every
+ * deleted key can be re-inserted exactly once. */
+TEST(gbuf_edge_dedup_index_survives_growth_and_deletion) {
+    enum { EDGE_N = 4096 };
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t src = cbm_gbuf_upsert_node(gb, "File", "a.ts", "p.a", "a.ts", 1, 1, "{}");
+    for (int i = 0; i < EDGE_N; i++) {
+        std::string qn = "p.t" + std::to_string(i);
+        int64_t tgt = cbm_gbuf_upsert_node(gb, "Module", "t", qn.c_str(), "t.ts", 1, 1, "{}");
+        cbm_gbuf_insert_edge(gb, src, tgt, i % 2 == 0 ? "CALLS" : "IMPORTS", "{}");
+    }
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), EDGE_N);
+
+    ASSERT_EQ(cbm_gbuf_delete_edges_by_type(gb, "CALLS"), 0);
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), EDGE_N / 2);
+
+    /* Survivors still dedup; the deleted keys insert again, once each. */
+    for (int i = 0; i < EDGE_N; i++) {
+        std::string qn = "p.t" + std::to_string(i);
+        int64_t tgt = cbm_gbuf_find_by_qn(gb, qn.c_str())->id;
+        cbm_gbuf_insert_edge(gb, src, tgt, i % 2 == 0 ? "CALLS" : "IMPORTS", "{}");
+        cbm_gbuf_insert_edge(gb, src, tgt, i % 2 == 0 ? "CALLS" : "IMPORTS", "{}");
+    }
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), EDGE_N);
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
 /* A worker buffer draws its ids from the shared counter, so a dense id → node
  * array in it spans the whole GLOBAL id space: 18 workers × (next power of two
  * above the highest id) × 8 B, doubling in lockstep — a 1 GB step inside one
@@ -1300,6 +1380,8 @@ TEST(gbuf_worker_buffer_keeps_no_by_id_array) {
 }
 
 SUITE(graph_buffer) {
+    RUN_TEST(gbuf_edge_dedup_keys_on_import_local_name);
+    RUN_TEST(gbuf_edge_dedup_index_survives_growth_and_deletion);
     RUN_TEST(gbuf_worker_buffer_keeps_no_by_id_array);
     RUN_TEST(gbuf_secondary_indexes_grow_delete_and_reinsert);
     /* Original tests */

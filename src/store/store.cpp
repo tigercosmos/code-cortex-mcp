@@ -254,7 +254,7 @@ static int init_schema(cbm_store_t *s) {
          * imports from the same specifier are distinct edges. Non-IMPORTS
          * edges get '' (NOT NULL: NULLs never conflict in a UNIQUE index,
          * which would break their dedup entirely). Mirrors the graph-buffer
-         * dedup key (make_edge_key) and the raw dump writer's DDL + hand-
+         * dedup key (edge_key_hash) and the raw dump writer's DDL + hand-
          * built sqlite_autoindex_edges_1 (internal/cbm/sqlite_writer.c) —
          * keep all three in sync. */
         "CREATE TABLE IF NOT EXISTS edges ("

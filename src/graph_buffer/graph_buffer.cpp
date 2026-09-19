@@ -36,6 +36,8 @@ enum {
 #include "foundation/dyn_array.h"
 #include "foundation/profile.h"
 #include "foundation/mem.h"
+#define XXH_INLINE_ALL
+#include "xxhash/xxhash.h"
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -57,11 +59,22 @@ static inline void *intptr_to_ptr(intptr_t v) {
 
 /* ── Internal types ──────────────────────────────────────────────── */
 
-/* Edge key for dedup hash table — composite key as string "srcID:tgtID:type",
- * plus ":local_name" for IMPORTS edges (#768). 256 bytes fit two int64s, the
- * type and a ~200-char local_name verbatim; longer local_names are re-keyed
- * with a hash of the full name in make_edge_key (never silently truncated). */
+/* Scratch buffer for the composite "srcID:type" secondary-index keys. */
 #define EDGE_KEY_BUF CBM_SZ_256
+
+/* One slot of the edge dedup index: a 128-bit key hash and the edge it
+ * identifies. edge == NULL marks the slot empty. */
+typedef struct {
+    uint64_t h0;
+    uint64_t h1;
+    cbm_gbuf_edge_t *edge;
+} edge_key_slot_t;
+
+typedef struct {
+    edge_key_slot_t *slots;
+    size_t cap;   /* power of two, 0 = not allocated */
+    size_t count; /* occupied slots */
+} edge_key_map_t;
 
 /* Per-type or per-key edge list stored in hash tables as values */
 typedef CBM_DYN_ARRAY(const cbm_gbuf_edge_t *) edge_ptr_array_t;
@@ -101,8 +114,9 @@ struct cbm_gbuf {
     /* Edge storage: array of pointers to individually heap-allocated edges */
     CBM_DYN_ARRAY(cbm_gbuf_edge_t *) edges;
 
-    /* Edge dedup index: "srcID:tgtID:type" → cbm_gbuf_edge_t* */
-    CBMHashTable *edge_by_key;
+    /* Edge dedup index: 128-bit hash of (source, target, type[, local_name])
+     * → cbm_gbuf_edge_t*. See edge_key_hash. */
+    edge_key_map_t edge_by_key;
 
     /* Edge secondary indexes: composite keys → edge_ptr_array_t */
     CBMHashTable *edges_by_source_type; /* "srcID:type" → edge_ptr_array_t* */
@@ -190,66 +204,153 @@ static void make_id_key(char *buf, size_t bufsz, int64_t id) {
     fmt_i64(buf, bufsz, id);
 }
 
-/* FNV-1a 64-bit over a byte slice — for re-keying oversized local_names. */
-static uint64_t fnv1a64(const char *s, size_t len) {
-    uint64_t h = 14695981039346656037ULL;
-    for (size_t i = 0; i < len; i++) {
-        h ^= (uint8_t)s[i];
-        h *= 1099511628211ULL;
-    }
+/* ── Edge dedup index: 128-bit key hash → edge, open addressing ───────
+ *
+ * The dedup key is (source_id, target_id, type) plus, for IMPORTS edges, the
+ * imported symbol's local_name (#768): IMPORTS edges carry exactly one
+ * local_name each, so two named imports from the same specifier resolve to
+ * the same (source, target) pair but are DISTINCT symbols. Keying on
+ * local_name too stops the second import from dedup-colliding with and
+ * overwriting the first — every pass that walks IMPORTS edges
+ * (pass_calls.cpp, pass_usages.cpp, pass_semantic.cpp, pass_lsp_cross.cpp)
+ * expects one local_name per edge, so losing an edge here silently breaks
+ * cross-file call resolution for whichever symbol got dropped, not just
+ * "who imports X" queries. Other edge types keep the plain
+ * (source, target, type) key: collapsing repeat edges of the same type
+ * between the same two nodes (e.g. multiple call sites) into one preserves
+ * the relationship; CALLS properties retain the distinct source lines
+ * separately.
+ *
+ * The key used to be composed as the string "src:tgt:type[:local_name]" in a
+ * 256-byte buffer and strdup'd into a string-keyed hash table — one heap
+ * string per edge (15.8M of them on a kernel-sized repo), plus a re-keying
+ * branch for local_names too long for the buffer, because a TRUNCATED key
+ * would collide two long names sharing a prefix and drop an edge. Hashing the
+ * components instead costs 16 bytes per edge, has no length limit at all, and
+ * retires the truncation branch. Component boundaries are unambiguous because
+ * each step seeds the next from the whole accumulator, so a differing prefix
+ * changes every later step. A false dedup needs both 64-bit halves to
+ * collide: ~n²/2¹²⁹ for n edges, below every other failure mode of the index.
+ *
+ * Linear probing, backward-shift deletion (no tombstones), load under 1/2.
+ * Values are the edge pointers, which are stable heap records. */
+
+/* Fold one key component into the running 128-bit accumulator. */
+static XXH128_hash_t edge_key_mix(XXH128_hash_t acc, const void *data, size_t len) {
+    XXH128_hash_t h = XXH3_128bits_withSeed(data, len, acc.low64);
+    h.low64 ^= acc.high64;
+    h.high64 += acc.low64;
     return h;
 }
 
-/* IMPORTS edges carry exactly one imported symbol's local_name (#768): two
- * named imports from the same specifier resolve to the same (source,
- * target) pair but are distinct symbols. Key on local_name too so the
- * second import doesn't dedup-collide with and overwrite the first —
- * every pass that walks IMPORTS edges (pass_calls.cpp, pass_usages.cpp,
- * pass_semantic.cpp, pass_lsp_cross.cpp) expects one local_name per edge, so
- * losing an edge here silently breaks cross-file call resolution for
- * whichever symbol got dropped, not just "who imports X" queries. Other
- * edge types keep the plain (source,target,type) key: collapsing repeat
- * edges of the same type between the same two nodes (e.g. multiple call
- * sites) into one preserves the relationship; CALLS properties retain the
- * distinct source lines separately.
- *
- * A local_name too long for the key buffer is re-keyed with an FNV-1a hash
- * of the FULL name instead of being truncated — a truncated key would
- * collide two long names sharing a prefix and silently drop an edge again.
- * The hash key is prefixed with byte 0x01, which cannot appear in the raw
- * JSON slice (control characters must be \u-escaped in JSON), so hash keys
- * can never collide with verbatim keys. */
-static void make_edge_key(char *buf, size_t bufsz, int64_t src, int64_t tgt, const char *type,
-                          const char *properties_json) {
-    size_t w = fmt_i64(buf, bufsz, src);
-    w = append_str(buf, bufsz, w, ":");
-    w += fmt_i64(buf + w, bufsz - w, tgt);
-    w = append_str(buf, bufsz, w, ":");
-    w = append_str(buf, bufsz, w, type);
+static XXH128_hash_t edge_key_hash(int64_t src, int64_t tgt, const char *type,
+                                   const char *properties_json) {
+    int64_t ids[PAIR_LEN] = {src, tgt};
+    XXH128_hash_t h = XXH3_128bits(ids, sizeof(ids));
+    h = edge_key_mix(h, type, strlen(type));
 
     if (properties_json && strcmp(type, "IMPORTS") == 0) {
         static const char local_name_key[] = "\"local_name\":\"";
         const char *ln = strstr(properties_json, local_name_key);
         if (ln) {
-            ln += sizeof(local_name_key) - 1;
+            ln += sizeof(local_name_key) - SKIP_ONE;
             const char *end = strchr(ln, '"');
             size_t ln_len = end ? (size_t)(end - ln) : strlen(ln);
-            /* ":" + verbatim local_name if it fits (need ':' + name + NUL),
-             * else ":" + 0x01 + FNV-1a hash of the full name. */
-            if (w + SKIP_ONE + ln_len + SKIP_ONE <= bufsz) {
-                w = append_str(buf, bufsz, w, ":");
-                for (size_t i = 0; i < ln_len && w + SKIP_ONE < bufsz; i++) {
-                    buf[w++] = ln[i];
-                }
-                if (w < bufsz) {
-                    buf[w] = '\0';
-                }
-            } else {
-                char hash[CBM_SZ_32];
-                snprintf(hash, sizeof(hash), ":\x01%016llx",
-                         (unsigned long long)fnv1a64(ln, ln_len));
-                append_str(buf, bufsz, w, hash);
-            }
+            h = edge_key_mix(h, ln, ln_len);
+        }
+    }
+    return h;
+}
+
+static void edge_key_map_free(edge_key_map_t *m) {
+    free(m->slots);
+    m->slots = NULL;
+    m->cap = 0;
+    m->count = 0;
+}
+
+static edge_key_slot_t *edge_key_map_find(const edge_key_map_t *m, XXH128_hash_t h) {
+    if (!m->slots) {
+        return NULL;
+    }
+    size_t mask = m->cap - SKIP_ONE;
+    for (size_t i = (size_t)h.low64 & mask;; i = (i + SKIP_ONE) & mask) {
+        edge_key_slot_t *slot = &m->slots[i];
+        if (!slot->edge) {
+            return NULL;
+        }
+        if (slot->h0 == h.low64 && slot->h1 == h.high64) {
+            return slot;
+        }
+    }
+}
+
+/* Double the table and re-home every live slot. Returns false on OOM, leaving
+ * the table untouched — the caller then skips the dedup entry (a duplicate
+ * edge, never a lost one). */
+static bool edge_key_map_grow(edge_key_map_t *m) {
+    size_t new_cap = m->cap ? m->cap * PAIR_LEN : (size_t)CBM_SZ_512;
+    edge_key_slot_t *slots = (edge_key_slot_t *)calloc(new_cap, sizeof(*slots));
+    if (!slots) {
+        return false;
+    }
+    size_t mask = new_cap - SKIP_ONE;
+    for (size_t i = 0; i < m->cap; i++) {
+        edge_key_slot_t *slot = &m->slots[i];
+        if (!slot->edge) {
+            continue;
+        }
+        size_t j = (size_t)slot->h0 & mask;
+        while (slots[j].edge) {
+            j = (j + SKIP_ONE) & mask;
+        }
+        slots[j] = *slot;
+    }
+    free(m->slots);
+    m->slots = slots;
+    m->cap = new_cap;
+    return true;
+}
+
+static bool edge_key_map_set(edge_key_map_t *m, XXH128_hash_t h, cbm_gbuf_edge_t *edge) {
+    if ((m->count + SKIP_ONE) * PAIR_LEN > m->cap && !edge_key_map_grow(m)) {
+        return false;
+    }
+    size_t mask = m->cap - SKIP_ONE;
+    size_t i = (size_t)h.low64 & mask;
+    while (m->slots[i].edge) {
+        if (m->slots[i].h0 == h.low64 && m->slots[i].h1 == h.high64) {
+            m->slots[i].edge = edge;
+            return true;
+        }
+        i = (i + SKIP_ONE) & mask;
+    }
+    m->slots[i].h0 = h.low64;
+    m->slots[i].h1 = h.high64;
+    m->slots[i].edge = edge;
+    m->count++;
+    return true;
+}
+
+static void edge_key_map_delete(edge_key_map_t *m, XXH128_hash_t h) {
+    edge_key_slot_t *slot = edge_key_map_find(m, h);
+    if (!slot) {
+        return;
+    }
+    size_t mask = m->cap - SKIP_ONE;
+    size_t i = (size_t)(slot - m->slots);
+    m->slots[i].edge = NULL;
+    m->count--;
+    /* Backward shift: pull later entries of the same probe run into the hole,
+     * so the run stays contiguous and no tombstone is needed. */
+    for (size_t j = (i + SKIP_ONE) & mask; m->slots[j].edge; j = (j + SKIP_ONE) & mask) {
+        size_t home = (size_t)m->slots[j].h0 & mask;
+        /* The entry at j may move to i when its home is not inside (i, j]. */
+        bool movable = (i <= j) ? (home <= i || home > j) : (home <= i && home > j);
+        if (movable) {
+            m->slots[i] = m->slots[j];
+            m->slots[j].edge = NULL;
+            i = j;
         }
     }
 }
@@ -373,10 +474,8 @@ static void remove_node_from_ptr_array(node_ptr_array_t *arr, int64_t node_id) {
 static void unindex_edge(cbm_gbuf_t *gb, const cbm_gbuf_edge_t *e) {
     char key[EDGE_KEY_BUF];
 
-    make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->properties_json);
-    const char *ekey = cbm_ht_get_key(gb->edge_by_key, key);
-    cbm_ht_delete(gb->edge_by_key, key);
-    free((void *)ekey);
+    edge_key_map_delete(&gb->edge_by_key,
+                        edge_key_hash(e->source_id, e->target_id, e->type, e->properties_json));
 
     make_src_type_key(key, sizeof(key), e->source_id, e->type);
     remove_edge_from_ptr_array((edge_ptr_array_t *)cbm_ht_get(gb->edges_by_source_type, key),
@@ -510,9 +609,7 @@ static void release_gbuf_indexes(cbm_gbuf_t *gb) {
     cbm_ht_foreach(gb->nodes_by_name, free_node_array, NULL);
     cbm_ht_free(gb->nodes_by_name);
     gb->nodes_by_name = NULL;
-    cbm_ht_foreach(gb->edge_by_key, free_key_only, NULL);
-    cbm_ht_free(gb->edge_by_key);
-    gb->edge_by_key = NULL;
+    edge_key_map_free(&gb->edge_by_key);
     cbm_ht_foreach(gb->edges_by_source_type, free_edge_array, NULL);
     cbm_ht_free(gb->edges_by_source_type);
     gb->edges_by_source_type = NULL;
@@ -543,7 +640,6 @@ cbm_gbuf_t *cbm_gbuf_new(const char *project, const char *root_path) {
     gb->nodes_by_label = cbm_ht_create(CBM_SZ_32);
     gb->nodes_by_name = cbm_ht_create(CBM_SZ_256);
 
-    gb->edge_by_key = cbm_ht_create(CBM_SZ_512);
     gb->edges_by_source_type = cbm_ht_create(CBM_SZ_256);
     gb->edges_by_target_type = cbm_ht_create(CBM_SZ_256);
     gb->edges_by_type = cbm_ht_create(CBM_SZ_32);
@@ -628,10 +724,7 @@ void cbm_gbuf_free(cbm_gbuf_t *gb) {
         cbm_ht_foreach(gb->nodes_by_name, free_node_array, NULL);
         cbm_ht_free(gb->nodes_by_name);
     }
-    if (gb->edge_by_key) {
-        cbm_ht_foreach(gb->edge_by_key, free_key_only, NULL);
-        cbm_ht_free(gb->edge_by_key);
-    }
+    edge_key_map_free(&gb->edge_by_key);
     if (gb->edges_by_source_type) {
         cbm_ht_foreach(gb->edges_by_source_type, free_edge_array, NULL);
         cbm_ht_free(gb->edges_by_source_type);
@@ -1221,7 +1314,8 @@ void cbm_gbuf_mem_stats(const cbm_gbuf_t *gb, cbm_gbuf_mem_t *out) {
     out->intern_pool += cbm_ht_memory_bytes(gb->intern_pool);
 
     size_t idx = cbm_ht_memory_bytes(gb->node_by_qn) + cbm_ht_memory_bytes(gb->nodes_by_label) +
-                 cbm_ht_memory_bytes(gb->nodes_by_name) + cbm_ht_memory_bytes(gb->edge_by_key) +
+                 cbm_ht_memory_bytes(gb->nodes_by_name) +
+                 (gb->edge_by_key.cap * sizeof(*gb->edge_by_key.slots)) +
                  cbm_ht_memory_bytes(gb->edges_by_source_type) +
                  cbm_ht_memory_bytes(gb->edges_by_target_type) +
                  cbm_ht_memory_bytes(gb->edges_by_type);
@@ -1231,13 +1325,6 @@ void cbm_gbuf_mem_stats(const cbm_gbuf_t *gb, cbm_gbuf_mem_t *out) {
     cbm_ht_foreach(gb->edges_by_source_type, mem_count_edge_array, &idx);
     cbm_ht_foreach(gb->edges_by_target_type, mem_count_edge_array, &idx);
     cbm_ht_foreach(gb->edges_by_type, mem_count_edge_array, &idx);
-    /* edge_by_key borrows one strdup'd "src:tgt:type" key per edge. */
-    for (int i = 0; i < gb->edges.count; i++) {
-        char key[EDGE_KEY_BUF];
-        const cbm_gbuf_edge_t *e = gb->edges.items[i];
-        make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type, e->properties_json);
-        idx += gb_str_bytes(key);
-    }
     out->indexes = idx;
 
     out->vectors = ((size_t)gb->dump_vector_cap * sizeof(*gb->dump_vectors)) +
@@ -1466,7 +1553,7 @@ static double edge_props_confidence(const char *props_json) {
 /* Decide whether an incoming property blob replaces the stored one on a
  * duplicate edge key.
  *
- * confidence/strategy/via are not part of the edge key (make_edge_key keys
+ * confidence/strategy/via are not part of the edge key (edge_key_hash keys
  * everything but IMPORTS on source:target:type alone), and the same logical
  * edge is legitimately minted by more than one strategy carrying different
  * values — LSP resolution and registry-textual matching both produce CALLS
@@ -1563,10 +1650,9 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     }
 
     /* Check for dedup */
-    char key[EDGE_KEY_BUF];
-    make_edge_key(key, sizeof(key), source_id, target_id, type, properties_json);
-
-    cbm_gbuf_edge_t *existing = (cbm_gbuf_edge_t *)cbm_ht_get(gb->edge_by_key, key);
+    XXH128_hash_t key = edge_key_hash(source_id, target_id, type, properties_json);
+    edge_key_slot_t *hit = edge_key_map_find(&gb->edge_by_key, key);
+    cbm_gbuf_edge_t *existing = hit ? hit->edge : NULL;
     if (existing) {
         if (strcmp(type, "CALLS") == 0 &&
             ((properties_json &&
@@ -1610,7 +1696,7 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     cbm_da_push(&gb->edges, edge);
 
     /* Dedup index */
-    cbm_ht_set(gb->edge_by_key, strdup(key), edge);
+    (void)edge_key_map_set(&gb->edge_by_key, key, edge);
 
     /* Secondary indexes */
     register_edge_in_indexes(gb, edge);
@@ -1692,12 +1778,8 @@ int cbm_gbuf_delete_edges_by_type(cbm_gbuf_t *gb, const char *type) {
     for (int i = 0; i < gb->edges.count; i++) {
         cbm_gbuf_edge_t *e = gb->edges.items[i];
         if (strcmp(e->type, type) == 0) {
-            char key[EDGE_KEY_BUF];
-            make_edge_key(key, sizeof(key), e->source_id, e->target_id, e->type,
-                          e->properties_json);
-            const char *ekey = cbm_ht_get_key(gb->edge_by_key, key);
-            cbm_ht_delete(gb->edge_by_key, key);
-            free((void *)ekey);
+            edge_key_map_delete(&gb->edge_by_key, edge_key_hash(e->source_id, e->target_id, e->type,
+                                                                e->properties_json));
             free_edge_strings(e);
             free(e);
         } else {
