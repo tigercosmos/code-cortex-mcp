@@ -542,8 +542,8 @@ void cbm_sem_corpus_add_doc(cbm_sem_corpus_t *corpus, const char **tokens, int c
 typedef struct {
     cbm_sem_corpus_t *corpus;
     char **all_tokens;
+    const size_t *offsets; /* document d = all_tokens[offsets[d] ..] */
     const int *token_counts;
-    int max_tokens;
     int doc_count;
     std::atomic<int> *doc_freq_atomic; /* per-entry atomic counter (entry_count long) */
     std::atomic<int> next_idx;
@@ -565,7 +565,7 @@ static void batch_resolve_one_doc(batch_resolve_ctx_t *bc, int doc_index, int *s
     bc->corpus->doc_token_counts[doc_index] = count;
 
     int seen_count = 0;
-    char **tokens = &bc->all_tokens[(ptrdiff_t)doc_index * bc->max_tokens];
+    char **tokens = &bc->all_tokens[bc->offsets[doc_index]];
     for (int i = 0; i < count; i++) {
         const char *idx_str = (const char *)cbm_ht_get(bc->corpus->token_map, tokens[i]);
         int tid = CBM_NOT_FOUND;
@@ -633,8 +633,8 @@ static void batch_resolve_worker(int worker_id, void *ctx_ptr) {
 }
 
 void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
-                                   const int *token_counts, int doc_count, int max_tokens_per_doc) {
-    if (!corpus || !all_tokens || !token_counts || doc_count <= 0) {
+                                   const size_t *offsets, const int *token_counts, int doc_count) {
+    if (!corpus || !all_tokens || !offsets || !token_counts || doc_count <= 0) {
         return;
     }
 
@@ -658,7 +658,7 @@ void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
 
     for (int d = 0; d < doc_count; d++) {
         int count = token_counts[d];
-        char **tokens = &all_tokens[(ptrdiff_t)d * max_tokens_per_doc];
+        char **tokens = &all_tokens[offsets[d]];
         for (int i = 0; i < count; i++) {
             /* Inserts token into token_map if new; we discard return here —
              * Phase B will re-lookup in read-only mode to get the ID. */
@@ -677,7 +677,7 @@ void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
         corpus->doc_count = base_doc;
         for (int d = 0; d < doc_count; d++) {
             int count = token_counts[d];
-            char **tokens = &all_tokens[(ptrdiff_t)d * max_tokens_per_doc];
+            char **tokens = &all_tokens[offsets[d]];
             cbm_sem_corpus_add_doc(corpus, (const char **)tokens, count);
         }
         return;
@@ -687,8 +687,8 @@ void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
     batch_resolve_ctx_t bc = {
         .corpus = corpus,
         .all_tokens = all_tokens,
+        .offsets = offsets,
         .token_counts = token_counts,
-        .max_tokens = max_tokens_per_doc,
         .doc_count = doc_count,
         .doc_freq_atomic = doc_freq_atomic,
     };
@@ -1271,6 +1271,19 @@ static void finalize_pass2(finalize_params_t *p) {
     cbm_parallel_for(p->worker_count, normalize_worker, &nc, p->opts);
 }
 
+/* The per-document token id lists exist for the co-occurrence pass only
+ * (build_reverse_index is their one reader). Released at the end of finalize
+ * so the vector phase runs without them — one small block per function. */
+static void corpus_release_docs(cbm_sem_corpus_t *corpus) {
+    if (!corpus->doc_token_ids) {
+        return;
+    }
+    for (int d = 0; d < corpus->doc_count; d++) {
+        free(corpus->doc_token_ids[d]);
+        corpus->doc_token_ids[d] = NULL;
+    }
+}
+
 void cbm_sem_corpus_finalize(cbm_sem_corpus_t *corpus) {
     if (!corpus || corpus->finalized) {
         return;
@@ -1318,6 +1331,7 @@ void cbm_sem_corpus_finalize(cbm_sem_corpus_t *corpus) {
 
     free(src_entries);
     free_reverse_index(rev);
+    corpus_release_docs(corpus);
     corpus->finalized = true;
 }
 
