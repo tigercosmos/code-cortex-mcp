@@ -5,8 +5,13 @@
 #include "lang_specs.h"      // CBMLangSpec, cbm_lang_spec, CBM_LANG_*
 #include "tree_sitter/api.h" // TSNode, TSTreeCursor, ts_tree_cursor_*, ts_node_*
 #include "foundation/constants.h"
+#include "foundation/compat.h" // cbm_thread_cpu_time_ns
+#include <stdlib.h>            // getenv, strtoul
 
 enum { MAX_INFRA_BINDINGS = 8 };
+
+/* The unified walk checks its CPU budget once every 1024 nodes. */
+enum { WALK_BUDGET_CHECK_MASK = 1023 };
 
 #include <stdint.h> // uint32_t, uint8_t
 #include <string.h>
@@ -1659,9 +1664,35 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
     state.py_param_stack_capacity = INLINE_PY_PARAM_STACK;
 
     uint32_t depth = 0;
+    uint32_t visited = 0;
+#ifdef CBM_ENABLE_TEST_SEAMS
+    /* CBM_TEST_WALK_BUDGET_NODES=<n>: the budget is "spent" after n nodes,
+     * no real timing involved. */
+    uint32_t seam_budget_nodes = 0;
+    {
+        const char *seam = getenv("CBM_TEST_WALK_BUDGET_NODES");
+        if (seam && seam[0]) {
+            seam_budget_nodes = (uint32_t)strtoul(seam, NULL, 10);
+        }
+    }
+#endif
 
     for (;;) {
         TSNode node = ts_tree_cursor_current_node(&cursor);
+        visited++;
+        /* Every 1024 nodes: reading the thread CPU clock per node would cost
+         * more than the walk it guards. What was extracted so far is kept. */
+        if (ctx->walk_deadline_cpu_ns != 0 && (visited & (uint32_t)WALK_BUDGET_CHECK_MASK) == 0 &&
+            cbm_thread_cpu_time_ns() > ctx->walk_deadline_cpu_ns) {
+            ctx->walk_budget_exhausted = true;
+            break;
+        }
+#ifdef CBM_ENABLE_TEST_SEAMS
+        if (seam_budget_nodes != 0 && visited > seam_budget_nodes) {
+            ctx->walk_budget_exhausted = true;
+            break;
+        }
+#endif
 
         pop_expired_scopes(&state, depth);
         recompute_state(&state, ctx->module_qn);

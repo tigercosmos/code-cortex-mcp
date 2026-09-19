@@ -505,7 +505,16 @@ typedef struct {
     int error_region_count;
     bool is_test_file;
     int imports_count;
-    TSTree *cached_tree;     // retained parse tree (caller frees via cbm_free_tree)
+    TSTree *cached_tree; // retained parse tree (caller frees via cbm_free_tree)
+    /* The parse alone used more than its share of the per-file budget: the
+     * per-file LSP walk and the cross-file resolve skip this file (its
+     * unified-extractor defs stay). Set by cbm_extract_file, honoured by
+     * cbm_pxc_dispatch_file -- one site for every language and both drivers. */
+    bool lsp_skipped;
+    /* The unified walk stopped at its CPU budget: defs/calls/usages found up
+     * to that point are kept, the rest of the file is not walked. Implies
+     * lsp_skipped. */
+    bool walk_truncated;
     CBMLanguage cached_lang; // language of cached tree (for parser selection)
 
     // Retained source bytes — copied into `arena` by the parallel
@@ -568,6 +577,16 @@ typedef struct {
     bool defer_cpp_operators; // Internal opt-in; preserve pending count without full call records.
     bool deduplicate_usages;
     void *usage_dedup; // Per-walk scratch set; never retained in the result.
+    /* Per-file walk budget (thread CPU time, ns; 0 = unbounded). The unified
+     * cursor walk checks it every 1024 nodes and stops when it is spent, so
+     * no single file can hold a worker for minutes: a 23 MB single-expression
+     * C# test file cost 346 s in usage stamping alone (tree-sitter's
+     * ts_node_parent descends from the root, quadratic on a deep tree;
+     * upstream 2026-09-14). What was extracted before the stop is kept.
+     * The C/C++/CUDA preprocessed second pass shares the same absolute
+     * deadline, so the budget covers the whole file, not one walk. */
+    uint64_t walk_deadline_cpu_ns;
+    bool walk_budget_exhausted;
 } CBMExtractCtx;
 
 // --- Public API ---

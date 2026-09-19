@@ -6840,6 +6840,125 @@ TEST(non_config_language_module_has_no_promoted_description_issue519) {
     PASS();
 }
 
+/* ── Per-file CPU budget over the LSP walks (upstream 7b77fd48) ──────────── */
+
+static const char *BUDGET_PY_SRC = "import os\n"
+                                   "from typing import List\n"
+                                   "\n"
+                                   "@app.route(\"/items\")\n"
+                                   "def list_items(limit: int, offset: int = 0) -> List[str]:\n"
+                                   "    \"\"\"Return items.\"\"\"\n"
+                                   "    rows = fetch(limit, offset=offset)\n"
+                                   "    total = len(rows)\n"
+                                   "    for r in rows:\n"
+                                   "        print(r, total)\n"
+                                   "    return rows\n"
+                                   "\n"
+                                   "class Store(Base):\n"
+                                   "    def get(self, key):\n"
+                                   "        return self.data.get(key, None)\n"
+                                   "\n"
+                                   "    def put(self, key, value):\n"
+                                   "        self.data[key] = value\n"
+                                   "        return fetch(key, value)\n";
+
+/* CBM_TEST_LSP_SKIP_ON names the file (no real timing): the result carries
+ * lsp_skipped, the per-file LSP walk did not run (no LSP-resolved calls), and
+ * the shared cross-file dispatcher returns without touching it. The unified
+ * extractor definitions are still there. */
+TEST(extract_lsp_skipped_when_parse_used_its_budget_share) {
+    cbm_setenv("CBM_TEST_LSP_SKIP_ON", "budget_share.py", 1);
+    CBMFileResult *skipped = extract(BUDGET_PY_SRC, CBM_LANG_PYTHON, "t", "budget_share.py");
+    cbm_unsetenv("CBM_TEST_LSP_SKIP_ON");
+    CBMFileResult *walked = extract(BUDGET_PY_SRC, CBM_LANG_PYTHON, "t", "walked.py");
+    ASSERT_NOT_NULL(skipped);
+    ASSERT_NOT_NULL(walked);
+    ASSERT_TRUE(skipped->lsp_skipped);
+    ASSERT_FALSE(walked->lsp_skipped);
+    ASSERT_GT(skipped->defs.count, 0);                      /* the unified extractor still ran */
+    ASSERT_TRUE(skipped->defs.count <= walked->defs.count); /* the LSP walk adds its own defs */
+    ASSERT_EQ(skipped->resolved_calls.count, 0);
+    ASSERT_GT(walked->resolved_calls.count, 0);
+
+    /* The dispatcher is the one gate for every language and both drivers. */
+    int calls_before = skipped->calls.count;
+    cbm_pxc_dispatch_file(CBM_LANG_PYTHON, skipped, BUDGET_PY_SRC, (int)strlen(BUDGET_PY_SRC),
+                          "budget_share.py", "t", NULL, NULL, NULL, 0, NULL, NULL, 0, NULL, NULL);
+    ASSERT_EQ(skipped->calls.count, calls_before);
+    ASSERT_EQ(skipped->resolved_calls.count, 0);
+
+    cbm_free_result(skipped);
+    cbm_free_result(walked);
+    PASS();
+}
+
+/* CBM_TEST_WALK_BUDGET_NODES stops the unified walk after that many nodes (no
+ * real timing): the result is walk_truncated, therefore lsp_skipped, and the
+ * records the walk had not reached are the only loss. */
+TEST(extract_walk_truncated_at_its_cpu_budget) {
+    cbm_setenv("CBM_TEST_WALK_BUDGET_NODES", "8", 1);
+    CBMFileResult *cut = extract(BUDGET_PY_SRC, CBM_LANG_PYTHON, "t", "walk_budget.py");
+    cbm_unsetenv("CBM_TEST_WALK_BUDGET_NODES");
+    CBMFileResult *full = extract(BUDGET_PY_SRC, CBM_LANG_PYTHON, "t", "walk_full.py");
+    ASSERT_NOT_NULL(cut);
+    ASSERT_NOT_NULL(full);
+    ASSERT_TRUE(cut->walk_truncated);
+    ASSERT_TRUE(cut->lsp_skipped);
+    ASSERT_FALSE(full->walk_truncated);
+    ASSERT_FALSE(full->lsp_skipped);
+    ASSERT_TRUE(cut->usages.count <= full->usages.count);
+    ASSERT_TRUE(cut->calls.count <= full->calls.count);
+    ASSERT_GT(full->calls.count, cut->calls.count);
+    /* cbm_extract_definitions runs before the unified walk and is untouched. */
+    ASSERT_GT(cut->defs.count, 0);
+    cbm_free_result(cut);
+    cbm_free_result(full);
+    PASS();
+}
+
+/* An lsp_skipped file takes no cross-file resolution from the shared
+ * dispatcher, while the identical file without the flag does — and the skipped
+ * file keeps every definition the unified extractor found. */
+TEST(lsp_skipped_file_gets_no_cross_file_resolution_but_keeps_defs) {
+    static const char *src = "from helpers import fetch\n"
+                             "\n"
+                             "def list_items(limit):\n"
+                             "    return fetch(limit)\n";
+    CBMLSPDef helper = {};
+    helper.qualified_name = "t.helpers.fetch";
+    helper.short_name = "fetch";
+    helper.label = "Function";
+    helper.def_module_qn = "t.helpers";
+    helper.lang = CBM_LANG_PYTHON;
+    const char *imp_keys[] = {"fetch"};
+    const char *imp_vals[] = {"t.helpers"};
+
+    cbm_setenv("CBM_TEST_LSP_SKIP_ON", "skipped_caller.py", 1);
+    CBMFileResult *skipped = extract(src, CBM_LANG_PYTHON, "t", "skipped_caller.py");
+    cbm_unsetenv("CBM_TEST_LSP_SKIP_ON");
+    CBMFileResult *resolved = extract(src, CBM_LANG_PYTHON, "t", "caller.py");
+    ASSERT_NOT_NULL(skipped);
+    ASSERT_NOT_NULL(resolved);
+    ASSERT_TRUE(skipped->lsp_skipped);
+
+    const int skipped_defs = skipped->defs.count;
+    const int skipped_resolved_before = skipped->resolved_calls.count;
+    const int resolved_before = resolved->resolved_calls.count;
+    cbm_pxc_dispatch_file(CBM_LANG_PYTHON, skipped, src, (int)strlen(src), "skipped_caller.py",
+                          "t.skipped_caller", NULL, NULL, &helper, 1, imp_keys, imp_vals, 1, NULL,
+                          NULL);
+    cbm_pxc_dispatch_file(CBM_LANG_PYTHON, resolved, src, (int)strlen(src), "caller.py", "t.caller",
+                          NULL, NULL, &helper, 1, imp_keys, imp_vals, 1, NULL, NULL);
+    ASSERT_EQ(skipped->resolved_calls.count, skipped_resolved_before);
+    ASSERT_GT(resolved->resolved_calls.count, resolved_before);
+    ASSERT_EQ(skipped->defs.count, skipped_defs);
+    ASSERT_GT(skipped->defs.count, 0);
+
+    cbm_free_result(skipped);
+    cbm_free_result(resolved);
+    PASS();
+}
+
 SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
@@ -7206,6 +7325,9 @@ SUITE(extraction) {
     RUN_TEST(json_toplevel_description_promoted_to_module_issue519);
     RUN_TEST(config_description_only_at_top_level_issue519);
     RUN_TEST(non_config_language_module_has_no_promoted_description_issue519);
+    RUN_TEST(extract_lsp_skipped_when_parse_used_its_budget_share);
+    RUN_TEST(extract_walk_truncated_at_its_cpu_budget);
+    RUN_TEST(lsp_skipped_file_gets_no_cross_file_resolution_but_keeps_defs);
 
     cbm_shutdown();
 }

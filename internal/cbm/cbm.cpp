@@ -18,6 +18,7 @@
 #include "foundation/hash_table.h" // CBMHashTable — crash-supervisor quarantine set
 #include "tree_sitter/api.h" // TSParser, TSNode, TSTree, TSInput, TSLanguage, TSPoint, TSParseOptions, TSParseState
 #include "foundation/constants.h"
+#include "foundation/log.h" // cbm_log_warn -- extract.lsp.skipped / extract.walk.truncated
 #include <mimalloc.h> // mi_malloc/mi_calloc/mi_realloc/mi_free/mi_usable_size — bind 3rd-party allocators (#424)
 #if defined(CBM_BIND_TS_ALLOCATOR) && CBM_BIND_TS_ALLOCATOR
 #include <sqlite3.h> // sqlite3_mem_methods, sqlite3_config, SQLITE_CONFIG_MALLOC — bind sqlite to mimalloc
@@ -370,6 +371,13 @@ static const char *cbm_string_read(void *payload, uint32_t byte, TSPoint point,
  * those defs anchored. A generous WALL ceiling stays as a backstop so a
  * genuinely stuck/spinning parse still terminates in bounded time. */
 enum { CBM_PARSE_WALL_CEILING_FACTOR = 12 }; /* ~60 s ceiling for the 5 s CPU budget */
+/* A parse that used more than 1/N of the per-file budget disqualifies the file
+ * from the unbudgeted LSP walks (see extract_file_impl_body). */
+enum { CBM_LSP_BUDGET_SHARE_DIV = 2 };
+/* The unified walk may spend this many parse budgets of thread CPU time: wide
+ * enough for a 7,873-definition reference file (~10 s), tight enough to stop the
+ * generated JIT tests (65-350 s). */
+enum { CBM_WALK_BUDGET_FACTOR = 6 };
 
 typedef struct {
     uint64_t cpu_deadline_ns;   // trip once this thread's CPU time passes it
@@ -2215,6 +2223,7 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     ts_parser_reset(parser);
 
     uint64_t t0 = now_ns();
+    uint64_t cpu_start_ns = cbm_thread_cpu_time_ns();
 
     // C/C++: parse a copy with statement-bearing macro invocations blanked
     // (same byte offsets), so one unparseable macro does not swallow every
@@ -2238,8 +2247,9 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
 
     TSParseOptions opts = {0};
     CBMParseBudget budget = {0, 0, 0}; // cppcheck-suppress unreadVariable
+    uint64_t budget_ns = 0;
     if (timeout_micros > 0) {
-        uint64_t budget_ns = (uint64_t)timeout_micros * USEC_TO_NSEC;
+        budget_ns = (uint64_t)timeout_micros * USEC_TO_NSEC;
         // Descheduling burns wall time but not CPU: gate on this thread's CPU
         // time so a starved-but-parseable file is not abandoned, with a generous
         // wall ceiling as a backstop against a genuinely spinning/stuck parse.
@@ -2273,6 +2283,34 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
 
     TSNode root = ts_tree_root_node(tree);
 
+    /* Parse-budget share. A file whose parse alone consumed more than
+     * 1/CBM_LSP_BUDGET_SHARE_DIV of its budget is too large for the per-file
+     * LSP walk that follows: the walk is superlinear in expression size and
+     * has no budget of its own (C#, a 23 MB single-expression JIT test: 354 s
+     * in the walk, then a crash in the cross-file resolve on the same tree --
+     * the parse used to time out at 5 s and hide both). The unified
+     * extractor's defs stay; the LSP refinement here and the cross-file
+     * resolve (cbm_pxc_dispatch_file) skip the file, logged. The budget is
+     * the same for every parser, so the rule is too. */
+    bool lsp_skipped =
+        timeout_micros > 0 && (t1 - t0) * (uint64_t)CBM_LSP_BUDGET_SHARE_DIV > budget_ns;
+#ifdef CBM_ENABLE_TEST_SEAMS
+    {
+        const char *skip_on = getenv("CBM_TEST_LSP_SKIP_ON");
+        if (skip_on && skip_on[0] && rel_path && strstr(rel_path, skip_on)) {
+            lsp_skipped = true; /* the test names the file; no real timing involved */
+        }
+    }
+#endif
+    if (lsp_skipped) {
+        char parse_ms[CBM_SZ_32];
+        snprintf(parse_ms, sizeof(parse_ms), "%llu",
+                 (unsigned long long)((t1 - t0) / CBM_NSEC_PER_MSEC));
+        cbm_log_warn("extract.lsp.skipped", "reason", "parse_budget", "parse_ms", parse_ms, "path",
+                     rel_path ? rel_path : "");
+        result->lsp_skipped = true;
+    }
+
     // Compute module QN. Java/Go derive the module from the CONTAINING
     // DIRECTORY (package semantics) rather than baking the filename stem in,
     // so def QNs, the LSP caller_qn, and the textual calls-enclosing QN all
@@ -2295,6 +2333,13 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
         .root = root,
         .defer_cpp_operators = options && options->defer_cpp_operators,
         .deduplicate_usages = options && options->deduplicate_usages,
+        /* One absolute deadline for every unified walk this file runs -- the
+         * raw walk below and the C/C++/CUDA preprocessed second pass share it,
+         * so the budget covers the whole file rather than one walk each. */
+        .walk_deadline_cpu_ns =
+            timeout_micros > 0
+                ? cbm_thread_cpu_time_ns() + budget_ns * (uint64_t)CBM_WALK_BUDGET_FACTOR
+                : 0,
     };
 
     // Run extractors: defs + imports use separate walks (unique recursion patterns),
@@ -2306,6 +2351,21 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     CPPPendingOperators raw_operators(result, ctx.defer_cpp_operators);
     cbm_extract_unified(&ctx);
     raw_operators.prepare();
+    if (ctx.walk_budget_exhausted) {
+        result->walk_truncated = true;
+        result->lsp_skipped = true;
+        cbm_log_warn("extract.walk.truncated", "reason", "cpu_budget", "path",
+                     rel_path ? rel_path : "");
+    }
+    /* A file that spent the budget on parse plus walk is too heavy for the
+     * unbudgeted LSP walks as well (the C# JIT test files: 65-73 s each in
+     * the per-file walk after a parse under the share rule). */
+    if (!result->lsp_skipped && timeout_micros > 0 &&
+        cbm_thread_cpu_time_ns() - cpu_start_ns > budget_ns) {
+        result->lsp_skipped = true;
+        cbm_log_warn("extract.lsp.skipped", "reason", "file_budget", "path",
+                     rel_path ? rel_path : "");
+    }
 
     // Channel detection (Socket.IO / EventEmitter) — JS/TS only.
     cbm_extract_channels(&ctx);
@@ -2334,7 +2394,10 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     const int lsp_defs_before = result->defs.count;
     const int lsp_calls_before = result->calls.count;
     const int lsp_resolved_before = result->resolved_calls.count;
-    {
+    /* One gate for every language: a file whose parse or unified walk already
+     * spent the per-file budget takes no per-file LSP walk (and no cross-file
+     * resolve -- cbm_pxc_dispatch_file makes the same check). */
+    if (!result->lsp_skipped) {
         if (language == CBM_LANG_GO) {
             cbm_run_go_lsp(la, result, source, source_len, root);
         }
@@ -2369,15 +2432,15 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
         if (language == CBM_LANG_CSHARP) {
             cbm_run_cs_lsp(la, result, source, source_len, root);
         }
-    }
-    if (language == CBM_LANG_JAVA) {
-        cbm_run_java_lsp(la, result, source, source_len, root);
-    }
-    if (language == CBM_LANG_KOTLIN) {
-        cbm_run_kotlin_lsp(la, result, source, source_len, root);
-    }
-    if (language == CBM_LANG_RUST) {
-        cbm_run_rust_lsp(la, result, source, source_len, root);
+        if (language == CBM_LANG_JAVA) {
+            cbm_run_java_lsp(la, result, source, source_len, root);
+        }
+        if (language == CBM_LANG_KOTLIN) {
+            cbm_run_kotlin_lsp(la, result, source, source_len, root);
+        }
+        if (language == CBM_LANG_RUST) {
+            cbm_run_rust_lsp(la, result, source, source_len, root);
+        }
     }
     lsp_scratch_reclaim(result, a, &lsp_scratch, lsp_defs_before, lsp_calls_before,
                         lsp_resolved_before);
@@ -2445,6 +2508,10 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
                         .root = pp_root,
                         .defer_cpp_operators = options && options->defer_cpp_operators,
                         .deduplicate_usages = options && options->deduplicate_usages,
+                        /* Same absolute deadline as the raw walk: the budget
+                         * is per FILE, and the expanded translation unit is
+                         * the larger of the two trees. */
+                        .walk_deadline_cpu_ns = ctx.walk_deadline_cpu_ns,
                     };
                     // Re-run unified extraction on expanded source.
                     // This adds macro-expanded calls. Their locations are remapped
@@ -2452,11 +2519,17 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
                     CPPPendingOperators pp_operators(result, pp_ctx.defer_cpp_operators);
                     cbm_extract_unified(&pp_ctx);
                     pp_operators.prepare();
+                    if (pp_ctx.walk_budget_exhausted && !result->walk_truncated) {
+                        result->walk_truncated = true;
+                        result->lsp_skipped = true;
+                        cbm_log_warn("extract.walk.truncated", "reason", "cpu_budget", "path",
+                                     rel_path ? rel_path : "");
+                    }
 
                     // Also run LSP on expanded source for additional type-resolved
                     // calls (language is already C/C++/CUDA — checked in enclosing
                     // block). Runs in every mode.
-                    {
+                    if (!result->lsp_skipped) {
                         /* Same deal as the raw-source resolvers: the registry
                          * this builds over a fully expanded translation unit
                          * is the largest of the lot, and none of it outlives

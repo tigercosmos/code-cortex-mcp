@@ -1165,6 +1165,11 @@ extern "C" void cbm_test_guard_ambiguous_cpp_receivers(CBMFileResult *result,
 }
 #endif
 
+/* A file the extractor marked lsp_skipped (its parse alone used more than its
+ * share of the per-file budget, or the unified walk stopped at its own) takes
+ * no cross-file resolve either: the same tree the per-file walk could not
+ * afford. One check for every language and BOTH drivers -- the sequential pass
+ * below and the parallel resolve worker in pass_parallel.cpp both come here. */
 void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *source,
                            int source_len, const char *rel, const char *def_module,
                            const CBMCrossLspRegistries *cross_registries,
@@ -1172,7 +1177,7 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
                            int all_def_count, const char **imp_keys, const char **imp_vals,
                            int imp_count, CBMTypeRegistry *(*rust_shared_get)(void *),
                            void *rust_shared_ctx) {
-    if (!result) {
+    if (!result || result->lsp_skipped) {
         return;
     }
     const int raw_cross_start = result->resolved_calls.count;
