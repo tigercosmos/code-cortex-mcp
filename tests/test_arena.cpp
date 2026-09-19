@@ -3,7 +3,10 @@
  */
 #include "test_framework.h"
 #include "../src/foundation/arena.h"
+#include "../src/foundation/compat_thread.h" // cbm_thread_* — per-thread sprintf locale
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 TEST(arena_init_default) {
     CBMArena a;
@@ -596,6 +599,134 @@ TEST(arena_bounded_accounts_for_blocks_and_grow_buffers) {
     PASS();
 }
 
+/* --- cbm_arena_sprintf: stack fast path, spill path, per-thread locale ---
+ * The formatter writes into a fixed stack buffer first and only falls back to
+ * a second format pass when the result does not fit; on macOS both passes use
+ * a thread-local C locale (vsnprintf_l) so no worker waits on the process
+ * locale lock. Output must stay byte-identical to snprintf on both paths. */
+
+TEST(arena_sprintf_matches_snprintf_on_the_stack_path) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    char expected[512];
+    (void)snprintf(expected, sizeof(expected), "%s:%d:%.3f:%c:%s", "mod::Type<int>", -7, 1.5, 'x',
+                   "tail");
+    char *got = cbm_arena_sprintf(&a, "%s:%d:%.3f:%c:%s", "mod::Type<int>", -7, 1.5, 'x', "tail");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, expected);
+    ASSERT_EQ((int)strlen(got), (int)strlen(expected));
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_sprintf_matches_snprintf_past_the_stack_buffer) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    /* 400 chars of payload: longer than the stack buffer, so the second
+     * (arena-targeted) format pass runs and must produce the same bytes. */
+    char payload[401];
+    for (size_t i = 0; i < sizeof(payload) - 1; i++) {
+        payload[i] = (char)('a' + (int)(i % 26));
+    }
+    payload[sizeof(payload) - 1] = '\0';
+    char expected[600];
+    (void)snprintf(expected, sizeof(expected), "[%s]=%d", payload, 99);
+    char *got = cbm_arena_sprintf(&a, "[%s]=%d", payload, 99);
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, expected);
+    ASSERT_EQ((int)strlen(got), (int)strlen(expected));
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_sprintf_matches_snprintf_at_the_buffer_boundary) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    /* Walk the sizes straddling the stack buffer: the fast path takes a
+     * string only when it plus its NUL fit, so 255/256/257 must all agree. */
+    for (int len = 250; len <= 262; len++) {
+        char payload[300];
+        for (int i = 0; i < len; i++) {
+            payload[i] = 'q';
+        }
+        payload[len] = '\0';
+        char expected[300];
+        (void)snprintf(expected, sizeof(expected), "%s", payload);
+        char *got = cbm_arena_sprintf(&a, "%s", payload);
+        ASSERT_NOT_NULL(got);
+        ASSERT_STR_EQ(got, expected);
+    }
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+enum { ARENA_FMT_THREADS = 8, ARENA_FMT_ITERS = 10000 };
+
+static int g_arena_fmt_failures[ARENA_FMT_THREADS];
+
+typedef struct {
+    int slot;
+} ArenaFmtJob;
+
+static void *arena_sprintf_worker(void *arg) {
+    ArenaFmtJob *job = (ArenaFmtJob *)arg;
+    CBMArena a; /* each thread owns its arena: the arena itself is not shared */
+    cbm_arena_init(&a);
+    int failures = 0;
+    char big[400];
+    for (size_t i = 0; i < sizeof(big) - 1; i++) {
+        big[i] = (char)('A' + (int)(i % 26));
+    }
+    big[sizeof(big) - 1] = '\0';
+    for (int i = 0; i < ARENA_FMT_ITERS; i++) {
+        char expected[600];
+        char *got = NULL;
+        if ((i % 1000) == 0) {
+            /* Every thousandth string spills past the stack buffer. */
+            (void)snprintf(expected, sizeof(expected), "t%d/%d/%s", job->slot, i, big);
+            got = cbm_arena_sprintf(&a, "t%d/%d/%s", job->slot, i, big);
+        } else {
+            (void)snprintf(expected, sizeof(expected), "t%d/%d/%.2f/%s", job->slot, i, 0.5,
+                           "Type<T>");
+            got = cbm_arena_sprintf(&a, "t%d/%d/%.2f/%s", job->slot, i, 0.5, "Type<T>");
+        }
+        if (!got || strcmp(got, expected) != 0) {
+            failures++;
+        }
+        if ((i % 512) == 0) {
+            cbm_arena_reset(&a); /* keep the per-thread arena bounded */
+        }
+    }
+    g_arena_fmt_failures[job->slot] = failures;
+    cbm_arena_destroy(&a);
+    return NULL;
+}
+
+TEST(arena_sprintf_is_correct_from_many_threads) {
+    cbm_thread_t tids[ARENA_FMT_THREADS];
+    ArenaFmtJob jobs[ARENA_FMT_THREADS];
+    int started = 0;
+    for (int i = 0; i < ARENA_FMT_THREADS; i++) {
+        g_arena_fmt_failures[i] = 0;
+        jobs[i].slot = i;
+        if (cbm_thread_create(&tids[i], 0, arena_sprintf_worker, &jobs[i]) == 0) {
+            started++;
+        } else {
+            jobs[i].slot = -1;
+        }
+    }
+    ASSERT_GT(started, 0);
+    for (int i = 0; i < ARENA_FMT_THREADS; i++) {
+        if (jobs[i].slot >= 0) {
+            cbm_thread_join(&tids[i]);
+        }
+    }
+    for (int i = 0; i < ARENA_FMT_THREADS; i++) {
+        ASSERT_EQ(g_arena_fmt_failures[i], 0);
+    }
+    PASS();
+}
+
 SUITE(arena) {
     RUN_TEST(arena_rejects_size_overflow_without_mutation);
     RUN_TEST(arena_rejects_accounting_overflow_without_growth);
@@ -636,4 +767,8 @@ SUITE(arena) {
     RUN_TEST(arena_total_through_reset);
     RUN_TEST(arena_reset_block_size_invariant);
     RUN_TEST(arena_strndup_zero_len);
+    RUN_TEST(arena_sprintf_matches_snprintf_on_the_stack_path);
+    RUN_TEST(arena_sprintf_matches_snprintf_past_the_stack_buffer);
+    RUN_TEST(arena_sprintf_matches_snprintf_at_the_buffer_boundary);
+    RUN_TEST(arena_sprintf_is_correct_from_many_threads);
 }
