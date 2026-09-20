@@ -1270,7 +1270,7 @@ static void phase2_tokenize(const cbm_gbuf_node_t **node_ptrs, cbm_gbuf_t *gbuf,
     for (int w = 0; w < worker_count; w++) {
         total += bufs[w].count;
     }
-    char **packed = (char **)malloc((total ? total : SKIP_ONE) * sizeof(char *));
+    char **packed = (char **)malloc((total ? total : (size_t)SKIP_ONE) * sizeof(char *));
     if (packed) {
         size_t base = 0;
         for (int w = 0; w < worker_count; w++) {
