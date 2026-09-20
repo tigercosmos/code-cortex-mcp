@@ -190,16 +190,11 @@ static const char *mb_buf(size_t bytes) {
 }
 
 /* Resident bytes of one extraction arena: every block, including the unused
- * tail each geometric grow abandons. Read off the struct rather than through
- * foundation/arena.h — internal/cbm/arena.h declares the same CBMArena under
- * the same include guard and cbm.h pulls it in first, so only the subset API
- * it declares is visible in this translation unit. */
+ * tail each geometric grow abandons, plus the separately owned growable
+ * buffers. (internal/cbm/arena.h is a shim onto foundation/arena.h now, so
+ * the whole API is visible here whichever header a TU reaches first.) */
 static size_t result_arena_resident(const CBMArena *a) {
-    size_t total = a->resizable_bytes;
-    for (int i = 0; i < a->nblocks; i++) {
-        total += a->block_sizes[i];
-    }
-    return total;
+    return cbm_arena_capacity(a);
 }
 
 static bool mem_profile_enabled(void) {

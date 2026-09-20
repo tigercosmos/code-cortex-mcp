@@ -6959,6 +6959,441 @@ TEST(lsp_skipped_file_gets_no_cross_file_resolution_but_keeps_defs) {
     PASS();
 }
 
+#include "result_compact.h"
+/* ── Per-file result compaction ─────────────────────────────────────
+ * cbm_result_compact copies everything reachable from a result into one
+ * exact-size arena. These guards cover (a) every field of every record type
+ * surviving the copy, (b) capacity == used afterwards, (c) an append after
+ * compaction growing normally, and (d) a REAL extracted file round-tripping:
+ * the snapshot walker in result_snapshot.cpp is the independent oracle —
+ * encode before and after a second compaction must be byte-identical. */
+
+namespace {
+
+/* Deliberately not arena strings: compaction interns by CONTENT, so a field
+ * pointing at a literal, an interned table or a slice must still come back as
+ * an equal string owned by the new arena. */
+CBMFileResult compact_fixture_result(CBMArena *scratch) {
+    CBMFileResult r = {};
+    cbm_arena_init(&r.arena);
+    auto dup = [&](const char *s) { return cbm_arena_strdup(scratch, s); };
+
+    static const char *decorators[] = {"app.route", "login_required", nullptr};
+    static const char *bases[] = {"Base", nullptr};
+    static const char *param_names[] = {"self", "request", nullptr};
+    static const char *param_types[] = {"Widget", "Request", nullptr};
+    static const char *return_types[] = {"Response", nullptr};
+    static uint32_t fingerprint[] = {11u, 22u, 33u, 44u};
+    static CBMDefinition defs[2] = {};
+    defs[0] = CBMDefinition{};
+    defs[0].name = dup("handle");
+    defs[0].qualified_name = dup("p.Widget.handle");
+    defs[0].label = dup("Method");
+    defs[0].file_path = dup("p/widget.py");
+    defs[0].start_line = 10;
+    defs[0].end_line = 42;
+    defs[0].signature = dup("(self, request)");
+    defs[0].return_type = dup("Response");
+    defs[0].receiver = dup("Widget");
+    defs[0].docstring = dup("Handle one request.");
+    defs[0].parent_class = dup("p.Widget");
+    defs[0].decorators = decorators;
+    defs[0].base_classes = bases;
+    defs[0].param_names = param_names;
+    defs[0].param_types = param_types;
+    defs[0].return_types = return_types;
+    defs[0].route_path = dup("/api/widgets");
+    defs[0].route_method = dup("POST");
+    defs[0].complexity = 7;
+    defs[0].cognitive = 9;
+    defs[0].loop_count = 2;
+    defs[0].loop_depth = 1;
+    defs[0].is_recursive = true;
+    defs[0].param_count = 2;
+    defs[0].max_access_depth = 3;
+    defs[0].linear_scan_in_loop = 1;
+    defs[0].alloc_in_loop = 4;
+    defs[0].recursion_in_loop = true;
+    defs[0].unguarded_recursion = true;
+    defs[0].lines = 33;
+    defs[0].fingerprint = fingerprint;
+    defs[0].fingerprint_k = 4;
+    defs[0].is_exported = true;
+    defs[0].is_abstract = true;
+    defs[0].is_test = true;
+    defs[0].is_entry_point = true;
+    defs[0].structural_profile = dup("C{F,F}");
+    defs[0].body_tokens = dup("request handle response");
+    defs[0].declaration_key = dup("Widget.handle(Request)");
+    defs[0].definition_offset = 4321u;
+    defs[1] = CBMDefinition{};
+    /* The same content through a different pointer: interning must fold it. */
+    defs[1].name = dup("handle");
+    defs[1].qualified_name = dup("p.Other.handle");
+    defs[1].label = dup("Method");
+    r.defs = {defs, 2, 8};
+
+    static CBMOverload overloads[] = {{4321u, nullptr}, {8765u, nullptr}};
+    overloads[0].qualified_name = dup("p.Widget.handle");
+    overloads[1].qualified_name = dup("p.Other.handle");
+    r.overloads = overloads;
+    r.overload_count = 2;
+
+    static CBMCallArg args[2] = {};
+    args[0] = CBMCallArg{dup("payload.info"), dup("resolved"), dup("url"), 0};
+    args[1] = CBMCallArg{dup("MY_CONST"), nullptr, nullptr, 1};
+    static CBMCall calls[1] = {};
+    calls[0] = CBMCall{};
+    calls[0].callee_name = dup("pkg.Func");
+    calls[0].enclosing_func_qn = dup("p.Widget.handle");
+    calls[0].first_string_arg = dup("https://example.test");
+    calls[0].second_arg_name = dup("handler");
+    calls[0].args = args;
+    calls[0].arg_count = 2;
+    calls[0].loop_depth = 1;
+    calls[0].branch_depth = 2;
+    calls[0].start_line = 21;
+    calls[0].source_byte = 999u;
+    calls[0].requires_typed_resolution = true;
+    calls[0].is_method = true;
+    calls[0].callee_is_locally_bound = true;
+    r.calls = {calls, 1, 4};
+
+    static CBMImport imports[] = {{nullptr, nullptr}};
+    imports[0] = CBMImport{dup("Alias"), dup("other.module")};
+    r.imports = {imports, 1, 2};
+    static CBMUsage usages[1] = {};
+    usages[0] = CBMUsage{dup("counter"), dup("p.Widget.handle"), true};
+    r.usages = {usages, 1, 1};
+    static CBMThrow throws[1] = {};
+    throws[0] = CBMThrow{dup("ValueError"), dup("p.Widget.handle")};
+    r.throws = {throws, 1, 1};
+    static CBMReadWrite rw[1] = {};
+    rw[0] = CBMReadWrite{dup("state"), dup("p.Widget.handle"), true, true};
+    r.rw = {rw, 1, 1};
+    static CBMTypeRef type_refs[1] = {};
+    type_refs[0] = CBMTypeRef{dup("Response"), dup("p.Widget.handle")};
+    r.type_refs = {type_refs, 1, 1};
+    static CBMEnvAccess env[1] = {};
+    env[0] = CBMEnvAccess{dup("CONFIG_PATH"), dup("p.Widget.handle")};
+    r.env_accesses = {env, 1, 1};
+    static CBMTypeAssign type_assigns[1] = {};
+    type_assigns[0] = CBMTypeAssign{dup("w"), dup("Widget"), dup("p.Widget.handle")};
+    r.type_assigns = {type_assigns, 1, 1};
+    static CBMImplTrait impl_traits[1] = {};
+    impl_traits[0] = CBMImplTrait{dup("Display"), dup("Widget")};
+    r.impl_traits = {impl_traits, 1, 1};
+    static CBMResolvedCall resolved[1] = {};
+    resolved[0] = CBMResolvedCall{};
+    resolved[0].caller_qn = dup("p.Widget.handle");
+    resolved[0].callee_qn = dup("pkg.Func");
+    resolved[0].strategy = dup("lsp_type_dispatch");
+    resolved[0].confidence = 0.95f;
+    resolved[0].reason = dup("receiver_typed");
+    resolved[0].source_byte = 999u;
+    resolved[0].binary_operator_line = 21u;
+    r.resolved_calls = {resolved, 1, 1};
+    static CBMStringRef string_refs[1] = {};
+    string_refs[0] = CBMStringRef{dup("https://example.test"), dup("p.Widget.handle"),
+                                  dup("push_endpoint"), CBM_STRREF_URL};
+    r.string_refs = {string_refs, 1, 1};
+    static CBMInfraBinding infra[1] = {};
+    infra[0] = CBMInfraBinding{dup("events"), dup("https://example.test"), dup("pubsub")};
+    r.infra_bindings = {infra, 1, 1};
+    static CBMChannel channels[1] = {};
+    channels[0] = CBMChannel{dup("user.created"), dup("socketio"), dup("p.Widget.handle"),
+                             CBM_CHANNEL_LISTEN};
+    r.channels = {channels, 1, 1};
+
+    static const char *exports[] = {"Widget", "handle", nullptr};
+    static const char *constants[] = {"MY_CONST", nullptr};
+    static const char *globals[] = {"registry", nullptr};
+    static const char *macros[] = {"MAX", nullptr};
+    r.module_qn = dup("p.widget");
+    r.namespace_name = dup("p");
+    r.exports = exports;
+    r.constants = constants;
+    r.global_vars = globals;
+    r.macros = macros;
+    r.has_error = true;
+    r.error_msg = dup("one region unparsed");
+    r.parse_incomplete = true;
+    r.parse_unusable = true;
+    r.error_ranges = dup("10-12,40-41");
+    r.error_region_count = 2;
+    r.is_test_file = true;
+    r.imports_count = 1;
+    r.cached_lang = CBM_LANG_PYTHON;
+    r.deferred_cpp_operator_count = 3;
+    r.pending_cpp_operator_count = 1;
+    static const char retained_source[] = "def handle(self, request):\n    pass\n";
+    r.source = retained_source;
+    r.source_len = (int)sizeof(retained_source) - 1;
+    return r;
+}
+
+} // namespace
+
+TEST(extract_compact_round_trip_keeps_every_field) {
+    CBMArena scratch;
+    cbm_arena_init(&scratch);
+    CBMFileResult r = compact_fixture_result(&scratch);
+    const CBMDefinition *old_defs = r.defs.items;
+
+    cbm_result_compact(&r);
+    /* The originals go away: everything read below must be the new arena's. */
+    cbm_arena_destroy(&scratch);
+
+    ASSERT(r.defs.items != old_defs);
+    ASSERT_EQ(r.arena.nblocks, 1);
+    ASSERT_EQ(cbm_arena_capacity(&r.arena), r.arena.total_alloc);
+
+    ASSERT_EQ(r.defs.count, 2);
+    ASSERT_EQ(r.defs.cap, 2); /* exact: nothing may append into dead headroom */
+    const CBMDefinition &d = r.defs.items[0];
+    ASSERT_STR_EQ(d.name, "handle");
+    ASSERT_STR_EQ(d.qualified_name, "p.Widget.handle");
+    ASSERT_STR_EQ(d.label, "Method");
+    ASSERT_STR_EQ(d.file_path, "p/widget.py");
+    ASSERT_EQ(d.start_line, 10u);
+    ASSERT_EQ(d.end_line, 42u);
+    ASSERT_STR_EQ(d.signature, "(self, request)");
+    ASSERT_STR_EQ(d.return_type, "Response");
+    ASSERT_STR_EQ(d.receiver, "Widget");
+    ASSERT_STR_EQ(d.docstring, "Handle one request.");
+    ASSERT_STR_EQ(d.parent_class, "p.Widget");
+    ASSERT_STR_EQ(d.decorators[0], "app.route");
+    ASSERT_STR_EQ(d.decorators[1], "login_required");
+    ASSERT_NULL(d.decorators[2]);
+    ASSERT_STR_EQ(d.base_classes[0], "Base");
+    ASSERT_NULL(d.base_classes[1]);
+    ASSERT_STR_EQ(d.param_names[0], "self");
+    ASSERT_STR_EQ(d.param_names[1], "request");
+    ASSERT_NULL(d.param_names[2]);
+    ASSERT_STR_EQ(d.param_types[0], "Widget");
+    ASSERT_STR_EQ(d.param_types[1], "Request");
+    ASSERT_STR_EQ(d.return_types[0], "Response");
+    ASSERT_STR_EQ(d.route_path, "/api/widgets");
+    ASSERT_STR_EQ(d.route_method, "POST");
+    ASSERT_EQ(d.complexity, 7);
+    ASSERT_EQ(d.cognitive, 9);
+    ASSERT_EQ(d.loop_count, 2);
+    ASSERT_EQ(d.loop_depth, 1);
+    ASSERT(d.is_recursive);
+    ASSERT_EQ(d.param_count, 2);
+    ASSERT_EQ(d.max_access_depth, 3);
+    ASSERT_EQ(d.linear_scan_in_loop, 1);
+    ASSERT_EQ(d.alloc_in_loop, 4);
+    ASSERT(d.recursion_in_loop);
+    ASSERT(d.unguarded_recursion);
+    ASSERT_EQ(d.lines, 33);
+    ASSERT_EQ(d.fingerprint_k, 4);
+    ASSERT_EQ(d.fingerprint[0], 11u);
+    ASSERT_EQ(d.fingerprint[3], 44u);
+    ASSERT(d.is_exported && d.is_abstract && d.is_test && d.is_entry_point);
+    ASSERT_STR_EQ(d.structural_profile, "C{F,F}");
+    ASSERT_STR_EQ(d.body_tokens, "request handle response");
+    ASSERT_STR_EQ(d.declaration_key, "Widget.handle(Request)");
+    ASSERT_EQ(d.definition_offset, 4321u);
+    ASSERT_STR_EQ(r.defs.items[1].qualified_name, "p.Other.handle");
+    /* Interned by content: two defs, one copy of "handle" and of "Method". */
+    ASSERT(r.defs.items[1].name == d.name);
+    ASSERT(r.defs.items[1].label == d.label);
+
+    ASSERT_EQ(r.overload_count, 2);
+    ASSERT_EQ(r.overloads[0].byte_offset, 4321u);
+    ASSERT_STR_EQ(r.overloads[0].qualified_name, "p.Widget.handle");
+    ASSERT(r.overloads[0].qualified_name == d.qualified_name);
+    ASSERT_EQ(r.overloads[1].byte_offset, 8765u);
+    ASSERT_STR_EQ(r.overloads[1].qualified_name, "p.Other.handle");
+
+    const CBMCall &c = r.calls.items[0];
+    ASSERT_EQ(r.calls.cap, 1);
+    ASSERT_STR_EQ(c.callee_name, "pkg.Func");
+    ASSERT_STR_EQ(c.enclosing_func_qn, "p.Widget.handle");
+    ASSERT_STR_EQ(c.first_string_arg, "https://example.test");
+    ASSERT_STR_EQ(c.second_arg_name, "handler");
+    ASSERT_EQ(c.arg_count, 2);
+    ASSERT_STR_EQ(c.args[0].expr, "payload.info");
+    ASSERT_STR_EQ(c.args[0].value, "resolved");
+    ASSERT_STR_EQ(c.args[0].keyword, "url");
+    ASSERT_EQ(c.args[0].index, 0);
+    ASSERT_STR_EQ(c.args[1].expr, "MY_CONST");
+    ASSERT_NULL(c.args[1].value);
+    ASSERT_NULL(c.args[1].keyword);
+    ASSERT_EQ(c.args[1].index, 1);
+    ASSERT_EQ(c.loop_depth, 1);
+    ASSERT_EQ(c.branch_depth, 2);
+    ASSERT_EQ(c.start_line, 21);
+    ASSERT_EQ(c.source_byte, 999u);
+    ASSERT(c.requires_typed_resolution && c.is_method && c.callee_is_locally_bound);
+
+    ASSERT_STR_EQ(r.imports.items[0].local_name, "Alias");
+    ASSERT_STR_EQ(r.imports.items[0].module_path, "other.module");
+    ASSERT_STR_EQ(r.usages.items[0].ref_name, "counter");
+    ASSERT_STR_EQ(r.usages.items[0].enclosing_func_qn, "p.Widget.handle");
+    ASSERT(r.usages.items[0].is_member_access);
+    ASSERT_STR_EQ(r.throws.items[0].exception_name, "ValueError");
+    ASSERT_STR_EQ(r.throws.items[0].enclosing_func_qn, "p.Widget.handle");
+    ASSERT_STR_EQ(r.rw.items[0].var_name, "state");
+    ASSERT(r.rw.items[0].is_write && r.rw.items[0].is_member_access);
+    ASSERT_STR_EQ(r.type_refs.items[0].type_name, "Response");
+    ASSERT_STR_EQ(r.env_accesses.items[0].env_key, "CONFIG_PATH");
+    ASSERT_STR_EQ(r.type_assigns.items[0].var_name, "w");
+    ASSERT_STR_EQ(r.type_assigns.items[0].type_name, "Widget");
+    ASSERT_STR_EQ(r.type_assigns.items[0].enclosing_func_qn, "p.Widget.handle");
+    ASSERT_STR_EQ(r.impl_traits.items[0].trait_name, "Display");
+    ASSERT_STR_EQ(r.impl_traits.items[0].struct_name, "Widget");
+    ASSERT_STR_EQ(r.resolved_calls.items[0].caller_qn, "p.Widget.handle");
+    ASSERT_STR_EQ(r.resolved_calls.items[0].callee_qn, "pkg.Func");
+    ASSERT_STR_EQ(r.resolved_calls.items[0].strategy, "lsp_type_dispatch");
+    ASSERT(r.resolved_calls.items[0].confidence > 0.94f);
+    ASSERT_STR_EQ(r.resolved_calls.items[0].reason, "receiver_typed");
+    ASSERT_EQ(r.resolved_calls.items[0].source_byte, 999u);
+    ASSERT_EQ(r.resolved_calls.items[0].binary_operator_line, 21u);
+    ASSERT_STR_EQ(r.string_refs.items[0].value, "https://example.test");
+    ASSERT_STR_EQ(r.string_refs.items[0].key_path, "push_endpoint");
+    ASSERT_EQ((int)r.string_refs.items[0].kind, (int)CBM_STRREF_URL);
+    ASSERT_STR_EQ(r.infra_bindings.items[0].source_name, "events");
+    ASSERT_STR_EQ(r.infra_bindings.items[0].target_url, "https://example.test");
+    ASSERT_STR_EQ(r.infra_bindings.items[0].broker, "pubsub");
+    ASSERT_STR_EQ(r.channels.items[0].channel_name, "user.created");
+    ASSERT_STR_EQ(r.channels.items[0].transport, "socketio");
+    ASSERT_EQ((int)r.channels.items[0].direction, (int)CBM_CHANNEL_LISTEN);
+    /* The URL appears in a call, a string ref and an infra binding: one copy. */
+    ASSERT(r.string_refs.items[0].value == c.first_string_arg);
+    ASSERT(r.infra_bindings.items[0].target_url == c.first_string_arg);
+
+    ASSERT_STR_EQ(r.module_qn, "p.widget");
+    ASSERT_STR_EQ(r.namespace_name, "p");
+    ASSERT_STR_EQ(r.exports[0], "Widget");
+    ASSERT_STR_EQ(r.exports[1], "handle");
+    ASSERT_NULL(r.exports[2]);
+    ASSERT_STR_EQ(r.constants[0], "MY_CONST");
+    ASSERT_STR_EQ(r.global_vars[0], "registry");
+    ASSERT_STR_EQ(r.macros[0], "MAX");
+    ASSERT(r.has_error && r.parse_incomplete && r.parse_unusable && r.is_test_file);
+    ASSERT_STR_EQ(r.error_msg, "one region unparsed");
+    ASSERT_STR_EQ(r.error_ranges, "10-12,40-41");
+    ASSERT_EQ(r.error_region_count, 2);
+    ASSERT_EQ(r.imports_count, 1);
+    ASSERT_EQ((int)r.cached_lang, (int)CBM_LANG_PYTHON);
+    ASSERT_EQ(r.deferred_cpp_operator_count, 3);
+    ASSERT_EQ(r.pending_cpp_operator_count, 1);
+    ASSERT_STR_EQ(r.source, "def handle(self, request):\n    pass\n");
+    ASSERT_EQ(r.source_len, 36);
+
+    cbm_arena_destroy(&r.arena);
+    cbm_work_arena_release();
+    PASS();
+}
+
+TEST(extract_compact_append_after_compaction_grows_normally) {
+    CBMArena scratch;
+    cbm_arena_init(&scratch);
+    CBMFileResult r = compact_fixture_result(&scratch);
+    cbm_result_compact(&r);
+    cbm_arena_destroy(&scratch);
+
+    ASSERT_EQ(r.arena.nblocks, 1);
+    size_t exact = cbm_arena_capacity(&r.arena);
+    ASSERT_EQ(exact, r.arena.total_alloc);
+
+    /* What the cross-file LSP pass does: append resolved calls afterwards. */
+    const CBMResolvedCall *before = r.resolved_calls.items;
+    for (int i = 0; i < 64; i++) {
+        CBMResolvedCall rc = {};
+        rc.caller_qn = cbm_arena_strdup(&r.arena, "p.Widget.handle");
+        rc.callee_qn = cbm_arena_sprintf(&r.arena, "pkg.Cross%d", i);
+        rc.strategy = "lsp_cross";
+        cbm_resolvedcall_push(&r.resolved_calls, &r.arena, rc);
+    }
+    ASSERT_EQ(r.resolved_calls.count, 65);
+    ASSERT(r.resolved_calls.items != before); /* cap was exact, so it regrew */
+    ASSERT_STR_EQ(r.resolved_calls.items[0].callee_qn, "pkg.Func");
+    ASSERT_STR_EQ(r.resolved_calls.items[64].callee_qn, "pkg.Cross63");
+    /* Growth restarts at the default block, not at double the exact block. */
+    ASSERT_EQ(r.arena.nblocks, 2);
+    ASSERT_EQ(r.arena.block_sizes[1], CBM_ARENA_DEFAULT_BLOCK_SIZE);
+
+    cbm_arena_destroy(&r.arena);
+    cbm_work_arena_release();
+    PASS();
+}
+
+TEST(extract_compact_is_a_no_op_on_an_empty_or_busy_result) {
+    CBMFileResult empty = {};
+    cbm_result_compact(&empty); /* nblocks == 0: nothing to do, no crash */
+    ASSERT_EQ(empty.arena.nblocks, 0);
+
+    CBMArena scratch;
+    cbm_arena_init(&scratch);
+    CBMFileResult busy = compact_fixture_result(&scratch);
+    int tracker = 0;
+    busy.cpp_operator_tracker = &tracker;
+    CBMArena before = busy.arena;
+    const CBMDefinition *items = busy.defs.items;
+    cbm_result_compact(&busy);
+    ASSERT_MEM_EQ(&busy.arena, &before, sizeof(before));
+    ASSERT(busy.defs.items == items);
+    cbm_arena_destroy(&busy.arena);
+    cbm_arena_destroy(&scratch);
+    cbm_work_arena_release();
+    PASS();
+}
+
+TEST(extract_compact_survives_a_real_file_and_is_idempotent) {
+    /* cbm_extract_file already compacts. The snapshot walker is an
+     * independent traversal of the SAME schema, so encoding before and after
+     * one more compaction proves every field survived relocation. */
+    const char *src = "package main\n"
+                      "\n"
+                      "import \"fmt\"\n"
+                      "\n"
+                      "type Widget struct{ Name string }\n"
+                      "\n"
+                      "// Greet prints the widget name.\n"
+                      "func (w *Widget) Greet(prefix string) string {\n"
+                      "    for i := 0; i < 3; i++ {\n"
+                      "        fmt.Println(prefix, w.Name)\n"
+                      "    }\n"
+                      "    return prefix + w.Name\n"
+                      "}\n"
+                      "\n"
+                      "func main() {\n"
+                      "    w := &Widget{Name: \"x\"}\n"
+                      "    fmt.Println(w.Greet(\"hi\"))\n"
+                      "}\n";
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)strlen(src), CBM_LANG_GO, "p", "p/main.go", 0, nullptr, nullptr);
+    ASSERT_NOT_NULL(r);
+    ASSERT(r->defs.count > 0);
+    ASSERT(r->calls.count > 0);
+    cbm_free_tree(r);
+
+    /* Compaction ran at the end of extraction: the arena is exactly full. */
+    ASSERT_EQ(r->arena.nblocks, 1);
+    ASSERT_EQ(cbm_arena_capacity(&r->arena), r->arena.total_alloc);
+    ASSERT_EQ(r->defs.cap, r->defs.count);
+    ASSERT_EQ(r->calls.cap, r->calls.count);
+
+    std::string error;
+    std::vector<std::byte> before;
+    ASSERT(cbm::encode_result_snapshot(*r, before, 8u * 1024 * 1024, error));
+
+    cbm_result_compact(r);
+    ASSERT_EQ(r->arena.nblocks, 1);
+    ASSERT_EQ(cbm_arena_capacity(&r->arena), r->arena.total_alloc);
+
+    std::vector<std::byte> after;
+    ASSERT(cbm::encode_result_snapshot(*r, after, 8u * 1024 * 1024, error));
+    ASSERT(before == after);
+
+    cbm_free_result(r);
+    cbm_work_arena_release();
+    PASS();
+}
+
 SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
@@ -7330,4 +7765,10 @@ SUITE(extraction) {
     RUN_TEST(lsp_skipped_file_gets_no_cross_file_resolution_but_keeps_defs);
 
     cbm_shutdown();
+    /* per-file result compaction into an exact-size arena */
+    RUN_TEST(extract_compact_round_trip_keeps_every_field);
+    RUN_TEST(extract_compact_append_after_compaction_grows_normally);
+    RUN_TEST(extract_compact_is_a_no_op_on_an_empty_or_busy_result);
+    RUN_TEST(extract_compact_survives_a_real_file_and_is_idempotent);
+
 }

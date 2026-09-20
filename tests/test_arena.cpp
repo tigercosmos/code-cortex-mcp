@@ -727,6 +727,129 @@ TEST(arena_sprintf_is_correct_from_many_threads) {
     PASS();
 }
 
+/* ── Exact-size init and post-compaction growth (result compaction) ── */
+
+TEST(arena_init_exact_is_one_block_of_exactly_that_size) {
+    CBMArena a;
+    cbm_arena_init_exact(&a, 4096);
+    ASSERT_EQ(a.nblocks, 1);
+    ASSERT_EQ(a.block_sizes[0], 4096u);
+    ASSERT_EQ(cbm_arena_capacity(&a), 4096u);
+    ASSERT_EQ(a.total_alloc, 0u);
+    /* The whole block is allocatable and nothing is left over. */
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 4096));
+    ASSERT_EQ(a.total_alloc, cbm_arena_capacity(&a));
+    ASSERT_EQ(a.nblocks, 1);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_init_exact_rounds_up_to_alignment) {
+    CBMArena a;
+    cbm_arena_init_exact(&a, 100);
+    ASSERT_EQ(a.block_sizes[0], 104u);        /* 100 -> next multiple of 8 */
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 97)); /* aligns to 104 */
+    ASSERT_EQ(a.nblocks, 1);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_init_exact_grows_at_the_default_block_not_double) {
+    /* A compacted result is sized for what is already in it. A later append
+     * (retained source, cross-file resolved calls) must cost one default
+     * block, never a second copy of the exact block. */
+    CBMArena a;
+    cbm_arena_init_exact(&a, 1024 * 1024);
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 1024 * 1024));
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 8));
+    ASSERT_EQ(a.nblocks, 2);
+    ASSERT_EQ(a.block_sizes[1], CBM_ARENA_DEFAULT_BLOCK_SIZE);
+    /* and from there growth doubles again */
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, CBM_ARENA_DEFAULT_BLOCK_SIZE));
+    ASSERT_EQ(a.nblocks, 3);
+    ASSERT_EQ(a.block_sizes[2], CBM_ARENA_DEFAULT_BLOCK_SIZE * 2);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_init_exact_growth_still_honours_a_large_request) {
+    CBMArena a;
+    cbm_arena_init_exact(&a, 64);
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 64));
+    size_t big = CBM_ARENA_DEFAULT_BLOCK_SIZE * 4;
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, big));
+    ASSERT_EQ(a.block_sizes[1], big);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_rewind_reuses_every_block_and_drops_buffers) {
+    CBMArena a;
+    cbm_arena_init_sized(&a, 64);
+    char *first = (char *)cbm_arena_alloc(&a, 64);
+    ASSERT_NOT_NULL(first);
+    char *second = (char *)cbm_arena_alloc(&a, 64); /* forces a second block */
+    ASSERT_NOT_NULL(second);
+    ASSERT_EQ(a.nblocks, 2);
+    ASSERT_NOT_NULL(cbm_arena_grow_buffer(&a, NULL, 256));
+    size_t capacity_before = cbm_arena_capacity(&a);
+
+    cbm_arena_rewind(&a);
+    ASSERT_EQ(a.nblocks, 2); /* every bump block kept */
+    ASSERT_EQ(a.used, 0u);
+    ASSERT_EQ(a.total_alloc, 0u);
+    ASSERT_NULL(a.resizable); /* growable buffers cannot be reused in place */
+    ASSERT_EQ(a.resizable_bytes, 0u);
+    ASSERT_EQ(cbm_arena_capacity(&a), capacity_before - 256u);
+
+    /* The same addresses come back, with no new malloc. */
+    ASSERT(cbm_arena_alloc(&a, 64) == first);
+    ASSERT(cbm_arena_alloc(&a, 64) == second);
+    ASSERT_EQ(a.nblocks, 2);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_rewind_drops_kept_blocks_too_small_for_the_next_request) {
+    CBMArena a;
+    cbm_arena_init_sized(&a, 64);
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 64));
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 64)); /* block 1 is 128 bytes */
+    ASSERT_EQ(a.nblocks, 2);
+    cbm_arena_rewind(&a);
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 64)); /* fills block 0 */
+    /* 256 does not fit the kept 128-byte block: it is released and replaced. */
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 256));
+    ASSERT_EQ(a.nblocks, 2);
+    ASSERT_GTE(a.block_sizes[1], 256u);
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
+TEST(arena_rewind_and_capacity_tolerate_empty_and_null) {
+    cbm_arena_rewind(NULL);
+    ASSERT_EQ(cbm_arena_capacity(NULL), 0u);
+    CBMArena a;
+    memset(&a, 0, sizeof(a));
+    cbm_arena_rewind(&a);
+    ASSERT_EQ(cbm_arena_capacity(&a), 0u);
+    PASS();
+}
+
+TEST(arena_capacity_counts_blocks_and_growable_buffers) {
+    CBMArena a;
+    cbm_arena_init_sized(&a, 64);
+    ASSERT_EQ(cbm_arena_capacity(&a), 64u);
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 64));
+    ASSERT_NOT_NULL(cbm_arena_alloc(&a, 8));
+    ASSERT_EQ(cbm_arena_capacity(&a), 64u + 128u);
+    ASSERT_NOT_NULL(cbm_arena_grow_buffer(&a, NULL, 32));
+    ASSERT_EQ(cbm_arena_capacity(&a), 64u + 128u + 32u);
+    cbm_arena_destroy(&a);
+    ASSERT_EQ(cbm_arena_capacity(&a), 0u);
+    PASS();
+}
+
 SUITE(arena) {
     RUN_TEST(arena_rejects_size_overflow_without_mutation);
     RUN_TEST(arena_rejects_accounting_overflow_without_growth);
@@ -771,4 +894,14 @@ SUITE(arena) {
     RUN_TEST(arena_sprintf_matches_snprintf_past_the_stack_buffer);
     RUN_TEST(arena_sprintf_matches_snprintf_at_the_buffer_boundary);
     RUN_TEST(arena_sprintf_is_correct_from_many_threads);
+
+    /* exact-size init, rewind and capacity (result compaction) */
+    RUN_TEST(arena_init_exact_is_one_block_of_exactly_that_size);
+    RUN_TEST(arena_init_exact_rounds_up_to_alignment);
+    RUN_TEST(arena_init_exact_grows_at_the_default_block_not_double);
+    RUN_TEST(arena_init_exact_growth_still_honours_a_large_request);
+    RUN_TEST(arena_rewind_reuses_every_block_and_drops_buffers);
+    RUN_TEST(arena_rewind_drops_kept_blocks_too_small_for_the_next_request);
+    RUN_TEST(arena_rewind_and_capacity_tolerate_empty_and_null);
+    RUN_TEST(arena_capacity_counts_blocks_and_growable_buffers);
 }

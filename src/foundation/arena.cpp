@@ -112,6 +112,7 @@ void cbm_arena_init_sized(CBMArena *a, size_t block_size) {
         block_size = CBM_SZ_64; /* minimum sanity */
     }
     a->block_size = block_size;
+    a->grow_size = block_size > SIZE_MAX / PAIR_LEN ? block_size : block_size * PAIR_LEN;
     a->blocks[0] = (char *)malloc(block_size);
     if (a->blocks[0]) {
         a->block_sizes[0] = block_size;
@@ -119,11 +120,39 @@ void cbm_arena_init_sized(CBMArena *a, size_t block_size) {
     }
 }
 
+void cbm_arena_init_exact(CBMArena *a, size_t bytes) {
+    size_t block =
+        bytes > SIZE_MAX - ARENA_ALIGN ? bytes : (bytes + ARENA_ALIGN) & ~(size_t)ARENA_ALIGN;
+    cbm_arena_init_sized(a, block);
+    /* The exact block is sized for what is already there; anything appended
+     * later is new work, so growth restarts at the default rather than
+     * doubling a block that was never meant to have a tail. */
+    a->grow_size = CBM_ARENA_DEFAULT_BLOCK_SIZE;
+}
+
 static int arena_grow(CBMArena *a, size_t min_size) {
+    /* A rewound arena still owns blocks past the cursor: use the next one if
+     * it fits, otherwise drop it and everything after it and grow fresh. The
+     * NULL check matters — the suites forge `nblocks = CBM_ARENA_MAX_BLOCKS`
+     * to exercise the OOM path, and those slots hold no block. */
+    if (a->cur + SKIP_ONE < a->nblocks && a->blocks[a->cur + SKIP_ONE]) {
+        if (a->block_sizes[a->cur + SKIP_ONE] >= min_size) {
+            a->cur++;
+            a->block_size = a->block_sizes[a->cur];
+            a->used = 0;
+            return ARENA_GROW_OK;
+        }
+        for (int i = a->cur + SKIP_ONE; i < a->nblocks; i++) {
+            free(a->blocks[i]);
+            a->blocks[i] = NULL;
+            a->block_sizes[i] = 0;
+        }
+        a->nblocks = a->cur + SKIP_ONE;
+    }
     if (a->nblocks >= CBM_ARENA_MAX_BLOCKS || a->block_size > SIZE_MAX / PAIR_LEN) {
         return 0;
     }
-    size_t new_size = a->block_size * PAIR_LEN;
+    size_t new_size = a->grow_size;
     if (new_size < min_size) {
         new_size = min_size;
     }
@@ -131,8 +160,10 @@ static int arena_grow(CBMArena *a, size_t min_size) {
     if (!block) {
         return 0;
     }
+    a->grow_size = new_size > SIZE_MAX / PAIR_LEN ? new_size : new_size * PAIR_LEN;
     a->blocks[a->nblocks] = block;
     a->block_sizes[a->nblocks] = new_size;
+    a->cur = a->nblocks;
     a->nblocks++;
     a->block_size = new_size;
     a->used = 0;
@@ -153,7 +184,7 @@ void *cbm_arena_alloc(CBMArena *a, size_t n) {
             return NULL;
         }
     }
-    char *ptr = a->blocks[a->nblocks - SKIP_ONE] + a->used;
+    char *ptr = a->blocks[a->cur] + a->used;
     a->used += n;
     a->total_alloc += n;
     return ptr;
@@ -174,8 +205,10 @@ void *cbm_arena_alloc_bounded(CBMArena *a, size_t n, size_t max_capacity) {
     if (aligned > a->block_size - a->used) {
         if (a->block_size > SIZE_MAX / PAIR_LEN)
             return NULL;
-        size_t growth = a->block_size * PAIR_LEN;
-        if (growth < aligned)
+        bool reuses_block = a->cur + SKIP_ONE < a->nblocks && a->blocks[a->cur + SKIP_ONE] &&
+                            a->block_sizes[a->cur + SKIP_ONE] >= aligned;
+        size_t growth = reuses_block ? 0 : a->grow_size;
+        if (growth < aligned && !reuses_block)
             growth = aligned;
         if (growth > max_capacity - capacity)
             return NULL;
@@ -293,13 +326,38 @@ void cbm_arena_reset(CBMArena *a) {
     if (a->nblocks > SKIP_ONE) {
         a->nblocks = SKIP_ONE;
     }
+    a->cur = 0;
     a->used = 0;
     a->total_alloc = 0;
     /* Reset block_size to match surviving block — prevents overflow if
      * block_size grew during previous allocations (e.g., CBM_SZ_128 → CBM_SZ_256). */
     if (a->nblocks == SKIP_ONE) {
         a->block_size = a->block_sizes[0];
+        a->grow_size =
+            a->block_size > SIZE_MAX / PAIR_LEN ? a->block_size : a->block_size * PAIR_LEN;
     }
+}
+
+void cbm_arena_rewind(CBMArena *a) {
+    if (!a || a->nblocks == 0) {
+        return;
+    }
+    arena_free_buffers(a);
+    a->cur = 0;
+    a->block_size = a->block_sizes[0];
+    a->used = 0;
+    a->total_alloc = 0;
+}
+
+size_t cbm_arena_capacity(const CBMArena *a) {
+    if (!a) {
+        return 0;
+    }
+    size_t total = a->resizable_bytes;
+    for (int i = 0; i < a->nblocks; i++) {
+        total += a->block_sizes[i];
+    }
+    return total;
 }
 
 void cbm_arena_destroy(CBMArena *a) {

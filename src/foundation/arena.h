@@ -33,6 +33,8 @@ typedef struct {
     size_t total_alloc;                  /* cumulative bytes allocated (for stats) */
     struct CBMArenaResizable *resizable; /* separately owned growable buffers */
     size_t resizable_bytes;
+    size_t grow_size; /* size of the NEXT block added; doubles per growth */
+    int cur;          /* index of the block allocations come from (rewind sets 0) */
 } CBMArena;
 
 /* Initialize arena with default block size. */
@@ -40,6 +42,14 @@ void cbm_arena_init(CBMArena *a);
 
 /* Initialize arena with a custom initial block size. */
 void cbm_arena_init_sized(CBMArena *a, size_t block_size);
+
+/* Initialize an arena as ONE block of exactly `bytes` (rounded to alignment),
+ * with later growth restarting at the default block size rather than doubling
+ * the exact block. This is the compaction target: a result whose reachable
+ * data measures N bytes lands in one N-byte block with no tail, and a later
+ * append (the parallel pass retains source bytes, the cross-file LSP pass adds
+ * resolved calls) costs one default block, not 2N. */
+void cbm_arena_init_exact(CBMArena *a, size_t bytes);
 
 /* Allocate n bytes (8-byte aligned). Returns NULL on OOM. */
 void *cbm_arena_alloc(CBMArena *a, size_t n);
@@ -72,6 +82,16 @@ char *cbm_arena_sprintf(CBMArena *a, const char *fmt, ...) __attribute__((format
 
 /* Reset arena for reuse: keeps first block, frees the rest. */
 void cbm_arena_reset(CBMArena *a);
+
+/* Rewind: keep EVERY bump block, start allocating from the first one again.
+ * The pages stay mapped and are overwritten by the next use — no free, no
+ * purge, no re-commit. This is what a per-worker working arena wants between
+ * files: the same addresses reused directly. Separately owned growable buffers
+ * (cbm_arena_grow_buffer) ARE freed, because nothing can reuse them in place.
+ * cbm_arena_capacity() reports total owned bytes, so a caller can drop an
+ * arena that grew outsized instead of keeping it. */
+void cbm_arena_rewind(CBMArena *a);
+size_t cbm_arena_capacity(const CBMArena *a);
 
 /* Free all blocks. Arena is zeroed after this. */
 void cbm_arena_destroy(CBMArena *a);

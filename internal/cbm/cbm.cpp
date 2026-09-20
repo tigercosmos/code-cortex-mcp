@@ -1,5 +1,6 @@
 #include "cbm.h"
-#include "arena.h" // CBMArena, cbm_arena_init/alloc/strdup/destroy
+#include "arena.h"          // CBMArena, cbm_arena_init/alloc/strdup/destroy
+#include "result_compact.h" // cbm_result_compact, cbm_work_arena_take/give/release
 #include "helpers.h"
 #include "lang_specs.h"
 #include "extract_unified.h"
@@ -591,6 +592,9 @@ void cbm_destroy_thread_parser(void) {
         tl_parser = NULL;
         tl_parser_lang = CBM_LANG_COUNT;
     }
+    /* This thread is done extracting: drop the parked working arena too.
+     * Every worker-exit path already calls this, so one site covers them. */
+    cbm_work_arena_release();
 }
 
 void cbm_shutdown(void) {
@@ -2216,7 +2220,10 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
         return NULL;
     }
 
-    cbm_arena_init(&result->arena);
+    /* Working arena for the whole of this file's extraction. It is this
+     * thread's parked arena when there is one (rewound: the pages stay
+     * mapped), and cbm_result_compact hands it back at the end. */
+    cbm_work_arena_take(&result->arena);
     CBMArena *a = &result->arena;
 
     /* Crash-quarantine hard guard (Stage 3c): a file the supervisor pinned as a
@@ -2900,6 +2907,14 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
                                                    timeout_micros, extra_defines, include_paths,
                                                    options, scratch.nblocks > 0 ? &scratch : NULL);
     cbm_arena_destroy(&scratch);
+    /* Everything this file will ever extract has been written. Copy what is
+     * still REACHABLE into one exact-size arena and give the working arena
+     * back: the node-text temporaries and every abandoned array generation go
+     * with it. This is the last moment at which nothing outside this call can
+     * hold a pointer into the arena — compaction relocates all of it — so it
+     * belongs here and not in a pipeline pass, where the parallel and
+     * sequential routes would each need their own copy of the hook. */
+    cbm_result_compact(result);
     return result;
 }
 
