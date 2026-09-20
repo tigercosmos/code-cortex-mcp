@@ -28,6 +28,13 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 > penalised; a wall-based share would mark normal files `lsp_skipped` on a
 > busy host and drop their resolved edges non-deterministically.
 > Re-applying upstream's hunk reintroduces that.
+>
+> **Post-sync review (2026-09-20, same day).** A Codex review (`gpt-5.6-sol`,
+> reasoning effort high, `codex exec review --base main` via `codexmon`, 7 min)
+> over the whole branch read the four upstream source commits alongside the
+> diff and returned **no actionable correctness defects**. Its own test run
+> reported 5,870 passed / 1 skipped (a different build tree; the incremental
+> suite was skipped for lack of network). No `/simplify` round was run.
 
 > *(previous pass)* **Range `31b611a3..339b3f40` was taken as a CURATED pass on 2026-09-14**:
 > 469 commits (221 merges, 248 real, ~178 touching first-party source).
