@@ -119,6 +119,15 @@ if(CBM_SANITIZE)
     # the primary signal; this define is the build system saying so explicitly,
     # so a sanitizer we do not special-case still gets the wider window.
     add_compile_definitions(CBM_SANITIZED_BUILD=1)
+    # xxhash's GCC/AArch64 NEON path loads unaligned input through an aliasing
+    # uint64x2_t dereference (XXH_vld1q_u64), which UBSan's alignment check
+    # reports on every string key long enough to reach the stripe loop
+    # (graph_buffer edge keys, 2026-09-20 Linux-arm CI). It is benign by
+    # xxhash's design and clang takes the intrinsic path, so it only shows on
+    # this one compiler. Sanitizer builds use the portable scalar kernel; the
+    # hash values are identical, only the speed differs, and no production
+    # build is affected.
+    add_compile_definitions(XXH_VECTOR=0)
 endif()
 
 # ── libgit2 auto-detect (mirrors Makefile.cbm) ─────────────────
