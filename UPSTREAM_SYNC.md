@@ -35,6 +35,26 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 > diff and returned **no actionable correctness defects**. Its own test run
 > reported 5,870 passed / 1 skipped (a different build tree; the incremental
 > suite was skipped for lack of network). No `/simplify` round was run.
+>
+> **Post-merge CI (2026-09-21).** Merged fast-forward and pushed as
+> `1ac77fdc..023df3af`. Linux CI then found two things this Mac cannot:
+> (1) **GCC `-Werror=extra`** rejected `total ? total : SKIP_ONE` (enum vs
+> `size_t`) in the packed-token malloc — fixed in `3283c3f8`, the same class
+> as the two fixes already atop `main`; clang accepts it, which is why the
+> macOS suite, ASan and Codex were all green. (2) **UBSan on Linux-arm**
+> reported xxhash's GCC/AArch64 aliasing NEON load nine times, all in the
+> graph_buffer suite (the hashed edge keys of `c7057ab0`); the last green arm
+> run had none. Benign by xxhash's design and non-fatal, but fixed in
+> `f63f31a5`: sanitizer builds define `XXH_VECTOR=0` centrally in CMake, hash
+> values unchanged, production untouched. One **Windows smoke** job on
+> `3283c3f8` failed on the cleanup `rm` of the freshly extracted exe ("Device
+> or resource busy") after every functional phase passed; the identical smoke
+> on `f63f31a5` passed, so it is a Windows file-lock race, not a regression.
+> **Final: the Dry Run on `f63f31a5` is green on every job** — lint, security,
+> CodeQL, tests on Linux x86/arm GCC, macOS 14/Intel, Windows; release builds
+> incl. the static Linux portable link; smoke on all six targets. Local GCC
+> cannot stand in for this gate: Homebrew GCC 15 does not parse the macOS 26
+> SDK Mach headers.
 
 > *(previous pass)* **Range `31b611a3..339b3f40` was taken as a CURATED pass on 2026-09-14**:
 > 469 commits (221 merges, 248 real, ~178 touching first-party source).
