@@ -11,6 +11,7 @@
 
 #include <mimalloc.h> /* mi_thread_done at thread exit */
 
+#include <cerrno> /* EINVAL — a refused stack-size hint, see cbm_thread_create */
 #include <pthread.h>
 #include <stdlib.h>
 
@@ -132,6 +133,22 @@ int cbm_thread_create(cbm_thread_t *t, size_t stack_size, void *(*fn)(void *), v
     pthread_attr_setstacksize(&attr, stack_size);
     int rc = pthread_create(&t->handle, &attr, fn, arg);
     pthread_attr_destroy(&attr);
+    if (rc == EINVAL && stack_size != CBM_DEFAULT_STACK_SIZE) {
+        /* glibc carves the static TLS block out of the thread's own stack
+         * allocation, so a small REQUESTED stack stops being legal the moment
+         * the image's TLS grows — with no warning where the growth happens, only
+         * EINVAL here. A stack size is a hint about what this thread needs; the
+         * platform refusing the hint is not a reason to fail to create the
+         * thread. Fall back to the default stack, which has room for the TLS
+         * block. (Upstream DeusData/codebase-memory-mcp@92e7e6a9, where the 64 KB
+         * parent-death watchdog stopped starting and the worker SIGKILLed its
+         * own group.) */
+        pthread_attr_t fallback;
+        pthread_attr_init(&fallback);
+        pthread_attr_setstacksize(&fallback, CBM_DEFAULT_STACK_SIZE);
+        rc = pthread_create(&t->handle, &fallback, fn, arg);
+        pthread_attr_destroy(&fallback);
+    }
     return rc;
 }
 

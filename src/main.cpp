@@ -24,7 +24,13 @@
 enum {
     MAIN_MIN_ARGC = 1,
     MAIN_CLI_ARGC = 2,
-    PARENT_WATCHDOG_STACK_SIZE = 64 * CBM_SZ_1K, /* watchdog only polls — tiny stack suffices */
+    /* The watchdog only polls, so the STACK it needs is tiny — but on glibc the
+     * thread's static TLS block is carved out of this same allocation, so a
+     * 64 KB request stops being creatable once TLS approaches it, and a worker
+     * without its parent-death watchdog refuses to index. Sized to hold the TLS
+     * block AND a real stack (upstream 92e7e6a9); cbm_thread_create also falls
+     * back to the default stack on EINVAL. */
+    PARENT_WATCHDOG_STACK_SIZE = 256 * CBM_SZ_1K,
 };
 #include "foundation/log.h"
 #include "foundation/diagnostics.h"

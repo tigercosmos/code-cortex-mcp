@@ -16,6 +16,7 @@ enum { DEFAULT_CORES = 1, MIN_WORKERS = 1, CBM_WORKERS_MAX = 256 };
 #include "foundation/log.h"
 #include "foundation/platform.h"
 #include "foundation/system_info_internal.h"
+#include <atomic>   // the system-info cache is published across threads
 #include <stdint.h> // uint64_t
 #include <stdlib.h> // strtol
 #include <string.h>
@@ -261,23 +262,49 @@ static cbm_system_info_t detect_system_windows(void) {
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
-static int info_cached = 0;
+/* The cache is published once, by whichever thread gets there first.
+ *
+ * A plain `if (!info_cached) { cached_info = detect(); }` is only safe while a
+ * single thread asks: with concurrent callers the threads race on the flag AND
+ * on the struct, and a struct assignment is not atomic, so a reader could see
+ * half of one (upstream DeusData/codebase-memory-mcp@9db48340, caught by TSan
+ * once extract workers called into it).
+ *
+ * Three states rather than a flag, so the winner of the compare-exchange is the
+ * only writer of cached_info: a loser returns the copy it detected itself,
+ * which is the same answer, and a later reader sees the published struct
+ * through the acquire/release pair. std::atomic's constexpr constructor keeps
+ * this constant-initialised, so nothing has to run before first use. */
+enum { INFO_EMPTY = 0, INFO_CLAIMED = 1, INFO_READY = 2 };
+static std::atomic<int> info_state{INFO_EMPTY};
 static cbm_system_info_t cached_info;
 
-cbm_system_info_t cbm_system_info(void) {
-    if (!info_cached) {
+static cbm_system_info_t detect_system_now(void) {
 #ifdef _WIN32
-        cached_info = detect_system_windows();
+    return detect_system_windows();
 #elif defined(__APPLE__)
-        cached_info = detect_system_macos();
+    return detect_system_macos();
 #elif defined(__NetBSD__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-        cached_info = detect_system_bsd();
+    return detect_system_bsd();
 #else
-        cached_info = detect_system_linux();
+    return detect_system_linux();
 #endif
-        info_cached = SKIP_ONE;
+}
+
+cbm_system_info_t cbm_system_info(void) {
+    if (info_state.load(std::memory_order_acquire) == INFO_READY) {
+        return cached_info;
     }
-    return cached_info;
+    /* Detection only reads the OS (sysconf/sysctl/GetSystemInfo), so racing
+     * threads doing it twice during startup costs a little and changes nothing. */
+    cbm_system_info_t local = detect_system_now();
+    int expected = INFO_EMPTY;
+    if (info_state.compare_exchange_strong(expected, INFO_CLAIMED, std::memory_order_acq_rel,
+                                           std::memory_order_relaxed)) {
+        cached_info = local;
+        info_state.store(INFO_READY, std::memory_order_release);
+    }
+    return local;
 }
 
 int cbm_default_worker_count(bool initial) {
