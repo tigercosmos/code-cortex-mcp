@@ -3227,6 +3227,26 @@ TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names) {
     ASSERT_EQ(defs.count, 2);
     ASSERT_STR_EQ(defs.items[1].name, "Test get datafeed stats given missing datafeed_id");
 
+    /* Fork-only: a C++ template-id split across lines is folded, not cut —
+     * cutting leaves `Templates<T1,` and merges distinct specializations. */
+    CBMDefinition spec = {};
+    spec.name = "Templates<T1, T2,\n    NoneT, NoneT>";
+    spec.qualified_name = "proj.gtest.Templates<T1, T2,\n    NoneT, NoneT>";
+    spec.label = "Class";
+    spec.file_path = "gtest/gtest.h";
+    cbm_defs_push(&defs, &a, spec);
+    CBMDefinition inst = {};
+    inst.name = "Impl<\n    Role::kReader>";
+    inst.qualified_name = "proj.cache.Impl<\n    Role::kReader>";
+    inst.label = "Class";
+    inst.file_path = "cache/cache.cc";
+    cbm_defs_push(&defs, &a, inst);
+    ASSERT_EQ(defs.count, 4);
+    ASSERT_STR_EQ(defs.items[2].name, "Templates<T1, T2, NoneT, NoneT>");
+    ASSERT_STR_EQ(defs.items[2].qualified_name, "proj.gtest.Templates<T1, T2, NoneT, NoneT>");
+    ASSERT_STR_EQ(defs.items[3].name, "Impl<Role::kReader>");
+    ASSERT_STR_EQ(defs.items[3].qualified_name, "proj.cache.Impl<Role::kReader>");
+
     /* JS/TS: a literal token is not a name. */
     CBMDefinition brace = {};
     brace.name = "{}";
@@ -3240,7 +3260,7 @@ TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names) {
     one.label = "Variable";
     one.file_path = "tests/cases/y.ts";
     cbm_defs_push(&defs, &a, one);
-    ASSERT_EQ(defs.count, 2);
+    ASSERT_EQ(defs.count, 4);
 
     /* Real JS names, including private members and `$`-prefixed ones, stay. */
     CBMDefinition priv = {};
@@ -3255,7 +3275,7 @@ TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names) {
     dollar.label = "Variable";
     dollar.file_path = "src/b.js";
     cbm_defs_push(&defs, &a, dollar);
-    ASSERT_EQ(defs.count, 4);
+    ASSERT_EQ(defs.count, 6);
 
     /* Member keys JS spells without an identifier start are names too:
      * computed, string-literal and escaped. */
@@ -3268,7 +3288,7 @@ TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names) {
         member.file_path = "src/c.ts";
         cbm_defs_push(&defs, &a, member);
     }
-    ASSERT_EQ(defs.count, 8);
+    ASSERT_EQ(defs.count, 10);
 
     /* Tokens that are not names in any spelling: patterns, numeric literals,
      * parenthesised types, rest elements. */
@@ -3282,7 +3302,7 @@ TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names) {
         token.file_path = "tests/cases/z.js";
         cbm_defs_push(&defs, &a, token);
     }
-    ASSERT_EQ(defs.count, 8);
+    ASSERT_EQ(defs.count, 10);
 
     /* Other languages may legitimately name operators: untouched. */
     CBMDefinition op = {};
@@ -3291,7 +3311,7 @@ TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names) {
     op.label = "Function";
     op.file_path = "src/Data/Functor.hs";
     cbm_defs_push(&defs, &a, op);
-    ASSERT_EQ(defs.count, 9);
+    ASSERT_EQ(defs.count, 11);
 
     cbm_arena_destroy(&a);
     PASS();

@@ -251,12 +251,64 @@ void cbm_reset_profile(void) {
         }                                                                                      \
     } while (0)
 
+/* A name whose first line leaves a `<`, `(` or `[` open continues on the
+ * next line: a C++ template-id split across lines (gtest's
+ * `Templates<T1, ..., T14,\n    T15, ...>` partial specializations, an
+ * explicit instantiation `Impl<\n    Role::kX>`). Cutting it at the line
+ * break leaves `Templates<T1, ..., T14,`, and distinct specializations then
+ * share one qualified name and merge (rocksdb: 84 Class nodes). */
+static bool cbm_first_line_leaves_bracket_open(const char *text, const char *nl) {
+    int depth = 0;
+    for (const char *p = text; p < nl; p++) {
+        if (*p == '<' || *p == '(' || *p == '[') {
+            depth++;
+        } else if ((*p == '>' || *p == ')' || *p == ']') && depth > 0) {
+            depth--;
+        }
+    }
+    return depth > 0;
+}
+
+/* Fold each line break, with the blanks around it, into one space — or into
+ * nothing right after an opening bracket or before a closing one — so a
+ * bracketed name reads as it would on one line. */
+static const char *cbm_fold_lines(CBMArena *a, const char *text) {
+    size_t len = strlen(text);
+    char *out = (char *)cbm_arena_alloc(a, len + 1);
+    if (!out) {
+        return text;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < len;) {
+        if (text[i] != '\r' && text[i] != '\n') {
+            out[n++] = text[i++];
+            continue;
+        }
+        while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t')) {
+            n--;
+        }
+        while (i < len &&
+               (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n')) {
+            i++;
+        }
+        bool after_open = n > 0 && (out[n - 1] == '<' || out[n - 1] == '(' || out[n - 1] == '[');
+        bool before_close = i < len && (text[i] == '>' || text[i] == ')' || text[i] == ']');
+        if (n > 0 && i < len && !after_open && !before_close) {
+            out[n++] = ' ';
+        }
+    }
+    out[n] = '\0';
+    return out;
+}
+
 /* A definition name never spans lines. Config extractors hand over a node's
  * whole text — a YAML block key, a Makefile recipe (`endif\n\n$(obj)/x.h`), a
  * ktest .conf directive — and the line break rode into the graph (upstream
  * probe: 8,301 Field nodes on elastic/elasticsearch, 91 kernel nodes). Cut at
  * the first line break and drop trailing blanks; the qualified name carries
- * the same text as its last segment and is cut the same way. */
+ * the same text as its last segment and is cut the same way. A bracketed name
+ * that continues past the break is folded onto one line instead (fork-only,
+ * see cbm_first_line_leaves_bracket_open). */
 static const char *cbm_first_line(CBMArena *a, const char *text) {
     if (!text) {
         return text;
@@ -264,6 +316,9 @@ static const char *cbm_first_line(CBMArena *a, const char *text) {
     const char *nl = strpbrk(text, "\r\n");
     if (!nl) {
         return text;
+    }
+    if (cbm_first_line_leaves_bracket_open(text, nl)) {
+        return cbm_fold_lines(a, text);
     }
     size_t n = (size_t)(nl - text);
     while (n > 0 && (text[n - 1] == ' ' || text[n - 1] == '\t')) {
