@@ -2847,6 +2847,28 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
  * column an instance actually landed in, so the fifth is never consulted. */
 #define BM25_WEIGHTS "bm25(nodes_fts, 1.0, 1.0, 1.0, 1.0, 0.3)"
 
+/* The FTS window keeps its early exit, so a filter applied after it only sees
+ * the top BM25_INNER_LIMIT (?5) hits: with thousands of partial matches, the
+ * exact-name definition (or every row of the requested label) could fall
+ * outside it. exact_extra adds the rows NAMED exactly the query (?8) — an
+ * idx_nodes_name lookup, not an FTS scan — under the same project (?2), path
+ * (?6) and label (?7) filters, scored as good as the best FTS hit so the
+ * exact-name tier decides. Shared by the ranked and the count query. */
+#define BM25_CANDIDATE_CTES                                                       \
+    "WITH fts_top AS MATERIALIZED ("                                              \
+    "    SELECT rowid, " BM25_WEIGHTS " AS base_rank"                             \
+    "    FROM nodes_fts WHERE nodes_fts MATCH ?1"                                 \
+    "    ORDER BY base_rank LIMIT ?5), "                                          \
+    "exact_extra AS ("                                                            \
+    "    SELECT x.id AS rowid,"                                                   \
+    "           COALESCE((SELECT min(base_rank) FROM fts_top), 0.0) AS base_rank" \
+    "    FROM nodes x WHERE x.project = ?2 AND x.name = ?8"                       \
+    "      AND x.label NOT IN ('File','Folder','Variable','Project')"             \
+    "      AND (?6 IS NULL OR x.file_path LIKE ?6)"                               \
+    "      AND (?7 IS NULL OR x.label = ?7)"                                      \
+    "      AND x.id NOT IN (SELECT rowid FROM fts_top)"                           \
+    "    LIMIT ?5) "
+
 static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
                          const char *file_pattern, const char *label, int limit, int offset) {
     sqlite3 *db = cbm_store_get_db(store);
@@ -2881,7 +2903,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
      * class's own methods above it (Method 10 > Class 5). The definition the
      * reader asked for by name comes first; case-insensitive exact spelling
      * comes next; everything else keeps its BM25 order. */
-    const char *sql =
+    const char *sql = BM25_CANDIDATE_CTES
         "SELECT n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, "
         "       (fts.base_rank "
         "        - CASE WHEN n.name = ?8 THEN 30.0 "
@@ -2894,9 +2916,9 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         "               WHEN n.label IN (" CBM_SQL_RELATION_LABELS ") THEN 5.0 "
         "               ELSE 0.0 END) AS rank "
         "FROM ("
-        "    SELECT rowid, " BM25_WEIGHTS " AS base_rank"
-        "    FROM nodes_fts WHERE nodes_fts MATCH ?1"
-        "    ORDER BY base_rank LIMIT ?5"
+        "    SELECT rowid, base_rank FROM fts_top"
+        "    UNION ALL "
+        "    SELECT rowid, base_rank FROM exact_extra"
         ") fts "
         "JOIN nodes n ON n.id = fts.rowid "
         "WHERE n.project = ?2 "
@@ -2938,11 +2960,10 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
      * Uses the identical subquery structure so the FTS5 early-exit applies here too. */
     int total = 0;
     {
-        const char *count_sql =
+        const char *count_sql = BM25_CANDIDATE_CTES
             "SELECT COUNT(*) FROM ("
             "    SELECT fts.rowid FROM ("
-            "        SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1"
-            "        ORDER BY " BM25_WEIGHTS " LIMIT ?3"
+            "        SELECT rowid FROM fts_top UNION ALL SELECT rowid FROM exact_extra"
             "    ) fts "
             "    JOIN nodes n ON n.id = fts.rowid "
             "    WHERE n.project = ?2 "
@@ -2957,7 +2978,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
                               MCP_SQLITE_TRANSIENT);
             sqlite3_bind_text(cs, BM25_BIND_PROJECT, project, BM25_SQL_AUTO_LEN,
                               MCP_SQLITE_TRANSIENT);
-            sqlite3_bind_int(cs, BM25_BIND_LIMIT, BM25_INNER_LIMIT);
+            sqlite3_bind_int(cs, BM25_BIND_INNER, BM25_INNER_LIMIT);
             if (file_like) {
                 sqlite3_bind_text(cs, BM25_BIND_FILE, file_like, BM25_SQL_AUTO_LEN,
                                   MCP_SQLITE_TRANSIENT);
@@ -2970,6 +2991,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
             } else {
                 sqlite3_bind_null(cs, BM25_BIND_LABEL);
             }
+            sqlite3_bind_text(cs, BM25_BIND_EXACT, query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
             if (sqlite3_step(cs) == SQLITE_ROW) {
                 total = sqlite3_column_int(cs, 0);
             }
@@ -5668,11 +5690,28 @@ static char *handle_cross_repo_mode(const char *repo_path, const char *args) {
             true);
     }
 
-    int tp_count = (int)yyjson_arr_size(tp_arr);
-    const char **targets = (const char **)malloc((size_t)tp_count * sizeof(char *));
+    /* Every element must be a project name. A non-string element used to
+     * reach cbm_cross_repo_match as a NULL name, which it strcmp()s — so
+     * `target_projects: [1]` crashed the worker instead of failing the call. */
     size_t idx;
     size_t max;
     yyjson_val *val;
+    yyjson_arr_foreach(tp_arr, idx, max, val) {
+        if (!yyjson_is_str(val)) {
+            yyjson_doc_free(jdoc);
+            free(project);
+            return cbm_mcp_text_result(
+                "{\"error\":\"target_projects must be an array of project-name strings.\"}", true);
+        }
+    }
+
+    int tp_count = (int)yyjson_arr_size(tp_arr);
+    const char **targets = (const char **)malloc((size_t)tp_count * sizeof(char *));
+    if (!targets) {
+        yyjson_doc_free(jdoc);
+        free(project);
+        return cbm_mcp_text_result("{\"error\":\"out of memory\"}", true);
+    }
     int ti = 0;
     yyjson_arr_foreach(tp_arr, idx, max, val) {
         targets[ti++] = yyjson_get_str(val);
@@ -7293,6 +7332,7 @@ static void add_snippet_coverage_note(yyjson_mut_doc *doc, yyjson_mut_val *root_
     if (cbm_store_coverage_get(store, node->project, &rows, &count) != CBM_STORE_OK) {
         return;
     }
+    char skip_note[CBM_SZ_1K] = "";
     for (int i = 0; i < count; i++) {
         if (!rows[i].rel_path || strcmp(rows[i].rel_path, node->file_path) != 0 || !rows[i].kind) {
             continue;
@@ -7317,11 +7357,27 @@ static void add_snippet_coverage_note(yyjson_mut_doc *doc, yyjson_mut_val *root_
                      "that point are missing from the graph. The source above is ground truth. "
                      "(best-effort signal)",
                      rows[i].detail && rows[i].detail[0] ? rows[i].detail : "?");
+        } else if (strcmp(rows[i].kind, "lsp_skipped") == 0) {
+            /* Weaker than the rows above: keep looking, so a partial parse or
+             * a truncated walk of the same file still wins (as in the hook's
+             * coverage note). */
+            if (!skip_note[0]) {
+                snprintf(skip_note, sizeof(skip_note),
+                         "Type-aware call resolution was skipped for this file (%s), so its "
+                         "callers/callees were matched by name only and may be missing or "
+                         "ambiguous. The source above is ground truth. (best-effort signal)",
+                         rows[i].detail && rows[i].detail[0] ? rows[i].detail : "?");
+            }
+            continue;
         } else {
             continue;
         }
         yyjson_mut_obj_add_strcpy(doc, root_obj, "coverage_note", note);
+        skip_note[0] = '\0';
         break;
+    }
+    if (skip_note[0]) {
+        yyjson_mut_obj_add_strcpy(doc, root_obj, "coverage_note", skip_note);
     }
     cbm_store_free_coverage(rows, count);
 }

@@ -2456,6 +2456,37 @@ TEST(tool_unknown_project_skips_nonregular_cache_db) {
 }
 #endif
 
+/* A non-string target_projects element used to reach cbm_cross_repo_match as
+ * a NULL project name, which it strcmp()s: `target_projects: [1]` crashed the
+ * worker (SIGSEGV) instead of failing the call. It is now a tool error, and
+ * the mixed-type case is rejected before any element is used. */
+TEST(tool_index_repository_cross_repo_rejects_non_string_targets) {
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-xrepo-targets-test-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        PASS();
+    }
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    const char *bad_targets[] = {"[1]", "[\"*\",null]", "[{\"p\":\"x\"}]"};
+    for (const char *targets : bad_targets) {
+        char args[1024];
+        snprintf(args, sizeof(args),
+                 "{\"repo_path\":\"%s\",\"mode\":\"cross-repo-intelligence\","
+                 "\"target_projects\":%s}",
+                 tmp_dir, targets);
+        char *resp = cbm_mcp_handle_tool(srv, "index_repository", args);
+        ASSERT_NOT_NULL(resp);
+        ASSERT_NOT_NULL(strstr(resp, "must be an array of project-name strings"));
+        free(resp);
+    }
+
+    cbm_mcp_server_free(srv);
+    cbm_rmdir(tmp_dir);
+    PASS();
+}
+
 /* #1211: list_projects only ever advertises the project NAME, never the
  * repo_path, but re-indexing by that same name (the natural next call) used
  * to fall straight to "repo_path is required" because nothing resolved the
@@ -3060,13 +3091,14 @@ typedef struct {
     long run_skipped;
     long status_count;
     char detail[128];
+    char snippet_note[512]; /* get_code_snippet's coverage_note for heavy.py's alpha */
 } walk_coverage_seen_t;
 
 /* Index a two-file Python repo with `seam` set to `value`, and read back how the
  * response and index_status report `kind` ("walk_truncated" / "lsp_skipped"). */
 static walk_coverage_seen_t index_and_read_walk_coverage(const char *seam, const char *value,
                                                          const char *kind) {
-    walk_coverage_seen_t seen = {-1, -1, -1, ""};
+    walk_coverage_seen_t seen = {-1, -1, -1, "", ""};
     char tmp_dir[256];
     char cache[256];
     snprintf(tmp_dir, sizeof(tmp_dir), "%s", th_mktempdir("cbm-walkcov"));
@@ -3092,6 +3124,18 @@ static walk_coverage_seen_t index_and_read_walk_coverage(const char *seam, const
     resp = srv ? cbm_mcp_handle_tool(srv, "index_status", args) : NULL;
     char *status = resp ? extract_text_content(resp) : NULL;
     free(resp);
+    snprintf(args, sizeof(args), "{\"project\":\"%s\",\"qualified_name\":\"alpha\"}",
+             project ? project : "");
+    resp = srv ? cbm_mcp_handle_tool(srv, "get_code_snippet", args) : NULL;
+    char *snippet = resp ? extract_text_content(resp) : NULL;
+    free(resp);
+    yyjson_doc *sd = snippet ? yyjson_read(snippet, strlen(snippet), 0) : NULL;
+    if (sd) {
+        const char *note = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(sd), "coverage_note"));
+        snprintf(seen.snippet_note, sizeof(seen.snippet_note), "%s", note ? note : "");
+        yyjson_doc_free(sd);
+    }
+    free(snippet);
 
     char count_key[64];
     snprintf(count_key, sizeof(count_key), "%s_count", kind);
@@ -3141,6 +3185,8 @@ TEST(index_response_reports_walk_coverage) {
     ASSERT_EQ(lsp.status_count, 1);
     ASSERT_NOT_NULL(strstr(lsp.detail, "test_seam, "));
     ASSERT_NOT_NULL(strstr(lsp.detail, " nodes"));
+    /* get_code_snippet names the skip too: the file's calls are name-only. */
+    ASSERT_NOT_NULL(strstr(lsp.snippet_note, "Type-aware call resolution was skipped"));
 
     /* Every file stops after 8 nodes. */
     walk_coverage_seen_t cut =
@@ -3150,6 +3196,7 @@ TEST(index_response_reports_walk_coverage) {
     ASSERT_EQ(cut.status_count, 2);
     ASSERT_EQ(strncmp(cut.detail, "8/", 2), 0);
     ASSERT_NOT_NULL(strstr(cut.detail, " nodes walked"));
+    ASSERT_NOT_NULL(strstr(cut.snippet_note, "Extraction stopped partway"));
     PASS();
 }
 #endif
@@ -5360,6 +5407,47 @@ TEST(bm25_ranks_exact_name_first) {
     PASS();
 }
 
+/* The FTS window stops at BM25_INNER_LIMIT (2000) hits for speed, and the
+ * label filter and exact-name tier used to run only on what survived it. With
+ * 2200 Methods named `Target` and one `Target` Class whose long path ranks it
+ * last in BM25, `query=Target label=Class` answered total 0. Rows named
+ * exactly the query now join the candidates whatever their BM25 position. */
+TEST(bm25_exact_name_survives_the_inner_limit) {
+    const char *proj = "bf-inner";
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/bm25-inner");
+    ASSERT_EQ(cbm_store_begin(st), CBM_STORE_OK);
+    for (int i = 0; i < 2200; i++) {
+        char qn[64];
+        char file[32];
+        snprintf(qn, sizeof(qn), "bf.m%d.Target", i);
+        snprintf(file, sizeof(file), "m%d.kt", i);
+        cbm_node_t n = prose_node(proj, "Method", "Target", qn, file, NULL);
+        cbm_store_upsert_node(st, &n);
+    }
+    cbm_node_t cls = prose_node(proj, "Class", "Target",
+                                "bf.very.deeply.nested.package.path.with.many.more.segments."
+                                "than.any.method.has.Target",
+                                "very/deeply/nested/package/path/with/many/more/segments/"
+                                "than/any/method/has/Target.kt",
+                                NULL);
+    cbm_store_upsert_node(st, &cls);
+    ASSERT_EQ(cbm_store_commit(st), CBM_STORE_OK);
+    cbm_store_fts_rebuild(st);
+
+    char *inner = bm25_find_search(srv, proj, "Target", "Class");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"search_mode\":\"bm25\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":1"));
+    ASSERT_NOT_NULL(strstr(inner, "than.any.method.has.Target"));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(bm25_identifier_match_outranks_prose_only_match_issue518) {
     /* Same label boost on both, so the order is decided by column weights. */
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -5619,6 +5707,7 @@ SUITE(mcp) {
 #ifndef _WIN32
     RUN_TEST(tool_unknown_project_skips_nonregular_cache_db);
 #endif
+    RUN_TEST(tool_index_repository_cross_repo_rejects_non_string_targets);
     RUN_TEST(tool_index_repository_resolves_root_path_from_project_name_issue1211);
     RUN_TEST(index_format_stale_db_rebuilds_once_issue769);
     RUN_TEST(index_recovery_quarantines_exit_nonzero);
@@ -5655,5 +5744,6 @@ SUITE(mcp) {
     RUN_TEST(bm25_identifier_match_outranks_prose_only_match_issue518);
     RUN_TEST(bm25_applies_label_filter);
     RUN_TEST(bm25_ranks_exact_name_first);
+    RUN_TEST(bm25_exact_name_survives_the_inner_limit);
     RUN_TEST(bm25_searches_legacy_four_column_fts_without_error_issue518);
 }

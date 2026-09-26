@@ -3425,9 +3425,44 @@ TEST(cli_build_args_json_array_flag_accepts_json_literal) {
     PASS();
 }
 
+/* A JSON-array literal must match the schema's items.type. A number in a
+ * string array (`--target-projects '[1]'`) used to pass through and crash the
+ * cross-repo worker; it is now a flag error. An object array (ingest_traces's
+ * `traces`) still carries its objects. */
+TEST(cli_build_args_json_array_flag_checks_item_type) {
+    char *err = NULL;
+    char a0[] = "--function-name", a1[] = "f", a2[] = "--edge-types", a3[] = "[\"CALLS\",1]";
+    char *argv[] = {a0, a1, a2, a3};
+    char *json = cbm_cli_build_args_json("trace_path", 4, argv, &err);
+    ASSERT_NULL(json);
+    ASSERT_NOT_NULL(err);
+    ASSERT_NOT_NULL(strstr(err, "--edge_types"));
+    ASSERT_NOT_NULL(strstr(err, "element 1 must be of type string"));
+    free(err);
+    err = NULL;
+
+    char b0[] = "--traces", b1[] = "[{\"caller\":\"a\",\"callee\":\"b\",\"count\":2}]";
+    char *argv2[] = {b0, b1};
+    json = cbm_cli_build_args_json("ingest_traces", 2, argv2, &err);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NULL(err);
+    ASSERT_NOT_NULL(strstr(json, "\"traces\":[{\"caller\":\"a\""));
+    free(json);
+
+    char c1[] = "[\"not-an-object\"]";
+    char *argv3[] = {b0, c1};
+    json = cbm_cli_build_args_json("ingest_traces", 2, argv3, &err);
+    ASSERT_NULL(json);
+    ASSERT_NOT_NULL(err);
+    ASSERT_NOT_NULL(strstr(err, "element 0 must be of type object"));
+    free(err);
+    PASS();
+}
+
 SUITE(cli) {
     RUN_TEST(cli_remove_indexes_respects_lease);
     RUN_TEST(cli_build_args_json_array_flag_accepts_json_literal);
+    RUN_TEST(cli_build_args_json_array_flag_checks_item_type);
 
     /* Version (2 tests — selfupdate_test.go) */
     RUN_TEST(cli_compare_versions);

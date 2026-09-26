@@ -4786,10 +4786,41 @@ static const char *cli_schema_type(yyjson_val *props, const char *key) {
     return (t && yyjson_is_str(t)) ? yyjson_get_str(t) : NULL;
 }
 
+/* The declared `items.type` of an array property, or NULL. */
+static const char *cli_schema_items_type(yyjson_val *props, const char *key) {
+    if (!props || !yyjson_is_obj(props)) {
+        return NULL;
+    }
+    yyjson_val *p = yyjson_obj_get(props, key);
+    yyjson_val *items = (p && yyjson_is_obj(p)) ? yyjson_obj_get(p, "items") : NULL;
+    yyjson_val *t = (items && yyjson_is_obj(items)) ? yyjson_obj_get(items, "type") : NULL;
+    return (t && yyjson_is_str(t)) ? yyjson_get_str(t) : NULL;
+}
+
+/* True if a JSON-array literal element matches the schema's items.type.
+ * Only the types the tool schemas declare are checked; an undeclared or
+ * unknown items.type accepts anything, and the tool handler validates. */
+static bool cli_elem_matches_items_type(yyjson_val *elem, const char *items_type) {
+    if (!items_type) {
+        return true;
+    }
+    if (strcmp(items_type, "string") == 0) {
+        return yyjson_is_str(elem);
+    }
+    if (strcmp(items_type, "object") == 0) {
+        return yyjson_is_obj(elem);
+    }
+    return true;
+}
+
 /* Append a typed value to the output object under `key`. For array-typed
- * properties, repeated flags accumulate into a single JSON array. */
-static void cli_add_typed(yyjson_mut_doc *out, yyjson_mut_val *obj, const char *key,
-                          const char *type, const char *value, bool have_value) {
+ * properties, repeated flags accumulate into a single JSON array. Returns
+ * false (with *err_out set) when a JSON-array literal holds an element of
+ * the wrong type — `--target-projects '[1]'` used to reach the cross-repo
+ * matcher as a NULL string and crash the worker. */
+static bool cli_add_typed(yyjson_mut_doc *out, yyjson_mut_val *obj, const char *key,
+                          const char *type, const char *items_type, const char *value,
+                          bool have_value, char **err_out) {
     if (type && strcmp(type, "array") == 0) {
         yyjson_mut_val *arr = yyjson_mut_obj_get(obj, key);
         if (!arr || !yyjson_mut_is_arr(arr)) {
@@ -4809,6 +4840,16 @@ static void cli_add_typed(yyjson_mut_doc *out, yyjson_mut_val *obj, const char *
                 size_t max;
                 yyjson_val *elem;
                 yyjson_arr_foreach(lit_root, idx, max, elem) {
+                    if (!cli_elem_matches_items_type(elem, items_type)) {
+                        if (err_out) {
+                            char msg[CLI_BUF_256];
+                            snprintf(msg, sizeof(msg), "flag --%s: element %zu must be of type %s",
+                                     key, idx, items_type);
+                            *err_out = cli_heap_msgf("%s", msg);
+                        }
+                        yyjson_doc_free(lit);
+                        return false;
+                    }
                     if (yyjson_is_str(elem)) {
                         yyjson_mut_arr_add_strcpy(out, arr, yyjson_get_str(elem));
                     } else {
@@ -4816,14 +4857,14 @@ static void cli_add_typed(yyjson_mut_doc *out, yyjson_mut_val *obj, const char *
                     }
                 }
                 yyjson_doc_free(lit);
-                return;
+                return true;
             }
             if (lit) {
                 yyjson_doc_free(lit);
             }
         }
         yyjson_mut_arr_add_strcpy(out, arr, have_value ? value : "");
-        return;
+        return true;
     }
 
     yyjson_mut_val *vv;
@@ -4848,6 +4889,7 @@ static void cli_add_typed(yyjson_mut_doc *out, yyjson_mut_val *obj, const char *
         vv = yyjson_mut_strcpy(out, have_value ? value : "");
     }
     yyjson_mut_obj_add(obj, yyjson_mut_strcpy(out, key), vv);
+    return true;
 }
 
 char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char **err_out) {
@@ -4930,7 +4972,11 @@ char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char
             break;
         }
 
-        cli_add_typed(out, obj, key, type, value, have_value);
+        if (!cli_add_typed(out, obj, key, type, cli_schema_items_type(props, key), value,
+                           have_value, err_out)) {
+            ok = false;
+            break;
+        }
     }
 
     char *result = NULL;

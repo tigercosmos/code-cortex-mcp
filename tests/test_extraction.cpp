@@ -6519,6 +6519,34 @@ TEST(extract_coverage_gap_of_only_comments_is_not_a_miss) {
     PASS();
 }
 
+/* A line that starts with `*` is only a comment continuation when it looks like
+ * one. A dereference statement (`*oops = ...`) inside an error gap is code the
+ * report must name; the old check treated every leading `*` as a comment line,
+ * so the gap below was reported as nothing at all. */
+TEST(extract_coverage_gap_with_leading_star_statement_is_a_miss) {
+    CBMFileResult *r = extract("int alpha(void) {\n"       /* 1 */
+                               "    return 1;\n"           /* 2 */
+                               "}\n"                       /* 3 */
+                               "/*\n"                      /* 4 */
+                               " * a block comment\n"      /* 5 */
+                               " */\n"                     /* 6 */
+                               "*oops = ( ( ;\n"           /* 7 */
+                               "int beta(void) {\n"        /* 8 */
+                               "    return 2;\n"           /* 9 */
+                               "}\n",                      /* 10 */
+                               CBM_LANG_C, "t", "star.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(find_def(r, "alpha"));
+    ASSERT_NOT_NULL(find_def(r, "beta"));
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 7u));
+    ASSERT_FALSE(cov_range_covers_line(r->error_ranges, 1u));
+    ASSERT_FALSE(cov_range_covers_line(r->error_ranges, 9u));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* #949 follow-up: an included header shifts physical lines in simplecpp's
  * expanded output. The #1050 name-on-same-line guard skipped this recoverable
  * definition; explicit source ownership mapping must restore its original
@@ -8599,6 +8627,7 @@ SUITE(extraction) {
     RUN_TEST(extract_coverage_range_never_ends_past_the_last_line_issue963);
     RUN_TEST(extract_coverage_range_never_covers_an_extracted_definition);
     RUN_TEST(extract_coverage_gap_of_only_comments_is_not_a_miss);
+    RUN_TEST(extract_coverage_gap_with_leading_star_statement_is_a_miss);
     RUN_TEST(extract_go_binary_concat_url_issue1249);
     RUN_TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249);
     RUN_TEST(extract_ts_url_builder_issue1009);

@@ -1430,7 +1430,16 @@ static bool cbm_line_is_inert(const char *src, const uint32_t *offs, uint32_t nl
     if (p[0] == '/' && p + 1 < end && (p[1] == '/' || p[1] == '*')) {
         return true;
     }
-    return p[0] == '*' || p[0] == '#';
+    if (p[0] == '*') {
+        /* A block-comment continuation: a star followed by a space, a tab,
+         * a slash (the closing line) or nothing. A statement that starts
+         * with a dereference (`*p = 5;`) is code a gap must report. Block-
+         * comment state is not tracked, because a string literal can hold
+         * a comment opener; the shape of the line decides. */
+        char next = (p + 1 < end) ? p[1] : '\n';
+        return next == ' ' || next == '\t' || next == '\r' || next == '\n' || next == '/';
+    }
+    return p[0] == '#';
 }
 
 static void cbm_regions_emit_gap(cbm_error_regions_t *out, uint32_t gs, uint32_t ge,
