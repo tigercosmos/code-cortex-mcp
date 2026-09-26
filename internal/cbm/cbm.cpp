@@ -1495,18 +1495,18 @@ static uint32_t *cbm_line_offsets(const char *src, int src_len, uint32_t *out_li
     return offs;
 }
 
-/* A 1-based line that holds nothing a reader would call missed code: blank,
- * a comment line, or a preprocessor directive (the import pass owns #include;
- * #if/#endif carry no construct of their own). Without line offsets (OOM) every
- * line counts as inert, which reports less, never a false gap. */
-/* How a language comments, for cbm_line_comment_state. */
+/* How a language comments and quotes, for the residual-coverage line checks. */
 typedef struct {
-    bool block;   /* C-style block comments exist */
-    bool hash;    /* `#` starts a line comment */
-    bool raw_cpp; /* C++ raw strings R"delim( ... )delim" */
+    bool block;            /* C-style block comments exist */
+    bool hash;             /* `#` starts a line comment */
+    bool raw_cpp;          /* C++ raw strings R"delim( ... )delim" */
+    bool hash_directive;   /* `#` starts a preprocessor directive */
+    bool multiline_quotes; /* a "..." literal may span lines */
+    bool verbatim_at;      /* C# verbatim strings @"..." (may span lines) */
 } cbm_comment_syntax_t;
 
 static cbm_comment_syntax_t cbm_comment_syntax(CBMLanguage lang) {
+    cbm_comment_syntax_t syn = {true, false, false, false, false, false};
     switch (lang) {
     /* `#` comments and no block comments: tracking C-style openers there
      * would let a docstring or string holding one hide real code. */
@@ -1547,25 +1547,48 @@ static cbm_comment_syntax_t cbm_comment_syntax(CBMLanguage lang) {
     case CBM_LANG_K8S:
     case CBM_LANG_KUSTOMIZE:
     case CBM_LANG_MOJO:
-        return {false, true, false};
+        syn.block = false;
+        syn.hash = true;
+        break;
     case CBM_LANG_PHP:
     case CBM_LANG_HCL:
     case CBM_LANG_NIX:
-        return {true, true, false};
+        syn.hash = true;
+        syn.multiline_quotes = true;
+        break;
+    case CBM_LANG_RUST:
+        syn.multiline_quotes = true;
+        break;
     case CBM_LANG_CPP:
     case CBM_LANG_CUDA:
-        return {true, false, true};
+        syn.raw_cpp = true;
+        syn.hash_directive = true;
+        break;
+    case CBM_LANG_C:
+    case CBM_LANG_OBJC:
+    case CBM_LANG_HLSL:
+    case CBM_LANG_GLSL:
+    case CBM_LANG_ISPC:
+    case CBM_LANG_SLANG:
+        syn.hash_directive = true;
+        break;
+    case CBM_LANG_CSHARP:
+        syn.hash_directive = true;
+        syn.verbatim_at = true;
+        break;
     default:
-        return {true, false, false};
+        break;
     }
+    return syn;
 }
 
 /* Per line: 1 when the line STARTS inside a block comment. One lexer pass
  * that skips literals and line comments, so a comment opener inside a
  * string does not open a comment. Literals that may span lines keep their
- * state across the newline: backslash-continued strings, C++ raw strings,
- * Rust raw strings (r#"..."#), backtick strings (Go, JS/TS templates) and
- * triple-quoted strings (Kotlin, Swift, Java, Scala, Dart). A plain quote
+ * state across the newline: backslash-continued strings, "..." where the
+ * language allows it (Rust, PHP, Nix, HCL), C++ raw strings, C# verbatim
+ * strings, Rust raw strings (r#"..."#), backtick strings (Go, JS/TS
+ * templates) and triple-quoted strings (Kotlin, Swift, Java, Scala, Dart). A plain quote
  * still ends at the end of its line, so an unclosed `'a` lifetime cannot
  * swallow the file. In a language without block comments every line starts
  * outside one. NULL on OOM. */
@@ -1585,7 +1608,11 @@ static uint8_t *cbm_line_comment_state(const char *src, int src_len, uint32_t nl
         char c = src[i];
         char next = i + 1 < src_len ? src[i + 1] : '\0';
         if (c == '\n') {
-            if (state == LX_STRING || state == LX_LINE) {
+            /* A plain quote ends at the end of its line unless the language
+             * lets "..." span lines; `'` always does (a Rust lifetime `'a`
+             * has no closing quote). */
+            bool string_spans = state == LX_STRING && syn.multiline_quotes && quote == '"';
+            if ((state == LX_STRING && !string_spans) || state == LX_LINE) {
                 state = LX_CODE;
             }
             line++;
@@ -1633,6 +1660,13 @@ static uint8_t *cbm_line_comment_state(const char *src, int src_len, uint32_t nl
                     state = LX_RAW;
                     i = j;
                 }
+            } else if (syn.verbatim_at && c == '@' && next == '"') {
+                /* C# @"..." ends at the first quote (a doubled "" closes
+                 * and reopens, which lands in the same place). */
+                raw_close[0] = '"';
+                raw_close_len = 1;
+                state = LX_RAW;
+                i++;
             } else if (c == '`') {
                 state = LX_BACKTICK;
             } else if (c == '"' && next == '"' && i + 2 < src_len && src[i + 2] == '"') {
@@ -1691,22 +1725,31 @@ static uint8_t *cbm_line_comment_state(const char *src, int src_len, uint32_t nl
     return starts_in_comment;
 }
 
+/* What the residual-coverage line checks read about one file. */
+typedef struct {
+    const char *src;
+    const uint32_t *offs;      /* line starts; NULL on OOM */
+    const uint8_t *in_comment; /* per line; NULL on OOM */
+    uint32_t nlines;
+    bool hash_inert; /* a `#` line is a comment or a directive */
+} cbm_line_ctx_t;
+
 /* A 1-based line that holds nothing a reader would call missed code: blank,
- * inside a block comment, a comment line, or a preprocessor directive (the
+ * inside a block comment, a comment line, or — where `#` starts a comment or
+ * a preprocessor directive, not a CSS `#id` selector — a `#` line (the
  * import pass owns #include; #if/#endif carry no construct of their own).
  * Block-comment state comes from cbm_line_comment_state, so a statement that
  * starts with a dereference (`*p = 5;`, `* p = 5;`) is code, and a ` * text`
  * continuation line is not. Without line offsets (OOM) every line counts as
  * inert, which reports less, never a false gap; without the comment state
  * (OOM) a leading `*` is read as a continuation, the same direction. */
-static bool cbm_line_is_inert(const char *src, const uint32_t *offs, const uint8_t *in_comment,
-                              uint32_t nlines, uint32_t line) {
-    if (!src || !offs || line == 0 || line > nlines) {
+static bool cbm_line_is_inert(const cbm_line_ctx_t *lc, uint32_t line) {
+    if (!lc->src || !lc->offs || line == 0 || line > lc->nlines) {
         return true;
     }
-    const char *p = src + offs[line - 1];
-    const char *end = src + offs[line];
-    if (in_comment && in_comment[line]) {
+    const char *p = lc->src + lc->offs[line - 1];
+    const char *end = lc->src + lc->offs[line];
+    if (lc->in_comment && lc->in_comment[line]) {
         const char *close = NULL;
         for (const char *q = p; q + 1 < end; q++) {
             if (q[0] == '*' && q[1] == '/') {
@@ -1740,18 +1783,17 @@ static bool cbm_line_is_inert(const char *src, const uint32_t *offs, const uint8
         }
         p = q + 2;
     }
-    if (p[0] == '*' && !in_comment) {
+    if (p[0] == '*' && !lc->in_comment) {
         return true;
     }
-    return p[0] == '#';
+    return p[0] == '#' && lc->hash_inert;
 }
 
 static void cbm_regions_emit_gap(cbm_error_regions_t *out, uint32_t gs, uint32_t ge,
-                                 const char *src, const uint32_t *offs, const uint8_t *in_comment,
-                                 uint32_t nlines) {
+                                 const cbm_line_ctx_t *lc) {
     bool live = false;
     for (uint32_t l = gs; l <= ge && !live; l++) {
-        live = !cbm_line_is_inert(src, offs, in_comment, nlines, l);
+        live = !cbm_line_is_inert(lc, l);
     }
     if (!live) {
         return;
@@ -1767,9 +1809,7 @@ static void cbm_regions_emit_gap(cbm_error_regions_t *out, uint32_t gs, uint32_t
 
 /* Replace [rs, re] by the sub-ranges no in-region definition covers. */
 static void cbm_region_uncovered_gaps(uint32_t rs, uint32_t re, const CBMDefArray *defs,
-                                      const char *src, const uint32_t *offs,
-                                      const uint8_t *in_comment, uint32_t nlines,
-                                      cbm_error_regions_t *out) {
+                                      const cbm_line_ctx_t *lc, cbm_error_regions_t *out) {
     enum { MAX_COVER_DEFS = 1024 };
     uint32_t starts[MAX_COVER_DEFS];
     uint32_t ends[MAX_COVER_DEFS];
@@ -1796,7 +1836,7 @@ static void cbm_region_uncovered_gaps(uint32_t rs, uint32_t re, const CBMDefArra
         n++;
     }
     if (n == 0) {
-        cbm_regions_emit_gap(out, rs, re, src, offs, in_comment, nlines);
+        cbm_regions_emit_gap(out, rs, re, lc);
         return;
     }
     /* Insertion-sort by start, then sweep and emit the gaps in [rs, re]. */
@@ -1815,14 +1855,14 @@ static void cbm_region_uncovered_gaps(uint32_t rs, uint32_t re, const CBMDefArra
     uint32_t cursor = rs;
     for (int i = 0; i < n; i++) {
         if (starts[i] > cursor) {
-            cbm_regions_emit_gap(out, cursor, starts[i] - 1, src, offs, in_comment, nlines);
+            cbm_regions_emit_gap(out, cursor, starts[i] - 1, lc);
         }
         if (ends[i] + 1 > cursor) {
             cursor = ends[i] + 1;
         }
     }
     if (cursor <= re) {
-        cbm_regions_emit_gap(out, cursor, re, src, offs, in_comment, nlines);
+        cbm_regions_emit_gap(out, cursor, re, lc);
     }
 }
 
@@ -2076,12 +2116,12 @@ static void cbm_subtract_recovered_regions(cbm_error_regions_t *regs, const CBMD
     }
     uint32_t nlines = 0;
     uint32_t *offs = cbm_line_offsets(src, src_len, &nlines);
-    uint8_t *in_comment =
-        offs ? cbm_line_comment_state(src, src_len, nlines, cbm_comment_syntax(language)) : NULL;
+    cbm_comment_syntax_t syn = cbm_comment_syntax(language);
+    uint8_t *in_comment = offs ? cbm_line_comment_state(src, src_len, nlines, syn) : NULL;
+    cbm_line_ctx_t lc = {src, offs, in_comment, nlines, syn.hash || syn.hash_directive};
     cbm_error_regions_t out = {{0}, {0}, 0, regs->dropped};
     for (int i = 0; i < regs->count; i++) {
-        cbm_region_uncovered_gaps(regs->starts[i], regs->ends[i], defs, src, offs, in_comment,
-                                  nlines, &out);
+        cbm_region_uncovered_gaps(regs->starts[i], regs->ends[i], defs, &lc, &out);
     }
     free(in_comment);
     free(offs);

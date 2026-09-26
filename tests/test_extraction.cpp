@@ -6747,6 +6747,43 @@ TEST(extract_coverage_comment_state_skips_multiline_literals) {
     ASSERT_NOT_NULL(r->error_ranges);
     ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 7u));
     cbm_free_result(r);
+
+    /* Rust "..." literals may span lines. */
+    r = extract("fn alpha() -> i32 {\n"     /* 1 */
+                "    1\n"                   /* 2 */
+                "}\n"                       /* 3 */
+                "const S: &str = \"one\n"  /* 4 */
+                "/* not a comment\n"        /* 5 */
+                "\";\n"                     /* 6 */
+                "static X: i32 = ;\n"       /* 7 */
+                "fn beta() -> i32 {\n"      /* 8 */
+                "    2\n"                   /* 9 */
+                "}\n",                      /* 10 */
+                CBM_LANG_RUST, "t", "ml.rs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 7u));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* `#` is only an inert line where it opens a comment or a preprocessor
+ * directive. A malformed CSS rule whose selector is an `#id` used to be
+ * treated as a comment line, so `#app {` reported no gap while `.app {`
+ * did. */
+TEST(extract_coverage_css_id_selector_is_code) {
+    CBMFileResult *cls = extract(".app {\n", CBM_LANG_CSS, "t", "a.css");
+    CBMFileResult *id = extract("#app {\n", CBM_LANG_CSS, "t", "b.css");
+    ASSERT_NOT_NULL(cls);
+    ASSERT_NOT_NULL(id);
+    ASSERT_TRUE(cls->parse_incomplete);
+    ASSERT_TRUE(id->parse_incomplete);
+    ASSERT_NOT_NULL(cls->error_ranges);
+    ASSERT_NOT_NULL(id->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(id->error_ranges, 1u));
+    cbm_free_result(cls);
+    cbm_free_result(id);
     PASS();
 }
 
@@ -8788,6 +8825,7 @@ SUITE(extraction) {
     RUN_TEST(defs_push_folds_multiline_operator_names);
     RUN_TEST(extract_coverage_comment_state_skips_multiline_literals);
     RUN_TEST(extract_pp_depth_skip_reports_expanded_tree_size);
+    RUN_TEST(extract_coverage_css_id_selector_is_code);
     RUN_TEST(cpp_forward_declarations_are_not_class_definitions);
     RUN_TEST(call_args_skip_comments_between_arguments);
     RUN_TEST(python_receiver_self_attribute_flag);
