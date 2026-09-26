@@ -49,8 +49,11 @@ typedef struct {
     uint64_t first_missing_ms; /* cbm_now_ms() of the streak's first miss (0 = no streak) */
     int file_count;            /* approximate, for interval calc */
     int interval_ms;           /* adaptive poll interval */
-    int index_failure_count;   /* consecutive failed re-index attempts */
-    int64_t next_poll_ns;      /* next poll time (monotonic ns) */
+    /* Written by the poller outside projects_lock and by touch /
+     * mark_index_pending / the failure-count accessor under it, so both are
+     * atomics: a plain int/int64 there is a data race, not a stale read. */
+    atomic_int index_failure_count; /* consecutive failed re-index attempts */
+    cbm_atomic_int64 next_poll_ns;  /* next poll time (monotonic ns) */
 } project_state_t;
 
 /* ── Watcher struct ─────────────────────────────────────────────── */
@@ -290,6 +293,8 @@ static project_state_t *state_new(const char *name, const char *root_path) {
     s->root_path = strdup(root_path);
     s->interval_ms = POLL_BASE_MS;
     atomic_init(&s->index_pending, false);
+    atomic_init(&s->index_failure_count, 0);
+    atomic_init(&s->next_poll_ns, (int64_t)0);
     return s;
 }
 
@@ -519,7 +524,7 @@ void cbm_watcher_mark_index_pending(cbm_watcher_t *w, const char *project_name) 
     project_state_t *s = (project_state_t *)cbm_ht_get(w->projects, project_name);
     if (s) {
         atomic_store(&s->index_pending, true);
-        s->next_poll_ns = 0;
+        atomic_store(&s->next_poll_ns, (int64_t)0);
     }
     cbm_mutex_unlock(&w->projects_lock);
 }
@@ -532,8 +537,8 @@ void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name) {
     project_state_t *s = (project_state_t *)cbm_ht_get(w->projects, project_name);
     if (s) {
         /* A new explicit change may have fixed the prior indexing failure. */
-        s->index_failure_count = 0;
-        s->next_poll_ns = 0;
+        atomic_store(&s->index_failure_count, 0);
+        atomic_store(&s->next_poll_ns, (int64_t)0);
     }
     cbm_mutex_unlock(&w->projects_lock);
 }
@@ -544,7 +549,7 @@ int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name) 
     }
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *s = (project_state_t *)cbm_ht_get(w->projects, project_name);
-    int failures = s ? s->index_failure_count : -1;
+    int failures = s ? atomic_load(&s->index_failure_count) : -1;
     cbm_mutex_unlock(&w->projects_lock);
     return failures;
 }
@@ -585,7 +590,7 @@ static void init_baseline(project_state_t *s) {
         cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "none");
     }
 
-    s->next_poll_ns = now_ns() + ((int64_t)s->interval_ms * US_PER_MS);
+    atomic_store(&s->next_poll_ns, now_ns() + ((int64_t)s->interval_ms * US_PER_MS));
 }
 
 /* Check if a project has changes. Returns true if reindex needed. */
@@ -707,7 +712,7 @@ static void poll_project(const char *key, void *val, void *ud) {
         if (!atomic_load(&s->index_pending)) {
             return;
         }
-        s->next_poll_ns = 0;
+        atomic_store(&s->next_poll_ns, (int64_t)0);
     }
 
     /* Explicit pending initial indexing also applies to non-git projects. */
@@ -716,7 +721,7 @@ static void poll_project(const char *key, void *val, void *ud) {
     }
 
     /* Respect adaptive interval */
-    if (ctx->now < s->next_poll_ns) {
+    if (ctx->now < atomic_load(&s->next_poll_ns)) {
         return;
     }
 
@@ -725,7 +730,7 @@ static void poll_project(const char *key, void *val, void *ud) {
     bool changed = s->is_git && check_changes(s, &dirty);
     changed = changed || atomic_load(&s->index_pending);
     if (!changed) {
-        s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
+        atomic_store(&s->next_poll_ns, ctx->now + ((int64_t)s->interval_ms * US_PER_MS));
         return;
     }
 
@@ -740,7 +745,7 @@ static void poll_project(const char *key, void *val, void *ud) {
             atomic_store(&s->index_pending, true);
         }
         if (rc == 0) {
-            s->index_failure_count = 0;
+            atomic_store(&s->index_failure_count, 0);
             s->needs_clean_reindex = dirty;
             ctx->reindexed++;
             /* Update HEAD after successful reindex */
@@ -753,32 +758,33 @@ static void poll_project(const char *key, void *val, void *ud) {
                          "index_busy");
             // Preserve pending dirty/HEAD state and the failure counter. This
             // is mutual exclusion, not proof that this snapshot was indexed.
-            s->next_poll_ns = now_ns() + ((int64_t)s->interval_ms * US_PER_MS);
+            atomic_store(&s->next_poll_ns, now_ns() + ((int64_t)s->interval_ms * US_PER_MS));
             return;
         } else {
-            if (s->index_failure_count < INT_MAX) {
-                s->index_failure_count++;
+            int failures = atomic_load(&s->index_failure_count);
+            if (failures < INT_MAX) {
+                failures++;
+                atomic_store(&s->index_failure_count, failures);
             }
             /* itoa_buf returns one shared per-thread buffer, so two of them
              * in one call would print the same value twice. */
             char rc_text[CBM_SZ_32];
             char streak_text[CBM_SZ_32];
             snprintf(rc_text, sizeof(rc_text), "%d", rc);
-            snprintf(streak_text, sizeof(streak_text), "%d", s->index_failure_count);
+            snprintf(streak_text, sizeof(streak_text), "%d", failures);
             cbm_log_warn("watcher.index.err", "project", s->project_name, "rc", rc_text,
                          "consecutive", streak_text);
-            if (s->index_failure_count == INDEX_FAIL_SUSTAINED) {
+            if (failures == INDEX_FAIL_SUSTAINED) {
                 cbm_log_warn("watcher.index.sustained_failure", "project", s->project_name,
                              "consecutive", streak_text);
             }
-            int64_t backoff_ms =
-                cbm_watcher_index_backoff_ms(s->interval_ms, s->index_failure_count);
-            s->next_poll_ns = now_ns() + (backoff_ms * US_PER_MS);
+            int64_t backoff_ms = cbm_watcher_index_backoff_ms(s->interval_ms, failures);
+            atomic_store(&s->next_poll_ns, now_ns() + (backoff_ms * US_PER_MS));
             return;
         }
     }
 
-    s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
+    atomic_store(&s->next_poll_ns, ctx->now + ((int64_t)s->interval_ms * US_PER_MS));
 }
 
 /* Callback to snapshot project state pointers into an array. */

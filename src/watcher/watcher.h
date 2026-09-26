@@ -81,12 +81,10 @@ int cbm_watcher_watch_count(cbm_watcher_t *w);
  * hard error, reset on success or cbm_watcher_touch) can be asserted directly
  * rather than inferred from the poll deadline it feeds.
  *
- * Memory visibility: this reads under projects_lock, but poll_project WRITES
- * the counter outside that lock, against a state snapshot taken while the
- * lock was held — the discipline the other poll-mutated fields (last_head,
- * interval_ms, next_poll_ns, missing_root_count) follow. A read concurrent
- * with a live poll may see a stale value; it is a diagnostic and test
- * accessor, not a synchronisation point. */
+ * Memory visibility: poll_project writes the counter outside projects_lock,
+ * so the counter is an atomic and this read is race-free. A read concurrent
+ * with a live poll may still see the value from just before that poll; it is
+ * a diagnostic and test accessor, not a synchronisation point. */
 int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name);
 
 /* Return the adaptive poll interval (ms) for a given file count. */
