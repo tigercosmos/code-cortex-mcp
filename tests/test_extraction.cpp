@@ -3198,6 +3198,88 @@ TEST(commonlisp_defmacro) {
     PASS();
 }
 
+/* A body-less C-family specifier declares a type without defining it. Only
+ * the definition becomes a Class: forward declarations (`class Logger;`),
+ * elaborated types in declarations (`struct stat st;`) and opaque enums
+ * (`enum class Mode : int;`) used to add same-named Class candidates that
+ * INHERITS/CALLS resolution could pick over the real definition. */
+TEST(cpp_forward_declarations_are_not_class_definitions) {
+    CBMFileResult *r = extract("class Logger;\n"
+                               "struct stat;\n"
+                               "enum class Mode : int;\n"
+                               "class Logger {\n"
+                               " public:\n"
+                               "  virtual ~Logger();\n"
+                               "};\n"
+                               "enum class Mode : int { kA, kB };\n"
+                               "int size_of(struct stat *st);\n"
+                               "class FileLogger : public Logger {};\n",
+                               CBM_LANG_CPP, "t", "fwd.h");
+    ASSERT_NOT_NULL(r);
+    int loggers = 0;
+    int modes = 0;
+    int stats = 0;
+    int file_loggers = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (!d->name || !d->label) {
+            continue;
+        }
+        if (strcmp(d->name, "Logger") == 0 && strcmp(d->label, "Class") == 0) {
+            loggers++;
+            ASSERT_EQ(d->start_line, 4u);
+        }
+        if (strcmp(d->name, "Mode") == 0 && strcmp(d->label, "Enum") == 0) {
+            modes++;
+            ASSERT_EQ(d->start_line, 8u);
+        }
+        if (strcmp(d->name, "stat") == 0) {
+            stats++;
+        }
+        if (strcmp(d->name, "FileLogger") == 0 && strcmp(d->label, "Class") == 0) {
+            file_loggers++;
+        }
+    }
+    ASSERT_EQ(loggers, 1);
+    ASSERT_EQ(modes, 1);
+    ASSERT_EQ(stats, 0);
+    ASSERT_EQ(file_loggers, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A numeric name is a valid JS/TS member key — `class C { 1() {} }`, an
+ * object-literal method `{ 3() {} }` — and must survive the literal-token
+ * filter, which targets destructuring artifacts (a Variable named `1`). */
+TEST(defs_push_keeps_numeric_js_member_names) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMDefArray defs = {};
+    CBMDefinition method = {};
+    method.name = "1";
+    method.qualified_name = "proj.src.a.C.1";
+    method.label = "Method";
+    method.file_path = "src/a.ts";
+    cbm_defs_push(&defs, &a, method);
+    CBMDefinition fn = {};
+    fn.name = "3";
+    fn.qualified_name = "proj.src.a.3";
+    fn.label = "Function";
+    fn.file_path = "src/a.js";
+    cbm_defs_push(&defs, &a, fn);
+    CBMDefinition var = {};
+    var.name = "1";
+    var.qualified_name = "proj.src.a.1";
+    var.label = "Variable";
+    var.file_path = "src/a.js";
+    cbm_defs_push(&defs, &a, var);
+    ASSERT_EQ(defs.count, 2);
+    ASSERT_STR_EQ(defs.items[0].label, "Method");
+    ASSERT_STR_EQ(defs.items[1].label, "Function");
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
 /* Upstream probe: config extractors handed multi-line node text over as a
  * name (8,301 elasticsearch YAML Fields, 91 kernel Makefile/.conf nodes with a
  * line break inside), and JS/TS baselines named functions `{}` and variables
@@ -8537,6 +8619,8 @@ SUITE(extraction) {
     RUN_TEST(commonlisp_multiple_functions);
     RUN_TEST(commonlisp_defmacro);
     RUN_TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names);
+    RUN_TEST(defs_push_keeps_numeric_js_member_names);
+    RUN_TEST(cpp_forward_declarations_are_not_class_definitions);
     RUN_TEST(call_args_skip_comments_between_arguments);
     RUN_TEST(python_receiver_self_attribute_flag);
     RUN_TEST(makefile_rule_as_function);

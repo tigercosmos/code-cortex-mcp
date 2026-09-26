@@ -4217,6 +4217,22 @@ static bool extract_sql_ddl_class_def(CBMExtractCtx *ctx, TSNode node, const cha
     return true;
 }
 
+/* A C-family class/struct/union/enum specifier without a body declares a
+ * type, it does not define one: a forward declaration (`class Logger;`), an
+ * elaborated type in a declaration (`struct stat st;`), an opaque enum
+ * (`enum class E : int;`). Emitting a Class for each made every forward
+ * declaration a same-named candidate for INHERITS/CALLS resolution — rocksdb
+ * declares `class Logger;` in ~30 headers, and the tie-break picked one of
+ * those over the real definition in include/rocksdb/env.h. These node kinds
+ * exist only in the C-family grammars. */
+static bool c_family_specifier_is_declaration_only(TSNode node, const char *kind) {
+    if (strcmp(kind, "class_specifier") != 0 && strcmp(kind, "struct_specifier") != 0 &&
+        strcmp(kind, "union_specifier") != 0 && strcmp(kind, "enum_specifier") != 0) {
+        return false;
+    }
+    return ts_node_is_null(ts_node_child_by_field_name(node, TS_FIELD("body")));
+}
+
 static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
     CBMArena *a = ctx->arena;
     const char *kind = ts_node_type(node);
@@ -4225,6 +4241,9 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
         return;
     }
     if (extract_sql_ddl_class_def(ctx, node, kind)) {
+        return;
+    }
+    if (c_family_specifier_is_declaration_only(node, kind)) {
         return;
     }
 

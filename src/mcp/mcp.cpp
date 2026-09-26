@@ -2847,19 +2847,28 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
  * column an instance actually landed in, so the fifth is never consulted. */
 #define BM25_WEIGHTS "bm25(nodes_fts, 1.0, 1.0, 1.0, 1.0, 0.3)"
 
-/* The FTS window keeps its early exit, so a filter applied after it only sees
- * the top BM25_INNER_LIMIT (?5) hits: with thousands of partial matches, the
- * exact-name definition (or every row of the requested label) could fall
- * outside it. exact_extra adds the rows NAMED exactly the query (?8) — an
- * idx_nodes_name lookup, not an FTS scan — under the same project (?2), path
- * (?6) and label (?7) filters, scored as good as the best FTS hit so the
- * exact-name tier decides. Shared by the ranked and the count query. */
+/* Candidate rows for BM25 search, shared by the ranked and the count query.
+ * fts_top is the top BM25_INNER_LIMIT (?5) FTS hits. A filter applied after
+ * that window only sees what survived it, so with thousands of partial
+ * matches the requested label (?7), or the definition named exactly like the
+ * query (?8), could be missing entirely (`query=get label=Class` on opencv:
+ * 16 classes in the window, 51 in the index). Two more sets close that:
+ *   exact_extra: rows named exactly the query — an idx_nodes_name lookup,
+ *     scored as good as the best FTS hit so the exact-name tier decides;
+ *   label_extra: with a label filter, the best FTS hits of that label. The
+ *     FTS scan drives (CROSS JOIN) and bm25() is only computed for rows that
+ *     pass the label, so it costs no more than fts_top's own full scoring
+ *     (1M matches: 0.11 s vs 1.35 s). It is skipped without a label, and when
+ *     fts_top already holds a full window of that label (its extra rows would
+ *     all rank below them).
+ * All three apply the same project (?2), path (?6) and label filters as the
+ * outer query and exclude rows already collected. */
 #define BM25_CANDIDATE_CTES                                                       \
     "WITH fts_top AS MATERIALIZED ("                                              \
     "    SELECT rowid, " BM25_WEIGHTS " AS base_rank"                             \
     "    FROM nodes_fts WHERE nodes_fts MATCH ?1"                                 \
     "    ORDER BY base_rank LIMIT ?5), "                                          \
-    "exact_extra AS ("                                                            \
+    "exact_extra AS MATERIALIZED ("                                               \
     "    SELECT x.id AS rowid,"                                                   \
     "           COALESCE((SELECT min(base_rank) FROM fts_top), 0.0) AS base_rank" \
     "    FROM nodes x WHERE x.project = ?2 AND x.name = ?8"                       \
@@ -2867,7 +2876,19 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
     "      AND (?6 IS NULL OR x.file_path LIKE ?6)"                               \
     "      AND (?7 IS NULL OR x.label = ?7)"                                      \
     "      AND x.id NOT IN (SELECT rowid FROM fts_top)"                           \
-    "    LIMIT ?5) "
+    "    LIMIT ?5), "                                                             \
+    "label_extra AS ("                                                            \
+    "    SELECT f.rowid AS rowid, " BM25_WEIGHTS " AS base_rank"                  \
+    "    FROM nodes_fts f CROSS JOIN nodes y ON y.id = f.rowid"                   \
+    "    WHERE ?7 IS NOT NULL"                                                    \
+    "      AND (SELECT count(*) FROM fts_top t JOIN nodes z ON z.id = t.rowid"    \
+    "           WHERE z.label = ?7) < ?5"                                         \
+    "      AND nodes_fts MATCH ?1"                                                \
+    "      AND y.project = ?2 AND y.label = ?7"                                   \
+    "      AND (?6 IS NULL OR y.file_path LIKE ?6)"                               \
+    "      AND f.rowid NOT IN (SELECT rowid FROM fts_top)"                        \
+    "      AND f.rowid NOT IN (SELECT rowid FROM exact_extra)"                    \
+    "    ORDER BY base_rank LIMIT ?5) "
 
 static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
                          const char *file_pattern, const char *label, int limit, int offset) {
@@ -2919,6 +2940,8 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         "    SELECT rowid, base_rank FROM fts_top"
         "    UNION ALL "
         "    SELECT rowid, base_rank FROM exact_extra"
+        "    UNION ALL "
+        "    SELECT rowid, base_rank FROM label_extra"
         ") fts "
         "JOIN nodes n ON n.id = fts.rowid "
         "WHERE n.project = ?2 "
@@ -2964,6 +2987,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
             "SELECT COUNT(*) FROM ("
             "    SELECT fts.rowid FROM ("
             "        SELECT rowid FROM fts_top UNION ALL SELECT rowid FROM exact_extra"
+            "        UNION ALL SELECT rowid FROM label_extra"
             "    ) fts "
             "    JOIN nodes n ON n.id = fts.rowid "
             "    WHERE n.project = ?2 "

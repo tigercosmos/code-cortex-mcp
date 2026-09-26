@@ -356,11 +356,17 @@ static bool cbm_js_family_path(const char *path) {
     return false;
 }
 
-static bool cbm_js_name_is_junk(const char *name) {
+static bool cbm_js_name_is_junk(const char *name, const char *label) {
     if (!name || !name[0]) {
         return false; /* empty names are handled by the callers' own rules */
     }
     unsigned char c = (unsigned char)name[0];
+    /* A numeric name is a valid member key — `class C { 1() {} }`,
+     * `{ 3() {} }` — so it is junk only as a Variable, where it is a
+     * destructuring pattern element (`1`). */
+    if (c >= '0' && c <= '9') {
+        return label && strcmp(label, "Variable") == 0;
+    }
     bool identifier_start = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' ||
                             c == '$' || c == '#' || c >= 0x80;
     /* Member names JS spells without an identifier start are still names:
@@ -376,7 +382,7 @@ static bool cbm_js_name_is_junk(const char *name) {
 void cbm_defs_push(CBMDefArray *arr, CBMArena *a, CBMDefinition def) {
     def.name = cbm_first_line(a, def.name);
     def.qualified_name = cbm_first_line(a, def.qualified_name);
-    if (cbm_js_family_path(def.file_path) && cbm_js_name_is_junk(def.name)) {
+    if (cbm_js_family_path(def.file_path) && cbm_js_name_is_junk(def.name, def.label)) {
         return;
     }
     GROW_ARRAY(arr, a);

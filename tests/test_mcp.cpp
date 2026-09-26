@@ -5448,6 +5448,47 @@ TEST(bm25_exact_name_survives_the_inner_limit) {
     PASS();
 }
 
+/* The label filter must see past the FTS window for PARTIAL matches too:
+ * 2100 Methods matching `needle` fill the 2000-row window, and a Class that
+ * only matches through its path used to vanish — `query=needle label=Class`
+ * answered total 0 while structural search found the class. */
+TEST(bm25_label_filter_survives_the_inner_limit) {
+    const char *proj = "bf-label-inner";
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/bm25-label-inner");
+    ASSERT_EQ(cbm_store_begin(st), CBM_STORE_OK);
+    for (int i = 0; i < 2100; i++) {
+        char name[48];
+        char qn[80];
+        char file[32];
+        snprintf(name, sizeof(name), "needle_%d", i);
+        snprintf(qn, sizeof(qn), "bf.m%d.needle_%d", i, i);
+        snprintf(file, sizeof(file), "m%d.kt", i);
+        cbm_node_t n = prose_node(proj, "Method", name, qn, file, NULL);
+        cbm_store_upsert_node(st, &n);
+    }
+    cbm_node_t cls = prose_node(proj, "Class", "Holder",
+                                "bf.very.deeply.nested.package.path.with.many.segments.Holder",
+                                "very/deeply/nested/package/path/with/many/segments/needle/"
+                                "Holder.kt",
+                                NULL);
+    cbm_store_upsert_node(st, &cls);
+    ASSERT_EQ(cbm_store_commit(st), CBM_STORE_OK);
+    cbm_store_fts_rebuild(st);
+
+    char *inner = bm25_find_search(srv, proj, "needle", "Class");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"search_mode\":\"bm25\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":1"));
+    ASSERT_NOT_NULL(strstr(inner, "many.segments.Holder"));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(bm25_identifier_match_outranks_prose_only_match_issue518) {
     /* Same label boost on both, so the order is decided by column weights. */
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -5745,5 +5786,6 @@ SUITE(mcp) {
     RUN_TEST(bm25_applies_label_filter);
     RUN_TEST(bm25_ranks_exact_name_first);
     RUN_TEST(bm25_exact_name_survives_the_inner_limit);
+    RUN_TEST(bm25_label_filter_survives_the_inner_limit);
     RUN_TEST(bm25_searches_legacy_four_column_fts_without_error_issue518);
 }
