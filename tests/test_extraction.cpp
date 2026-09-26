@@ -3248,6 +3248,43 @@ TEST(cpp_forward_declarations_are_not_class_definitions) {
     PASS();
 }
 
+/* C++ allows a line break inside a conversion-function name. Cut at the
+ * break, `operator\nbool` and `operator\nint` were both `operator` and merged
+ * into one overload set; folded, they keep their names. */
+TEST(defs_push_folds_multiline_operator_names) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMDefArray defs = {};
+    const char *names[][3] = {
+        {"operator\n    bool", "proj.a.Flag.operator\n    bool", "operator bool"},
+        {"operator\nint", "proj.a.Flag.operator\nint", "operator int"},
+        {"operator\n()", "proj.a.Flag.operator\n()", "operator()"},
+    };
+    for (auto &n : names) {
+        CBMDefinition d = {};
+        d.name = n[0];
+        d.qualified_name = n[1];
+        d.label = "Method";
+        d.file_path = "a.h";
+        cbm_defs_push(&defs, &a, d);
+    }
+    ASSERT_EQ(defs.count, 3);
+    ASSERT_STR_EQ(defs.items[0].name, "operator bool");
+    ASSERT_STR_EQ(defs.items[0].qualified_name, "proj.a.Flag.operator bool");
+    ASSERT_STR_EQ(defs.items[1].name, "operator int");
+    ASSERT_STR_EQ(defs.items[2].name, "operator()");
+    /* A plain word that merely ends in "operator" is still cut. */
+    CBMDefinition plain = {};
+    plain.name = "cooperator\nnext";
+    plain.qualified_name = "proj.a.cooperator\nnext";
+    plain.label = "Function";
+    plain.file_path = "a.h";
+    cbm_defs_push(&defs, &a, plain);
+    ASSERT_STR_EQ(defs.items[3].name, "cooperator");
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
 /* A numeric name is a valid JS/TS member key — `class C { 1() {} }`, an
  * object-literal method `{ 3() {} }` — and must survive the literal-token
  * filter, which targets destructuring artifacts (a Variable named `1`). */
@@ -6621,6 +6658,64 @@ TEST(extract_coverage_gap_of_only_comments_is_not_a_miss) {
     PASS();
 }
 
+/* A comment opener inside a literal that spans lines — a C++ raw string, a
+ * backslash-continued string — or inside a Python docstring must not open a
+ * block comment for the lines after it: the syntax error that follows stays
+ * reported. */
+TEST(extract_coverage_comment_state_skips_multiline_literals) {
+    CBMFileResult *r = extract("int alpha(void) {\n"          /* 1 */
+                               "    return 1;\n"              /* 2 */
+                               "}\n"                          /* 3 */
+                               "const char *s = R\"(\n"       /* 4 */
+                               "text /* not a comment\n"      /* 5 */
+                               ")\";\n"                       /* 6 */
+                               "int broken = ;\n"             /* 7 */
+                               "int beta(void) {\n"           /* 8 */
+                               "    return 2;\n"              /* 9 */
+                               "}\n",                         /* 10 */
+                               CBM_LANG_CPP, "t", "raw.cpp");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 7u));
+    cbm_free_result(r);
+
+    r = extract("int alpha(void) {\n"      /* 1 */
+                "    return 1;\n"          /* 2 */
+                "}\n"                      /* 3 */
+                "const char *t = \"a \\\n" /* 4 */
+                "/* b\";\n"                /* 5 */
+                "int broken = ;\n"         /* 6 */
+                "int beta(void) {\n"       /* 7 */
+                "    return 2;\n"          /* 8 */
+                "}\n",                     /* 9 */
+                CBM_LANG_C, "t", "cont.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 6u));
+    cbm_free_result(r);
+
+    r = extract("def alpha():\n"          /* 1 */
+                "    \"\"\"Doc.\n"        /* 2 */
+                "    /* not a comment\n"  /* 3 */
+                "    \"\"\"\n"            /* 4 */
+                "    return 1\n"          /* 5 */
+                "\n"                      /* 6 */
+                "x = = 1\n"               /* 7 */
+                "\n"                      /* 8 */
+                "\n"                      /* 9 */
+                "def beta():\n"           /* 10 */
+                "    return 2\n",         /* 11 */
+                CBM_LANG_PYTHON, "t", "doc.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 7u));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* A line that starts with `*` is only a comment continuation when it looks like
  * one. A dereference statement (`*oops = ...`) inside an error gap is code the
  * report must name; the old check treated every leading `*` as a comment line,
@@ -8640,6 +8735,8 @@ SUITE(extraction) {
     RUN_TEST(commonlisp_defmacro);
     RUN_TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names);
     RUN_TEST(defs_push_keeps_numeric_js_member_names);
+    RUN_TEST(defs_push_folds_multiline_operator_names);
+    RUN_TEST(extract_coverage_comment_state_skips_multiline_literals);
     RUN_TEST(cpp_forward_declarations_are_not_class_definitions);
     RUN_TEST(call_args_skip_comments_between_arguments);
     RUN_TEST(python_receiver_self_attribute_flag);

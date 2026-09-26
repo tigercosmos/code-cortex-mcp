@@ -251,13 +251,21 @@ void cbm_reset_profile(void) {
         }                                                                                      \
     } while (0)
 
-/* A name whose first line leaves a `<`, `(` or `[` open continues on the
- * next line: a C++ template-id split across lines (gtest's
- * `Templates<T1, ..., T14,\n    T15, ...>` partial specializations, an
- * explicit instantiation `Impl<\n    Role::kX>`). Cutting it at the line
- * break leaves `Templates<T1, ..., T14,`, and distinct specializations then
- * share one qualified name and merge (rocksdb: 84 Class nodes). */
-static bool cbm_first_line_leaves_bracket_open(const char *text, const char *nl) {
+static bool cbm_is_ident_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+/* True when a name continues past its first line break, so cutting it there
+ * would change which definition it names:
+ *   - an unclosed `<`, `(` or `[`: a C++ template-id split across lines
+ *     (gtest's `Templates<T1, ..., T14,\n    T15, ...>` partial
+ *     specializations, an explicit instantiation `Impl<\n    Role::kX>`).
+ *     Cut, distinct specializations share `Templates<T1, ..., T14,` and
+ *     merge (rocksdb: 84 Class nodes);
+ *   - a trailing `operator` keyword whose operator sits on the next line
+ *     (`operator\nbool`): cut, every conversion operator of a class is
+ *     named `operator`. */
+static bool cbm_name_continues_past_line(const char *text, const char *nl) {
     int depth = 0;
     for (const char *p = text; p < nl; p++) {
         if (*p == '<' || *p == '(' || *p == '[') {
@@ -266,12 +274,21 @@ static bool cbm_first_line_leaves_bracket_open(const char *text, const char *nl)
             depth--;
         }
     }
-    return depth > 0;
+    if (depth > 0) {
+        return true;
+    }
+    const char *end = nl;
+    while (end > text && (end[-1] == ' ' || end[-1] == '\t')) {
+        end--;
+    }
+    static const char kw[] = "operator";
+    size_t kw_len = sizeof(kw) - 1;
+    return (size_t)(end - text) >= kw_len && memcmp(end - kw_len, kw, kw_len) == 0 &&
+           (end - (ptrdiff_t)kw_len == text || !cbm_is_ident_char(end[-(ptrdiff_t)kw_len - 1]));
 }
 
-/* Fold each line break, with the blanks around it, into one space — or into
- * nothing right after an opening bracket or before a closing one — so a
- * bracketed name reads as it would on one line. */
+/* Fold each line break, with the blanks around it, into at most one space,
+ * so a name that continues past its first line reads as it would on one. */
 static const char *cbm_fold_lines(CBMArena *a, const char *text) {
     size_t len = strlen(text);
     char *out = (char *)cbm_arena_alloc(a, len + 1);
@@ -291,9 +308,11 @@ static const char *cbm_fold_lines(CBMArena *a, const char *text) {
                (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n')) {
             i++;
         }
-        bool after_open = n > 0 && (out[n - 1] == '<' || out[n - 1] == '(' || out[n - 1] == '[');
-        bool before_close = i < len && (text[i] == '>' || text[i] == ')' || text[i] == ']');
-        if (n > 0 && i < len && !after_open && !before_close) {
+        /* A space only where one is needed to keep tokens apart: between two
+         * identifier characters (`operator bool`) or after a comma
+         * (`T2, NoneT`); `Impl<Role>`, `operator()` join directly. */
+        if (n > 0 && i < len && cbm_is_ident_char(text[i]) &&
+            (cbm_is_ident_char(out[n - 1]) || out[n - 1] == ',')) {
             out[n++] = ' ';
         }
     }
@@ -308,7 +327,7 @@ static const char *cbm_fold_lines(CBMArena *a, const char *text) {
  * the first line break and drop trailing blanks; the qualified name carries
  * the same text as its last segment and is cut the same way. A bracketed name
  * that continues past the break is folded onto one line instead (fork-only,
- * see cbm_first_line_leaves_bracket_open). */
+ * see cbm_name_continues_past_line). */
 static const char *cbm_first_line(CBMArena *a, const char *text) {
     if (!text) {
         return text;
@@ -317,7 +336,7 @@ static const char *cbm_first_line(CBMArena *a, const char *text) {
     if (!nl) {
         return text;
     }
-    if (cbm_first_line_leaves_bracket_open(text, nl)) {
+    if (cbm_name_continues_past_line(text, nl)) {
         return cbm_fold_lines(a, text);
     }
     size_t n = (size_t)(nl - text);
@@ -1475,20 +1494,87 @@ static uint32_t *cbm_line_offsets(const char *src, int src_len, uint32_t *out_li
  * a comment line, or a preprocessor directive (the import pass owns #include;
  * #if/#endif carry no construct of their own). Without line offsets (OOM) every
  * line counts as inert, which reports less, never a false gap. */
-/* Per line: 1 when the line STARTS inside a block comment. One lexer pass
- * that skips string and character literals (reset at the end of a line, so
- * an unclosed `'a` lifetime cannot swallow the file) and line comments, so a
- * comment opener inside a string does not open a comment. `#` starts a line
- * comment only where it is not a preprocessor directive: in C a `#define`
- * line can itself open a block comment. NULL on OOM. */
-static uint8_t *cbm_line_comment_state(const char *src, int src_len, uint32_t nlines,
-                                       bool hash_line_comments) {
-    auto *starts_in_comment = (uint8_t *)calloc((size_t)nlines + 2, 1);
-    if (!starts_in_comment) {
-        return NULL;
+/* How a language comments, for cbm_line_comment_state. */
+typedef struct {
+    bool block;   /* C-style block comments exist */
+    bool hash;    /* `#` starts a line comment */
+    bool raw_cpp; /* C++ raw strings R"delim( ... )delim" */
+} cbm_comment_syntax_t;
+
+static cbm_comment_syntax_t cbm_comment_syntax(CBMLanguage lang) {
+    switch (lang) {
+    /* `#` comments and no block comments: tracking C-style openers there
+     * would let a docstring or string holding one hide real code. */
+    case CBM_LANG_PYTHON:
+    case CBM_LANG_RUBY:
+    case CBM_LANG_BASH:
+    case CBM_LANG_ZSH:
+    case CBM_LANG_FISH:
+    case CBM_LANG_ELIXIR:
+    case CBM_LANG_PERL:
+    case CBM_LANG_R:
+    case CBM_LANG_YAML:
+    case CBM_LANG_TOML:
+    case CBM_LANG_DOCKERFILE:
+    case CBM_LANG_JULIA:
+    case CBM_LANG_MAKEFILE:
+    case CBM_LANG_CMAKE:
+    case CBM_LANG_MESON:
+    case CBM_LANG_INI:
+    case CBM_LANG_GDSCRIPT:
+    case CBM_LANG_POWERSHELL:
+    case CBM_LANG_NIM:
+    case CBM_LANG_AWK:
+    case CBM_LANG_TCL:
+    case CBM_LANG_CRYSTAL:
+    case CBM_LANG_STARLARK:
+    case CBM_LANG_DOTENV:
+    case CBM_LANG_PROPERTIES:
+    case CBM_LANG_SSHCONFIG:
+    case CBM_LANG_REQUIREMENTS:
+    case CBM_LANG_GN:
+    case CBM_LANG_KCONFIG:
+    case CBM_LANG_BITBAKE:
+    case CBM_LANG_PUPPET:
+    case CBM_LANG_PO:
+    case CBM_LANG_GITATTRIBUTES:
+    case CBM_LANG_GITIGNORE:
+    case CBM_LANG_K8S:
+    case CBM_LANG_KUSTOMIZE:
+    case CBM_LANG_MOJO:
+        return {false, true, false};
+    case CBM_LANG_PHP:
+    case CBM_LANG_HCL:
+    case CBM_LANG_NIX:
+        return {true, true, false};
+    case CBM_LANG_CPP:
+    case CBM_LANG_CUDA:
+        return {true, false, true};
+    default:
+        return {true, false, false};
     }
-    enum { LX_CODE, LX_BLOCK, LX_STRING, LX_LINE } state = LX_CODE;
+}
+
+/* Per line: 1 when the line STARTS inside a block comment. One lexer pass
+ * that skips literals and line comments, so a comment opener inside a
+ * string does not open a comment. Literals that may span lines keep their
+ * state across the newline: backslash-continued strings, C++ raw strings,
+ * Rust raw strings (r#"..."#), backtick strings (Go, JS/TS templates) and
+ * triple-quoted strings (Kotlin, Swift, Java, Scala, Dart). A plain quote
+ * still ends at the end of its line, so an unclosed `'a` lifetime cannot
+ * swallow the file. In a language without block comments every line starts
+ * outside one. NULL on OOM. */
+static uint8_t *cbm_line_comment_state(const char *src, int src_len, uint32_t nlines,
+                                       cbm_comment_syntax_t syn) {
+    auto *starts_in_comment = (uint8_t *)calloc((size_t)nlines + 2, 1);
+    if (!starts_in_comment || !syn.block) {
+        return starts_in_comment;
+    }
+    enum { LX_CODE, LX_BLOCK, LX_STRING, LX_LINE, LX_RAW, LX_BACKTICK, LX_TRIPLE } state = LX_CODE;
+    enum { RAW_DELIM_MAX = 16 };
     char quote = 0;
+    char raw_close[RAW_DELIM_MAX + 3]; /* `)delim"` or `"###` */
+    size_t raw_close_len = 0;
     uint32_t line = 1;
     for (int i = 0; i < src_len; i++) {
         char c = src[i];
@@ -1504,17 +1590,55 @@ static uint8_t *cbm_line_comment_state(const char *src, int src_len, uint32_t nl
             continue;
         }
         switch (state) {
-        case LX_CODE:
+        case LX_CODE: {
+            bool ident_before = i > 0 && (isalnum((unsigned char)src[i - 1]) || src[i - 1] == '_');
             if (c == '/' && next == '*') {
                 state = LX_BLOCK;
                 i++;
-            } else if ((c == '/' && next == '/') || (c == '#' && hash_line_comments)) {
+            } else if ((c == '/' && next == '/') || (c == '#' && syn.hash)) {
                 state = LX_LINE;
+            } else if (syn.raw_cpp && c == 'R' && next == '"') {
+                /* R"delim( ... )delim" — the delimiter is at most 16 chars. */
+                int j = i + 2;
+                size_t d = 0;
+                while (j < src_len && src[j] != '(' && d < RAW_DELIM_MAX && src[j] != '\n') {
+                    raw_close[1 + d++] = src[j++];
+                }
+                if (j < src_len && src[j] == '(') {
+                    raw_close[0] = ')';
+                    raw_close[1 + d] = '"';
+                    raw_close_len = d + 2;
+                    state = LX_RAW;
+                    i = j;
+                }
+            } else if (c == 'r' && !ident_before && (next == '#' || next == '"')) {
+                /* Rust raw string: r"..." or r#"..."# with any number of #. */
+                int j = i + 1;
+                size_t hashes = 0;
+                while (j < src_len && src[j] == '#' && hashes < RAW_DELIM_MAX) {
+                    hashes++;
+                    j++;
+                }
+                if (j < src_len && src[j] == '"') {
+                    raw_close[0] = '"';
+                    for (size_t h = 0; h < hashes; h++) {
+                        raw_close[1 + h] = '#';
+                    }
+                    raw_close_len = hashes + 1;
+                    state = LX_RAW;
+                    i = j;
+                }
+            } else if (c == '`') {
+                state = LX_BACKTICK;
+            } else if (c == '"' && next == '"' && i + 2 < src_len && src[i + 2] == '"') {
+                state = LX_TRIPLE;
+                i += 2;
             } else if (c == '"' || c == '\'') {
                 state = LX_STRING;
                 quote = c;
             }
             break;
+        }
         case LX_BLOCK:
             if (c == '*' && next == '/') {
                 state = LX_CODE;
@@ -1522,10 +1646,37 @@ static uint8_t *cbm_line_comment_state(const char *src, int src_len, uint32_t nl
             }
             break;
         case LX_STRING:
-            if (c == '\\' && next != '\n') {
+            if (c == '\\' && next == '\n') {
+                /* A backslash-newline continues the literal on the next line. */
+                i++;
+                line++;
+                if (line <= nlines) {
+                    starts_in_comment[line] = 0;
+                }
+            } else if (c == '\\') {
                 i++;
             } else if (c == quote) {
                 state = LX_CODE;
+            }
+            break;
+        case LX_RAW:
+            if ((size_t)(src_len - i) >= raw_close_len &&
+                memcmp(src + i, raw_close, raw_close_len) == 0) {
+                i += (int)raw_close_len - 1;
+                state = LX_CODE;
+            }
+            break;
+        case LX_BACKTICK:
+            if (c == '\\' && next != '\n') {
+                i++;
+            } else if (c == '`') {
+                state = LX_CODE;
+            }
+            break;
+        case LX_TRIPLE:
+            if (c == '"' && next == '"' && i + 2 < src_len && src[i + 2] == '"') {
+                state = LX_CODE;
+                i += 2;
             }
             break;
         case LX_LINE:
@@ -1533,12 +1684,6 @@ static uint8_t *cbm_line_comment_state(const char *src, int src_len, uint32_t nl
         }
     }
     return starts_in_comment;
-}
-
-static bool cbm_uses_c_preprocessor(CBMLanguage lang) {
-    return lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA ||
-           lang == CBM_LANG_OBJC || lang == CBM_LANG_HLSL || lang == CBM_LANG_GLSL ||
-           lang == CBM_LANG_ISPC || lang == CBM_LANG_SLANG || lang == CBM_LANG_CSHARP;
 }
 
 /* A 1-based line that holds nothing a reader would call missed code: blank,
@@ -1915,8 +2060,7 @@ static void cbm_subtract_recovered_regions(cbm_error_regions_t *regs, const CBMD
     uint32_t nlines = 0;
     uint32_t *offs = cbm_line_offsets(src, src_len, &nlines);
     uint8_t *in_comment =
-        offs ? cbm_line_comment_state(src, src_len, nlines, !cbm_uses_c_preprocessor(language))
-             : NULL;
+        offs ? cbm_line_comment_state(src, src_len, nlines, cbm_comment_syntax(language)) : NULL;
     cbm_error_regions_t out = {{0}, {0}, 0, regs->dropped};
     for (int i = 0; i < regs->count; i++) {
         cbm_region_uncovered_gaps(regs->starts[i], regs->ends[i], defs, src, offs, in_comment,
