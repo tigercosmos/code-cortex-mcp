@@ -6646,6 +6646,26 @@ TEST(extract_coverage_gap_with_leading_star_statement_is_a_miss) {
     ASSERT_FALSE(cov_range_covers_line(r->error_ranges, 1u));
     ASSERT_FALSE(cov_range_covers_line(r->error_ranges, 9u));
     cbm_free_result(r);
+
+    /* A spaced dereference (`* oops = ...`) is code too: whether a star line
+     * is a comment continuation depends on block-comment state, not on the
+     * space after the star. A comment opener inside a string literal does
+     * not open a comment for the lines after it. */
+    r = extract("int alpha(void) {\n"          /* 1 */
+                "    return 1;\n"              /* 2 */
+                "}\n"                          /* 3 */
+                "const char *s = \"/*\";\n"    /* 4 */
+                "\n"                           /* 5 */
+                "* oops = ( ( ;\n"             /* 6 */
+                "int beta(void) {\n"           /* 7 */
+                "    return 2;\n"              /* 8 */
+                "}\n",                         /* 9 */
+                CBM_LANG_C, "t", "star2.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 6u));
+    cbm_free_result(r);
     PASS();
 }
 

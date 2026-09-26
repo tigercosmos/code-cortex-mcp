@@ -5489,6 +5489,98 @@ TEST(bm25_label_filter_survives_the_inner_limit) {
     PASS();
 }
 
+/* 2100 Methods named `needle_<n>` fill the 2000-row FTS window for
+ * `needle`. Used by the two probes below. */
+static cbm_mcp_server_t *setup_bm25_saturated_server(const char *proj) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    if (!srv) {
+        return NULL;
+    }
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/bm25-saturated");
+    cbm_store_begin(st);
+    for (int i = 0; i < 2100; i++) {
+        char name[48];
+        char qn[80];
+        char file[32];
+        snprintf(name, sizeof(name), "needle_%d", i);
+        snprintf(qn, sizeof(qn), "bf.m%d.needle_%d", i, i);
+        snprintf(file, sizeof(file), "m%d.kt", i);
+        cbm_node_t n = prose_node(proj, "Method", name, qn, file, NULL);
+        cbm_store_upsert_node(st, &n);
+    }
+    cbm_node_t cls = prose_node(proj, "Class", "Needle",
+                                "bf.very.deeply.nested.package.path.with.many.segments.Needle",
+                                "very/deeply/nested/package/path/with/many/segments/Needle.kt",
+                                NULL);
+    cbm_store_upsert_node(st, &cls);
+    cbm_node_t special =
+        prose_node(proj, "Method", "needle_special",
+                   "bf.lib.special.very.deeply.nested.package.path.Holder.needle_special",
+                   "lib/special/very/deeply/nested/package/path/with/many/segments/Holder.kt",
+                   NULL);
+    cbm_store_upsert_node(st, &special);
+    cbm_store_commit(st);
+    cbm_store_fts_rebuild(st);
+    return srv;
+}
+
+static char *bm25_search_args(cbm_mcp_server_t *srv, const char *args) {
+    char req[768];
+    snprintf(req, sizeof(req),
+             "{\"jsonrpc\":\"2.0\",\"id\":555,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_graph\",\"arguments\":%s}}",
+             args);
+    char *resp = cbm_mcp_server_handle(srv, req);
+    if (!resp) {
+        return NULL;
+    }
+    char *inner = extract_text_content(resp);
+    free(resp);
+    return inner;
+}
+
+/* A definition named like the query up to case (`Needle` for `needle`) gets
+ * the ranking's case-insensitive exact tier, so it must be a candidate even
+ * when its BM25 score puts it outside the saturated window. */
+TEST(bm25_case_insensitive_exact_name_survives_the_inner_limit) {
+    cbm_mcp_server_t *srv = setup_bm25_saturated_server("bf-nocase");
+    ASSERT_NOT_NULL(srv);
+    char *inner = bm25_search_args(srv, "{\"project\":\"bf-nocase\",\"query\":\"needle\","
+                                        "\"limit\":5}");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"search_mode\":\"bm25\""));
+    ASSERT_STR_EQ(bm25_first_qn(inner), "bf.very.deeply.nested.package.path.with.many.segments.Needle");
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* label AND file_pattern: the window holds 2000 Methods, none under
+ * lib/special. Counting label rows alone would call the window full and skip
+ * the expansion, and the path filter would then leave total 0. */
+TEST(bm25_label_and_path_filter_survive_the_inner_limit) {
+    cbm_mcp_server_t *srv = setup_bm25_saturated_server("bf-labelpath");
+    ASSERT_NOT_NULL(srv);
+    char *inner = bm25_search_args(srv, "{\"project\":\"bf-labelpath\",\"query\":\"needle\","
+                                        "\"label\":\"Method\",\"file_pattern\":\"lib/special\","
+                                        "\"limit\":5}");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":1"));
+    ASSERT_NOT_NULL(strstr(inner, "Holder.needle_special"));
+    free(inner);
+    /* Path filter alone, no label. */
+    inner = bm25_search_args(srv, "{\"project\":\"bf-labelpath\",\"query\":\"needle\","
+                                  "\"file_pattern\":\"lib/special\",\"limit\":5}");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":1"));
+    ASSERT_NOT_NULL(strstr(inner, "Holder.needle_special"));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(bm25_identifier_match_outranks_prose_only_match_issue518) {
     /* Same label boost on both, so the order is decided by column weights. */
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -5787,5 +5879,7 @@ SUITE(mcp) {
     RUN_TEST(bm25_ranks_exact_name_first);
     RUN_TEST(bm25_exact_name_survives_the_inner_limit);
     RUN_TEST(bm25_label_filter_survives_the_inner_limit);
+    RUN_TEST(bm25_case_insensitive_exact_name_survives_the_inner_limit);
+    RUN_TEST(bm25_label_and_path_filter_survive_the_inner_limit);
     RUN_TEST(bm25_searches_legacy_four_column_fts_without_error_issue518);
 }
