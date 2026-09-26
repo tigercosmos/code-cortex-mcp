@@ -451,6 +451,17 @@ enum { CBM_LSP_BUDGET_SHARE_DIV = 2 };
  * enough for a 7,873-definition reference file (~10 s), tight enough to stop the
  * generated JIT tests (65-350 s). */
 enum { CBM_WALK_BUDGET_FACTOR = 6 };
+/* A tree deeper than this takes no per-file or cross-file LSP walk. Several
+ * resolvers recurse once per tree level (cs_resolve_calls_in_node, the TS
+ * process_node, go_/rust_eval_expr_type), and a left-nested `a + a + ... + a`
+ * chain 16,000 terms long overflows an 8 MB stack in TS, Go and Rust; 8,000
+ * passes in every language (measured 2026-09-26). The CPU budgets used to hide
+ * this for C#, Go and Rust by accident — the unified walk was quadratic on deep
+ * trees, so a deep file ran out of budget before its LSP walk — and once the
+ * walk carried its own parent chain (upstream 8c1a9d61) nothing did. Depth is
+ * a property of the file, so unlike the budgets this rule gives the same answer
+ * on every machine. Half the verified-safe depth. */
+enum { CBM_LSP_MAX_TREE_DEPTH = 4096 };
 
 typedef struct {
     uint64_t cpu_deadline_ns;   // trip once this thread's CPU time passes it
@@ -984,6 +995,34 @@ bool cbm_index_is_quarantined(const char *rel_path) {
         }
     }
     return g_quarantine_set && cbm_ht_has(g_quarantine_set, rel_path);
+}
+
+/* Mark a file whose tree is deeper than CBM_LSP_MAX_TREE_DEPTH as LSP-skipped,
+ * and say so in the log. */
+static void cbm_lsp_skip_for_depth(CBMFileResult *result, uint32_t depth, const char *rel_path) {
+    result->lsp_skipped = true;
+    result->lsp_skip_reason = CBM_LSP_SKIP_TREE_DEPTH;
+    char depth_text[CBM_SZ_32];
+    snprintf(depth_text, sizeof(depth_text), "%u", depth);
+    cbm_log_warn("extract.lsp.skipped", "reason", "tree_depth", "depth", depth_text, "path",
+                 rel_path ? rel_path : "");
+}
+
+const char *cbm_lsp_skip_reason_name(uint8_t reason) {
+    switch (reason) {
+    case CBM_LSP_SKIP_PARSE_BUDGET:
+        return "parse_budget";
+    case CBM_LSP_SKIP_FILE_BUDGET:
+        return "file_budget";
+    case CBM_LSP_SKIP_WALK_BUDGET:
+        return "walk_budget";
+    case CBM_LSP_SKIP_TEST_SEAM:
+        return "test_seam";
+    case CBM_LSP_SKIP_TREE_DEPTH:
+        return "tree_depth";
+    default:
+        return "unknown";
+    }
 }
 
 const char *cbm_index_quarantine_phase(const char *rel_path) {
@@ -2569,14 +2608,19 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
         const char *skip_on = getenv("CBM_TEST_LSP_SKIP_ON");
         if (skip_on && skip_on[0] && rel_path && strstr(rel_path, skip_on)) {
             lsp_skipped = true; /* the test names the file; no real timing involved */
+            result->lsp_skip_reason = CBM_LSP_SKIP_TEST_SEAM;
         }
     }
 #endif
     if (lsp_skipped) {
+        if (result->lsp_skip_reason == CBM_LSP_SKIP_NONE) {
+            result->lsp_skip_reason = CBM_LSP_SKIP_PARSE_BUDGET;
+        }
         char parse_ms[CBM_SZ_32];
         snprintf(parse_ms, sizeof(parse_ms), "%llu",
                  (unsigned long long)(parse_cpu_ns / CBM_NSEC_PER_MSEC));
-        cbm_log_warn("extract.lsp.skipped", "reason", "parse_budget", "parse_cpu_ms", parse_ms,
+        cbm_log_warn("extract.lsp.skipped", "reason",
+                     cbm_lsp_skip_reason_name(result->lsp_skip_reason), "parse_cpu_ms", parse_ms,
                      "path", rel_path ? rel_path : "");
         result->lsp_skipped = true;
     }
@@ -2621,11 +2665,23 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     CPPPendingOperators raw_operators(result, ctx.defer_cpp_operators);
     cbm_extract_unified(&ctx);
     raw_operators.prepare();
+    /* How far the walk got, against the whole tree: the coverage report names
+     * a truncated or LSP-skipped file with these, so a file the walk abandoned
+     * is not reported as fully indexed (upstream 8c1a9d61). */
+    result->tree_nodes = ts_node_descendant_count(root);
+    result->walk_nodes_visited = ctx.walk_nodes_visited;
     if (ctx.walk_budget_exhausted) {
         result->walk_truncated = true;
         result->lsp_skipped = true;
+        result->lsp_skip_reason = CBM_LSP_SKIP_WALK_BUDGET;
         cbm_log_warn("extract.walk.truncated", "reason", "cpu_budget", "path",
                      rel_path ? rel_path : "");
+    }
+    /* Too deep for the recursive resolvers: see CBM_LSP_MAX_TREE_DEPTH. Checked
+     * before the clock rule below, and whether or not a budget is configured,
+     * because this one protects the stack rather than the schedule. */
+    if (!result->lsp_skipped && ctx.walk_max_depth > (uint32_t)CBM_LSP_MAX_TREE_DEPTH) {
+        cbm_lsp_skip_for_depth(result, ctx.walk_max_depth, rel_path);
     }
     /* A file that spent the budget on parse plus walk is too heavy for the
      * unbudgeted LSP walks as well (the C# JIT test files: 65-73 s each in
@@ -2633,6 +2689,7 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
     if (!result->lsp_skipped && timeout_micros > 0 &&
         cbm_thread_cpu_time_ns() - cpu_start_ns > budget_ns) {
         result->lsp_skipped = true;
+        result->lsp_skip_reason = CBM_LSP_SKIP_FILE_BUDGET;
         cbm_log_warn("extract.lsp.skipped", "reason", "file_budget", "path",
                      rel_path ? rel_path : "");
     }
@@ -2800,8 +2857,19 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
                     if (pp_ctx.walk_budget_exhausted && !result->walk_truncated) {
                         result->walk_truncated = true;
                         result->lsp_skipped = true;
+                        result->lsp_skip_reason = CBM_LSP_SKIP_WALK_BUDGET;
+                        /* The expanded unit is the walk that stopped, so its
+                         * tree is the one "how far" is measured against. */
+                        result->tree_nodes = ts_node_descendant_count(pp_root);
+                        result->walk_nodes_visited = pp_ctx.walk_nodes_visited;
                         cbm_log_warn("extract.walk.truncated", "reason", "cpu_budget", "path",
                                      rel_path ? rel_path : "");
+                    }
+                    /* Macro expansion can deepen the tree past what the raw
+                     * walk saw; the LSP pass below walks this one. */
+                    if (!result->lsp_skipped &&
+                        pp_ctx.walk_max_depth > (uint32_t)CBM_LSP_MAX_TREE_DEPTH) {
+                        cbm_lsp_skip_for_depth(result, pp_ctx.walk_max_depth, rel_path);
                     }
 
                     // Also run LSP on expanded source for additional type-resolved

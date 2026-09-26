@@ -117,7 +117,11 @@ typedef struct {
                    * but contains tree-sitter ERROR/MISSING regions whose
                    * constructs are absent from the graph (best-effort signal —
                    * absence of the flag is NOT a completeness guarantee). The
-                   * MCP layer reports it separately from skipped[]. "cross_lsp"
+                   * MCP layer reports it separately from skipped[].
+                   * "walk_truncated" / "lsp_skipped" are likewise indexed,
+                   * not skips: the unified walk stopped at its budget, or the
+                   * file ran without its LSP walks (reason says how far /
+                   * which rule — cbm_walk_coverage_entry). "cross_lsp"
                    * is a RESERVED phase string for Track C's crash-attribution
                    * signal and is intentionally NOT emitted today (the
                    * cross-LSP passes are best-effort/void with no genuine

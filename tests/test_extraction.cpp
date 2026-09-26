@@ -560,6 +560,50 @@ TEST(call_arguments_preserve_keywords_after_spreads) {
     PASS();
 }
 
+/* A tree deeper than the recursive LSP resolvers can take is indexed without
+ * its LSP walks — decided by depth, not by a clock. A left-nested chain 16,000
+ * terms long overflowed an 8 MB stack in the TS, Go and Rust resolvers, and
+ * only the CPU budgets (by accident) kept C#, Go and Rust from reaching it once
+ * the unified walk stopped being quadratic. Same file, same answer, any
+ * machine; a shallow file is untouched. */
+TEST(extract_tree_too_deep_for_lsp_skips_it_by_depth) {
+    char *deep_src = (char *)malloc(6000 * 4 + 64);
+    char *shallow_src = (char *)malloc(1000 * 4 + 64);
+    ASSERT_NOT_NULL(deep_src);
+    ASSERT_NOT_NULL(shallow_src);
+    const struct {
+        char *buf;
+        int terms;
+    } shapes[] = {{deep_src, 6000}, {shallow_src, 1000}};
+    for (const auto &shape : shapes) {
+        size_t off =
+            (size_t)snprintf(shape.buf, 64, "package p\n\nfunc F(a int) int {\n\treturn a");
+        for (int i = 1; i < shape.terms; i++) {
+            memcpy(shape.buf + off, " + a", 4);
+            off += 4;
+        }
+        memcpy(shape.buf + off, "\n}\n", 4);
+    }
+    CBMFileResult *deep =
+        cbm_extract_file(deep_src, (int)strlen(deep_src), CBM_LANG_GO, "t", "deep.go", 0, NULL, NULL);
+    CBMFileResult *shallow = cbm_extract_file(shallow_src, (int)strlen(shallow_src), CBM_LANG_GO,
+                                              "t", "shallow.go", 0, NULL, NULL);
+    free(deep_src);
+    free(shallow_src);
+    ASSERT_NOT_NULL(deep);
+    ASSERT_NOT_NULL(shallow);
+    ASSERT_TRUE(deep->lsp_skipped);
+    ASSERT_EQ(deep->lsp_skip_reason, CBM_LSP_SKIP_TREE_DEPTH);
+    ASSERT_FALSE(deep->walk_truncated); /* the walk itself still covered the file */
+    ASSERT_EQ(deep->walk_nodes_visited, deep->tree_nodes);
+    ASSERT_GT(deep->defs.count, 0);
+    ASSERT_FALSE(shallow->lsp_skipped);
+    ASSERT_EQ(shallow->lsp_skip_reason, CBM_LSP_SKIP_NONE);
+    cbm_free_result(deep);
+    cbm_free_result(shallow);
+    PASS();
+}
+
 #ifdef CBM_ENABLE_TEST_SEAMS
 TEST(call_arguments_survive_scratch_reclamation) {
     CBMArena durable, scratch;
@@ -7625,7 +7669,9 @@ TEST(extract_lsp_skipped_when_parse_used_its_budget_share) {
     ASSERT_NOT_NULL(skipped);
     ASSERT_NOT_NULL(walked);
     ASSERT_TRUE(skipped->lsp_skipped);
+    ASSERT_EQ(skipped->lsp_skip_reason, CBM_LSP_SKIP_TEST_SEAM);
     ASSERT_FALSE(walked->lsp_skipped);
+    ASSERT_EQ(walked->lsp_skip_reason, CBM_LSP_SKIP_NONE);
     ASSERT_GT(skipped->defs.count, 0);                      /* the unified extractor still ran */
     ASSERT_TRUE(skipped->defs.count <= walked->defs.count); /* the LSP walk adds its own defs */
     ASSERT_EQ(skipped->resolved_calls.count, 0);
@@ -7655,8 +7701,16 @@ TEST(extract_walk_truncated_at_its_cpu_budget) {
     ASSERT_NOT_NULL(full);
     ASSERT_TRUE(cut->walk_truncated);
     ASSERT_TRUE(cut->lsp_skipped);
+    ASSERT_EQ(cut->lsp_skip_reason, CBM_LSP_SKIP_WALK_BUDGET);
     ASSERT_FALSE(full->walk_truncated);
     ASSERT_FALSE(full->lsp_skipped);
+    /* How far each walk got, for the coverage report (upstream 8c1a9d61): the
+     * cut walk handled exactly its 8 nodes of the tree, the full one all of
+     * them. */
+    ASSERT_EQ(cut->walk_nodes_visited, 8u);
+    ASSERT_EQ(cut->tree_nodes, full->tree_nodes);
+    ASSERT_GT(full->tree_nodes, 8u);
+    ASSERT_EQ(full->walk_nodes_visited, full->tree_nodes);
     ASSERT_TRUE(cut->usages.count <= full->usages.count);
     ASSERT_TRUE(cut->calls.count <= full->calls.count);
     ASSERT_GT(full->calls.count, cut->calls.count);
@@ -7666,6 +7720,71 @@ TEST(extract_walk_truncated_at_its_cpu_budget) {
     cbm_free_result(full);
     PASS();
 }
+
+/* `class Deep { static int Run(int a) { int declared = 0; int r = a + a + ...; ... } }`
+ * with `terms` operands: a left-nested binary chain whose tree is `terms` levels
+ * deep — the shape of the generated .NET JIT tests (hugeSimpleExpr1.cs).
+ * Caller frees. */
+static char *deep_csharp_chain(int terms) {
+    static const char prefix[] = "class Deep {\n"
+                                 "  static int Run(int a) {\n"
+                                 "    int declared = 0;\n"
+                                 "    int r = a";
+    static const char term[] = " + a";
+    static const char suffix[] = ";\n    return r;\n  }\n}\n";
+    size_t cap = sizeof(prefix) + (size_t)terms * (sizeof(term) - 1U) + sizeof(suffix);
+    char *src = (char *)malloc(cap);
+    if (!src) {
+        return NULL;
+    }
+    size_t off = 0;
+    memcpy(src + off, prefix, sizeof(prefix) - 1U);
+    off += sizeof(prefix) - 1U;
+    for (int i = 1; i < terms; i++) {
+        memcpy(src + off, term, sizeof(term) - 1U);
+        off += sizeof(term) - 1U;
+    }
+    memcpy(src + off, suffix, sizeof(suffix));
+    return src;
+}
+
+static int count_usages_named(const CBMFileResult *r, const char *name) {
+    int n = 0;
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && strcmp(r->usages.items[i].ref_name, name) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The unified walk hands usage extraction each node's parent off its own
+ * ancestor chain. It used to ask ts_node_parent, which tree-sitter answers by
+ * descending from the ROOT — O(depth) per reference node, quadratic across a
+ * deep file: 99.8% of the walk on a 127 KB single-expression C# file, 8 s, and
+ * enough to push the file past its budget and silently skip its LSP walk
+ * (upstream 8c1a9d61 found the same climb in its C# site walk). Not one
+ * reference node may fall back to the root-descending lookup, and the
+ * definition-name check that consumes the parent must still hold: `declared`
+ * and `r` are declared names, not usages. */
+#ifdef CBM_ENABLE_TEST_SEAMS
+TEST(extract_deep_expression_usages_use_the_walk_parent) {
+    enum { TERMS = 2000 };
+    char *src = deep_csharp_chain(TERMS);
+    ASSERT_NOT_NULL(src);
+    cbm_usage_slow_parent_fallback_test_reset();
+    CBMFileResult *r = extract(src, CBM_LANG_CSHARP, "t", "Deep.cs");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(cbm_usage_slow_parent_fallback_test_count(), 0u);
+    /* Anti-vacuous: every operand really was classified as a usage. */
+    ASSERT_EQ(count_usages_named(r, "a"), TERMS);
+    ASSERT_EQ(count_usages_named(r, "declared"), 0);
+    ASSERT_EQ(count_usages_named(r, "r"), 1); /* `return r;` only */
+    cbm_free_result(r);
+    PASS();
+}
+#endif
 
 /* An lsp_skipped file takes no cross-file resolution from the shared
  * dispatcher, while the identical file without the flag does — and the skipped
@@ -8526,6 +8645,7 @@ SUITE(extraction) {
 #ifdef CBM_ENABLE_TEST_SEAMS
     RUN_TEST(call_arguments_survive_scratch_reclamation);
 #endif
+    RUN_TEST(extract_tree_too_deep_for_lsp_skips_it_by_depth);
     RUN_TEST(call_array_growth_preserves_records_without_old_buffers);
     RUN_TEST(call_array_growth_across_scratch_arenas);
 
@@ -8542,6 +8662,9 @@ SUITE(extraction) {
     RUN_TEST(non_config_language_module_has_no_promoted_description_issue519);
     RUN_TEST(extract_lsp_skipped_when_parse_used_its_budget_share);
     RUN_TEST(extract_walk_truncated_at_its_cpu_budget);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(extract_deep_expression_usages_use_the_walk_parent);
+#endif
     RUN_TEST(lsp_skipped_file_gets_no_cross_file_resolution_but_keeps_defs);
 
     cbm_shutdown();

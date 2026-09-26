@@ -458,6 +458,20 @@ typedef struct {
     int cap;
 } CBMChannelArray;
 
+// Why a file's LSP walks were skipped (CBMFileResult.lsp_skip_reason).
+typedef enum {
+    CBM_LSP_SKIP_NONE = 0,
+    CBM_LSP_SKIP_PARSE_BUDGET = 1, // the parse alone used more than its share of the budget
+    CBM_LSP_SKIP_FILE_BUDGET = 2,  // parse plus unified walk used the whole budget
+    CBM_LSP_SKIP_WALK_BUDGET = 3,  // the unified walk stopped at its budget (walk_truncated)
+    CBM_LSP_SKIP_TEST_SEAM = 4,    // CBM_TEST_LSP_SKIP_ON named the file
+    CBM_LSP_SKIP_TREE_DEPTH = 5,   // the tree is too deep for the recursive resolvers
+} CBMLspSkipReason;
+
+// Stable lower_snake name of a CBMLspSkipReason, as the coverage report and the
+// extract.lsp.skipped log line spell it.
+const char *cbm_lsp_skip_reason_name(uint8_t reason);
+
 // Full extraction result for one file.
 typedef struct {
     CBMArena arena; // owns all string memory
@@ -520,6 +534,15 @@ typedef struct {
      * to that point are kept, the rest of the file is not walked. Implies
      * lsp_skipped. */
     bool walk_truncated;
+    /* Which rule set lsp_skipped (a CBMLspSkipReason), so the coverage report
+     * can name it. CBM_LSP_SKIP_NONE while lsp_skipped is false. */
+    uint8_t lsp_skip_reason;
+    /* Size of this file's parse tree, and how much of it the unified walk got
+     * through. Reported for a truncated or LSP-skipped file so the coverage
+     * report says how much of it is missing, instead of leaving the gap
+     * silent (upstream 8c1a9d61). */
+    uint32_t tree_nodes;
+    uint32_t walk_nodes_visited;
     CBMLanguage cached_lang; // language of cached tree (for parser selection)
 
     // Retained source bytes — copied into `arena` by the parallel
@@ -592,6 +615,10 @@ typedef struct {
      * deadline, so the budget covers the whole file, not one walk. */
     uint64_t walk_deadline_cpu_ns;
     bool walk_budget_exhausted;
+    /* How many nodes the unified walk actually visited, whether or not it ran
+     * out of budget, and the deepest tree level it reached. */
+    uint32_t walk_nodes_visited;
+    uint32_t walk_max_depth;
 } CBMExtractCtx;
 
 // --- Public API ---
@@ -721,6 +748,10 @@ void cbm_defs_push(CBMDefArray *arr, CBMArena *a, CBMDefinition def);
 void cbm_calls_push(CBMCallArray *arr, CBMArena *a, CBMCall call);
 #ifdef CBM_ENABLE_TEST_SEAMS
 void cbm_test_relocate_call(CBMArena *dst, const CBMArena *scratch, CBMCall *call);
+// Count of reference nodes whose parent the unified walk could not supply, so
+// usage extraction fell back to ts_node_parent (a descent from the root).
+void cbm_usage_slow_parent_fallback_test_reset(void);
+uint64_t cbm_usage_slow_parent_fallback_test_count(void);
 #endif
 void cbm_imports_push(CBMImportArray *arr, CBMArena *a, CBMImport imp);
 void cbm_usages_push(CBMUsageArray *arr, CBMArena *a, CBMUsage usage);

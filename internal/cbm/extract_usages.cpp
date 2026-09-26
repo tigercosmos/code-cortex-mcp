@@ -10,6 +10,7 @@ enum { MAX_PARENT_DEPTH = 10 };
 #include <stdint.h> // uint32_t
 #include <string.h>
 #include <ctype.h>
+#include <atomic>
 #include <string_view>
 #include <unordered_set>
 
@@ -240,6 +241,26 @@ void cbm_extract_usages(CBMExtractCtx *ctx) {
     cbm_usage_dedup_end(ctx, owns_usage_dedup);
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* How often handle_usages had to ask ts_node_parent because the walk could not
+ * tell it the parent. Zero on every walk that did not run out of memory. */
+static std::atomic<uint64_t> g_usage_slow_parent_fallbacks{0};
+
+void cbm_usage_slow_parent_fallback_test_reset(void) {
+    g_usage_slow_parent_fallbacks.store(0, std::memory_order_relaxed);
+}
+
+uint64_t cbm_usage_slow_parent_fallback_test_count(void) {
+    return g_usage_slow_parent_fallbacks.load(std::memory_order_relaxed);
+}
+
+static void usage_slow_parent_fallback_test_note(void) {
+    g_usage_slow_parent_fallbacks.fetch_add(1, std::memory_order_relaxed);
+}
+#else
+static void usage_slow_parent_fallback_test_note(void) {}
+#endif
+
 // --- Unified handler: called once per node by the cursor walk ---
 // Uses WalkState flags instead of parent-chain walks for O(1) context checks.
 
@@ -258,8 +279,18 @@ void handle_usages(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Wal
         return;
     }
 
-    // Skip if it's a definition name (left side of assignment, function name)
-    TSNode parent = ts_node_parent(node);
+    // Skip if it's a definition name (left side of assignment, function name).
+    // The parent comes off the walk's ancestor chain: ts_node_parent descends
+    // from the root, and asking it once per reference node was 99.8% of the
+    // walk on a 127 KB single-expression C# file (upstream 8c1a9d61's
+    // hugeSimpleExpr shape), enough to trip the walk budget and skip LSP.
+    TSNode parent;
+    if (state->parent_known) {
+        parent = state->parent;
+    } else {
+        usage_slow_parent_fallback_test_note();
+        parent = ts_node_parent(node);
+    }
     if (!ts_node_is_null(parent)) {
         TSNode name_field = ts_node_child_by_field_name(parent, TS_FIELD("name"));
         if (!ts_node_is_null(name_field) &&

@@ -3052,6 +3052,108 @@ TEST(index_response_reports_parse_unusable_range_end_issue963) {
     PASS();
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* What one index run reported about a walk-coverage kind: the index_repository
+ * count and first detail, and the persisted index_status count. */
+typedef struct {
+    long run_count;
+    long run_skipped;
+    long status_count;
+    char detail[128];
+} walk_coverage_seen_t;
+
+/* Index a two-file Python repo with `seam` set to `value`, and read back how the
+ * response and index_status report `kind` ("walk_truncated" / "lsp_skipped"). */
+static walk_coverage_seen_t index_and_read_walk_coverage(const char *seam, const char *value,
+                                                         const char *kind) {
+    walk_coverage_seen_t seen = {-1, -1, -1, ""};
+    char tmp_dir[256];
+    char cache[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "%s", th_mktempdir("cbm-walkcov"));
+    snprintf(cache, sizeof(cache), "%s", th_mktempdir("cbm-walkcov-cache"));
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    th_write_file(TH_PATH(tmp_dir, "heavy.py"),
+                  "import os\n\ndef alpha(x):\n    return os.path.join(x, 'a')\n\n"
+                  "def beta():\n    return alpha('b')\n");
+    th_write_file(TH_PATH(tmp_dir, "light.py"), "def gamma():\n    return 1\n");
+    cbm_setenv(seam, value, 1);
+
+    char *project = cbm_project_name_from_path(tmp_dir);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    char args[700];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", tmp_dir);
+    char *resp = srv ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    char *inner = resp ? extract_text_content(resp) : NULL;
+    free(resp);
+    cbm_unsetenv(seam);
+    snprintf(args, sizeof(args), "{\"project\":\"%s\"}", project ? project : "");
+    resp = srv ? cbm_mcp_handle_tool(srv, "index_status", args) : NULL;
+    char *status = resp ? extract_text_content(resp) : NULL;
+    free(resp);
+
+    char count_key[64];
+    snprintf(count_key, sizeof(count_key), "%s_count", kind);
+    yyjson_doc *d = inner ? yyjson_read(inner, strlen(inner), 0) : NULL;
+    if (d) {
+        yyjson_val *root = yyjson_doc_get_root(d);
+        seen.run_count = (long)yyjson_get_int(yyjson_obj_get(root, count_key));
+        seen.run_skipped = (long)yyjson_get_int(yyjson_obj_get(root, "skipped_count"));
+        yyjson_val *files = yyjson_obj_get(yyjson_obj_get(root, kind), "files");
+        const char *detail = yyjson_get_str(yyjson_obj_get(yyjson_arr_get(files, 0), "detail"));
+        snprintf(seen.detail, sizeof(seen.detail), "%s", detail ? detail : "");
+        yyjson_doc_free(d);
+    }
+    d = status ? yyjson_read(status, strlen(status), 0) : NULL;
+    if (d) {
+        yyjson_val *section = yyjson_obj_get(yyjson_doc_get_root(d), kind);
+        seen.status_count = (long)yyjson_get_int(yyjson_obj_get(section, "count"));
+        yyjson_doc_free(d);
+    }
+    free(inner);
+    free(status);
+    if (srv) {
+        cbm_mcp_server_free(srv);
+    }
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+        free(saved_copy);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(project);
+    th_rmtree(cache);
+    th_rmtree(tmp_dir);
+    return seen;
+}
+
+/* Upstream 8c1a9d61: a file whose walk stopped at its budget, or that ran
+ * without its LSP walks, was reported as fully indexed — walk_truncated and
+ * lsp_skipped were set and nothing read them. Both are now coverage entries,
+ * in the index response and in the persisted index_status report, and both
+ * stay out of skipped[] because the file WAS indexed. */
+TEST(index_response_reports_walk_coverage) {
+    walk_coverage_seen_t lsp =
+        index_and_read_walk_coverage("CBM_TEST_LSP_SKIP_ON", "heavy.py", "lsp_skipped");
+    ASSERT_EQ(lsp.run_count, 1); /* heavy.py only — light.py was not named */
+    ASSERT_EQ(lsp.run_skipped, 0);
+    ASSERT_EQ(lsp.status_count, 1);
+    ASSERT_NOT_NULL(strstr(lsp.detail, "test_seam, "));
+    ASSERT_NOT_NULL(strstr(lsp.detail, " nodes"));
+
+    /* Every file stops after 8 nodes. */
+    walk_coverage_seen_t cut =
+        index_and_read_walk_coverage("CBM_TEST_WALK_BUDGET_NODES", "8", "walk_truncated");
+    ASSERT_EQ(cut.run_count, 2);
+    ASSERT_EQ(cut.run_skipped, 0);
+    ASSERT_EQ(cut.status_count, 2);
+    ASSERT_EQ(strncmp(cut.detail, "8/", 2), 0);
+    ASSERT_NOT_NULL(strstr(cut.detail, " nodes walked"));
+    PASS();
+}
+#endif
+
 /* list_projects pages DETERMINISTICALLY. Without the sort, paging over readdir
  * order is meaningless — the order is filesystem-dependent, so page 2 could
  * repeat or skip entries from page 1, and even the unpaginated list differed
@@ -5432,6 +5534,9 @@ SUITE(mcp) {
     RUN_TEST(search_graph_semantic_only_skips_structural_scan);
     RUN_TEST(index_response_reports_persisted_coverage_on_reindex);
     RUN_TEST(index_response_reports_parse_unusable_range_end_issue963);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(index_response_reports_walk_coverage);
+#endif
     RUN_TEST(tool_list_projects_pages_deterministically);
     RUN_TEST(search_code_file_pattern_prefilter_boundaries);
     RUN_TEST(search_code_windows_prefilter_precedes_content_scan);

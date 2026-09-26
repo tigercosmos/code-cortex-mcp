@@ -284,6 +284,11 @@ static int init_schema(cbm_store_t *s) {
          *                    saying the producer's cap dropped N more.
          *   "parse_unusable" indexed, but one range covers 80%+ of the file;
          *                    detail = the same range string. Read the source.
+         *   "walk_truncated" indexed, but the unified walk stopped at its
+         *                    budget; detail = "<visited>/<total> nodes walked".
+         *   "lsp_skipped"    indexed, but without the per-file and
+         *                    cross-file LSP walks; detail = "<rule>, <total>
+         *                    nodes".
          *   a skip phase     NOT indexed: "read"/"extract"/"oversized";
          *                    detail = reason.
          * Deliberately SEPARATE from the graph tables: coverage is metadata

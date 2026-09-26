@@ -117,6 +117,28 @@ void cbm_pp_bp_nap_cycles_reset(void) {
     atomic_store_explicit(&g_bp_nap_cycles, 0L, memory_order_relaxed);
 }
 
+/* A truncated walk is a coverage gap like a partial parse, and until now it was
+ * the only one kept quiet: walk_truncated and lsp_skipped were set and nothing
+ * reported them, so a file the walk abandoned halfway looked fully indexed.
+ * Saying how far it got is the difference between a graph with a known hole
+ * and a graph that quietly lies about its coverage. Independent of the parse
+ * coverage entries: a truncated walk is not a parse error. */
+const char *cbm_walk_coverage_entry(const CBMFileResult *r, char *reason, size_t reason_sz) {
+    if (!r || r->has_error) {
+        return NULL;
+    }
+    if (r->walk_truncated) {
+        snprintf(reason, reason_sz, "%u/%u nodes walked", r->walk_nodes_visited, r->tree_nodes);
+        return "walk_truncated";
+    }
+    if (r->lsp_skipped) {
+        snprintf(reason, reason_sz, "%s, %u nodes", cbm_lsp_skip_reason_name(r->lsp_skip_reason),
+                 r->tree_nodes);
+        return "lsp_skipped";
+    }
+    return NULL;
+}
+
 /* Parse a positive MB-valued retention env knob (CBM_RETAIN_*_MB) into bytes.
  * Follows the limits.c strtol convention: unset / unparseable / non-positive
  * → return 0 so the caller keeps its derived default. */
@@ -933,6 +955,14 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
              * when one range covers nearly the whole file (see cbm.h). */
             pp_err_add(errs, fi->rel_path, result->error_ranges ? result->error_ranges : "unknown",
                        result->parse_unusable ? "parse_unusable" : "parse_partial");
+        }
+        {
+            char walk_reason[CBM_SZ_64];
+            const char *walk_phase =
+                cbm_walk_coverage_entry(result, walk_reason, sizeof(walk_reason));
+            if (walk_phase) {
+                pp_err_add(errs, fi->rel_path, walk_reason, walk_phase);
+            }
         }
 
         /* Create definition nodes in local gbuf */

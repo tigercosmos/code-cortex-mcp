@@ -728,6 +728,15 @@ bool extract_grpc_service_method(const char *callee, char *service, size_t srv_s
 long cbm_pp_bp_nap_cycles(void);
 void cbm_pp_bp_nap_cycles_reset(void);
 
+/* The walk-coverage entry for one extracted file (upstream 8c1a9d61). Phase
+ * "walk_truncated" (reason "<visited>/<total> nodes walked") when the unified
+ * walk stopped at its budget; phase "lsp_skipped" (reason "<rule>, <total>
+ * nodes") when the file was indexed without its per-file and cross-file LSP
+ * walks. Both files WERE indexed — this is coverage, not a skip. Returns NULL
+ * when the walks covered the whole file. Shared by the sequential and parallel
+ * extract loops so the two cannot drift. */
+const char *cbm_walk_coverage_entry(const CBMFileResult *r, char *reason, size_t reason_sz);
+
 #ifdef __cplusplus
 }
 #endif

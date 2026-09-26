@@ -6,12 +6,15 @@
 #include "tree_sitter/api.h" // TSNode, TSTreeCursor, ts_tree_cursor_*, ts_node_*
 #include "foundation/constants.h"
 #include "foundation/compat.h" // cbm_thread_cpu_time_ns
-#include <stdlib.h>            // getenv, strtoul
+#include <stdlib.h>            // getenv, strtoul, malloc, realloc, free
 
 enum { MAX_INFRA_BINDINGS = 8 };
 
 /* The unified walk checks its CPU budget once every 1024 nodes. */
 enum { WALK_BUDGET_CHECK_MASK = 1023 };
+
+/* Starting depth capacity of the walk's ancestor chain; doubles as needed. */
+enum { WALK_ANCESTORS_INITIAL = 256 };
 
 #include <stdint.h> // uint32_t, uint8_t
 #include <string.h>
@@ -1664,7 +1667,13 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
     state.py_param_stack_capacity = INLINE_PY_PARAM_STACK;
 
     uint32_t depth = 0;
+    uint32_t max_depth = 0;
     uint32_t visited = 0;
+    /* ancestors[d] is the node last visited at depth d, so ancestors[depth - 1]
+     * is the current node's parent: the chain costs one store per node, where
+     * ts_node_parent costs a descent from the root. Sized by tree depth. */
+    uint32_t ancestors_cap = WALK_ANCESTORS_INITIAL;
+    TSNode *ancestors = (TSNode *)malloc((size_t)ancestors_cap * sizeof(*ancestors));
 #ifdef CBM_ENABLE_TEST_SEAMS
     /* CBM_TEST_WALK_BUDGET_NODES=<n>: the budget is "spent" after n nodes,
      * no real timing involved. */
@@ -1694,6 +1703,24 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
         }
 #endif
 
+        if (ancestors && depth >= ancestors_cap) {
+            uint32_t grown_cap = ancestors_cap * 2;
+            TSNode *grown = (TSNode *)realloc(ancestors, (size_t)grown_cap * sizeof(*ancestors));
+            if (grown) {
+                ancestors = grown;
+                ancestors_cap = grown_cap;
+            } else {
+                /* Out of memory: handlers fall back to ts_node_parent. */
+                free(ancestors);
+                ancestors = NULL;
+            }
+        }
+        if (ancestors) {
+            ancestors[depth] = node;
+            state.parent = depth > 0 ? ancestors[depth - 1] : TSNode{};
+        }
+        state.parent_known = ancestors != NULL;
+
         pop_expired_scopes(&state, depth);
         recompute_state(&state, ctx->module_qn);
 
@@ -1714,6 +1741,9 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
 
         if (ts_tree_cursor_goto_first_child(&cursor)) {
             depth++;
+            if (depth > max_depth) {
+                max_depth = depth;
+            }
             continue;
         }
         if (ts_tree_cursor_goto_next_sibling(&cursor)) {
@@ -1732,6 +1762,10 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
         }
     }
 
+    /* The node that tripped the budget was counted but never handled. */
+    ctx->walk_nodes_visited = ctx->walk_budget_exhausted ? visited - 1 : visited;
+    ctx->walk_max_depth = max_depth;
+    free(ancestors);
     ts_tree_cursor_delete(&cursor);
     cbm_usage_dedup_end(ctx, owns_usage_dedup);
 }

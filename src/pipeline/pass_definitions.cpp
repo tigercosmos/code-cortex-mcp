@@ -667,6 +667,15 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
                 ctx->pipeline, rel, result->error_ranges ? result->error_ranges : "unknown",
                 result->parse_unusable ? "parse_unusable" : "parse_partial");
         }
+        {
+            /* Walk coverage — see cbm_walk_coverage_entry (pass_parallel.c). */
+            char walk_reason[CBM_SZ_64];
+            const char *walk_phase =
+                cbm_walk_coverage_entry(result, walk_reason, sizeof(walk_reason));
+            if (walk_phase) {
+                cbm_pipeline_add_file_error(ctx->pipeline, rel, walk_reason, walk_phase);
+            }
+        }
 
         /* Create nodes for each definition */
         for (int d = 0; d < result->defs.count; d++) {

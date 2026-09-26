@@ -1809,6 +1809,7 @@ static cbm_store_t *resolve_store(cbm_mcp_server_t *srv, const char *project) {
  * (read / extract / oversized). */
 static bool coverage_kind_is_skip(const char *kind) {
     return strcmp(kind, "parse_partial") != 0 && strcmp(kind, "parse_unusable") != 0 &&
+           strcmp(kind, "walk_truncated") != 0 && strcmp(kind, "lsp_skipped") != 0 &&
            strcmp(kind, "not_indexed_dir") != 0 && strcmp(kind, "not_indexed_file") != 0;
 }
 
@@ -1857,6 +1858,24 @@ char *cbm_mcp_coverage_note(cbm_mcp_server_t *srv, const char *project, const ch
                      "graph queries may under-report this file. (best-effort signal)",
                      detail[0] ? detail : "?");
             break; /* the partial-parse note wins over any skip row */
+        }
+        if (strcmp(kind, "walk_truncated") == 0) {
+            snprintf(note, sizeof(note),
+                     "[code-cortex] Coverage note: extraction stopped partway through this file "
+                     "(%s), so calls and usages past that point are missing from the knowledge "
+                     "graph. The file content you are reading is ground truth; graph queries may "
+                     "under-report this file. (best-effort signal)",
+                     detail[0] ? detail : "?");
+            break;
+        }
+        if (strcmp(kind, "lsp_skipped") == 0 && !note[0]) {
+            snprintf(note, sizeof(note),
+                     "[code-cortex] Coverage note: this file is too large or too deeply nested "
+                     "for type-aware call resolution (%s), so its calls are resolved by name "
+                     "only and some may be "
+                     "missing or ambiguous in the knowledge graph. (best-effort signal)",
+                     detail[0] ? detail : "?");
+            continue;
         }
         if (coverage_kind_is_skip(kind) && !note[0]) {
             snprintf(note, sizeof(note),
@@ -3414,6 +3433,16 @@ static void add_parse_unusable_file(yyjson_mut_doc *doc, yyjson_mut_val *files, 
     yyjson_mut_arr_add_val(files, fe);
 }
 
+/* Append one walk-coverage entry, {path, detail}, to `files`. detail is the
+ * producer's "<visited>/<total> nodes walked" or "<rule>, <total> nodes". */
+static void add_walk_coverage_file(yyjson_mut_doc *doc, yyjson_mut_val *files, const char *path,
+                                   const char *detail) {
+    yyjson_mut_val *fe = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc, fe, "path", path ? path : "");
+    yyjson_mut_obj_add_strcpy(doc, fe, "detail", detail ? detail : "");
+    yyjson_mut_arr_add_val(files, fe);
+}
+
 static void add_coverage_report(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_store_t *store,
                                 const char *project) {
     cbm_coverage_row_t *rows = NULL;
@@ -3422,11 +3451,15 @@ static void add_coverage_report(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_s
 
     yyjson_mut_val *pp_files = yyjson_mut_arr(doc);
     yyjson_mut_val *pu_files = yyjson_mut_arr(doc);
+    yyjson_mut_val *wt_files = yyjson_mut_arr(doc);
+    yyjson_mut_val *ls_files = yyjson_mut_arr(doc);
     yyjson_mut_val *sk_files = yyjson_mut_arr(doc);
     yyjson_mut_val *ni_dirs = yyjson_mut_arr(doc);
     yyjson_mut_val *ni_files = yyjson_mut_arr(doc);
     int pp_n = 0;
     int pu_n = 0;
+    int wt_n = 0;
+    int ls_n = 0;
     int sk_n = 0;
     int ni_dir_n = 0;
     int ni_file_n = 0;
@@ -3448,6 +3481,19 @@ static void add_coverage_report(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_s
                 add_parse_unusable_file(doc, pu_files, rows[i].rel_path, rows[i].detail);
             }
             pu_n++;
+        } else if (strcmp(kind, "walk_truncated") == 0) {
+            /* Indexed too — the walk stopped early. Kept out of skipped[] for
+             * the same reason. */
+            if (wt_n < COVERAGE_FILE_CAP) {
+                add_walk_coverage_file(doc, wt_files, rows[i].rel_path, rows[i].detail);
+            }
+            wt_n++;
+        } else if (strcmp(kind, "lsp_skipped") == 0) {
+            /* Indexed, without the per-file and cross-file LSP walks. */
+            if (ls_n < COVERAGE_FILE_CAP) {
+                add_walk_coverage_file(doc, ls_files, rows[i].rel_path, rows[i].detail);
+            }
+            ls_n++;
         } else if (strcmp(kind, "not_indexed_dir") == 0) {
             if (ni_dir_n < COVERAGE_FILE_CAP) {
                 yyjson_mut_arr_add_strcpy(doc, ni_dirs, rows[i].rel_path);
@@ -3488,6 +3534,20 @@ static void add_coverage_report(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_s
     yyjson_mut_obj_add_bool(doc, pu, "truncated", pu_n > COVERAGE_FILE_CAP);
     yyjson_mut_obj_add_val(doc, root, "parse_unusable", pu);
 
+    /* Indexed, but the unified walk stopped at its budget ("N/M nodes walked"),
+     * or the file ran without its per-file and cross-file LSP walks. */
+    yyjson_mut_val *wt = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, wt, "files", wt_files);
+    yyjson_mut_obj_add_int(doc, wt, "count", wt_n);
+    yyjson_mut_obj_add_bool(doc, wt, "truncated", wt_n > COVERAGE_FILE_CAP);
+    yyjson_mut_obj_add_val(doc, root, "walk_truncated", wt);
+
+    yyjson_mut_val *ls = yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_val(doc, ls, "files", ls_files);
+    yyjson_mut_obj_add_int(doc, ls, "count", ls_n);
+    yyjson_mut_obj_add_bool(doc, ls, "truncated", ls_n > COVERAGE_FILE_CAP);
+    yyjson_mut_obj_add_val(doc, root, "lsp_skipped", ls);
+
     yyjson_mut_val *sk = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, sk, "files", sk_files);
     yyjson_mut_obj_add_int(doc, sk, "count", sk_n);
@@ -3513,12 +3573,14 @@ static void add_coverage_report(yyjson_mut_doc *doc, yyjson_mut_val *root, cbm_s
     }
     yyjson_mut_obj_add_val(doc, root, "not_indexed", ni);
 
-    if (pp_n > 0 || sk_n > 0) {
+    if (pp_n > 0 || sk_n > 0 || wt_n > 0 || ls_n > 0) {
         yyjson_mut_obj_add_str(
             doc, root, "coverage_note",
             "Best-effort signal, not a completeness guarantee: parse_partial files WERE indexed, "
             "but constructs inside the listed line ranges (1-based) MAY be missing from the graph "
-            "(tree-sitter error recovery still salvages some). skipped files were not indexed at "
+            "(tree-sitter error recovery still salvages some). walk_truncated files WERE indexed "
+            "up to the node count shown, and lsp_skipped files without type-aware call "
+            "resolution. skipped files were not indexed at "
             "all. Prefer text search (grep) for flagged files/ranges. Files absent from this list "
             "are NOT guaranteed to be fully indexed. (not_indexed entries are a separate, "
             "BY-DESIGN class — deliberate ignore rules, not failures.)");
@@ -5734,10 +5796,18 @@ static bool is_parse_unusable(const cbm_file_error_t *e) {
     return e->phase && strcmp(e->phase, "parse_unusable") == 0;
 }
 
-/* Either coverage phase. Both mean the file WAS indexed, so both stay out of
+static bool is_walk_truncated(const cbm_file_error_t *e) {
+    return e->phase && strcmp(e->phase, "walk_truncated") == 0;
+}
+
+static bool is_lsp_skipped(const cbm_file_error_t *e) {
+    return e->phase && strcmp(e->phase, "lsp_skipped") == 0;
+}
+
+/* Any coverage phase. All of them mean the file WAS indexed, so all stay out of
  * skipped[] — a reader who sees a file there believes it is absent. */
 static bool is_parse_coverage(const cbm_file_error_t *e) {
-    return is_parse_partial(e) || is_parse_unusable(e);
+    return is_parse_partial(e) || is_parse_unusable(e) || is_walk_truncated(e) || is_lsp_skipped(e);
 }
 
 /* Attach a summary of per-file skips (Stage 2 / Track B). Always emits a
@@ -5874,6 +5944,30 @@ static void add_parse_unusable_summary(yyjson_mut_doc *doc, yyjson_mut_val *root
     add_parse_coverage_summary(doc, root, errs, count, &section);
 }
 
+static void add_walk_coverage_error_file(yyjson_mut_doc *doc, yyjson_mut_val *files,
+                                         const cbm_file_error_t *e) {
+    add_walk_coverage_file(doc, files, e->path, e->reason);
+}
+
+/* The walk half of the coverage summary (upstream 8c1a9d61). Always emits
+ * top-level "walk_truncated_count" and "lsp_skipped_count" (0 on clean runs);
+ * sections only when files were flagged. Both kinds WERE indexed. */
+static void add_walk_coverage_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                      const cbm_file_error_t *errs, int count) {
+    static const parse_coverage_section_t truncated = {
+        is_walk_truncated, "walk_truncated_count", "walk_truncated", add_walk_coverage_error_file,
+        "Indexed, but extraction stopped at its per-file budget partway through each file "
+        "(detail = nodes walked / nodes in the tree), so calls and usages past that point are "
+        "missing. Read or grep the source for the rest."};
+    static const parse_coverage_section_t lsp = {
+        is_lsp_skipped, "lsp_skipped_count", "lsp_skipped", add_walk_coverage_error_file,
+        "Indexed, but too large or too deeply nested for the type-aware (LSP) call resolution, "
+        "so calls from these files are resolved by name only (detail = the rule that skipped "
+        "it, tree size)."};
+    add_parse_coverage_summary(doc, root, errs, count, &truncated);
+    add_parse_coverage_summary(doc, root, errs, count, &lsp);
+}
+
 /* Write the FULL (uncapped) skip list to a per-run logfile — ONLY when >=1 file
  * was skipped (no logfile on a clean run). Location:
  *   $CBM_INDEX_LOG (override) else <cache_dir>/logs/<project>-<epoch>.log
@@ -5905,16 +5999,20 @@ static bool write_skip_logfile(const char *project, const cbm_file_error_t *errs
     }
     int partials = 0;
     int unusable = 0;
+    int walk = 0;
     for (int i = 0; i < count; i++) {
         if (is_parse_partial(&errs[i])) {
             partials++;
         } else if (is_parse_unusable(&errs[i])) {
             unusable++;
+        } else if (is_walk_truncated(&errs[i]) || is_lsp_skipped(&errs[i])) {
+            walk++;
         }
     }
     (void)fprintf(f, "# code-cortex-mcp index coverage report\n");
-    (void)fprintf(f, "# project=%s skipped=%d parse_partial=%d parse_unusable=%d\n",
-                  project ? project : "", count - partials - unusable, partials, unusable);
+    (void)fprintf(f, "# project=%s skipped=%d parse_partial=%d parse_unusable=%d walk=%d\n",
+                  project ? project : "", count - partials - unusable - walk, partials, unusable,
+                  walk);
     (void)fprintf(f, "# columns: phase\treason\tpath\n");
     for (int i = 0; i < count; i++) {
         (void)fprintf(f, "%s\t%s\t%s\n", errs[i].phase ? errs[i].phase : "",
@@ -5975,6 +6073,7 @@ static bool add_persisted_failure_summaries(yyjson_mut_doc *doc, yyjson_mut_val 
     add_skipped_summary(doc, root, failures, failure_count, logfile);
     add_parse_partial_summary(doc, root, failures, failure_count);
     add_parse_unusable_summary(doc, root, failures, failure_count);
+    add_walk_coverage_summary(doc, root, failures, failure_count);
     free(failures);
     cbm_store_free_coverage(rows, row_count);
     return true;
@@ -6004,6 +6103,7 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
         add_skipped_summary(doc, root, file_errors, file_error_count, logfile);
         add_parse_partial_summary(doc, root, file_errors, file_error_count);
         add_parse_unusable_summary(doc, root, file_errors, file_error_count);
+        add_walk_coverage_summary(doc, root, file_errors, file_error_count);
     }
 
     int nodes = 0;
@@ -7210,6 +7310,12 @@ static void add_snippet_coverage_note(yyjson_mut_doc *doc, yyjson_mut_val *root_
                      "parsed, so constructs there may be missing from the graph (callers/callees "
                      "and search results can under-report this file). The source above is ground "
                      "truth. (best-effort signal)",
+                     rows[i].detail && rows[i].detail[0] ? rows[i].detail : "?");
+        } else if (strcmp(rows[i].kind, "walk_truncated") == 0) {
+            snprintf(note, sizeof(note),
+                     "Extraction stopped partway through this file (%s), so calls and usages past "
+                     "that point are missing from the graph. The source above is ground truth. "
+                     "(best-effort signal)",
                      rows[i].detail && rows[i].detail[0] ? rows[i].detail : "?");
         } else {
             continue;

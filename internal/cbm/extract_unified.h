@@ -77,6 +77,17 @@ typedef struct {
     /* Allocation failure: stop tracking and answer "not bound" forever after,
      * which can only cost a suppression, never a true edge. */
     bool py_param_tracking_failed;
+
+    /* The parent of the node being handled, taken from the walk's own ancestor
+     * chain. tree-sitter nodes carry no parent pointer: ts_node_parent answers
+     * by descending from the ROOT, so a handler that asks per node pays O(depth)
+     * each time and goes quadratic on a deep tree (upstream 8c1a9d61: the .NET
+     * JIT tests, single expressions megabytes deep). Valid only while
+     * parent_known; a null `parent` with parent_known set means the root.
+     * When the chain could not grow, parent_known is false and a handler falls
+     * back to ts_node_parent. */
+    TSNode parent;
+    bool parent_known;
 } WalkState;
 
 /* Is the `len`-byte name at `name` (not NUL-terminated) bound as a parameter by
