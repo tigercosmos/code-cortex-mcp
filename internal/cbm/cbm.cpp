@@ -277,14 +277,16 @@ static bool cbm_name_continues_past_line(const char *text, const char *nl) {
     if (depth > 0) {
         return true;
     }
-    const char *end = nl;
-    while (end > text && (end[-1] == ' ' || end[-1] == '\t')) {
-        end--;
+    size_t n = (size_t)(nl - text);
+    while (n > 0 && (text[n - 1] == ' ' || text[n - 1] == '\t')) {
+        n--;
     }
     static const char kw[] = "operator";
-    size_t kw_len = sizeof(kw) - 1;
-    return (size_t)(end - text) >= kw_len && memcmp(end - kw_len, kw, kw_len) == 0 &&
-           (end - (ptrdiff_t)kw_len == text || !cbm_is_ident_char(end[-(ptrdiff_t)kw_len - 1]));
+    const size_t kw_len = sizeof(kw) - 1;
+    if (n < kw_len || memcmp(text + n - kw_len, kw, kw_len) != 0) {
+        return false;
+    }
+    return n == kw_len || !cbm_is_ident_char(text[n - kw_len - 1]);
 }
 
 /* Fold each line break, with the blanks around it, into at most one space,
