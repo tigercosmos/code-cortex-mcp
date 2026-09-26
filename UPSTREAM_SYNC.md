@@ -52,8 +52,8 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 > had no `lsp_skipped` note. Items 1 and 3 are identical in upstream
 > `1a342553`. Suite 6098 → 6102, ASan+UBSan clean.
 >
-> **Review rounds 2-8 and the RocksDB benchmark (2026-09-26, same day).**
-> Seven more Codex passes (`codex exec review --base main`, effort high, via
+> **Review rounds 2-9 and the RocksDB benchmark (2026-09-26, same day).**
+> Eight more Codex passes (`codex exec review --base main`, effort high, via
 > `codexmon`) and a benchmark on facebook/rocksdb@`4052fccd` (production
 > `-O2` builds, 4 interleaved rounds, fresh cache each) found and fixed, each
 > with a regression test that fails without its fix:
@@ -81,10 +81,12 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 >   the mirror form fail. The seed filter now applies only fully bound AND
 >   conjuncts.
 > - **Residual-coverage comment detection** is a language-aware lexer
->   (block-comment state across raw, backtick, triple-quoted and
->   backslash-continued literals; `#` comments only where they are
->   comments). It replaces the leading-`*` heuristic, which hid `*p = 5;`,
->   `* p = 5;` and statements after `/* note */`.
+>   (block-comment state across raw, verbatim, backtick, triple-quoted,
+>   backslash-continued and, where the language allows it, multi-line
+>   "..." literals; `#` comments only where they are comments). It replaces
+>   the leading-`*` heuristic, which hid `*p = 5;`, `* p = 5;` and
+>   statements after `/* note */`. A `#` line is inert only where `#`
+>   opens a comment or a directive (a CSS `#id {` is code).
 > - **Watcher:** `index_failure_count` and `next_poll_ns` are atomics. The
 >   poller wrote them outside `projects_lock`.
 > - **Coverage detail:** a `tree_depth` skip that only macro expansion
@@ -96,8 +98,12 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 > DEFINES_METHOD +361, OVERRIDE +372, USAGE −345, WRITES −319. About 5,400
 > CALLS retargets are name-only binds among same-named candidates switching
 > under the least-nested tie-break, deterministic, with no clear net
-> direction. Suite 6098 → 6111, ASan+UBSan clean, cppcheck identical to
-> the base.
+> direction. Suite 6098 → 6112, ASan+UBSan clean, cppcheck identical to
+> the base. **Later rounds converged on the fork-only coverage lexer**:
+> every finding from round 5 on was a new literal or comment form it did
+> not know (raw strings, then multi-line quotes, then CSS `#`). It is a
+> best-effort signal and fails toward reporting less; a further review
+> would likely find more such forms (heredocs, nested block comments).
 >
 > **Build note:** `-DCMAKE_BUILD_TYPE=Release` does not compile (vendored
 > `just` scanner: `#error "expected assertions to be enabled"`). Configure
