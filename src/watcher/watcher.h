@@ -76,8 +76,29 @@ void cbm_watcher_stop(cbm_watcher_t *w);
 /* Return the number of projects in the watch list. */
 int cbm_watcher_watch_count(cbm_watcher_t *w);
 
+/* Return a watched project's consecutive hard-index-failure count, or -1 when
+ * it is not watched. Exposed so the failure state machine (increment on a
+ * hard error, reset on success or cbm_watcher_touch) can be asserted directly
+ * rather than inferred from the poll deadline it feeds.
+ *
+ * Memory visibility: this reads under projects_lock, but poll_project WRITES
+ * the counter outside that lock, against a state snapshot taken while the
+ * lock was held — the discipline the other poll-mutated fields (last_head,
+ * interval_ms, next_poll_ns, missing_root_count) follow. A read concurrent
+ * with a live poll may see a stale value; it is a diagnostic and test
+ * accessor, not a synchronisation point. */
+int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name);
+
 /* Return the adaptive poll interval (ms) for a given file count. */
 int cbm_watcher_poll_interval_ms(int file_count);
+
+/* Return the delay (ms) before the next index attempt for a project with
+ * `consecutive_failures` consecutive hard index failures (#2015). Zero
+ * failures yields `interval_ms` unchanged; each further failure doubles the
+ * delay up to a shift cap, and the result is clamped at BOTH ends: never above
+ * a fixed ceiling (15 min) and never below `interval_ms`, so backing off can
+ * only delay the next attempt. Negative inputs are treated as zero. */
+int cbm_watcher_index_backoff_ms(int interval_ms, int consecutive_failures);
 
 /* Classify a stat() errno observed on a watched project root: returns true
  * only for values that mean the root itself is gone (ENOENT, ENOTDIR) and

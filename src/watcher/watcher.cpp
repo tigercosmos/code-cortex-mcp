@@ -27,6 +27,7 @@
 #include "pipeline/artifact.h" /* CBM_ARTIFACT_DIR: the indexer's own output directory */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,7 +78,17 @@ struct cbm_watcher {
 #define POLL_BASE_MS 5000
 #define POLL_FILE_STEP 500 /* add 1s per this many files */
 #define POLL_MAX_MS 60000
-#define INDEX_FAILURE_BACKOFF_MAX_MS 900000
+
+/* Hard index-failure backoff (#2015). Doubling per consecutive failure, the
+ * shift capped so the intermediate value stays well inside int64, and the
+ * delay capped at a ceiling so a permanently failing project is retried a few
+ * times an hour instead of at the poll cadence, yet still recovers on its own
+ * once the cause clears. */
+#define INDEX_FAIL_SHIFT_MAX 8
+#define INDEX_FAIL_CEILING_MS 900000 /* 15 min */
+/* Log a distinct line once the failures are clearly not transient, so the
+ * daemon log names the stuck project instead of only repeating the warning. */
+#define INDEX_FAIL_SUSTAINED 10
 
 /* Stale-root pruning (#286): a watched project whose root directory stays
  * missing is pruned — its cached DB is deleted and the watch entry removed.
@@ -99,6 +110,25 @@ static int64_t now_ns(void) {
 }
 
 /* ── Adaptive interval ──────────────────────────────────────────── */
+
+int cbm_watcher_index_backoff_ms(int interval_ms, int consecutive_failures) {
+    if (interval_ms < 0) {
+        interval_ms = 0;
+    }
+    if (consecutive_failures <= 0) {
+        return interval_ms;
+    }
+    int shift =
+        consecutive_failures < INDEX_FAIL_SHIFT_MAX ? consecutive_failures : INDEX_FAIL_SHIFT_MAX;
+    int64_t delay = (int64_t)interval_ms << shift;
+    if (delay > INDEX_FAIL_CEILING_MS) {
+        delay = INDEX_FAIL_CEILING_MS;
+    }
+    /* Backing off must never schedule SOONER than the project's own cadence:
+     * the clamp is a floor as well as a cap, so the delay never shrinks as
+     * failures accumulate, whatever interval a caller passes. */
+    return (int)(delay < interval_ms ? interval_ms : delay);
+}
 
 int cbm_watcher_poll_interval_ms(int file_count) {
     int ms = POLL_BASE_MS + ((file_count / POLL_FILE_STEP) * CBM_MSEC_PER_SEC);
@@ -508,6 +538,17 @@ void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name) {
     cbm_mutex_unlock(&w->projects_lock);
 }
 
+int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name) {
+    if (!w || !project_name) {
+        return -1;
+    }
+    cbm_mutex_lock(&w->projects_lock);
+    project_state_t *s = (project_state_t *)cbm_ht_get(w->projects, project_name);
+    int failures = s ? s->index_failure_count : -1;
+    cbm_mutex_unlock(&w->projects_lock);
+    return failures;
+}
+
 int cbm_watcher_watch_count(cbm_watcher_t *w) {
     if (!w) {
         return 0;
@@ -715,16 +756,23 @@ static void poll_project(const char *key, void *val, void *ud) {
             s->next_poll_ns = now_ns() + ((int64_t)s->interval_ms * US_PER_MS);
             return;
         } else {
-            s->index_failure_count++;
-            int64_t backoff_ms = s->interval_ms;
-            int doublings = s->index_failure_count > 8 ? 8 : s->index_failure_count;
-            for (int i = 0; i < doublings && backoff_ms < INDEX_FAILURE_BACKOFF_MAX_MS; i++) {
-                backoff_ms *= 2;
+            if (s->index_failure_count < INT_MAX) {
+                s->index_failure_count++;
             }
-            if (backoff_ms > INDEX_FAILURE_BACKOFF_MAX_MS) {
-                backoff_ms = INDEX_FAILURE_BACKOFF_MAX_MS;
+            /* itoa_buf returns one shared per-thread buffer, so two of them
+             * in one call would print the same value twice. */
+            char rc_text[CBM_SZ_32];
+            char streak_text[CBM_SZ_32];
+            snprintf(rc_text, sizeof(rc_text), "%d", rc);
+            snprintf(streak_text, sizeof(streak_text), "%d", s->index_failure_count);
+            cbm_log_warn("watcher.index.err", "project", s->project_name, "rc", rc_text,
+                         "consecutive", streak_text);
+            if (s->index_failure_count == INDEX_FAIL_SUSTAINED) {
+                cbm_log_warn("watcher.index.sustained_failure", "project", s->project_name,
+                             "consecutive", streak_text);
             }
-            cbm_log_warn("watcher.index.err", "project", s->project_name);
+            int64_t backoff_ms =
+                cbm_watcher_index_backoff_ms(s->interval_ms, s->index_failure_count);
             s->next_poll_ns = now_ns() + (backoff_ms * US_PER_MS);
             return;
         }

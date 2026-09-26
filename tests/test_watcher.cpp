@@ -5,10 +5,12 @@
  * poll_once behavior.
  */
 #include "../src/foundation/compat.h"
+#include "../src/foundation/log.h"
 #include "test_framework.h"
 #include "test_helpers.h"
 #include <watcher/watcher.h>
 #include <store/store.h>
+#include <limits.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -69,6 +71,68 @@ TEST(poll_interval_small) {
     /* 500 files → 5000 + 1*1000 = 6000ms */
     ms = cbm_watcher_poll_interval_ms(500);
     ASSERT_EQ(ms, 6000);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  HARD INDEX-FAILURE BACKOFF (#2015)
+ * ══════════════════════════════════════════════════════════════════ */
+
+TEST(index_backoff_no_failures_keeps_interval) {
+    /* The success and busy-skip paths must be completely unaffected. */
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, 0), 5000);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(60000, 0), 60000);
+    PASS();
+}
+
+TEST(index_backoff_doubles_per_failure) {
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, 1), 10000);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, 2), 20000);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, 3), 40000);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, 4), 80000);
+    PASS();
+}
+
+TEST(index_backoff_reaches_ceiling_and_stays) {
+    /* 5000 << 8 = 1,280,000, above the 15-minute ceiling. The shift is capped
+     * too, so an arbitrarily long failure streak cannot overflow the
+     * intermediate value or wrap back to a short delay. */
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, 8), 900000);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, 100), 900000);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, INT_MAX), 900000);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(60000, INT_MAX), 900000);
+    PASS();
+}
+
+TEST(index_backoff_is_monotonic_and_bounded) {
+    /* The delay never decreases as the streak grows, and never exceeds the
+     * ceiling. This is what bounds the fork rate of a permanently failing
+     * project. */
+    int previous = cbm_watcher_index_backoff_ms(5000, 0);
+    for (int failures = 1; failures < 200; failures++) {
+        int delay = cbm_watcher_index_backoff_ms(5000, failures);
+        ASSERT_TRUE(delay >= previous);
+        ASSERT_TRUE(delay <= 900000);
+        previous = delay;
+    }
+    PASS();
+}
+
+TEST(index_backoff_degenerate_inputs) {
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(0, 5), 0);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(-1, 0), 0);
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(5000, -1), 5000);
+    PASS();
+}
+
+TEST(index_backoff_never_schedules_sooner_than_the_interval) {
+    /* An interval above the ceiling must not be SHORTENED by backing off:
+     * the clamp is a floor as well as a cap. */
+    int over = 1000000; /* > the 15-minute ceiling */
+    ASSERT_EQ(cbm_watcher_index_backoff_ms(over, 0), over);
+    for (int failures = 1; failures < 20; failures++) {
+        ASSERT_TRUE(cbm_watcher_index_backoff_ms(over, failures) >= over);
+    }
     PASS();
 }
 
@@ -1339,6 +1403,176 @@ TEST(watcher_failed_commit_index_retries_without_losing_head) {
     PASS();
 }
 
+/* #2015: an index callback that fails hard for its first N attempts. */
+static int streak_index_calls = 0;
+static int streak_index_fail_first_n = 0;
+static int streak_index_callback(const char *name, const char *path, void *ud) {
+    (void)name;
+    (void)path;
+    (void)ud;
+    streak_index_calls++;
+    return streak_index_calls <= streak_index_fail_first_n ? -1 : 0;
+}
+
+/* A git repo with one commit, then a second commit the watcher has not seen,
+ * so every subsequent poll that is allowed through attempts a reindex. */
+static bool streak_repo_with_pending_commit(char *tmpdir, size_t n, const char *tag,
+                                            cbm_watcher_t *w, const char *project) {
+    snprintf(tmpdir, n, "/tmp/cbm_watcher_%s_XXXXXX", tag);
+    if (!cbm_mkdtemp(tmpdir)) {
+        return false;
+    }
+    if (wt_git(tmpdir, "init -q") != 0) {
+        th_rmtree(tmpdir);
+        return false;
+    }
+    char p[300];
+    th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "hello\n");
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m init");
+    cbm_watcher_watch(w, project, tmpdir);
+    cbm_watcher_poll_once(w); /* baseline */
+    th_append_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "world\n");
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m add-world");
+    return true;
+}
+
+/* The failure state machine the backoff feeds (#2015): the streak counts
+ * consecutive HARD failures and resets when a reindex succeeds. A streak that
+ * never increments or never resets silently reverts the backoff to unbounded
+ * retry. In this fork cbm_watcher_touch also resets the streak (a new explicit
+ * change may have fixed the cause), so the deadline is cleared here with
+ * cbm_watcher_mark_index_pending, which leaves the streak alone. */
+TEST(watcher_index_failure_streak_increments_and_resets_issue2015) {
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, streak_index_callback, NULL);
+    streak_index_calls = 0;
+    streak_index_fail_first_n = 2;
+    char tmpdir[256];
+    if (!streak_repo_with_pending_commit(tmpdir, sizeof(tmpdir), "strk", w, "strk-repo")) {
+        cbm_watcher_free(w);
+        cbm_store_close(store);
+        FAIL("repo setup failed");
+    }
+    ASSERT_EQ(streak_index_calls, 0);
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, "strk-repo"), 0);
+
+    cbm_watcher_mark_index_pending(w, "strk-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(streak_index_calls, 1);
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, "strk-repo"), 1);
+
+    /* It accumulates; it is not a boolean, which is what makes the delay grow. */
+    cbm_watcher_mark_index_pending(w, "strk-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(streak_index_calls, 2);
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, "strk-repo"), 2);
+
+    /* Success resets it, so a recovered project returns to its cadence. */
+    cbm_watcher_mark_index_pending(w, "strk-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(streak_index_calls, 3);
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, "strk-repo"), 0);
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
+/* A hard failure must leave a deadline behind, so the failing project is not
+ * re-forked on the very next cycle. Observable without a clock by polling
+ * without clearing the deadline. This guards the deadline being assigned at
+ * all; the delay's MAGNITUDE is covered by the index_backoff_* unit tests,
+ * and observing it through the scheduler would need a controllable clock. */
+TEST(watcher_index_failure_backoff_gates_repolling_issue2015) {
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, streak_index_callback, NULL);
+    streak_index_calls = 0;
+    streak_index_fail_first_n = 100; /* never succeeds */
+    char tmpdir[256];
+    if (!streak_repo_with_pending_commit(tmpdir, sizeof(tmpdir), "gate", w, "gate-repo")) {
+        cbm_watcher_free(w);
+        cbm_store_close(store);
+        FAIL("repo setup failed");
+    }
+
+    cbm_watcher_touch(w, "gate-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(streak_index_calls, 1);
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, "gate-repo"), 1);
+
+    /* The commit is still unabsorbed, so only the deadline stops a re-fork. */
+    for (int i = 0; i < 5; i++) {
+        cbm_watcher_poll_once(w);
+    }
+    ASSERT_EQ(streak_index_calls, 1);
+
+    /* Control: the watcher is not dead — clearing the deadline lets the retry
+     * through, keeping the at-least-once guarantee. */
+    cbm_watcher_mark_index_pending(w, "gate-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(streak_index_calls, 2);
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, "gate-repo"), 2);
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
+/* The sustained-failure line fires EXACTLY once, at the threshold — widening
+ * the `==` to `>=` would emit it on every failure from then on. */
+static int sustained_log_hits = 0;
+static void sustained_log_sink(const char *line) {
+    if (line && strstr(line, "watcher.index.sustained_failure") != NULL) {
+        sustained_log_hits++;
+    }
+}
+
+TEST(watcher_sustained_failure_logs_once_issue2015) {
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, streak_index_callback, NULL);
+    streak_index_calls = 0;
+    streak_index_fail_first_n = 100; /* never succeeds */
+    char tmpdir[256];
+    if (!streak_repo_with_pending_commit(tmpdir, sizeof(tmpdir), "sust", w, "sust-repo")) {
+        cbm_watcher_free(w);
+        cbm_store_close(store);
+        FAIL("repo setup failed");
+    }
+
+    sustained_log_hits = 0;
+    cbm_log_set_sink(sustained_log_sink);
+    for (int i = 0; i < 14; i++) {
+        cbm_watcher_mark_index_pending(w, "sust-repo");
+        cbm_watcher_poll_once(w);
+    }
+    cbm_log_set_sink(NULL);
+
+    ASSERT_EQ(streak_index_calls, 14);
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, "sust-repo"), 14);
+    ASSERT_EQ(sustained_log_hits, 1);
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
+TEST(watcher_index_failure_count_unknown_project) {
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    /* Unwatched and NULL inputs report -1, distinct from a legitimate 0. */
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, "never-watched"), -1);
+    ASSERT_EQ(cbm_watcher_index_failure_count(w, NULL), -1);
+    ASSERT_EQ(cbm_watcher_index_failure_count(NULL, "x"), -1);
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  RESOURCE MANAGEMENT & AUTO-INDEXING BEHAVIOR
  * ══════════════════════════════════════════════════════════════════ */
@@ -1814,6 +2048,16 @@ SUITE(watcher) {
     RUN_TEST(watcher_touch_resets_immediate);
     RUN_TEST(watcher_modify_tracked_file);
     RUN_TEST(watcher_failed_commit_index_retries_without_losing_head);
+    RUN_TEST(index_backoff_no_failures_keeps_interval);
+    RUN_TEST(index_backoff_doubles_per_failure);
+    RUN_TEST(index_backoff_reaches_ceiling_and_stays);
+    RUN_TEST(index_backoff_is_monotonic_and_bounded);
+    RUN_TEST(index_backoff_degenerate_inputs);
+    RUN_TEST(index_backoff_never_schedules_sooner_than_the_interval);
+    RUN_TEST(watcher_index_failure_streak_increments_and_resets_issue2015);
+    RUN_TEST(watcher_index_failure_backoff_gates_repolling_issue2015);
+    RUN_TEST(watcher_sustained_failure_logs_once_issue2015);
+    RUN_TEST(watcher_index_failure_count_unknown_project);
 
     /* Resource management & auto-indexing behavior */
     RUN_TEST(watcher_null_store_handling);
