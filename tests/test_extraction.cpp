@@ -3259,6 +3259,7 @@ TEST(defs_push_folds_multiline_operator_names) {
         {"operator\n    bool", "proj.a.Flag.operator\n    bool", "operator bool"},
         {"operator\nint", "proj.a.Flag.operator\nint", "operator int"},
         {"operator\n()", "proj.a.Flag.operator\n()", "operator()"},
+        {"operator N::\n    T", "proj.a.Flag.operator N::\n    T", "operator N::T"},
     };
     for (auto &n : names) {
         CBMDefinition d = {};
@@ -3268,11 +3269,13 @@ TEST(defs_push_folds_multiline_operator_names) {
         d.file_path = "a.h";
         cbm_defs_push(&defs, &a, d);
     }
-    ASSERT_EQ(defs.count, 3);
+    ASSERT_EQ(defs.count, 4);
     ASSERT_STR_EQ(defs.items[0].name, "operator bool");
     ASSERT_STR_EQ(defs.items[0].qualified_name, "proj.a.Flag.operator bool");
     ASSERT_STR_EQ(defs.items[1].name, "operator int");
     ASSERT_STR_EQ(defs.items[2].name, "operator()");
+    ASSERT_STR_EQ(defs.items[3].name, "operator N::T");
+    ASSERT_STR_EQ(defs.items[3].qualified_name, "proj.a.Flag.operator N::T");
     /* A plain word that merely ends in "operator" is still cut. */
     CBMDefinition plain = {};
     plain.name = "cooperator\nnext";
@@ -3280,7 +3283,7 @@ TEST(defs_push_folds_multiline_operator_names) {
     plain.label = "Function";
     plain.file_path = "a.h";
     cbm_defs_push(&defs, &a, plain);
-    ASSERT_STR_EQ(defs.items[3].name, "cooperator");
+    ASSERT_STR_EQ(defs.items[4].name, "cooperator");
     cbm_arena_destroy(&a);
     PASS();
 }

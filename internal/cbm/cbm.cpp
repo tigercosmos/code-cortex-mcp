@@ -263,8 +263,8 @@ static bool cbm_is_ident_char(char c) {
  *     Cut, distinct specializations share `Templates<T1, ..., T14,` and
  *     merge (rocksdb: 84 Class nodes);
  *   - a trailing `operator` keyword whose operator sits on the next line
- *     (`operator\nbool`): cut, every conversion operator of a class is
- *     named `operator`. */
+ *     (`operator\nbool`), or a trailing `::` (`operator N::\nT`): cut,
+ *     conversion operators of a class share one truncated name. */
 static bool cbm_name_continues_past_line(const char *text, const char *nl) {
     int depth = 0;
     for (const char *p = text; p < nl; p++) {
@@ -280,6 +280,9 @@ static bool cbm_name_continues_past_line(const char *text, const char *nl) {
     size_t n = (size_t)(nl - text);
     while (n > 0 && (text[n - 1] == ' ' || text[n - 1] == '\t')) {
         n--;
+    }
+    if (n >= 2 && text[n - 2] == ':' && text[n - 1] == ':') {
+        return true; /* `operator N::\nT`: a scope operator never ends a name */
     }
     static const char kw[] = "operator";
     const size_t kw_len = sizeof(kw) - 1;
