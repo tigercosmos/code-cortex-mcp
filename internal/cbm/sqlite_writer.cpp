@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <errno.h>
 
 #ifdef _WIN32
 #include <io.h>
@@ -1759,6 +1760,10 @@ static int sync_writer_output(FILE *fp) {
 }
 
 static int discard_writer_output(write_db_ctx_t *w, int rc) {
+    /* Cleanup runs after the failure that brought us here, and a library
+     * call may set errno even when it succeeds. Carry the reason across it
+     * so the caller can report WHY the publish failed. */
+    int failure_errno = errno;
     if (w->fp) {
         (void)fclose(w->fp);
         w->fp = NULL;
@@ -1766,6 +1771,7 @@ static int discard_writer_output(write_db_ctx_t *w, int rc) {
     if (w->temp_path[0]) {
         (void)cbm_unlink(w->temp_path);
     }
+    errno = failure_errno;
     return rc;
 }
 
@@ -1774,10 +1780,12 @@ static int publish_writer_output(write_db_ctx_t *w) {
         return discard_writer_output(w, ERR_WRITE_FAILED);
     }
     if (fclose(w->fp) != 0) {
+        int failure_errno = errno;
         w->fp = NULL;
         if (w->temp_path[0]) {
             (void)cbm_unlink(w->temp_path);
         }
+        errno = failure_errno;
         return ERR_WRITE_FAILED;
     }
     w->fp = NULL;
@@ -1785,7 +1793,12 @@ static int publish_writer_output(write_db_ctx_t *w) {
         return 0;
     }
     if (cbm_rename_replace(w->temp_path, w->final_path) != 0) {
+        /* cbm_rename_replace leaves the platform's reason in errno so the
+         * caller can say what denied the publish (#1620). Preserve it across
+         * the cleanup unlink. */
+        int rename_errno = errno;
         (void)cbm_unlink(w->temp_path);
+        errno = rename_errno;
         return ERR_WRITE_FAILED;
     }
     /* Sidecars are removed only after the replacement succeeds. On POSIX,
@@ -2286,7 +2299,10 @@ cbm_db_writer_t *cbm_writer_open(const char *path) {
     int n = snprintf(w->wc.final_path, sizeof(w->wc.final_path), "%s", path);
     if (n < 0 || (size_t)n >= sizeof(w->wc.final_path) ||
         make_writer_temp_path(path, w, w->wc.temp_path, sizeof(w->wc.temp_path)) != 0) {
+        /* Both conditions are truncation and neither sets errno; name the
+         * reason rather than let the caller report a stale one. */
         free(w);
+        errno = ENAMETOOLONG;
         return NULL;
     }
     /* cbm_fopen, not raw fopen: the cache dir lives under the user profile,
@@ -2294,8 +2310,14 @@ cbm_db_writer_t *cbm_writer_open(const char *path) {
      * profiles. Everything around this call is already wide-safe. */
     FILE *fp = cbm_fopen(w->wc.temp_path, "wb");
     if (!fp) {
+        /* The cleanup below unlinks a file that was never created, so it
+         * fails and leaves ENOENT behind — which reads as a missing path when
+         * the real answer is that the directory refused the create (#1620).
+         * Carry the open's reason across it. */
+        int open_errno = errno;
         (void)cbm_unlink(w->wc.temp_path);
         free(w);
+        errno = open_errno;
         return NULL;
     }
     w->wc.fp = fp;
@@ -2361,7 +2383,11 @@ int cbm_writer_finalize(cbm_db_writer_t *w, const char *project, const char *roo
     write_db_ctx_t wc = w->wc; /* value copy survives free(w) */
     free(w);
     if (err != 0) {
-        /* wc is a value copy, valid after free(w) */
+        /* A sticky append failure: errno belongs to whatever call failed many
+         * calls ago, not to the publish. Clear it so the caller does not
+         * attach a reason this path does not have. wc is a value copy, valid
+         * after free(w). */
+        errno = 0;
         return discard_writer_output(&wc, err);
     }
     return write_db_after_nodes(&wc, nodes_root);

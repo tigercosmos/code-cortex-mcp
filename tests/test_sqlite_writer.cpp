@@ -13,6 +13,7 @@
 /* sqlite_writer.h is at internal/cbm/ — Makefile adds -Iinternal/cbm */
 #include "sqlite_writer.h" /* CBMDumpNode, CBMDumpEdge, cbm_write_db */
 #include "sqlite3.h"       /* vendored/sqlite3/ via -Ivendored/sqlite3 */
+#include <errno.h>
 #include <unistd.h>
 
 /* ── Helper: create temp file path ─────────────────────────────── */
@@ -60,7 +61,9 @@ static int fixture_file_equals(const char *path, const char *expected) {
     return close_rc == 0 && n == expected_len && memcmp(buf, expected, expected_len) == 0;
 }
 
-static int count_temp_outputs_for(const char *path) {
+/* Count the writer's temp outputs for `path`; when `first` is non-NULL, also
+ * store the full path of the first one found there. */
+static int scan_temp_outputs_for(const char *path, char *first, size_t first_size) {
     char dir[256];
     char base[256];
     const char *slash = strrchr(path, '/');
@@ -94,11 +97,18 @@ static int count_temp_outputs_for(const char *path) {
         size_t name_len = strlen(ent->name);
         if (name_len > base_len + 5 && strncmp(ent->name, base, base_len) == 0 &&
             strncmp(ent->name + base_len, ".tmp.", 5) == 0) {
+            if (count == 0 && first) {
+                snprintf(first, first_size, "%s/%s", dir, ent->name);
+            }
             count++;
         }
     }
     cbm_closedir(d);
     return count;
+}
+
+static int count_temp_outputs_for(const char *path) {
+    return scan_temp_outputs_for(path, NULL, 0);
 }
 
 /* ── Tests ─────────────────────────────────────────────────────── */
@@ -785,6 +795,61 @@ TEST(sw_publish_preserves_live_reader) {
     PASS();
 }
 
+TEST(sw_open_truncated_path_names_its_reason) {
+    /* final_path is a fixed 4K buffer and make_writer_temp_path only fails by
+     * truncation. Neither sets an errno of its own, so without naming one the
+     * caller reports whatever an unrelated call left behind. */
+    char longpath[5000];
+    memset(longpath, 'a', sizeof(longpath) - 1);
+    longpath[sizeof(longpath) - 1] = '\0';
+    longpath[0] = '/';
+
+    errno = 0;
+    cbm_db_writer_t *w = cbm_writer_open(longpath);
+    ASSERT(w == NULL);
+    ASSERT_EQ(errno, ENAMETOOLONG);
+    PASS();
+}
+
+TEST(sw_publish_failure_reports_the_rename_not_the_cleanup) {
+#ifdef _WIN32
+    SKIP_PLATFORM("removing a still-open file to make the cleanup unlink fail");
+#endif
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/cbm_sw_cleanup_XXXXXX");
+    ASSERT(cbm_mkdtemp(dir) != NULL);
+
+    char final_path[320];
+    snprintf(final_path, sizeof(final_path), "%s/db.sqlite", dir);
+    ASSERT_EQ(write_fixture_file(final_path, "destination"), 0);
+
+    cbm_db_writer_t *w = cbm_writer_open(final_path);
+    ASSERT(w != NULL);
+
+    /* Turn the still-open temp into a directory. The publish rename then fails
+     * with ENOTDIR (directory onto a file), and the cleanup unlink fails too
+     * (EISDIR on Linux, EPERM on macOS) — so only a saved errno still carries
+     * the rename's reason out to the caller (#1620). */
+    char temp[512];
+    ASSERT_EQ(scan_temp_outputs_for(final_path, temp, sizeof(temp)), 1);
+    ASSERT_EQ(cbm_unlink(temp), 0);
+    ASSERT(cbm_mkdir_p(temp, 0700));
+
+    errno = 0;
+    int rc = cbm_writer_finalize(w, "test", "/tmp/test", "2026-07-07T00:00:00Z", NULL, 0, NULL, 0,
+                                 NULL, 0, NULL, 0);
+    int publish_errno = errno;
+    ASSERT(rc != 0);
+    ASSERT_EQ(publish_errno, ENOTDIR);
+    /* The destination is intact: a failed publish never replaces it. */
+    ASSERT(fixture_file_equals(final_path, "destination"));
+
+    cbm_rmdir(temp);
+    cbm_unlink(final_path);
+    cbm_rmdir(dir);
+    PASS();
+}
+
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(sqlite_writer) {
@@ -799,4 +864,6 @@ SUITE(sqlite_writer) {
     RUN_TEST(sw_publish_failure_preserves_destination_sidecars);
     RUN_TEST(sw_publish_supports_non_ascii_path);
     RUN_TEST(sw_publish_preserves_live_reader);
+    RUN_TEST(sw_open_truncated_path_names_its_reason);
+    RUN_TEST(sw_publish_failure_reports_the_rename_not_the_cleanup);
 }

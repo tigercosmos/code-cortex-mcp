@@ -746,11 +746,46 @@ int cbm_rename_replace(const char *src, const char *dst) {
     wchar_t *wdst = cbm_utf8_to_wide(dst);
     int ret = CBM_NOT_FOUND;
     if (wsrc && wdst) {
-        ret =
-            MoveFileExW(wsrc, wdst,
-                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)
-                ? 0
-                : CBM_NOT_FOUND;
+        if (MoveFileExW(wsrc, wdst,
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED |
+                            MOVEFILE_WRITE_THROUGH)) {
+            ret = 0;
+        } else {
+            /* Translate the Win32 error into errno so a caller can report WHY
+             * the publish failed (#1620): otherwise errno is whatever an
+             * unrelated CRT call left behind, and an ACL denial reaches the
+             * user as a generic pipeline failure. MoveFileEx needs DELETE on
+             * the destination, which a cache file under an empty or foreign
+             * DACL does not grant — hence ERROR_ACCESS_DENIED. */
+            switch (GetLastError()) {
+            case ERROR_ACCESS_DENIED:
+            case ERROR_WRITE_PROTECT:
+                errno = EACCES;
+                break;
+            case ERROR_FILE_NOT_FOUND:
+            case ERROR_PATH_NOT_FOUND:
+                errno = ENOENT;
+                break;
+            case ERROR_SHARING_VIOLATION:
+            case ERROR_LOCK_VIOLATION:
+            case ERROR_USER_MAPPED_FILE:
+                errno = EBUSY;
+                break;
+            case ERROR_NOT_SAME_DEVICE:
+                errno = EXDEV;
+                break;
+            case ERROR_DISK_FULL:
+                errno = ENOSPC;
+                break;
+            case ERROR_INVALID_NAME:
+            case ERROR_FILENAME_EXCED_RANGE:
+                errno = ENAMETOOLONG;
+                break;
+            default:
+                errno = EIO;
+                break;
+            }
+        }
     }
     free(wsrc);
     free(wdst);
