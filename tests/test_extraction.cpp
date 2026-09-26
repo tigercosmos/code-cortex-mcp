@@ -6761,6 +6761,22 @@ TEST(extract_coverage_gap_with_leading_star_statement_is_a_miss) {
     ASSERT_NOT_NULL(r->error_ranges);
     ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 6u));
     cbm_free_result(r);
+
+    /* A closed block comment opening the line does not make it a comment
+     * line: the statement after it is judged. */
+    r = extract("int alpha(void) {\n"            /* 1 */
+                "    return 1;\n"                /* 2 */
+                "}\n"                            /* 3 */
+                "/* note */ int broken = ;\n"    /* 4 */
+                "int beta(void) {\n"             /* 5 */
+                "    return 2;\n"                /* 6 */
+                "}\n",                           /* 7 */
+                CBM_LANG_C, "t", "note.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 4u));
+    cbm_free_result(r);
     PASS();
 }
 

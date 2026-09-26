@@ -1716,14 +1716,26 @@ static bool cbm_line_is_inert(const char *src, const uint32_t *offs, const uint8
         }
         p = close + 2; /* code may follow the comment's end */
     }
-    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r')) {
-        p++;
-    }
-    if (p >= end || *p == '\n') {
-        return true;
-    }
-    if (p[0] == '/' && p + 1 < end && (p[1] == '/' || p[1] == '*')) {
-        return true;
+    for (;;) {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r')) {
+            p++;
+        }
+        if (p >= end || *p == '\n' || (p[0] == '/' && p + 1 < end && p[1] == '/')) {
+            return true;
+        }
+        if (!(p[0] == '/' && p + 1 < end && p[1] == '*')) {
+            break;
+        }
+        /* A block comment opening the line: what follows its same-line end
+         * decides, so a statement after a closed note comment is code. */
+        const char *q = p + 2;
+        while (q + 1 < end && !(q[0] == '*' && q[1] == '/')) {
+            q++;
+        }
+        if (q + 1 >= end) {
+            return true; /* the comment runs past this line */
+        }
+        p = q + 2;
     }
     if (p[0] == '*' && !in_comment) {
         return true;

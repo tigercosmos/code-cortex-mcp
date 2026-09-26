@@ -1050,6 +1050,52 @@ TEST(cypher_exec_optional_bound_terminal_count_ignores_unbound) {
     PASS();
 }
 
+/* A label or EXISTS predicate on the variable the seed step has not bound
+ * yet must not discard the seeds: `a:Function` with only `b` bound used to
+ * be false, so both spellings below answered nothing (the second one before
+ * this branch, the first once the planner started seeding from `b`). */
+static int cypher_rows_for(const char *query, char out[][64], int cap) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s, query, "test", 0, &r);
+    int n = rc == 0 ? r.row_count : -1;
+    for (int i = 0; i < n && i < cap; i++) {
+        snprintf(out[i], 64, "%s", r.rows[i][0]);
+    }
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    return n;
+}
+
+TEST(cypher_exec_label_on_unbound_side_keeps_seeds) {
+    char rows[8][64];
+    int n = cypher_rows_for(
+        "MATCH (a)-[:CALLS]->(b) WHERE a:Function AND b.name = 'ValidateOrder' RETURN a.name",
+        rows, 8);
+    ASSERT_EQ(n, 1);
+    ASSERT_STR_EQ(rows[0], "HandleOrder");
+
+    n = cypher_rows_for("MATCH (a)-[:CALLS]->(b) WHERE b:Function AND a.name = 'HandleOrder' "
+                        "RETURN b.name ORDER BY b.name",
+                        rows, 8);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(rows[0], "LogError");
+    ASSERT_STR_EQ(rows[1], "ValidateOrder");
+
+    n = cypher_rows_for(
+        "MATCH (a)-[:CALLS]->(b) WHERE NOT a:Module AND b.name = 'SubmitOrder' RETURN a.name",
+        rows, 8);
+    ASSERT_EQ(n, 1);
+    ASSERT_STR_EQ(rows[0], "ValidateOrder");
+
+    /* Control: the deferred label still filters once both ends are bound. */
+    n = cypher_rows_for(
+        "MATCH (a)-[:CALLS]->(b) WHERE a:Module AND b.name = 'ValidateOrder' RETURN a.name", rows,
+        8);
+    ASSERT_EQ(n, 0);
+    PASS();
+}
+
 TEST(cypher_exec_limit) {
     cbm_store_t *s = setup_cypher_store();
     cbm_cypher_result_t r = {0};
@@ -3538,6 +3584,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_inbound);
     RUN_TEST(cypher_exec_count);
     RUN_TEST(cypher_exec_optional_bound_terminal_count_ignores_unbound);
+    RUN_TEST(cypher_exec_label_on_unbound_side_keeps_seeds);
     RUN_TEST(cypher_exec_limit);
     RUN_TEST(cypher_exec_order_by);
     RUN_TEST(cypher_exec_variable_length);

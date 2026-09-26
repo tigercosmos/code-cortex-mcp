@@ -4795,6 +4795,99 @@ static void cypher_plan_seed_from_selective_end(cbm_query_t *q) {
     }
 }
 
+/* ── Seed-time WHERE ──────────────────────────────────────────────────────
+ *
+ * Step 1 of execute_single filters the seed nodes before the pattern is
+ * expanded, so only the seed variable is bound. A comparison on an unbound
+ * variable passes, but `n:Label` and EXISTS {} on an unbound variable are
+ * false — so `MATCH (a)-[:CALLS]->(b) WHERE b:Function AND a.name = 'x'`
+ * discarded every seed and answered nothing, and the selective-end planner
+ * (which may seed from either end) turned `WHERE a:Function AND b.name = 'x'`
+ * into the same shape. The seed filter now evaluates only the top-level AND
+ * conjuncts whose variables are all bound, and drops a seed only when one of
+ * those is false; the rest are decided by the late WHERE after expansion,
+ * which sees every variable. Both walks use explicit stacks; an expression
+ * too deep for them is treated as not yet decidable (the seed is kept). */
+enum { CYPHER_SEED_EXPR_STACK = 64 };
+
+static bool cypher_cond_var_bound(const cbm_condition_t *c, binding_t *b) {
+    return !c->variable || binding_get_edge(b, c->variable) != NULL ||
+           binding_get(b, c->variable) != NULL;
+}
+
+/* True when every condition in the subtree names a bound variable. */
+static bool cypher_expr_fully_bound(const cbm_expr_t *root, binding_t *b) {
+    const cbm_expr_t *stack[CYPHER_SEED_EXPR_STACK];
+    int top = 0;
+    stack[top++] = root;
+    while (top > 0) {
+        const cbm_expr_t *e = stack[--top];
+        if (!e) {
+            continue;
+        }
+        if (e->type == EXPR_CONDITION) {
+            if (!cypher_cond_var_bound(&e->cond, b)) {
+                return false;
+            }
+            continue;
+        }
+        if (top + 2 > CYPHER_SEED_EXPR_STACK) {
+            return false;
+        }
+        stack[top++] = e->left;
+        stack[top++] = e->right;
+    }
+    return true;
+}
+
+/* False only when some fully bound top-level conjunct is false. */
+static bool cypher_seed_passes_where(const cbm_where_clause_t *w, binding_t *b) {
+    if (!w) {
+        return true;
+    }
+    if (w->root) {
+        const cbm_expr_t *stack[CYPHER_SEED_EXPR_STACK];
+        int top = 0;
+        stack[top++] = w->root;
+        while (top > 0) {
+            const cbm_expr_t *e = stack[--top];
+            if (!e) {
+                continue;
+            }
+            if (e->type == EXPR_AND) {
+                if (top + 2 > CYPHER_SEED_EXPR_STACK) {
+                    return true;
+                }
+                stack[top++] = e->left;
+                stack[top++] = e->right;
+                continue;
+            }
+            if (cypher_expr_fully_bound(e, b) && !eval_expr(e, b)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    /* Legacy flat conditions: under AND each bound condition is a conjunct;
+     * under OR a seed can only be rejected when every condition is bound. */
+    bool is_and = w->op && strcmp(w->op, "AND") == 0; /* as eval_where reads it */
+    if (is_and) {
+        for (int i = 0; i < w->count; i++) {
+            if (cypher_cond_var_bound(&w->conditions[i], b) &&
+                !eval_condition(&w->conditions[i], b)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    for (int i = 0; i < w->count; i++) {
+        if (!cypher_cond_var_bound(&w->conditions[i], b)) {
+            return true;
+        }
+    }
+    return eval_where(w, b);
+}
+
 static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *project, int max_rows,
                           result_builder_t *rb) {
     cypher_plan_seed_from_selective_end(q);
@@ -4818,7 +4911,11 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
         binding_t b = {0};
         b.store = store;
         binding_set(&b, var_name, &scanned[i]);
-        bool pass = !q->where || eval_where(q->where, &b);
+        /* A pattern with more to bind gets the late WHERE below, so here
+         * only the conjuncts the seed alone can decide are applied. */
+        bool expands = pat0->rel_count > 0 || q->pattern_count > SKIP_ONE;
+        bool pass = !q->where ||
+                    (expands ? cypher_seed_passes_where(q->where, &b) : eval_where(q->where, &b));
         if (pass) {
             bindings[bind_count++] = b;
         } else {
