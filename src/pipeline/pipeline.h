@@ -351,10 +351,25 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
 bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_bound,
                                           const char *strategy);
 
+/* True if `name` is a method of a Python builtin type (str/bytes/list/dict/set/
+ * file) or a builtin function seen as an attribute call. A language fact, kept
+ * as a sorted table like the Perl builtins. */
+bool cbm_python_is_builtin_member(const char *name);
+
+/* The member guard's one exemption: a Python member call whose receiver is an
+ * attribute chain rooted at self/cls (an object the class owns), whose callee
+ * has exactly one project definition (strategy unique_name) and is not a
+ * builtin type's own method keeps its edge. cbm_suppress_weak_call applies it,
+ * so the sequential and parallel resolvers agree. Pure; unit-tested in
+ * test_registry.cpp. */
+bool cbm_weak_member_unique_name_exempt(bool is_python, bool receiver_is_self_attribute,
+                                        const char *callee_name, const char *strategy);
+
 /* True when a resolved call's plain CALLS edge is weak-strategy noise: the
- * member guard (Python, JS/TS/TSX) or the bare-call local-binding guard
- * (Python). The one owner of both language sets; the sequential and parallel
- * resolvers both call it. */
+ * member guard (Python, JS/TS/TSX, and the HTML/Vue/Svelte/Astro hosts of
+ * embedded scripts) less its Python self-attribute exemption, or the bare-call
+ * local-binding guard (Python). The one owner of both language sets; the
+ * sequential and parallel resolvers both call it. */
 bool cbm_suppress_weak_call(CBMLanguage lang, const CBMCall *call, const char *strategy);
 
 /* Get the label of a qualified name, or NULL if not found. */

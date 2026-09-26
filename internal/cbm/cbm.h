@@ -258,6 +258,11 @@ typedef struct {
                                     // parameter of an enclosing function or lambda, so it
                                     // cannot be the module-level foo. Python only today. Read
                                     // by the weak-local-binding guard. Default false.
+    bool receiver_is_self_attribute; // Python member call whose receiver is an attribute
+                                     // chain rooted at self/cls but not self/cls itself
+                                     // (self.compiler.apply_converters()). An object the
+                                     // class owns, not a parameter: read by the weak-member
+                                     // guard's unique-name exemption. Default false.
 } CBMCall;
 
 typedef struct {

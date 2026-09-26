@@ -2200,6 +2200,28 @@ static bool python_receiver_is_exempt(CBMExtractCtx *ctx, TSNode receiver) {
     return false;
 }
 
+/* True when a Python attribute-call receiver is an attribute chain ROOTED at
+ * self/cls but is not self/cls itself: `self.compiler.apply_converters()` has
+ * receiver `self.compiler`, an object the class owns. The weak-member guard's
+ * unique-name exemption keys on this shape (cbm_weak_member_unique_name_
+ * exempt): a bare parameter (`accelerator.backward()`) carries no ownership
+ * evidence and stays suppressed. Direct `self.m()` is already exempt via
+ * python_receiver_is_exempt and is deliberately NOT flagged here. */
+static bool python_receiver_rooted_at_self(CBMExtractCtx *ctx, TSNode receiver) {
+    if (ts_node_is_null(receiver) || strcmp(ts_node_type(receiver), "attribute") != 0) {
+        return false;
+    }
+    TSNode root = receiver;
+    while (!ts_node_is_null(root) && strcmp(ts_node_type(root), "attribute") == 0) {
+        root = ts_node_child_by_field_name(root, TS_FIELD("object"));
+    }
+    if (ts_node_is_null(root) || strcmp(ts_node_type(root), "identifier") != 0) {
+        return false;
+    }
+    return node_text_equals(root, ctx->source, "self") ||
+           node_text_equals(root, ctx->source, "cls");
+}
+
 void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state) {
     if (!spec->call_node_types || !spec->call_node_types[0]) {
         return;
@@ -2245,6 +2267,7 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                 if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "attribute") == 0) {
                     TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
                     call.is_method = !python_receiver_is_exempt(ctx, obj);
+                    call.receiver_is_self_attribute = python_receiver_rooted_at_self(ctx, obj);
                 } else if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0) {
                     /* A parameter binding shadows any module-level `foo` for the
                      * whole body (`def f(run): run()` must not bind an unrelated

@@ -163,6 +163,32 @@ static int candidate_score(const char *candidate_qn, const char *module_qn) {
     return score;
 }
 
+/* Number of '.'-separated segments in a QN: how deeply the definition is
+ * nested (file depth + enclosing types). */
+static int qn_depth(const char *qn) {
+    int depth = 1;
+    for (const char *p = qn; *p; p++) {
+        if (*p == '.') {
+            depth++;
+        }
+    }
+    return depth;
+}
+
+/* Total order among candidates that tie on candidate_score. The least nested
+ * definition wins — a top-level function over a same-named member two types
+ * deep, include/linux over tools/virtio/linux (upstream's kernel probe:
+ * `sg_set_buf`, `dev_name`) — then the lexicographically smaller QN. A pure
+ * function of the candidate set, never of the order it was built in. */
+static bool candidate_outranks_on_tie(const char *candidate, const char *best) {
+    int cd = qn_depth(candidate);
+    int bd = qn_depth(best);
+    if (cd != bd) {
+        return cd < bd;
+    }
+    return strcmp(candidate, best) < 0;
+}
+
 /* Pick candidate with highest composite score (test-deprioritization + namespace proximity). */
 static const char *best_by_import_distance(const char **candidates, int count,
                                            const char *module_qn) {
@@ -170,13 +196,13 @@ static const char *best_by_import_distance(const char **candidates, int count,
     int best_score = CBM_NOT_FOUND;
     for (int i = 0; i < count; i++) {
         int score = candidate_score(candidates[i], module_qn);
-        /* Score ties break by lexicographic QN, not array position — the
-         * candidate array order reflects registry insertion order, and an
-         * order-sensitive pick let equally-scored ambiguous names (e.g. two
-         * Makefiles both defining an `echo` target) resolve differently
-         * between identical runs. */
+        /* Score ties break on the candidates themselves (nesting depth, then
+         * lexicographic QN), not array position — the candidate array order
+         * reflects registry insertion order, and an order-sensitive pick let
+         * equally-scored ambiguous names (e.g. two Makefiles both defining an
+         * `echo` target) resolve differently between identical runs. */
         if (score > best_score ||
-            (score == best_score && best && strcmp(candidates[i], best) < 0)) {
+            (score == best_score && best && candidate_outranks_on_tie(candidates[i], best))) {
             best_score = score;
             best = candidates[i];
         }
@@ -533,6 +559,82 @@ bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_b
     return cbm_weak_short_name_strategy(strategy);
 }
 
+/* ── Python builtin-type members ─────────────────────────────────────────
+ * Methods of Python's builtin types (str, bytes, list, dict, set, file objects)
+ * plus the builtin functions that appear as attribute calls. Like PERL_BUILTINS
+ * this is a fact about the LANGUAGE, not about corpus fashion: a member call
+ * whose name is a builtin's own method — `parts.extend(...)`, `line.strip()`,
+ * `d.items()` — is that builtin's method whenever the receiver is untyped, so a
+ * project symbol that merely shares the spelling must not bind. MUST stay
+ * sorted ASCII-ascending for bsearch. */
+static const char *const PYTHON_BUILTIN_MEMBERS[] = {
+    "add",        "append",       "capitalize",
+    "casefold",   "center",       "clear",
+    "close",      "copy",         "count",
+    "decode",     "difference",   "discard",
+    "encode",     "endswith",     "expandtabs",
+    "extend",     "fileno",       "find",
+    "flush",      "format",       "get",
+    "index",      "insert",       "intersection",
+    "isalnum",    "isalpha",      "isdecimal",
+    "isdigit",    "isidentifier", "islower",
+    "isnumeric",  "isprintable",  "isspace",
+    "issubset",   "issuperset",   "istitle",
+    "isupper",    "items",        "join",
+    "keys",       "ljust",        "lower",
+    "lstrip",     "partition",    "pop",
+    "popitem",    "print",        "read",
+    "readable",   "readline",     "readlines",
+    "remove",     "replace",      "reverse",
+    "rfind",      "rindex",       "rjust",
+    "rpartition", "rsplit",       "rstrip",
+    "seek",       "setdefault",   "sort",
+    "split",      "splitlines",   "startswith",
+    "strip",      "swapcase",     "symmetric_difference",
+    "tell",       "title",        "truncate",
+    "union",      "update",       "upper",
+    "values",     "writable",     "write",
+    "writelines", "zfill",
+};
+
+static int python_builtin_member_cmp(const void *key, const void *elem) {
+    return strcmp((const char *)key, *(const char *const *)elem);
+}
+
+bool cbm_python_is_builtin_member(const char *name) {
+    if (!name || !name[0]) {
+        return false;
+    }
+    return bsearch(name, PYTHON_BUILTIN_MEMBERS,
+                   sizeof(PYTHON_BUILTIN_MEMBERS) / sizeof(PYTHON_BUILTIN_MEMBERS[0]),
+                   sizeof(PYTHON_BUILTIN_MEMBERS[0]), python_builtin_member_cmp) != NULL;
+}
+
+/* The member guard's one exemption. A Python member call whose receiver could
+ * not be typed still carries real evidence when three facts line up: the callee
+ * name has exactly ONE definition in the whole project (strategy unique_name),
+ * the receiver is an attribute chain rooted at self/cls — an object the class
+ * owns, not a parameter handed in — and the name is not a builtin type's own
+ * method. `self.compiler.apply_converters()` names the only apply_converters in
+ * django and nothing else it could mean exists (upstream measured 800 such
+ * self-rooted edges dropped on django, every sampled one a real call). A bare
+ * parameter receiver (`accelerator.backward()`, #1276's own case) carries no
+ * ownership evidence and stays suppressed, as does every builtin-member name
+ * (`self.parts.extend()`). Python only. */
+bool cbm_weak_member_unique_name_exempt(bool is_python, bool receiver_is_self_attribute,
+                                        const char *callee_name, const char *strategy) {
+    if (!is_python || !receiver_is_self_attribute) {
+        return false;
+    }
+    if (!strategy || strcmp(strategy, "unique_name") != 0) {
+        return false;
+    }
+    if (!callee_name || !callee_name[0]) {
+        return false;
+    }
+    return !cbm_python_is_builtin_member(simple_name(callee_name));
+}
+
 /* The weak-call guards above, with their language set in ONE place. Both the
  * sequential (pass_calls.cpp) and parallel (pass_parallel.cpp) resolvers call
  * this, so a language added here reaches both and they cannot diverge. The
@@ -541,11 +643,21 @@ bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_b
  * callee_is_locally_bound. */
 bool cbm_suppress_weak_call(CBMLanguage lang, const CBMCall *call, const char *strategy) {
     bool member_lang = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
-                       lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+                       lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX ||
+                       /* Files whose calls are embedded JS/TS (<script> bodies):
+                        * the calls carry the JS receiver flag but the FILE
+                        * language gated them out, so generated Dokka pages
+                        * bound localStorage.getItem to a docs bundle (upstream
+                        * probe: 4,207 junk edges on JetBrains/Exposed). */
+                       lang == CBM_LANG_HTML || lang == CBM_LANG_VUE || lang == CBM_LANG_SVELTE ||
+                       lang == CBM_LANG_ASTRO;
     bool local_binding_lang = lang == CBM_LANG_PYTHON;
-    return cbm_suppress_weak_member_match(member_lang, call->is_method, strategy) ||
-           cbm_suppress_weak_local_binding_call(local_binding_lang, call->callee_is_locally_bound,
-                                                strategy);
+    bool weak_member = cbm_suppress_weak_member_match(member_lang, call->is_method, strategy) &&
+                       !cbm_weak_member_unique_name_exempt(lang == CBM_LANG_PYTHON,
+                                                           call->receiver_is_self_attribute,
+                                                           call->callee_name, strategy);
+    return weak_member || cbm_suppress_weak_local_binding_call(
+                              local_binding_lang, call->callee_is_locally_bound, strategy);
 }
 
 /* ── Lifecycle ──────────────────────────────────────────────────── */
@@ -931,27 +1043,37 @@ static bool receiver_chain_admits(const char *callee_name, const char *candidate
         return true;
     }
 
-    /* The candidate's parent segment: the one before its final name. */
+    /* The candidate's ancestry: every segment before its final name. */
     const char *cand_last = strrchr(candidate_qn, '.');
     if (!cand_last || cand_last == candidate_qn) {
-        return true; /* top-level candidate — no parent to look for */
+        return true; /* top-level candidate — no ancestry to look for */
     }
-    const char *parent = cand_last;
-    while (parent > candidate_qn && parent[-1] != '.') {
-        parent--;
-    }
-    size_t parent_len = (size_t)(cand_last - parent);
 
     /* Walk the chain — every segment before the final callee name. A trailing
-     * "()" is dropped so JSONEncoder().encode reads as JSONEncoder. */
+     * "()" is dropped so JSONEncoder().encode reads as JSONEncoder. A chain
+     * segment admits the candidate when it names ANY segment of the candidate's
+     * ancestry, not only the immediate parent: Settings.builder().putList binds
+     * settings.Settings.Builder.putList because Settings owns Builder, and
+     * RequestOptions.DEFAULT.toBuilder().setWarningsHandler binds
+     * RequestOptions.Builder.setWarningsHandler the same way (upstream measured
+     * 9,473 refused unique-name calls on elasticsearch, most of them these
+     * factory chains into a nested Builder). A foreign root still finds nothing
+     * in the ancestry — Base64.getEncoder does not admit
+     * DocOffsetsCodec.getEncoder, URLSession.shared.data does not admit
+     * PickedFile.data. */
     for (const char *seg = dotted; seg < last_dot;) {
         const char *end = strchr(seg, '.');
         size_t len = (size_t)(end - seg);
         if (len >= 2 && seg[len - 2] == '(' && seg[len - 1] == ')') {
             len -= 2; /* an empty "()" — JSONEncoder().encode names JSONEncoder */
         }
-        if (len == parent_len && strncmp(seg, parent, parent_len) == 0) {
-            return true;
+        for (const char *anc = candidate_qn; anc < cand_last;) {
+            const char *anc_end = strchr(anc, '.');
+            size_t anc_len = (size_t)(anc_end - anc);
+            if (anc_len == len && len > 0 && strncmp(seg, anc, len) == 0) {
+                return true;
+            }
+            anc = anc_end + SKIP_ONE;
         }
         seg = end + SKIP_ONE;
     }
@@ -1330,9 +1452,27 @@ static CBMLanguage target_file_language(const char *target_file_path, cbm_lang_m
     return lang;
 }
 
+/* Build and configuration languages have no cross-language call semantics: a
+ * Makefile's `$(eval ...)` or a CMake `function(...)` names nothing in a C
+ * file, so a bare-name bind into another language is always a collision
+ * (upstream's kernel probe: Makefile targets bound to `sk_psock.eval`). */
+static bool build_config_language(CBMLanguage lang) {
+    return lang == CBM_LANG_MAKEFILE || lang == CBM_LANG_CMAKE || lang == CBM_LANG_YAML ||
+           lang == CBM_LANG_TOML || lang == CBM_LANG_JSON || lang == CBM_LANG_INI ||
+           lang == CBM_LANG_DOCKERFILE;
+}
+
 bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const char *target_file_path,
                                               const char *strategy) {
-    if (!strategy || strcmp(strategy, "suffix_match") != 0) {
+    /* unique_name is the candidates==1 case and is not this guard — except for
+     * a build or configuration caller, where even a unique match into another
+     * language is a collision by construction. */
+    if (!strategy) {
+        return false;
+    }
+    bool config_caller = build_config_language(caller_lang);
+    if (strcmp(strategy, "suffix_match") != 0 &&
+        !(config_caller && strcmp(strategy, "unique_name") == 0)) {
         return false;
     }
     if (caller_lang == CBM_LANG_COUNT || !target_file_path || !target_file_path[0]) {

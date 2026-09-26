@@ -4814,6 +4814,113 @@ TEST(registry_receiver_chain_keeps_project_extension_issue1893) {
     PASS();
 }
 
+/* A factory chain into a nested type: Settings.builder().putList names the only
+ * putList in the project, Settings.Builder.putList, and Settings — the chain's
+ * root — is in the candidate's ancestry even though the candidate's immediate
+ * parent (Builder) is not spelled in the chain. The parent-only rule refused
+ * 9,473 such unique-name calls on elastic/elasticsearch (upstream A/B). */
+TEST(registry_receiver_chain_admits_factory_chain_into_nested_type) {
+    cbm_registry_t *reg = cbm_registry_new();
+    cbm_registry_add(reg, "putList", "org.elasticsearch.common.settings.Settings.Builder.putList",
+                     "Method");
+
+    cbm_resolution_t r = cbm_registry_resolve(
+        reg, "Settings.builder().putList", "org.elasticsearch.index.IndexSettings", NULL, NULL, 0);
+    ASSERT_STR_EQ(r.qualified_name, "org.elasticsearch.common.settings.Settings.Builder.putList");
+    ASSERT_STR_EQ(r.strategy, "unique_name");
+
+    /* The same shape through a value in between: RequestOptions.DEFAULT
+     * .toBuilder().setWarningsHandler -> RequestOptions.Builder.setWarningsHandler. */
+    cbm_registry_add(reg, "setWarningsHandler",
+                     "org.elasticsearch.client.RequestOptions.Builder.setWarningsHandler",
+                     "Method");
+    r = cbm_registry_resolve(reg, "RequestOptions.DEFAULT.toBuilder().setWarningsHandler",
+                             "org.elasticsearch.client.Rest", NULL, NULL, 0);
+    ASSERT_STR_EQ(r.qualified_name,
+                  "org.elasticsearch.client.RequestOptions.Builder.setWarningsHandler");
+
+    cbm_registry_free(reg);
+    PASS();
+}
+
+/* The ancestry rule must not widen the gate to foreign roots: Base64 is the
+ * JDK's, so the project's DocOffsetsCodec.getEncoder stays refused, exactly as
+ * #1893's URLSession case above. */
+TEST(registry_receiver_chain_still_refuses_foreign_root_with_ancestry_rule) {
+    cbm_registry_t *reg = cbm_registry_new();
+    cbm_registry_add(reg, "getEncoder", "org.elasticsearch.index.codec.DocOffsetsCodec.getEncoder",
+                     "Method");
+
+    cbm_resolution_t r = cbm_registry_resolve(
+        reg, "Base64.getEncoder", "org.elasticsearch.index.IndexSettings", NULL, NULL, 0);
+    ASSERT_NULL(r.qualified_name);
+
+    /* A root that really is an ancestry segment admits the candidate: the
+     * project's own Math.toIntExact. */
+    cbm_registry_add(reg, "toIntExact", "org.elasticsearch.common.Math.toIntExact", "Method");
+    r = cbm_registry_resolve(reg, "Math.toIntExact", "org.elasticsearch.index.IndexSettings", NULL,
+                             NULL, 0);
+    ASSERT_STR_EQ(r.qualified_name, "org.elasticsearch.common.Math.toIntExact");
+
+    cbm_registry_free(reg);
+    PASS();
+}
+
+/* `#include <linux/device.h>` from arch/x/bugs.c: two headers end with the
+ * include path (include/linux/device.h, tools/virtio/linux/device.h) and each
+ * declares `struct device`. The target is the least nested File node,
+ * whichever order the nodes were registered in (upstream: 5,821 kernel IMPORTS
+ * edges moved between two indexes of one tree). */
+static void add_device_header(cbm_gbuf_t *gb, const char *rel, const char *qn_stem) {
+    char fqn[256];
+    snprintf(fqn, sizeof(fqn), "%s.h.__file__", qn_stem);
+    cbm_gbuf_upsert_node(gb, "File", "device.h", fqn, rel, 0, 0, "{}");
+    char cqn[256];
+    snprintf(cqn, sizeof(cqn), "%s.device", qn_stem);
+    cbm_gbuf_upsert_node(gb, "Class", "device", cqn, rel, 10, 40, "{}");
+}
+
+static const cbm_gbuf_node_t *resolve_device_h_from(cbm_gbuf_t *gb) {
+    static std::atomic<int> cancelled{0};
+    cbm_pipeline_ctx_t ctx = {};
+    ctx.project_name = "p";
+    ctx.repo_path = "/tmp/p";
+    ctx.gbuf = gb;
+    ctx.cancelled = &cancelled;
+    CBMImport imp = {};
+    imp.module_path = "linux/device.h";
+    imp.local_name = "h";
+    return cbm_pipeline_resolve_import_node(&ctx, "arch/x/bugs.c", "p.arch.x.bugs.c.__file__", &imp,
+                                            NULL);
+}
+
+TEST(pipeline_header_include_target_is_independent_of_registration_order) {
+    cbm_gbuf_t *a = cbm_gbuf_new("p", "/tmp/cbm_include_order_a");
+    cbm_gbuf_t *b = cbm_gbuf_new("p", "/tmp/cbm_include_order_b");
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(b);
+    /* `tools/…` sorts after `include/…`, so a lexicographic pick would pass
+     * both orders; a third, shallower-by-path but deeper-by-dir header proves
+     * the depth rule: `a/b/c/linux/device.h` sorts first by path. */
+    add_device_header(a, "include/linux/device.h", "p.include.linux.device");
+    add_device_header(a, "tools/virtio/linux/device.h", "p.tools.virtio.linux.device");
+    add_device_header(a, "a/b/c/linux/device.h", "p.a.b.c.linux.device");
+    add_device_header(b, "a/b/c/linux/device.h", "p.a.b.c.linux.device");
+    add_device_header(b, "tools/virtio/linux/device.h", "p.tools.virtio.linux.device");
+    add_device_header(b, "include/linux/device.h", "p.include.linux.device");
+
+    const cbm_gbuf_node_t *ta = resolve_device_h_from(a);
+    const cbm_gbuf_node_t *tb = resolve_device_h_from(b);
+    ASSERT_NOT_NULL(ta);
+    ASSERT_NOT_NULL(tb);
+    ASSERT_STR_EQ(ta->qualified_name, "p.include.linux.device.h.__file__");
+    ASSERT_STR_EQ(tb->qualified_name, "p.include.linux.device.h.__file__");
+
+    cbm_gbuf_free(a);
+    cbm_gbuf_free(b);
+    PASS();
+}
+
 /* A lower-case root names a value, whose type the chain does not show. The gate
  * must not look at it, or every ordinary vm.load style call would be refused. */
 TEST(registry_receiver_chain_ignores_lowercase_root_issue1893) {
@@ -8246,6 +8353,103 @@ TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges) {
     PASS();
 }
 
+/* The member guard's one exemption, both resolvers (upstream v0.10.8 → v0.11.0
+ * A/B on django/django): a member call whose receiver is an attribute chain
+ * rooted at self/cls, whose callee has exactly ONE definition in the project
+ * and is not a builtin type's own method keeps its unique_name edge —
+ * `self.compiler.apply_converters()` names the only apply_converters there is.
+ * A bare parameter receiver and the builtin-member class the guard was built
+ * for (`parts.extend()` -> a project ListMixin.extend) stay suppressed. */
+static int py_self_attribute_exempt_case(bool parallel) {
+    ThSavedEnv workers("CBM_WORKERS"), single("CBM_INDEX_SINGLE_THREAD");
+    char root[256] = "/tmp/cbm_py_uniq_XXXXXX";
+    if (!cbm_mkdtemp(root))
+        return 1;
+    std::string repo = std::string(root) + "/src";
+    th_write_file((repo + "/compiler.py").c_str(),
+                  "class SQLCompiler:\n    def apply_converters(self, rows):\n"
+                  "        return rows\n");
+    th_write_file((repo + "/mixin.py").c_str(),
+                  "class ListMixin:\n    def extend(self, other):\n        return other\n");
+    th_write_file((repo + "/caller.py").c_str(),
+                  "class RawIterable:\n    def __init__(self, compiler):\n"
+                  "        self.compiler = compiler\n\n"
+                  "    def iterate(self):\n        return self.compiler.apply_converters([])\n\n\n"
+                  "def collect(parts):\n    parts.extend([1])\n    return parts\n\n\n"
+                  "def handed_in(compiler):\n    return compiler.apply_converters([])\n");
+    int fail = 0;
+    std::string project;
+    if (py_guard_index(root, repo, parallel, &project) != 0)
+        fail = 2;
+    std::string db = std::string(root) + "/graph.db";
+    /* POSITIVE: the only apply_converters binds through self.compiler. */
+    if (!fail && py_guard_calls(db.c_str(), project, "iterate", "apply_converters") < 1)
+        fail = 3;
+    /* NEGATIVE: a bare parameter receiver, and list.extend on a parameter. */
+    if (!fail && (py_guard_calls(db.c_str(), project, "handed_in", "apply_converters") != 0 ||
+                  py_guard_calls(db.c_str(), project, "collect", "extend") != 0))
+        fail = 4;
+    th_rmtree(root);
+    return fail;
+}
+
+TEST(pipeline_python_receiver_keeps_specific_unique_name_member_call) {
+    ASSERT_EQ(py_self_attribute_exempt_case(false), 0);
+    PASS();
+}
+
+TEST(pipeline_python_receiver_parallel_keeps_specific_unique_name_member_call) {
+    ASSERT_EQ(py_self_attribute_exempt_case(true), 0);
+    PASS();
+}
+
+/* Embedded-script hosts (upstream probe on JetBrains/Exposed): a member call
+ * inside an HTML <script> body carries the JS receiver flag, but the
+ * weak-member guard was gated on the FILE language, so generated Dokka pages
+ * bound `localStorage.getItem` to a project function through unique_name.
+ * POSITIVE tripwire: a bare project call in a plain .js file still resolves. */
+TEST(pipeline_html_embedded_member_call_stays_unbound) {
+    ThSavedEnv workers("CBM_WORKERS"), single("CBM_INDEX_SINGLE_THREAD");
+    char root[256] = "/tmp/cbm_html_member_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    std::string repo = std::string(root) + "/src";
+    th_write_file((repo + "/scripts/storage.js").c_str(),
+                  "function getItem(key) {\n    return key;\n}\n");
+    th_write_file((repo + "/scripts/theme.js").c_str(),
+                  "import { getItem } from './storage.js';\n\n"
+                  "function loadTheme() {\n    return getItem('theme');\n}\n");
+    th_write_file((repo + "/docs/index.html").c_str(),
+                  "<html><head><script>\n"
+                  "var mode = localStorage.getItem('dokka-dark-mode');\n"
+                  "</script></head><body></body></html>\n");
+    std::string project;
+    ASSERT_EQ(py_guard_index(root, repo, false, &project), 0);
+    std::string db = std::string(root) + "/graph.db";
+    cbm_store_t *s = cbm_store_open_path(db.c_str());
+    ASSERT_NOT_NULL(s);
+    /* Every CALLS edge into getItem: only loadTheme's. */
+    cbm_node_t *targets = NULL;
+    int ntgt = 0;
+    cbm_store_find_nodes_by_name(s, project.c_str(), "getItem", &targets, &ntgt);
+    int inbound = 0;
+    for (int t = 0; t < ntgt; t++) {
+        cbm_edge_t *edges = NULL;
+        int ne = 0;
+        cbm_store_find_edges_by_target_type(s, targets[t].id, "CALLS", &edges, &ne);
+        inbound += ne;
+        if (edges) {
+            cbm_store_free_edges(edges, ne);
+        }
+    }
+    cbm_store_free_nodes(targets, ntgt);
+    int from_theme = named_edge_count(s, project.c_str(), "CALLS", "loadTheme", "getItem");
+    cbm_store_close(s);
+    th_rmtree(root);
+    ASSERT_EQ(from_theme, 1);
+    ASSERT_EQ(inbound, 1);
+    PASS();
+}
+
 /* Bare-call local-binding guard, both resolvers. `run` / `execute` are
  * PARAMETERS, so `run()` cannot bind SatoriLive.run. The positive control is a
  * CROSS-FILE bare call with no import, so it resolves by a weak strategy this
@@ -8653,9 +8857,13 @@ SUITE(pipeline) {
     RUN_TEST(registry_receiver_chain_refuses_library_unique_name_issue1893);
     RUN_TEST(registry_receiver_chain_refuses_library_suffix_match_issue1893);
     RUN_TEST(registry_receiver_chain_keeps_project_extension_issue1893);
+    RUN_TEST(registry_receiver_chain_admits_factory_chain_into_nested_type);
+    RUN_TEST(registry_receiver_chain_still_refuses_foreign_root_with_ancestry_rule);
+    RUN_TEST(pipeline_header_include_target_is_independent_of_registration_order);
     RUN_TEST(registry_receiver_chain_ignores_lowercase_root_issue1893);
     RUN_TEST(registry_receiver_chain_ignores_bare_name_issue1893);
     RUN_TEST(http_route_literal_guard_rejects_regex_replacement_operands);
+    RUN_TEST(http_route_literal_guard_rejects_comments_keeps_wildcard);
     RUN_TEST(pipeline_arg_url_rejects_non_http_slash_arguments);
     RUN_TEST(pipeline_complexity_props_independent_of_worker_order);
     RUN_TEST(registry_fuzzy_confidence_single);
@@ -8762,6 +8970,9 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);
     RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
+    RUN_TEST(pipeline_python_receiver_keeps_specific_unique_name_member_call);
+    RUN_TEST(pipeline_python_receiver_parallel_keeps_specific_unique_name_member_call);
+    RUN_TEST(pipeline_html_embedded_member_call_stays_unbound);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
     RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
     RUN_TEST(pipeline_semantic_batched_matches_unbatched);

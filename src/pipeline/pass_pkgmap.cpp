@@ -1599,6 +1599,47 @@ static bool is_c_family_source(const char *source_rel) {
     return false;
 }
 
+/* Directory depth of a repo-relative path: how many directories sit above it. */
+static int include_path_depth(const char *path) {
+    int depth = 0;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            depth++;
+        }
+    }
+    return depth;
+}
+
+/* Total order among nodes whose file path ends with the include path. The
+ * by-name hits arrive in graph-buffer order, which cbm_gbuf_canonicalize()
+ * makes stable but which is still qualified-name order, not a judgement about
+ * which header an include names: `#include <linux/device.h>` must target
+ * include/linux/device.h, not tools/virtio/linux/device.h. The include names a
+ * file, so a File node outranks a symbol declared in it; among files the least
+ * nested path wins, then the smaller path, then the smaller QN — a function of
+ * the candidate set alone. */
+static bool include_target_outranks(const cbm_gbuf_node_t *cand, const cbm_gbuf_node_t *best) {
+    if (!best) {
+        return true;
+    }
+    bool cand_file = strcmp(cand->label, "File") == 0;
+    bool best_file = strcmp(best->label, "File") == 0;
+    if (cand_file != best_file) {
+        return cand_file;
+    }
+    int cd = include_path_depth(cand->file_path);
+    int bd = include_path_depth(best->file_path);
+    if (cd != bd) {
+        return cd < bd;
+    }
+    int by_path = strcmp(cand->file_path, best->file_path);
+    if (by_path != 0) {
+        return by_path < 0;
+    }
+    return cand->qualified_name && best->qualified_name &&
+           strcmp(cand->qualified_name, best->qualified_name) < 0;
+}
+
 static const cbm_gbuf_node_t *resolve_exact_file_node(const cbm_pipeline_ctx_t *ctx,
                                                       const char *file_path,
                                                       const char *source_file_qn) {
@@ -1651,18 +1692,12 @@ static const cbm_gbuf_node_t *resolve_exact_file_node(const cbm_pipeline_ctx_t *
                 strcmp(cand->qualified_name, source_file_qn) == 0) {
                 continue;
             }
-            if (strcmp(cand->label, "File") == 0) {
-                return cand;
-            }
-            if (!best) {
+            if (include_target_outranks(cand, best)) {
                 best = cand;
             }
         }
-        if (best) {
-            return best;
-        }
     }
-    return NULL;
+    return best;
 }
 
 static const cbm_gbuf_node_t *resolve_header_include(const cbm_pipeline_ctx_t *ctx,
