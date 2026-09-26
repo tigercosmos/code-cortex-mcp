@@ -52,6 +52,53 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 > had no `lsp_skipped` note. Items 1 and 3 are identical in upstream
 > `1a342553`. Suite 6098 → 6102, ASan+UBSan clean.
 >
+> **Review rounds 2-8 and the RocksDB benchmark (2026-09-26, same day).**
+> Seven more Codex passes (`codex exec review --base main`, effort high, via
+> `codexmon`) and a benchmark on facebook/rocksdb@`4052fccd` (production
+> `-O2` builds, 4 interleaved rounds, fresh cache each) found and fixed, each
+> with a regression test that fails without its fix:
+> - **Names cut at their first line** (upstream `1a342553`) merged distinct
+>   C++ template specializations (rocksdb: −84 Class) and conversion
+>   operators. **FORK-ONLY:** a name continues when its first line leaves a
+>   `<`/`(`/`[` open, or ends in `operator` or `::`. Those names are folded
+>   onto one line. Everything else is still cut.
+> - **Forward declarations were Class nodes.** Found by the benchmark,
+>   predates the sync. **FORK-ONLY:** a body-less C-family
+>   class/struct/union/enum specifier is not a definition. rocksdb: −1,023
+>   Class, INHERITS into one-line stubs 252 → 41, OVERRIDE +372, and
+>   `: public Logger` now resolves to `include/rocksdb/env.h`, not one of
+>   ~30 forward declarations.
+> - **BM25 window (`search_graph`):** exact-name, case-insensitive
+>   exact-name, and label/path-filtered candidate sets join the 2000-row FTS
+>   window (`exact_extra`, `nocase_extra`, `filtered_extra`). A synthetic
+>   1M-match index runs in 1.6-2.1 s CPU with or without filters; opencv
+>   ~80-100 ms.
+> - **JS/TS numeric member names** (`class C { 1() {} }`) are kept. Only a
+>   numeric Variable is junk (upstream dropped all of them).
+> - **Cypher seed-time WHERE:** a label or EXISTS predicate on the not-yet-
+>   bound side discarded every seed. It is broken on main too for
+>   `WHERE b:Function AND a.name = 'x'`, and the selective-end planner made
+>   the mirror form fail. The seed filter now applies only fully bound AND
+>   conjuncts.
+> - **Residual-coverage comment detection** is a language-aware lexer
+>   (block-comment state across raw, backtick, triple-quoted and
+>   backslash-continued literals; `#` comments only where they are
+>   comments). It replaces the leading-`*` heuristic, which hid `*p = 5;`,
+>   `* p = 5;` and statements after `/* note */`.
+> - **Watcher:** `index_failure_count` and `next_poll_ns` are atomics. The
+>   poller wrote them outside `projects_lock`.
+> - **Coverage detail:** a `tree_depth` skip that only macro expansion
+>   triggers reports the expanded tree's node count (was the raw tree's).
+>
+> **RocksDB, main → sync:** wall/CPU at parity (medians 9.6 s / 62.5 s vs
+> 9.1 s / 62.4 s; per-pass times identical), peak RSS ~2.27 GB both.
+> Nodes 82,833 → 81,801 (forward declarations), CALLS +1,072,
+> DEFINES_METHOD +361, OVERRIDE +372, USAGE −345, WRITES −319. About 5,400
+> CALLS retargets are name-only binds among same-named candidates switching
+> under the least-nested tie-break, deterministic, with no clear net
+> direction. Suite 6098 → 6111, ASan+UBSan clean, cppcheck identical to
+> the base.
+>
 > **Build note:** `-DCMAKE_BUILD_TYPE=Release` does not compile (vendored
 > `just` scanner: `#error "expected assertions to be enabled"`). Configure
 > without a build type. Compare timings only between trees with the same
