@@ -2731,6 +2731,8 @@ enum {
     BM25_BIND_OFFSET = 4,
     BM25_BIND_INNER = 5,
     BM25_BIND_FILE = 6,
+    BM25_BIND_LABEL = 7,
+    BM25_BIND_EXACT = 8,
     BM25_SQL_AUTO_LEN = -1,
     /* Inner FTS5 candidate cap.  SQLite can early-terminate a plain FTS5 query
      * (no JOIN/WHERE on outer table) of the form:
@@ -2827,7 +2829,7 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
 #define BM25_WEIGHTS "bm25(nodes_fts, 1.0, 1.0, 1.0, 1.0, 0.3)"
 
 static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
-                         const char *file_pattern, int limit, int offset) {
+                         const char *file_pattern, const char *label, int limit, int offset) {
     sqlite3 *db = cbm_store_get_db(store);
     if (!db) {
         return NULL;
@@ -2853,9 +2855,18 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
      * because no outer predicate blocks it.  We fetch BM25_INNER_LIMIT top candidates
      * from the FTS5 index, then join/filter/boost only those rows.  bm25() returns a
      * NEGATIVE score (lower = more relevant). */
+    /* Exact-name tier: a definition whose NAME is the query outranks every
+     * partial hit. BM25 term frequency otherwise rewards a long test-method
+     * name that repeats the token — `table references table with same name` —
+     * over the `Table` class itself, and the label tiers below then push the
+     * class's own methods above it (Method 10 > Class 5). The definition the
+     * reader asked for by name comes first; case-insensitive exact spelling
+     * comes next; everything else keeps its BM25 order. */
     const char *sql =
         "SELECT n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, "
         "       (fts.base_rank "
+        "        - CASE WHEN n.name = ?8 THEN 30.0 "
+        "               WHEN lower(n.name) = lower(?8) THEN 20.0 ELSE 0.0 END "
         "        - CASE WHEN n.label IN ('Function','Method') THEN 10.0 "
         "               WHEN n.label = 'Route' THEN 8.0 "
         "               WHEN n.label IN (" CBM_SQL_TYPE_LIKE_LABELS ") THEN 5.0 "
@@ -2875,6 +2886,10 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
          * MIRRORED in the count query below; change the two together. */
         "  AND n.label NOT IN ('File','Folder','Variable','Project') "
         "  AND (?6 IS NULL OR n.file_path LIKE ?6) "
+        /* The caller's label filter applies in query mode exactly as it does
+         * in the structural mode (`label=Class` used to be ignored here and
+         * Methods came back). MIRRORED in the count query. */
+        "  AND (?7 IS NULL OR n.label = ?7) "
         "ORDER BY rank "
         "LIMIT ?3 OFFSET ?4";
 
@@ -2893,6 +2908,12 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
     } else {
         sqlite3_bind_null(stmt, BM25_BIND_FILE);
     }
+    if (label && label[0]) {
+        sqlite3_bind_text(stmt, BM25_BIND_LABEL, label, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(stmt, BM25_BIND_LABEL);
+    }
+    sqlite3_bind_text(stmt, BM25_BIND_EXACT, query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
 
     /* Count hits within the same inner-limit window — capped at BM25_INNER_LIMIT.
      * Uses the identical subquery structure so the FTS5 early-exit applies here too. */
@@ -2909,6 +2930,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
             /* MIRRORS the ranked query verbatim: same weights, same exclusions. */
             "      AND n.label NOT IN ('File','Folder','Variable','Project')"
             "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
+            "      AND (?7 IS NULL OR n.label = ?7)"
             ")";
         sqlite3_stmt *cs = NULL;
         if (sqlite3_prepare_v2(db, count_sql, BM25_SQL_AUTO_LEN, &cs, NULL) == SQLITE_OK) {
@@ -2922,6 +2944,12 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
                                   MCP_SQLITE_TRANSIENT);
             } else {
                 sqlite3_bind_null(cs, BM25_BIND_FILE);
+            }
+            if (label && label[0]) {
+                sqlite3_bind_text(cs, BM25_BIND_LABEL, label, BM25_SQL_AUTO_LEN,
+                                  MCP_SQLITE_TRANSIENT);
+            } else {
+                sqlite3_bind_null(cs, BM25_BIND_LABEL);
             }
             if (sqlite3_step(cs) == SQLITE_ROW) {
                 total = sqlite3_column_int(cs, 0);
@@ -3124,8 +3152,11 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         int q_limit = cbm_mcp_get_int_arg(args, "limit", BM25_DEFAULT_LIMIT);
         int q_offset = cbm_mcp_get_int_arg(args, "offset", 0);
         char *q_file_pattern = cbm_mcp_get_string_arg(args, "file_pattern");
-        char *bm25_json = bm25_search(store, project, query, q_file_pattern, q_limit, q_offset);
+        char *q_label = cbm_mcp_get_string_arg(args, "label");
+        char *bm25_json =
+            bm25_search(store, project, query, q_file_pattern, q_label, q_limit, q_offset);
         free(q_file_pattern);
+        free(q_label);
         if (bm25_json) {
             free(query);
             free(project);

@@ -5151,6 +5151,113 @@ TEST(bm25_results_and_total_stay_consistent_issue518) {
     cbm_mcp_server_free(srv);
     PASS();
 }
+/* Shared fixture for the two BM25 findability probes (upstream, measured on
+ * JetBrains/Exposed and django/django): a Class named exactly like the query,
+ * that class's own Methods, and test Methods whose long names repeat the
+ * query token — the shapes that outranked the class and hid it entirely. */
+static cbm_mcp_server_t *setup_bm25_findability_server(const char *proj) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    if (!srv) {
+        return NULL;
+    }
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/bm25-findability");
+    struct {
+        const char *label, *name, *qn, *file;
+    } rows[] = {
+        {"Class", "Table", "bf.core.Table.Table", "core/Table.kt"},
+        {"Method", "unquoted", "bf.core.Table.Table.unquoted", "core/Table.kt"},
+        {"Method", "describe", "bf.core.Table.Table.describe", "core/Table.kt"},
+        {"Method", "table references table with same name in other database",
+         "bf.tests.SchemaTests.table_references_table_with_same_name", "tests/Schema.kt"},
+        {"Method", "table references table with same name in mysql",
+         "bf.tests.SchemaTests.table_references_table_with_same_name_mysql", "tests/Schema.kt"},
+        {"Function", "get_object_or_404", "bf.shortcuts.get_object_or_404", "shortcuts.py"},
+        {"Method", "test_get_object_or_404", "bf.tests.GetObjectOr404Tests.test_get_object_or_404",
+         "tests/tests.py"},
+        {"Method", "test_get_object_or_404_queryset_attribute_error",
+         "bf.tests.GetObjectOr404Tests.test_get_object_or_404_queryset_attribute_error",
+         "tests/tests.py"},
+        {"Method", "test_get_object_or_404_bad_class",
+         "bf.tests.GetListObjectOr404Test.test_get_object_or_404_bad_class", "tests/async.py"},
+    };
+    for (auto &row : rows) {
+        cbm_node_t n = prose_node(proj, row.label, row.name, row.qn, row.file, NULL);
+        cbm_store_upsert_node(st, &n);
+    }
+    cbm_store_fts_rebuild(st);
+    return srv;
+}
+
+static char *bm25_find_search(cbm_mcp_server_t *srv, const char *proj, const char *query,
+                              const char *label) {
+    char req[512];
+    snprintf(req, sizeof(req),
+             "{\"jsonrpc\":\"2.0\",\"id\":554,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_graph\","
+             "\"arguments\":{\"project\":\"%s\",\"query\":\"%s\"%s%s%s,\"limit\":5}}}",
+             proj, query, label ? ",\"label\":\"" : "", label ? label : "", label ? "\"" : "");
+    char *resp = cbm_mcp_server_handle(srv, req);
+    if (!resp) {
+        return NULL;
+    }
+    char *inner = extract_text_content(resp);
+    free(resp);
+    return inner;
+}
+
+/* First result's qualified_name, or "" (static buffer). */
+static const char *bm25_first_qn(const char *inner) {
+    static char qn[256];
+    qn[0] = '\0';
+    yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
+    if (!doc) {
+        return qn;
+    }
+    yyjson_val *results = yyjson_obj_get(yyjson_doc_get_root(doc), "results");
+    yyjson_val *first = results ? yyjson_arr_get_first(results) : NULL;
+    const char *s = first ? yyjson_get_str(yyjson_obj_get(first, "qualified_name")) : NULL;
+    snprintf(qn, sizeof(qn), "%s", s ? s : "");
+    yyjson_doc_free(doc);
+    return qn;
+}
+
+/* The label filter must apply in query (BM25) mode exactly as in structural
+ * mode: `query=Table label=Class` returns the class, and no Method; the
+ * reported total describes the filtered rows. */
+TEST(bm25_applies_label_filter) {
+    cbm_mcp_server_t *srv = setup_bm25_findability_server("bf-label");
+    ASSERT_NOT_NULL(srv);
+    char *inner = bm25_find_search(srv, "bf-label", "Table", "Class");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"search_mode\":\"bm25\""));
+    ASSERT_NOT_NULL(strstr(inner, "bf.core.Table.Table"));
+    ASSERT_NULL(strstr(inner, "\"Method\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":1"));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* The definition whose NAME is the query ranks first: the `Table` class above
+ * its own methods and above test methods that repeat "table" three times; the
+ * `get_object_or_404` function above the test methods that contain it. */
+TEST(bm25_ranks_exact_name_first) {
+    cbm_mcp_server_t *srv = setup_bm25_findability_server("bf-exact");
+    ASSERT_NOT_NULL(srv);
+    char *inner = bm25_find_search(srv, "bf-exact", "Table", NULL);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_STR_EQ(bm25_first_qn(inner), "bf.core.Table.Table");
+    free(inner);
+    inner = bm25_find_search(srv, "bf-exact", "get_object_or_404", NULL);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_STR_EQ(bm25_first_qn(inner), "bf.shortcuts.get_object_or_404");
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(bm25_identifier_match_outranks_prose_only_match_issue518) {
     /* Same label boost on both, so the order is decided by column weights. */
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -5441,5 +5548,7 @@ SUITE(mcp) {
     RUN_TEST(bm25_finds_module_by_promoted_description_issue519);
     RUN_TEST(bm25_results_and_total_stay_consistent_issue518);
     RUN_TEST(bm25_identifier_match_outranks_prose_only_match_issue518);
+    RUN_TEST(bm25_applies_label_filter);
+    RUN_TEST(bm25_ranks_exact_name_first);
     RUN_TEST(bm25_searches_legacy_four_column_fts_without_error_issue518);
 }

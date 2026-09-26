@@ -3358,6 +3358,72 @@ TEST(cypher_exec_deadline_allows_normal_query_issue601) {
  *
  * max_rows = 1 with 11 distractors ahead of the match: the old 10-node scan
  * could not reach it. */
+/* Planner: a single-hop pattern whose FAR node carries the selective filter is
+ * walked from that end. `MATCH (a)-[:CALLS]->(b) WHERE b.name = 'X'` used to
+ * scan every node before the filter on b could act — on upstream's 8.5 M node
+ * kernel graph it hit the execution-time limit. The rows must be the same in
+ * every spelling, including the inline-property and inbound-direction forms,
+ * and the caller-side variable must still bind the right nodes. */
+TEST(cypher_single_hop_seeds_from_selective_far_node) {
+    cbm_store_t *s = setup_cypher_store();
+
+    cbm_cypher_result_t where_form = {};
+    ASSERT_EQ(cbm_cypher_execute(s,
+                                 "MATCH (a)-[:CALLS]->(b) WHERE b.name = 'ValidateOrder' "
+                                 "RETURN a.name ORDER BY a.name",
+                                 "test", 0, &where_form),
+              0);
+    ASSERT_EQ(where_form.row_count, 1);
+    ASSERT_STR_EQ(where_form.rows[0][0], "HandleOrder");
+    cbm_cypher_result_free(&where_form);
+
+    cbm_cypher_result_t inline_form = {};
+    ASSERT_EQ(cbm_cypher_execute(s,
+                                 "MATCH (a)-[:CALLS]->(b {name: 'SubmitOrder'}) "
+                                 "RETURN a.name",
+                                 "test", 0, &inline_form),
+              0);
+    ASSERT_EQ(inline_form.row_count, 1);
+    ASSERT_STR_EQ(inline_form.rows[0][0], "ValidateOrder");
+    cbm_cypher_result_free(&inline_form);
+
+    /* Inbound spelling: the far node is now the CALLER; direction inverts back. */
+    cbm_cypher_result_t inbound_form = {};
+    ASSERT_EQ(cbm_cypher_execute(s,
+                                 "MATCH (callee)<-[:CALLS]-(caller) WHERE caller.name = "
+                                 "'HandleOrder' RETURN callee.name ORDER BY callee.name",
+                                 "test", 0, &inbound_form),
+              0);
+    ASSERT_EQ(inbound_form.row_count, 2);
+    ASSERT_STR_EQ(inbound_form.rows[0][0], "LogError");
+    ASSERT_STR_EQ(inbound_form.rows[1][0], "ValidateOrder");
+    cbm_cypher_result_free(&inbound_form);
+
+    /* Count aggregation through the swapped seed. */
+    cbm_cypher_result_t count_form = {};
+    ASSERT_EQ(cbm_cypher_execute(s,
+                                 "MATCH (a)-[:CALLS]->(b) WHERE b.name = 'LogError' "
+                                 "RETURN count(a) AS callers",
+                                 "test", 0, &count_form),
+              0);
+    ASSERT_EQ(count_form.row_count, 1);
+    ASSERT_STR_EQ(count_form.rows[0][0], "1");
+    cbm_cypher_result_free(&count_form);
+
+    /* RETURN * keeps pattern order, so it is never swapped: column 0 is `a`. */
+    cbm_cypher_result_t star_form = {};
+    ASSERT_EQ(cbm_cypher_execute(s, "MATCH (a)-[:CALLS]->(b) WHERE b.name = 'LogError' RETURN *",
+                                 "test", 0, &star_form),
+              0);
+    ASSERT_EQ(star_form.row_count, 1);
+    ASSERT_TRUE(star_form.col_count >= 2);
+    ASSERT_NOT_NULL(strstr(star_form.columns[0], "a"));
+    cbm_cypher_result_free(&star_form);
+
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_exec_unlabeled_where_beyond_result_limit_issue1196) {
     cbm_store_t *s = cbm_store_open_memory();
     ASSERT_NOT_NULL(s);
@@ -3599,4 +3665,5 @@ SUITE(cypher) {
     RUN_TEST(cypher_parse_unwind_oversized_literal_no_overflow);
     RUN_TEST(cypher_parse_unwind_many_elements_no_overflow);
     RUN_TEST(cypher_exec_unlabeled_where_beyond_result_limit_issue1196);
+    RUN_TEST(cypher_single_hop_seeds_from_selective_far_node);
 }

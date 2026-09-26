@@ -3393,8 +3393,41 @@ TEST(cli_remove_indexes_respects_lease) {
     PASS();
 }
 
+/* An array-typed flag given a JSON array literal — the shape the help's
+ * `<array>` invites — contributes the literal's elements, not one element
+ * holding the literal text (upstream probe: check_index_coverage reported the
+ * fake path `["lib","t"]`). Repeated plain values still accumulate. */
+TEST(cli_build_args_json_array_flag_accepts_json_literal) {
+    char *err = NULL;
+    char a0[] = "--function-name", a1[] = "f", a2[] = "--edge-types",
+         a3[] = "[\"CALLS\",\"HTTP_CALLS\"]";
+    char *argv[] = {a0, a1, a2, a3};
+    char *json = cbm_cli_build_args_json("trace_path", 4, argv, &err);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NULL(err);
+    ASSERT(strstr(json, "\"edge_types\":[\"CALLS\",\"HTTP_CALLS\"]") != NULL);
+    free(json);
+
+    char b3[] = "CALLS", b4[] = "--edge-types", b5[] = "HTTP_CALLS";
+    char *argv2[] = {a0, a1, a2, b3, b4, b5};
+    json = cbm_cli_build_args_json("trace_path", 6, argv2, &err);
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"edge_types\":[\"CALLS\",\"HTTP_CALLS\"]") != NULL);
+    free(json);
+
+    /* A value that merely starts with '[' but is not JSON stays one element. */
+    char c3[] = "[weird";
+    char *argv3[] = {a0, a1, a2, c3};
+    json = cbm_cli_build_args_json("trace_path", 4, argv3, &err);
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"edge_types\":[\"[weird\"]") != NULL);
+    free(json);
+    PASS();
+}
+
 SUITE(cli) {
     RUN_TEST(cli_remove_indexes_respects_lease);
+    RUN_TEST(cli_build_args_json_array_flag_accepts_json_literal);
 
     /* Version (2 tests — selfupdate_test.go) */
     RUN_TEST(cli_compare_versions);
