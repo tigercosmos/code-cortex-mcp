@@ -39,6 +39,19 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 > (option A(b), declined in this pass). It is not verified; re-check with
 > `extract.*` logs on a cold cache.
 >
+> **Post-sync review (2026-09-26, same day).** A Codex review (`codex exec
+> review --base main`, reasoning effort high, via `codexmon`, 8.5 min) found
+> four real defects, all fixed in `0c5cb19e` with regression tests that fail
+> without their fixes: (1) BM25 `label` filter and exact-name tier ran only on
+> the 2000-row FTS window, now joined by an `idx_nodes_name` exact-name
+> candidate set; (2) a non-string `target_projects` element SEGFAULTed the
+> cross-repo worker over MCP, and via the new CLI JSON-array flags from the
+> CLI too (the crash predated this pass), now rejected in the handler and
+> checked against `items.type` in the CLI; (3) a `*`-leading statement
+> counted as a comment line in residual coverage; (4) `get_code_snippet`
+> had no `lsp_skipped` note. Items 1 and 3 are identical in upstream
+> `1a342553`. Suite 6098 → 6102, ASan+UBSan clean.
+>
 > **Build note:** `-DCMAKE_BUILD_TYPE=Release` does not compile (vendored
 > `just` scanner: `#error "expected assertions to be enabled"`). Configure
 > without a build type. Compare timings only between trees with the same
