@@ -4471,6 +4471,21 @@ TEST(extract_ts_route_handler_after_inline_middleware) {
 /* Issue #1006: JS/TS template-literal URLs must flatten ${...} substitutions
  * to the canonical "{}" placeholder, both as call arguments (HTTP_CALLS) and
  * as URL-shaped string_refs collected from const/return positions. */
+/* Upstream #2210: `await f<T>()` parses as a call whose function is the
+ * await_expression, so the generic call lost its CALLS edge while the plain
+ * `await f()` kept it. */
+TEST(extract_ts_await_generic_call_issue2210) {
+    CBMFileResult *r = extract("function parseJsonBody<T>() { return {} as T; }\n"
+                               "async function plain() { return await parseJsonBody(); }\n"
+                               "async function generic() { return await parseJsonBody<string>(); }\n",
+                               CBM_LANG_TYPESCRIPT, "t", "await.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(count_calls_named(r, "parseJsonBody"), 2);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Issue #1009: URL-builder helper pattern — a function returning a URL-shaped
  * literal, consumed as client(buildPath(id)). The builder's URL is recorded in
  * the per-file constant map and resolved at the call site, for both return
@@ -7724,6 +7739,7 @@ SUITE(extraction) {
     RUN_TEST(extract_go_binary_concat_url_issue1249);
     RUN_TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249);
     RUN_TEST(extract_ts_url_builder_issue1009);
+    RUN_TEST(extract_ts_await_generic_call_issue2210);
     RUN_TEST(extract_ts_route_handler_after_named_middleware);
     RUN_TEST(extract_ts_route_handler_after_inline_middleware);
     RUN_TEST(extract_ts_url_builder_composed_issue1009);
