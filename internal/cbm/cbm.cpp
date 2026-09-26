@@ -3188,6 +3188,9 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
                      * walk saw; the LSP pass below walks this one. */
                     if (!result->lsp_skipped &&
                         pp_ctx.walk_max_depth > (uint32_t)CBM_LSP_MAX_TREE_DEPTH) {
+                        /* The coverage entry's "N nodes" must describe the
+                         * tree that was too deep — the expanded one. */
+                        result->tree_nodes = ts_node_descendant_count(pp_root);
                         cbm_lsp_skip_for_depth(result, pp_ctx.walk_max_depth, rel_path);
                     }
 

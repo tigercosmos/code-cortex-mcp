@@ -6661,6 +6661,37 @@ TEST(extract_coverage_gap_of_only_comments_is_not_a_miss) {
     PASS();
 }
 
+/* A tree that only macro expansion makes too deep: the raw file is
+ * shallow, the expanded unit nests thousands of levels. The tree_depth skip
+ * must report the expanded tree's size, not the raw tree's handful of
+ * nodes. */
+TEST(extract_pp_depth_skip_reports_expanded_tree_size) {
+    CBMFileResult *r = extract("#define A0(x) ((x) + 1)\n"
+                               "#define A1(x) A0(A0(x))\n"
+                               "#define A2(x) A1(A1(x))\n"
+                               "#define A3(x) A2(A2(x))\n"
+                               "#define A4(x) A3(A3(x))\n"
+                               "#define A5(x) A4(A4(x))\n"
+                               "#define A6(x) A5(A5(x))\n"
+                               "#define A7(x) A6(A6(x))\n"
+                               "#define A8(x) A7(A7(x))\n"
+                               "#define A9(x) A8(A8(x))\n"
+                               "#define A10(x) A9(A9(x))\n"
+                               "#define A11(x) A10(A10(x))\n"
+                               "int deep(int v) { return A11(v); }\n",
+                               CBM_LANG_C, "t", "deep_macro.c");
+    ASSERT_NOT_NULL(r);
+    if (!r->lsp_skipped) {
+        /* No preprocessed pass in this configuration: nothing to check. */
+        cbm_free_result(r);
+        PASS();
+    }
+    ASSERT_EQ(r->lsp_skip_reason, (uint8_t)CBM_LSP_SKIP_TREE_DEPTH);
+    ASSERT_GT(r->tree_nodes, 4096u);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* A comment opener inside a literal that spans lines — a C++ raw string, a
  * backslash-continued string — or inside a Python docstring must not open a
  * block comment for the lines after it: the syntax error that follows stays
@@ -8756,6 +8787,7 @@ SUITE(extraction) {
     RUN_TEST(defs_push_keeps_numeric_js_member_names);
     RUN_TEST(defs_push_folds_multiline_operator_names);
     RUN_TEST(extract_coverage_comment_state_skips_multiline_literals);
+    RUN_TEST(extract_pp_depth_skip_reports_expanded_tree_size);
     RUN_TEST(cpp_forward_declarations_are_not_class_definitions);
     RUN_TEST(call_args_skip_comments_between_arguments);
     RUN_TEST(python_receiver_self_attribute_flag);
