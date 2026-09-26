@@ -3154,6 +3154,105 @@ TEST(commonlisp_defmacro) {
     PASS();
 }
 
+/* Upstream probe: config extractors handed multi-line node text over as a
+ * name (8,301 elasticsearch YAML Fields, 91 kernel Makefile/.conf nodes with a
+ * line break inside), and JS/TS baselines named functions `{}` and variables
+ * `1`. The definition push is the one place every extractor goes through. */
+TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names) {
+    CBMArena a;
+    cbm_arena_init(&a);
+    CBMDefArray defs = {};
+
+    CBMDefinition make = {};
+    make.name = "endif\n\n$(obj)/pm_data-offsets.h";
+    make.qualified_name = "proj.arch.arm.mach-at91.Makefile.endif\n\n$(obj)/pm_data-offsets.h";
+    make.label = "Function";
+    make.file_path = "arch/arm/mach-at91/Makefile";
+    cbm_defs_push(&defs, &a, make);
+    ASSERT_EQ(defs.count, 1);
+    ASSERT_STR_EQ(defs.items[0].name, "endif");
+    ASSERT_STR_EQ(defs.items[0].qualified_name, "proj.arch.arm.mach-at91.Makefile.endif");
+
+    CBMDefinition yaml = {};
+    yaml.name = "Test get datafeed stats given missing datafeed_id   \r\n  - do:";
+    yaml.qualified_name =
+        "proj.spec.Test get datafeed stats given missing datafeed_id   \r\n  - do:";
+    yaml.label = "Field";
+    yaml.file_path = "rest-api-spec/test/ml/get_datafeed_stats.yml";
+    cbm_defs_push(&defs, &a, yaml);
+    ASSERT_EQ(defs.count, 2);
+    ASSERT_STR_EQ(defs.items[1].name, "Test get datafeed stats given missing datafeed_id");
+
+    /* JS/TS: a literal token is not a name. */
+    CBMDefinition brace = {};
+    brace.name = "{}";
+    brace.qualified_name = "proj.tests.baselines.x.{}";
+    brace.label = "Function";
+    brace.file_path = "tests/baselines/reference/x.js";
+    cbm_defs_push(&defs, &a, brace);
+    CBMDefinition one = {};
+    one.name = "1";
+    one.qualified_name = "proj.tests.cases.y.1";
+    one.label = "Variable";
+    one.file_path = "tests/cases/y.ts";
+    cbm_defs_push(&defs, &a, one);
+    ASSERT_EQ(defs.count, 2);
+
+    /* Real JS names, including private members and `$`-prefixed ones, stay. */
+    CBMDefinition priv = {};
+    priv.name = "#secret";
+    priv.qualified_name = "proj.src.a.Klass.#secret";
+    priv.label = "Method";
+    priv.file_path = "src/a.ts";
+    cbm_defs_push(&defs, &a, priv);
+    CBMDefinition dollar = {};
+    dollar.name = "$scope";
+    dollar.qualified_name = "proj.src.b.$scope";
+    dollar.label = "Variable";
+    dollar.file_path = "src/b.js";
+    cbm_defs_push(&defs, &a, dollar);
+    ASSERT_EQ(defs.count, 4);
+
+    /* Member keys JS spells without an identifier start are names too:
+     * computed, string-literal and escaped. */
+    const char *member_keys[] = {"[Symbol.iterator]", "\"my-key\"", "'x'", "\\u0410"};
+    for (int i = 0; i < 4; i++) {
+        CBMDefinition member = {};
+        member.name = member_keys[i];
+        member.qualified_name = member_keys[i];
+        member.label = "Method";
+        member.file_path = "src/c.ts";
+        cbm_defs_push(&defs, &a, member);
+    }
+    ASSERT_EQ(defs.count, 8);
+
+    /* Tokens that are not names in any spelling: patterns, numeric literals,
+     * parenthesised types, rest elements. */
+    const char *tokens[] = {"{ b11 } = { b11: \"string\" }", "0x0",  "3.2e1",
+                            "(x: number) => string",         "...a", "?"};
+    for (int i = 0; i < 6; i++) {
+        CBMDefinition token = {};
+        token.name = tokens[i];
+        token.qualified_name = tokens[i];
+        token.label = "Variable";
+        token.file_path = "tests/cases/z.js";
+        cbm_defs_push(&defs, &a, token);
+    }
+    ASSERT_EQ(defs.count, 8);
+
+    /* Other languages may legitimately name operators: untouched. */
+    CBMDefinition op = {};
+    op.name = "<$>";
+    op.qualified_name = "proj.Data.Functor.<$>";
+    op.label = "Function";
+    op.file_path = "src/Data/Functor.hs";
+    cbm_defs_push(&defs, &a, op);
+    ASSERT_EQ(defs.count, 9);
+
+    cbm_arena_destroy(&a);
+    PASS();
+}
+
 TEST(makefile_rule_as_function) {
     CBMFileResult *r = extract("all:\n\t@echo hello\n", CBM_LANG_MAKEFILE, "test", "Makefile");
     ASSERT_NOT_NULL(r);
@@ -4518,6 +4617,66 @@ static const CBMCall *find_call_by_callee(CBMFileResult *r, const char *callee) 
         }
     }
     return NULL;
+}
+
+/* tree-sitter lists a comment inside an argument list as a named child; it is
+ * not an argument. A Java call whose argument list opened with a slash-star
+ * comment handed the comment text to the Route pass as a URL (upstream: three
+ * Route nodes named by comments on elasticsearch). */
+TEST(call_args_skip_comments_between_arguments) {
+    CBMFileResult *r = extract("class A {\n"
+                               "  void f() {\n"
+                               "    app.get(/* the orders listing */ \"/orders\", handler);\n"
+                               "    new TestCase(\n"
+                               "        /*\n"
+                               "         * a multi-line note\n"
+                               "         */\n"
+                               "        \"x\", // trailing\n"
+                               "        1);\n"
+                               "  }\n"
+                               "}\n",
+                               CBM_LANG_JAVA, "t", "A.java");
+    ASSERT_NOT_NULL(r);
+    const CBMCall *get = find_call_by_callee(r, "app.get");
+    ASSERT_NOT_NULL(get);
+    ASSERT_EQ(get->arg_count, 2);
+    ASSERT_STR_EQ(get->args[0].expr, "\"/orders\"");
+    ASSERT_STR_EQ(get->args[1].expr, "handler");
+    const CBMCall *ctor = find_call_by_callee(r, "TestCase");
+    ASSERT_NOT_NULL(ctor);
+    ASSERT_EQ(ctor->arg_count, 2);
+    ASSERT_STR_EQ(ctor->args[0].expr, "\"x\"");
+    ASSERT_STR_EQ(ctor->args[1].expr, "1");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The weak-member guard's exemption reads this flag: set only for a Python
+ * receiver that is an attribute chain rooted at self/cls, never for self/cls
+ * itself (already exempt) or a parameter. */
+TEST(python_receiver_self_attribute_flag) {
+    CBMFileResult *r = extract("class A:\n"
+                               "    def f(self, p):\n"
+                               "        self.compiler.apply_converters()\n"
+                               "        self.local_method()\n"
+                               "        p.other()\n"
+                               "        cls.registry.deep.lookup()\n",
+                               CBM_LANG_PYTHON, "t", "a.py");
+    ASSERT_NOT_NULL(r);
+    const CBMCall *owned = find_call_by_callee(r, "self.compiler.apply_converters");
+    const CBMCall *direct = find_call_by_callee(r, "self.local_method");
+    const CBMCall *param = find_call_by_callee(r, "p.other");
+    const CBMCall *deep = find_call_by_callee(r, "cls.registry.deep.lookup");
+    ASSERT_NOT_NULL(owned);
+    ASSERT_NOT_NULL(direct);
+    ASSERT_NOT_NULL(param);
+    ASSERT_NOT_NULL(deep);
+    ASSERT_TRUE(owned->receiver_is_self_attribute);
+    ASSERT_TRUE(deep->receiver_is_self_attribute);
+    ASSERT_FALSE(direct->receiver_is_self_attribute);
+    ASSERT_FALSE(param->receiver_is_self_attribute);
+    cbm_free_result(r);
+    PASS();
 }
 
 /* A route registration names its middleware before its handler, and every
@@ -6158,20 +6317,33 @@ TEST(extract_local_error_stays_partial_not_unusable_issue963) {
     PASS();
 }
 
-/* Pinned grammar limit, so a tree-sitter bump cannot change it quietly: only
- * the ARRAY form of `_Thread_local` fails today, and its range names that one
- * line rather than the whole file. */
+/* Pinned grammar limit, so a tree-sitter bump cannot change it quietly: every
+ * form of `_Thread_local` leaves an ERROR on its line, and the range names
+ * that one line rather than the whole file.
+ *
+ * The init and pointer forms used to read as "parses clean", but that was a
+ * masking effect, not a clean parse: the grammar salvages a one-line Variable
+ * named `int` from the ERROR, which the old all-or-nothing recovery rule
+ * accepted as evidence the line was understood. A one-line salvage is no
+ * longer evidence, so the line is flagged — honest, because `x` is what the
+ * graph lacks. */
 TEST(extract_c_thread_local_grammar_limit_is_pinned_issue963) {
     CBMFileResult *ok = extract("static _Thread_local int x = 0;\nvoid f(void) { x = 1; }\n",
                                 CBM_LANG_C, "t", "tls_init.c");
     ASSERT_NOT_NULL(ok);
-    ASSERT_FALSE(ok->parse_incomplete);
+    ASSERT_TRUE(ok->parse_incomplete);
+    ASSERT_NOT_NULL(ok->error_ranges);
+    ASSERT_STR_EQ("1-1", ok->error_ranges);
+    ASSERT_NOT_NULL(find_def(ok, "f"));
     cbm_free_result(ok);
 
     CBMFileResult *ptr = extract("static _Thread_local int *p;\nvoid f(void) { p = 0; }\n",
                                  CBM_LANG_C, "t", "tls_ptr.c");
     ASSERT_NOT_NULL(ptr);
-    ASSERT_FALSE(ptr->parse_incomplete);
+    ASSERT_TRUE(ptr->parse_incomplete);
+    ASSERT_NOT_NULL(ptr->error_ranges);
+    ASSERT_STR_EQ("1-1", ptr->error_ranges);
+    ASSERT_NOT_NULL(find_def(ptr, "f"));
     cbm_free_result(ptr);
 
     CBMFileResult *arr = extract("static _Thread_local char b[8];\nvoid f(void) { b[0] = 0; }\n",
@@ -6214,6 +6386,91 @@ TEST(extract_coverage_range_never_ends_past_the_last_line_issue963) {
     ASSERT_TRUE(r->parse_incomplete);
     ASSERT_NOT_NULL(r->error_ranges);
     ASSERT_STR_EQ(r->error_ranges, "1-4"); /* four lines; line 5 does not exist */
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── Residual ranges ──────────────────────────────────────────────────────
+ * The recovery subtraction used to be all-or-nothing: a region stayed flagged
+ * whole unless every one of its lines was covered by a definition that started
+ * inside it. On torvalds/linux (upstream probe) one ERROR node that swallowed
+ * the second half of kernel/sched/core.c survived on the strength of the
+ * comment and macro lines BETWEEN its 286 extracted functions. The ranges must
+ * now name only the lines no extracted definition covers. */
+static int cov_range_covers_line(const char *ranges, unsigned int line) {
+    const char *p = ranges;
+    while (p && *p) {
+        unsigned int s = 0;
+        unsigned int e = 0;
+        if (sscanf(p, "%u-%u", &s, &e) == 2 && s <= line && line <= e) {
+            return 1;
+        }
+        p = strchr(p, ',');
+        if (p) {
+            p++;
+        }
+    }
+    return 0;
+}
+
+/* A brace-unbalanced junk line between clean functions: the recovery walker
+ * still extracts them, so the reported range must not cover any of them, only
+ * the junk. */
+TEST(extract_coverage_range_never_covers_an_extracted_definition) {
+    CBMFileResult *r = extract("int alpha(void) {\n" /* 1 */
+                               "    return 1;\n"     /* 2 */
+                               "}\n"                 /* 3 */
+                               "\n"                  /* 4 */
+                               "} ] junk ( {\n"      /* 5 */
+                               "\n"                  /* 6 */
+                               "int beta(void) {\n"  /* 7 */
+                               "    return 2;\n"     /* 8 */
+                               "}\n"                 /* 9 */
+                               "\n"                  /* 10 */
+                               "int gamma(void) {\n" /* 11 */
+                               "    return 3;\n"     /* 12 */
+                               "}\n",                /* 13 */
+                               CBM_LANG_C, "t", "junk.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(find_def(r, "alpha"));
+    ASSERT_NOT_NULL(find_def(r, "beta"));
+    ASSERT_NOT_NULL(find_def(r, "gamma"));
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (!d->label || strcmp(d->label, "Module") == 0) {
+            continue;
+        }
+        ASSERT_FALSE(cov_range_covers_line(r->error_ranges, (unsigned)d->start_line));
+    }
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 5u));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The lines between recovered definitions are comments here: a gap with no
+ * code in it is not a miss. The junk line stays reported. */
+TEST(extract_coverage_gap_of_only_comments_is_not_a_miss) {
+    CBMFileResult *r = extract("int alpha(void) {\n"                /* 1 */
+                               "    return 1;\n"                    /* 2 */
+                               "}\n"                                /* 3 */
+                               "/* between alpha and the junk */\n" /* 4 */
+                               "} ] junk ( {\n"                     /* 5 */
+                               "// trailing note\n"                 /* 6 */
+                               "int beta(void) {\n"                 /* 7 */
+                               "    return 2;\n"                    /* 8 */
+                               "}\n",                               /* 9 */
+                               CBM_LANG_C, "t", "gaps.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(find_def(r, "alpha"));
+    ASSERT_NOT_NULL(find_def(r, "beta"));
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(cov_range_covers_line(r->error_ranges, 5u));
+    ASSERT_FALSE(cov_range_covers_line(r->error_ranges, 1u));
+    ASSERT_FALSE(cov_range_covers_line(r->error_ranges, 7u));
+    ASSERT_FALSE(cov_range_covers_line(r->error_ranges, 9u));
     cbm_free_result(r);
     PASS();
 }
@@ -8112,6 +8369,9 @@ SUITE(extraction) {
     RUN_TEST(commonlisp_defun);
     RUN_TEST(commonlisp_multiple_functions);
     RUN_TEST(commonlisp_defmacro);
+    RUN_TEST(defs_push_cuts_multiline_names_and_rejects_js_literal_names);
+    RUN_TEST(call_args_skip_comments_between_arguments);
+    RUN_TEST(python_receiver_self_attribute_flag);
     RUN_TEST(makefile_rule_as_function);
     RUN_TEST(makefile_multiple_targets);
     RUN_TEST(makefile_variable_extraction);
@@ -8218,6 +8478,8 @@ SUITE(extraction) {
     RUN_TEST(extract_c_thread_local_grammar_limit_is_pinned_issue963);
     RUN_TEST(extract_coverage_repeated_error_line_reports_one_range_issue963);
     RUN_TEST(extract_coverage_range_never_ends_past_the_last_line_issue963);
+    RUN_TEST(extract_coverage_range_never_covers_an_extracted_definition);
+    RUN_TEST(extract_coverage_gap_of_only_comments_is_not_a_miss);
     RUN_TEST(extract_go_binary_concat_url_issue1249);
     RUN_TEST(extract_go_binary_concat_url_no_literal_suffix_issue1249);
     RUN_TEST(extract_ts_url_builder_issue1009);

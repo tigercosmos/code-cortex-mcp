@@ -251,7 +251,79 @@ void cbm_reset_profile(void) {
         }                                                                                      \
     } while (0)
 
+/* A definition name never spans lines. Config extractors hand over a node's
+ * whole text — a YAML block key, a Makefile recipe (`endif\n\n$(obj)/x.h`), a
+ * ktest .conf directive — and the line break rode into the graph (upstream
+ * probe: 8,301 Field nodes on elastic/elasticsearch, 91 kernel nodes). Cut at
+ * the first line break and drop trailing blanks; the qualified name carries
+ * the same text as its last segment and is cut the same way. */
+static const char *cbm_first_line(CBMArena *a, const char *text) {
+    if (!text) {
+        return text;
+    }
+    const char *nl = strpbrk(text, "\r\n");
+    if (!nl) {
+        return text;
+    }
+    size_t n = (size_t)(nl - text);
+    while (n > 0 && (text[n - 1] == ' ' || text[n - 1] == '\t')) {
+        n--;
+    }
+    char *cut = (char *)cbm_arena_alloc(a, n + 1);
+    if (!cut) {
+        return text;
+    }
+    memcpy(cut, text, n);
+    cut[n] = '\0';
+    return cut;
+}
+
+/* JS/TS files: a definition named by a literal token is the walker naming a
+ * function or variable from an object key or a numeric pattern element —
+ * `{}` (1,534 incoming CALLS on microsoft/TypeScript's test baselines), `1`,
+ * a parenthesised type. An identifier starts with a letter, `_`, `$`, `#`
+ * (private members) or a non-ASCII byte; anything else is not a name. */
+static bool cbm_js_family_path(const char *path) {
+    if (!path) {
+        return false;
+    }
+    const char *dot = strrchr(path, '.');
+    if (!dot) {
+        return false;
+    }
+    static const char *const exts[] = {".js",  ".mjs", ".cjs", ".jsx", ".ts",
+                                       ".mts", ".cts", ".tsx", NULL};
+    for (int i = 0; exts[i]; i++) {
+        if (strcmp(dot, exts[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cbm_js_name_is_junk(const char *name) {
+    if (!name || !name[0]) {
+        return false; /* empty names are handled by the callers' own rules */
+    }
+    unsigned char c = (unsigned char)name[0];
+    bool identifier_start = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' ||
+                            c == '$' || c == '#' || c >= 0x80;
+    /* Member names JS spells without an identifier start are still names:
+     * computed keys (`[Symbol.iterator]`), string-literal keys (`"my-key"`,
+     * `'x'`) and escaped identifiers (`А`). Upstream measured on the
+     * TypeScript corpus: 1,531 `[…]` members, 97 quoted members, 154 escaped
+     * identifiers — all real definitions. What remains ({…} patterns, numeric
+     * literals, parenthesised types, `...rest`) is a token, not a name. */
+    bool member_key_start = c == '[' || c == '"' || c == '\'' || c == '\\';
+    return !identifier_start && !member_key_start;
+}
+
 void cbm_defs_push(CBMDefArray *arr, CBMArena *a, CBMDefinition def) {
+    def.name = cbm_first_line(a, def.name);
+    def.qualified_name = cbm_first_line(a, def.qualified_name);
+    if (cbm_js_family_path(def.file_path) && cbm_js_name_is_junk(def.name)) {
+        return;
+    }
     GROW_ARRAY(arr, a);
     arr->items[arr->count++] = def;
 }
@@ -988,7 +1060,7 @@ static void cbm_error_regions_push(cbm_error_regions_t *acc, TSNode n) {
     /* One line can carry several error nodes; repeating the same range says
      * nothing new. Only an EXACT repeat of the range just pushed is dropped —
      * never a merely overlapping one. Each range is judged separately later by
-     * cbm_region_is_recovered, and merging 3-3 into 2-3 would hand the wider
+     * cbm_region_uncovered_gaps, and merging 3-3 into 2-3 would hand the wider
      * range's covering definition to an error it does not explain, making a
      * real failure vanish (the Perl #1838 malformed fixture has exactly that
      * 2-3 / 3-3 shape upstream). Runs BEFORE the cap check, so a repeat is never
@@ -1262,14 +1334,89 @@ static uint8_t *cbm_build_pp_line_map(CBMArena *a, const char *source, int sourc
 /* Recovery subtraction (#963): tree-sitter error recovery plus the
  * ERROR-descending def walker often still extract constructs INSIDE a failed
  * region (verified: a function in an #ifdef-split ERROR region and even a
- * `def broken(:` both came back as defs). A region whose every line is
- * covered by definitions that START inside it is definitely recovered — its
- * constructs ARE in the graph — so flagging it would be a false miss.
- * Container defs (Module/Package) are ignored: a file-spanning Module node is
- * not evidence the region's constructs survived. Conservative: partially
- * covered regions stay flagged. */
-static bool cbm_region_is_recovered(uint32_t rs, uint32_t re, const CBMDefArray *defs) {
-    enum { MAX_COVER_DEFS = 256 };
+ * `def broken(:` both came back as defs). The lines a definition that STARTS
+ * inside the region covers are therefore in the graph, and only the lines no
+ * definition covers can honestly be called missed. Container defs
+ * (Module/Package) are ignored: a file-spanning Module node is not evidence
+ * the region's constructs survived.
+ *
+ * This used to be all-or-nothing — a region stayed flagged whole unless every
+ * line was covered. Upstream's kernel probe: one ERROR node that swallowed the
+ * second half of kernel/sched/core.c survived because of the comment and macro
+ * lines between its 286 extracted functions, and the coverage report said 68 %
+ * of the scheduler was unindexed. Now the uncovered gaps are reported instead,
+ * and a gap holding only blank, comment or preprocessor lines is not a miss at
+ * all. */
+static uint32_t *cbm_line_offsets(const char *src, int src_len, uint32_t *out_lines) {
+    uint32_t lines = 1;
+    for (int i = 0; i < src_len; i++) {
+        if (src[i] == '\n') {
+            lines++;
+        }
+    }
+    auto *offs = (uint32_t *)malloc((size_t)(lines + 1) * sizeof(uint32_t));
+    if (!offs) {
+        *out_lines = 0;
+        return NULL;
+    }
+    uint32_t n = 0;
+    offs[n++] = 0;
+    for (int i = 0; i < src_len && n < lines; i++) {
+        if (src[i] == '\n') {
+            offs[n++] = (uint32_t)i + 1;
+        }
+    }
+    offs[n] = (uint32_t)src_len;
+    *out_lines = n;
+    return offs;
+}
+
+/* A 1-based line that holds nothing a reader would call missed code: blank,
+ * a comment line, or a preprocessor directive (the import pass owns #include;
+ * #if/#endif carry no construct of their own). Without line offsets (OOM) every
+ * line counts as inert, which reports less, never a false gap. */
+static bool cbm_line_is_inert(const char *src, const uint32_t *offs, uint32_t nlines,
+                              uint32_t line) {
+    if (!src || !offs || line == 0 || line > nlines) {
+        return true;
+    }
+    const char *p = src + offs[line - 1];
+    const char *end = src + offs[line];
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r')) {
+        p++;
+    }
+    if (p >= end || *p == '\n') {
+        return true;
+    }
+    if (p[0] == '/' && p + 1 < end && (p[1] == '/' || p[1] == '*')) {
+        return true;
+    }
+    return p[0] == '*' || p[0] == '#';
+}
+
+static void cbm_regions_emit_gap(cbm_error_regions_t *out, uint32_t gs, uint32_t ge,
+                                 const char *src, const uint32_t *offs, uint32_t nlines) {
+    bool live = false;
+    for (uint32_t l = gs; l <= ge && !live; l++) {
+        live = !cbm_line_is_inert(src, offs, nlines, l);
+    }
+    if (!live) {
+        return;
+    }
+    if (out->count < CBM_MAX_ERROR_REGIONS) {
+        out->starts[out->count] = gs;
+        out->ends[out->count] = ge;
+        out->count++;
+    } else {
+        out->dropped++;
+    }
+}
+
+/* Replace [rs, re] by the sub-ranges no in-region definition covers. */
+static void cbm_region_uncovered_gaps(uint32_t rs, uint32_t re, const CBMDefArray *defs,
+                                      const char *src, const uint32_t *offs, uint32_t nlines,
+                                      cbm_error_regions_t *out) {
+    enum { MAX_COVER_DEFS = 1024 };
     uint32_t starts[MAX_COVER_DEFS];
     uint32_t ends[MAX_COVER_DEFS];
     int n = 0;
@@ -1281,14 +1428,24 @@ static bool cbm_region_is_recovered(uint32_t rs, uint32_t re, const CBMDefArray 
         if (d->start_line < rs || d->start_line > re) {
             continue; /* recovery evidence must originate inside the region */
         }
+        /* A one-line definition salvaged from inside an error region is the
+         * walker's guess at broken text (`def x(:` comes back as a def, a
+         * mis-parsed `static _Thread_local int x` as a Variable named `int`);
+         * only a construct whose body spans lines proves it was understood.
+         * Conservative: real one-line variables and macros inside a failed
+         * region keep their line flagged. */
+        if (d->end_line <= d->start_line) {
+            continue;
+        }
         starts[n] = d->start_line;
-        ends[n] = d->end_line < d->start_line ? d->start_line : d->end_line;
+        ends[n] = d->end_line;
         n++;
     }
     if (n == 0) {
-        return false;
+        cbm_regions_emit_gap(out, rs, re, src, offs, nlines);
+        return;
     }
-    /* Insertion-sort by start, then sweep for gaps in [rs, re]. */
+    /* Insertion-sort by start, then sweep and emit the gaps in [rs, re]. */
     for (int i = 1; i < n; i++) {
         uint32_t s = starts[i];
         uint32_t e = ends[i];
@@ -1301,16 +1458,18 @@ static bool cbm_region_is_recovered(uint32_t rs, uint32_t re, const CBMDefArray 
         starts[j + 1] = s;
         ends[j + 1] = e;
     }
-    uint32_t covered_to = rs - 1;
+    uint32_t cursor = rs;
     for (int i = 0; i < n; i++) {
-        if (starts[i] > covered_to + 1) {
-            return false; /* uncovered gap */
+        if (starts[i] > cursor) {
+            cbm_regions_emit_gap(out, cursor, starts[i] - 1, src, offs, nlines);
         }
-        if (ends[i] > covered_to) {
-            covered_to = ends[i];
+        if (ends[i] + 1 > cursor) {
+            cursor = ends[i] + 1;
         }
     }
-    return covered_to >= re;
+    if (cursor <= re) {
+        cbm_regions_emit_gap(out, cursor, re, src, offs, nlines);
+    }
 }
 
 /* #961: true when 1-based `line` of `src` contains `name` (used to verify a
@@ -1556,16 +1715,19 @@ static bool cbm_remap_preprocessed_def(CBMDefinition *def, const CBMPreprocessed
     return true;
 }
 
-static void cbm_subtract_recovered_regions(cbm_error_regions_t *regs, const CBMDefArray *defs) {
-    int kept = 0;
-    for (int i = 0; i < regs->count; i++) {
-        if (!cbm_region_is_recovered(regs->starts[i], regs->ends[i], defs)) {
-            regs->starts[kept] = regs->starts[i];
-            regs->ends[kept] = regs->ends[i];
-            kept++;
-        }
+static void cbm_subtract_recovered_regions(cbm_error_regions_t *regs, const CBMDefArray *defs,
+                                           const char *src, int src_len) {
+    if (regs->count <= 0) {
+        return;
     }
-    regs->count = kept;
+    uint32_t nlines = 0;
+    uint32_t *offs = cbm_line_offsets(src, src_len, &nlines);
+    cbm_error_regions_t out = {{0}, {0}, 0, regs->dropped};
+    for (int i = 0; i < regs->count; i++) {
+        cbm_region_uncovered_gaps(regs->starts[i], regs->ends[i], defs, src, offs, nlines, &out);
+    }
+    free(offs);
+    *regs = out;
 }
 
 /* #1071: a function-like macro invocation whose argument is a type token
@@ -3030,7 +3192,7 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
         /* Recovery subtraction runs on the RAW ranges: its evidence is a whole
          * definition that STARTS inside the range, so it must be asked while the
          * range still matches the construct. */
-        cbm_subtract_recovered_regions(&regs, &result->defs);
+        cbm_subtract_recovered_regions(&regs, &result->defs, source, source_len);
         /* Shared by the two macro-invocation rules below. The line count comes
          * from the pp line map when there is one (same definition), and 0 means
          * not counted yet. The offset table is built once, only when a

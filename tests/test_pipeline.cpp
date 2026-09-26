@@ -4957,6 +4957,25 @@ TEST(http_route_literal_guard_rejects_regex_replacement_operands) {
     PASS();
 }
 
+/* A comment that leads an argument list is not a route (upstream:
+ * elasticsearch RestHandler routes — three Java block comments became Route
+ * nodes). The wildcard path (slash-star alone) is a route, not a comment. */
+TEST(http_route_literal_guard_rejects_comments_keeps_wildcard) {
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal(
+        "/*\n                 * Deprecated in #64227, 7.12/8.0.\n                 */",
+        "Route.builder"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("// legacy path", "Route.builder"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/_cat\n/indices", "Route.builder"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/* all */", "Route.builder"));
+    ASSERT_TRUE(cbm_service_pattern_is_http_route_literal("/_cat/indices", "Route.builder"));
+    ASSERT_TRUE(cbm_service_pattern_is_http_route_literal("/*", "RestClient.buildUri"));
+    ASSERT_TRUE(cbm_service_pattern_is_http_route_literal("/api/*", "app.get"));
+    ASSERT_FALSE(cbm_service_pattern_is_comment_text("/*"));
+    ASSERT_FALSE(cbm_service_pattern_is_comment_text("//double/slash"));
+    ASSERT_TRUE(cbm_service_pattern_is_comment_text("// note"));
+    PASS();
+}
+
 static int count_nodes_named_in(cbm_store_t *s, const char *project, const char *name) {
     cbm_node_t *ns = NULL;
     int n = 0;

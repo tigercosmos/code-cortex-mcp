@@ -424,6 +424,51 @@ TEST(validate_shell_arg_spaces) {
     PASS();
 }
 
+/* A truncated escape must never end inside a multibyte UTF-8 sequence: the
+ * callee text of a CALLS edge is escaped into a fixed buffer, and a cut
+ * character persisted bytes SQLite could not decode as text (upstream probe:
+ * rust, java and typescript stores). "aé" is a, 0xC3, 0xA9. */
+TEST(json_escape_never_splits_utf8) {
+    char buf[3]; /* two payload bytes + NUL: the lead byte fits, its continuation not */
+    int len = cbm_json_escape(buf, sizeof(buf), "a\xC3\xA9");
+    ASSERT_STR_EQ(buf, "a");
+    ASSERT_EQ(len, 1);
+
+    char whole[4];
+    len = cbm_json_escape(whole, sizeof(whole), "a\xC3\xA9");
+    ASSERT_STR_EQ(whole, "a\xC3\xA9");
+    ASSERT_EQ(len, 3);
+
+    /* A four-byte sequence cut after two bytes is dropped whole. */
+    char emoji[3];
+    len = cbm_json_escape(emoji, sizeof(emoji), "\xF0\x9F\x98\x80z");
+    ASSERT_STR_EQ(emoji, "");
+    ASSERT_EQ(len, 0);
+
+    /* Untruncated output is never trimmed, even when it ends in a lead byte
+     * the SOURCE itself left incomplete. */
+    char raw[8];
+    len = cbm_json_escape(raw, sizeof(raw), "ab\xC3");
+    ASSERT_EQ(len, 3);
+    PASS();
+}
+
+TEST(utf8_trim_partial_drops_only_incomplete_tail) {
+    char a[] = "abc";
+    ASSERT_EQ(cbm_utf8_trim_partial(a), 3);
+    char b[] = "a\xC3\xA9";
+    ASSERT_EQ(cbm_utf8_trim_partial(b), 3);
+    char c[] = "a\xE2\x82"; /* 3-byte lead with one continuation */
+    ASSERT_EQ(cbm_utf8_trim_partial(c), 1);
+    ASSERT_STR_EQ(c, "a");
+    char d[] = "\xF0\x9F\x98\x80"; /* complete 4-byte sequence */
+    ASSERT_EQ(cbm_utf8_trim_partial(d), 4);
+    char e[] = "";
+    ASSERT_EQ(cbm_utf8_trim_partial(e), 0);
+    ASSERT_EQ(cbm_utf8_trim_partial(NULL), 0);
+    PASS();
+}
+
 /* ── SNPRINTF_APPEND tests ────────────────────────────────────── */
 
 TEST(snprintf_append_basic) {
@@ -538,4 +583,6 @@ SUITE(str_util) {
     RUN_TEST(snprintf_append_fills_exactly);
     RUN_TEST(snprintf_append_overflow);
     RUN_TEST(snprintf_append_multiple_sequential);
+    RUN_TEST(json_escape_never_splits_utf8);
+    RUN_TEST(utf8_trim_partial_drops_only_incomplete_tail);
 }
