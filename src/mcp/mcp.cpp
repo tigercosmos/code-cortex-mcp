@@ -5721,7 +5721,9 @@ static char *get_project_root(cbm_mcp_server_t *srv, const char *project) {
 
 /* Handle mode="cross-repo-intelligence" — extract to reduce complexity. */
 static char *handle_cross_repo_mode(const char *repo_path, const char *args) {
-    char *project = heap_strdup(cbm_project_name_from_path(repo_path));
+    /* cbm_project_name_from_path already returns a heap copy we own; wrapping
+     * it in heap_strdup leaked the original on every cross-repo call. */
+    char *project = cbm_project_name_from_path(repo_path);
     if (!project) {
         return cbm_mcp_text_result("cannot derive project name", true);
     }
