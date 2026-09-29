@@ -33,8 +33,12 @@ typedef struct cbm_store cbm_store_t;
  * through the full-reindex path instead of producing a mixed graph.
  * 1 = File QNs keep the file extension (#769/#964/#1077).
  * 2 = C/C++ Declaration nodes and declaration_key on callable definitions.
- * 3 = Primary class-template identities and reference parameter normalization. */
-#define CBM_INDEX_FORMAT_VERSION 3
+ * 3 = Primary class-template identities and reference parameter normalization.
+ * 4 = C-family forward declarations are not Class nodes; a multi-line
+ *     definition name is cut at its first line, or folded onto one when it
+ *     continues (open bracket, trailing `operator` or `::`); numeric JS/TS
+ *     member names are kept (2026-09-26 upstream sync). */
+#define CBM_INDEX_FORMAT_VERSION 4
 
 /* ── Data structures ────────────────────────────────────────────── */
 
