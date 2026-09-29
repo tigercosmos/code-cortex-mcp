@@ -105,6 +105,18 @@ sync with upstream **[`DeusData/codebase-memory-mcp`](https://github.com/DeusDat
 > best-effort signal and fails toward reporting less; a further review
 > would likely find more such forms (heredocs, nested block comments).
 >
+> **Post-merge CI (2026-09-28).** Fast-forwarded into `main` and pushed as
+> `8c82e468..8fe6e3c4`. The Dry Run failed on both Linux GCC test jobs
+> (ubuntu-latest, ubuntu-24.04-arm): LeakSanitizer reported 102 bytes in 3
+> objects from `handle_cross_repo_mode`, which wrapped
+> `cbm_project_name_from_path()` (already a heap copy) in `heap_strdup()`.
+> The leak predates this pass; the new
+> `tool_index_repository_cross_repo_rejects_non_string_targets` is the first
+> test to reach that handler. macOS ASan has no leak detection, so every
+> local sanitizer run was clean. Fixed in `03635d4f`. Every workflow on it is
+> green: all 22 Dry Run jobs (lint, security, tests on Linux x86/ARM,
+> macOS 14/15, Windows, builds, smoke), CodeQL, Scorecard, Pages.
+>
 > **Build note:** `-DCMAKE_BUILD_TYPE=Release` does not compile (vendored
 > `just` scanner: `#error "expected assertions to be enabled"`). Configure
 > without a build type. Compare timings only between trees with the same
