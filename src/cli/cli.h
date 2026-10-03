@@ -371,6 +371,15 @@ char *cbm_request_symbol_for_testing(const char *request, bool automatic);
 /* SessionStart brief text from stored brief inputs JSON (NULL when unusable). */
 char *cbm_session_brief_format_for_testing(const char *project, const char *json);
 char *cbm_prompt_candidates_for_testing(const char *prompt);
+/* "intent=<callers|->[,chain]" then one "name|qualifier|hint,hint" line per target. */
+char *cbm_prompt_targets_for_testing(const char *prompt);
+/* The node(s) the first prompt target resolves to among nodes_json
+ * ({"nodes":[...]} as cbm_mcp_symbol_nodes returns it), one QN per line. */
+char *cbm_prompt_resolve_for_testing(const char *nodes_json, const char *prompt);
+/* The callers rollup lines for an inspect_symbol payload, scanning `files`
+ * under `root` for whole-word mentions of `bare`. */
+char *cbm_prompt_callers_block_for_testing(const char *inspect_json, const char *bare,
+                                           const char *root, const char *const *files, int count);
 char *cbm_prompt_symbol_block_for_testing(const char *inspect_json, const char *token,
                                           char **trace_name, bool *stale, const char *root,
                                           char **label);

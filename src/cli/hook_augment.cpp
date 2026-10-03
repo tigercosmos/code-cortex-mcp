@@ -43,7 +43,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <mutex>
+#include <string_view>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -1573,7 +1577,11 @@ static bool ha_norm_abs(const char *in, char *out, size_t out_sz) {
  * chain between them. Prose words never reach the database: a prompt with no
  * code-looking token exits before the server is even created. */
 #define HA_PROMPT_MAX_CANDIDATES 6
-#define HA_PROMPT_MAX_BYTES 4000
+#define HA_PROMPT_MAX_BYTES 6000 /* Claude Code caps hook context at 10 000 chars */
+#define HA_PROMPT_MAX_CALLER_FILES 40
+#define HA_PROMPT_MAX_MENTION_FILES 20
+#define HA_SCAN_MAX_FILE_BYTES (4 * 1024 * 1024)
+#define HA_SCAN_BUDGET_MS 900 /* text scan, of the 1500 ms event deadline */
 #define HA_PROMPT_MAX_PAIRS 3
 #define HA_PROMPT_NEIGHBOURS 3
 #define HA_PROMPT_SIG_MAX 200
@@ -1598,7 +1606,7 @@ static bool ha_norm_abs(const char *in, char *out, size_t out_sz) {
 #define HA_PROMPT_LABEL_STALE                                                                \
     "[code-cortex] graph facts for symbols in your request (from the index; entries marked " \
     "stale have a file modified after indexing, re-check those):"
-#define HA_VERIFY_MAX_FILES 8
+#define HA_VERIFY_MAX_FILES 16
 #define HA_VERIFY_MAX_FILE_BYTES (2 * 1024 * 1024)
 #define HA_VERIFY_BUDGET_MS 800 /* of the 1500 ms event deadline */
 
@@ -1770,6 +1778,488 @@ static std::vector<std::string> ha_prompt_candidates(const char *prompt) {
     return out;
 }
 
+/* ── Prompt targets ────────────────────────────────────────────────
+ * Which symbols the request is about. When the prompt backticks any
+ * identifier, only backticked identifiers are candidates: prose words, paths
+ * and identifiers quoted as counter-examples ("not `X`", "e.g. `Y`", "such as
+ * `Z`", bullets under a "Do NOT count:" header) are never resolved. A
+ * qualifier is taken from the identifier itself (`Class::method`,
+ * `Class.method`, `Class#method`, `pkg.Func(...)`) or from the prose around it
+ * ("`m` of class `C`", "`m` method of the `C` interface", "defined in module
+ * `M`"). Repo-relative paths are disambiguation hints, never candidates. */
+struct ha_target {
+    std::string name;              /* as written, qualifier included ("Signer.unsign") */
+    std::string bare;              /* last segment ("unsign") */
+    std::string qualifier;         /* "" or the owning class/module/package path */
+    bool strong_qualifier = false; /* from "of class `C`"-style prose */
+    std::vector<std::string> file_hints;
+    size_t pos = 0;
+    int para = 0; /* paragraph (blank-line separated) of the mention */
+};
+
+struct ha_prompt_parse {
+    std::vector<ha_target> targets;
+    std::vector<std::string> paths;
+    bool backticked = false;
+    bool callers_intent = false;
+    bool chain_intent = false;
+};
+
+static bool ha_word_in(const std::string &w, std::initializer_list<const char *> set) {
+    for (const char *s : set) {
+        if (w == s) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Words after which, in the same clause, a quoted identifier is an example or
+ * an exclusion rather than the subject. */
+static bool ha_negation_word(const std::string &w) {
+    return ha_word_in(w, {"not",       "never",  "nor",       "eg",      "e.g",      "example",
+                          "such",      "merely", "different", "ignore",  "ignoring", "exclude",
+                          "excluding", "except", "unlike",    "instead", "similar",  "similarly",
+                          "without",   "don't",  "doesn't",   "isn't"});
+}
+
+static bool ha_kind_word(const std::string &w) {
+    return ha_word_in(w, {"class", "struct", "interface", "module", "namespace", "package", "type",
+                          "enum", "trait", "protocol", "record", "object", "mixin", "inside",
+                          "within"});
+}
+
+static bool ha_code_keyword(const std::string &w) {
+    return ha_word_in(w, {"func",   "def",       "fn",        "function", "class",     "struct",
+                          "return", "static",    "public",    "private",  "protected", "void",
+                          "int",    "self",      "this",      "cls",      "yield",     "delegate",
+                          "let",    "var",       "const",     "new",      "import",    "from",
+                          "module", "package",   "interface", "type",     "enum",      "boolean",
+                          "bool",   "string",    "true",      "false",    "null",      "nil",
+                          "none",   "generated", "export",    "async",    "await",     "extern",
+                          "inline", "virtual",   "override",  "final"});
+}
+
+static bool ha_callers_word(const std::string &w) {
+    return ha_word_in(w, {"call",    "calls",     "caller",     "callers",    "called",
+                          "calling", "used",      "usage",      "usages",     "uses",
+                          "use",     "impact",    "impacted",   "affected",   "affect",
+                          "affects", "signature", "change",     "changes",    "changing",
+                          "edit",    "modify",    "references", "referenced", "referencing"});
+}
+
+/* A repository-relative file path ("src/db.c", "db/builder.h"): a slash, no
+ * spaces, and a file extension. Directories ("deps/") are not file hints. */
+static bool ha_is_repo_path(const std::string &t) {
+    if (t.find('/') == std::string::npos || t.find(' ') != std::string::npos || t[0] == '/' ||
+        t.back() == '/') {
+        return false;
+    }
+    size_t slash = t.rfind('/');
+    size_t dot = t.rfind('.');
+    return dot != std::string::npos && dot > slash + 1 && dot + 1 < t.size();
+}
+
+/* Split "A::B.c#d" into segments. */
+static std::vector<std::string> ha_qual_segments(const std::string &q) {
+    std::vector<std::string> segs;
+    std::string cur;
+    for (size_t i = 0; i < q.size(); ++i) {
+        char c = q[i];
+        if (c == '.' || c == '#' || (c == ':' && i + 1 < q.size() && q[i + 1] == ':')) {
+            if (!cur.empty()) {
+                segs.push_back(cur);
+            }
+            cur.clear();
+            i += c == ':';
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) {
+        segs.push_back(cur);
+    }
+    return segs;
+}
+
+/* The identifier a backtick span names, or "" when it is not one: a plain or
+ * qualified identifier (`a`, `A::b`, `A.b`, `A#b`), or the callee of a call
+ * or signature written as `name(...)` / `A.b(...)`. Receivers that are not
+ * owners (`self.`, `this.`) and declarations (`int f(void)`) yield "". */
+static std::string ha_span_identifier(std::string span) {
+    size_t a = span.find_first_not_of(" \t");
+    size_t b = span.find_last_not_of(" \t");
+    if (a == std::string::npos) {
+        return {};
+    }
+    span = span.substr(a, b - a + 1);
+    size_t paren = span.find('(');
+    if (paren != std::string::npos) {
+        span.resize(paren);
+    }
+    std::string norm;
+    for (char c : span) {
+        norm += c == '#' ? '.' : c;
+    }
+    if (!ha_request_identifier(norm)) {
+        return {};
+    }
+    std::vector<std::string> segs = ha_qual_segments(norm);
+    if (segs.size() > 1 && ha_word_in(segs[0], {"self", "this", "cls", "super"})) {
+        return {};
+    }
+    if (segs.size() == 1 && ha_code_keyword(segs[0])) {
+        return {};
+    }
+    return span; /* keep the '#' spelling for display; segments split on it */
+}
+
+static void ha_prompt_add_target(ha_prompt_parse &out, const std::string &name, size_t pos) {
+    ha_target t;
+    t.name = name;
+    t.para = 0;
+    std::vector<std::string> segs = ha_qual_segments(name);
+    t.bare = segs.empty() ? name : segs.back();
+    if (segs.size() > 1) {
+        size_t cut = name.size() - t.bare.size();
+        while (cut > 0 && (name[cut - 1] == '.' || name[cut - 1] == ':' || name[cut - 1] == '#')) {
+            cut--;
+        }
+        t.qualifier = name.substr(0, cut);
+    }
+    t.pos = pos;
+    out.targets.push_back(t);
+}
+
+static ha_prompt_parse ha_prompt_parse_request(const char *prompt) {
+    ha_prompt_parse out;
+    if (!prompt) {
+        return out;
+    }
+    const std::string text = prompt;
+    struct span_t {
+        size_t pos;
+        size_t end;
+        std::string body;
+        bool negated;
+        std::string prev_word;  /* word before the span */
+        std::string prev2_word; /* the one before that */
+        std::string next_word;  /* word right after the span */
+    };
+    std::vector<span_t> spans;
+    std::vector<std::pair<size_t, std::string>> path_tokens;
+
+    bool fenced = false;
+    bool neg = false;
+    bool line_neg = false; /* this bullet sits under a "Do NOT ...:" header */
+    bool list_neg = false; /* the previous header line was a negated list intro */
+    bool line_start = true;
+    bool line_has_neg = false;
+    std::vector<bool> paren;
+    std::string w1, w2; /* last two words, lowercased */
+    for (size_t i = 0; i < text.size();) {
+        char c = text[i];
+        if (text.compare(i, 3, "```") == 0) {
+            fenced = !fenced;
+            i += 3;
+            continue;
+        }
+        if (fenced) {
+            i++;
+            continue;
+        }
+        if (line_start) {
+            size_t j = i;
+            while (j < text.size() && (text[j] == ' ' || text[j] == '\t')) {
+                j++;
+            }
+            bool bullet =
+                j + 1 < text.size() && (text[j] == '-' || text[j] == '*') && text[j + 1] == ' ';
+            bool blank = j >= text.size() || text[j] == '\n';
+            if (!bullet && !blank) {
+                list_neg = false;
+            }
+            line_neg = bullet && list_neg;
+            neg = line_neg;
+            line_has_neg = false;
+            line_start = false;
+        }
+        if (c == '\n') {
+            /* A line that ends with ':' after a negation introduces a list of
+             * exclusions ("Do NOT count:"). */
+            size_t k = i;
+            while (k > 0 && (text[k - 1] == ' ' || text[k - 1] == '\t' || text[k - 1] == '\r')) {
+                k--;
+            }
+            if (k > 0 && text[k - 1] == ':' && line_has_neg) {
+                list_neg = true;
+            }
+            paren.clear();
+            line_start = true;
+            w1.clear();
+            w2.clear();
+            i++;
+            continue;
+        }
+        if (c == '(') {
+            paren.push_back(neg);
+            i++;
+            continue;
+        }
+        if (c == ')') {
+            if (!paren.empty()) {
+                neg = paren.back();
+                paren.pop_back();
+            }
+            i++;
+            continue;
+        }
+        if ((c == '.' || c == '?' || c == '!' || c == ';') && i + 1 < text.size() &&
+            isspace((unsigned char)text[i + 1]) && w1 != "e.g" && w1 != "i.e" && w1 != "eg" &&
+            w1 != "ie" && w1 != "etc" && w1 != "vs") {
+            neg = paren.empty() ? line_neg : neg;
+            if (paren.empty()) {
+                w1.clear();
+                w2.clear();
+            }
+            i++;
+            continue;
+        }
+        if (c == '`') {
+            size_t ticks = 0;
+            while (i + ticks < text.size() && text[i + ticks] == '`') {
+                ticks++;
+            }
+            size_t close = text.find(std::string(ticks, '`'), i + ticks);
+            if (close == std::string::npos) {
+                i += ticks;
+                continue;
+            }
+            span_t s;
+            s.pos = i;
+            s.end = close + ticks;
+            s.body = text.substr(i + ticks, close - i - ticks);
+            s.negated = neg;
+            s.prev_word = w1;
+            s.prev2_word = w2;
+            size_t k = s.end;
+            while (k < text.size() && (text[k] == ' ' || text[k] == '\t')) {
+                k++;
+            }
+            while (k < text.size() && isalpha((unsigned char)text[k])) {
+                s.next_word += (char)tolower((unsigned char)text[k++]);
+            }
+            spans.push_back(s);
+            w2 = w1;
+            w1 = "`";
+            i = s.end;
+            continue;
+        }
+        if (isalpha((unsigned char)c)) {
+            size_t j = i;
+            std::string w;
+            while (j < text.size() &&
+                   (isalnum((unsigned char)text[j]) || text[j] == '\'' ||
+                    (text[j] == '.' && j + 1 < text.size() && isalpha((unsigned char)text[j + 1]) &&
+                     j + 2 < text.size() && text[j + 2] == '.'))) {
+                w += (char)tolower((unsigned char)text[j++]);
+            }
+            /* Unquoted repository paths ride along as hints. */
+            size_t pe = j;
+            while (pe < text.size() &&
+                   (isalnum((unsigned char)text[pe]) || strchr("_./-+@", text[pe]) != nullptr)) {
+                pe++;
+            }
+            std::string tok = text.substr(i, pe - i);
+            while (!tok.empty() && strchr(".,;:", tok.back())) {
+                tok.pop_back();
+            }
+            if (ha_is_repo_path(tok)) {
+                path_tokens.emplace_back(i, tok);
+                i += tok.size();
+                continue;
+            }
+            if (ha_negation_word(w)) {
+                neg = true;
+                line_has_neg = true;
+            }
+            if (!neg && ha_callers_word(w)) {
+                out.callers_intent = true;
+            }
+            if (!neg && (w == "chain" || w == "chains")) {
+                out.chain_intent = true;
+            }
+            w2 = w1;
+            w1 = w;
+            i = j;
+            continue;
+        }
+        i++;
+    }
+
+    /* Classify spans. */
+    std::vector<size_t> target_span; /* index into spans per target */
+    for (size_t si = 0; si < spans.size(); ++si) {
+        const span_t &s = spans[si];
+        std::string body = s.body;
+        size_t a = body.find_first_not_of(" \t");
+        size_t b = body.find_last_not_of(" \t");
+        body = a == std::string::npos ? std::string() : body.substr(a, b - a + 1);
+        if (ha_is_repo_path(body)) {
+            path_tokens.emplace_back(s.pos, body);
+            continue;
+        }
+        std::string ident = ha_span_identifier(body);
+        if (ident.empty()) {
+            continue;
+        }
+        /* "class `C`", "inside `f`", "the `C` interface": an owner, not a target. */
+        bool owner = ha_kind_word(s.prev_word) ||
+                     (ha_kind_word(s.next_word) && s.next_word != "inside" &&
+                      s.next_word != "within" && (s.prev_word == "the" || s.prev_word == "of"));
+        if (owner) {
+            /* Bind to the most recent target in the same clause when the prose
+             * says so ("`m` of class `C`", "`m` method of the `C` interface",
+             * "`m` ... defined in module `C`"). */
+            if (!out.targets.empty() && !s.negated) {
+                ha_target &t = out.targets.back();
+                size_t gap_start = spans[target_span.back()].end;
+                std::string gap = text.substr(gap_start, s.pos - gap_start);
+                bool linked = gap.size() < 80 && gap.find('\n') == std::string::npos &&
+                              (gap.find(" of ") != std::string::npos ||
+                               gap.find(" in ") != std::string::npos);
+                if (linked && !t.strong_qualifier &&
+                    !ha_word_in(s.prev_word, {"inside", "within"})) {
+                    t.qualifier = ha_span_identifier(body);
+                    t.strong_qualifier = true;
+                }
+            }
+            continue;
+        }
+        if (s.negated) {
+            continue;
+        }
+        out.backticked = true;
+        ha_prompt_add_target(out, ident, s.pos);
+        target_span.push_back(si);
+    }
+
+    /* File hints: paths after a target and before the next one. */
+    std::sort(path_tokens.begin(), path_tokens.end());
+    for (const auto &pt : path_tokens) {
+        if (std::find(out.paths.begin(), out.paths.end(), pt.second) == out.paths.end()) {
+            out.paths.push_back(pt.second);
+        }
+    }
+    for (size_t ti = 0; ti < out.targets.size(); ++ti) {
+        size_t from = out.targets[ti].pos;
+        size_t to = ti + 1 < out.targets.size() ? out.targets[ti + 1].pos : from + 240;
+        for (const auto &pt : path_tokens) {
+            if (pt.first > from && pt.first < to && pt.first < from + 240) {
+                out.targets[ti].file_hints.push_back(pt.second);
+            }
+        }
+    }
+
+    /* Paragraphs: the subject of a request is named in the first paragraph
+     * that names anything; later paragraphs (rules, output format) only add
+     * qualifiers and hints to it ("`Run`" -> "`Repairer::Run`") and never
+     * new targets ("`snapshotRestoreCommandFunc` and `SnapshotRestoreCommandFunc`
+     * are different"). */
+    for (auto &t : out.targets) {
+        int para = 0;
+        for (size_t k = 0; k + 1 < t.pos && k + 1 < text.size(); ++k) {
+            if (text[k] == '\n') {
+                size_t m = k + 1;
+                while (m < text.size() && (text[m] == ' ' || text[m] == '\t' || text[m] == '\r')) {
+                    m++;
+                }
+                if (m < text.size() && text[m] == '\n' && m < t.pos) {
+                    para++;
+                    k = m - 1;
+                }
+            }
+        }
+        t.para = para;
+    }
+    const int subject_para = out.targets.empty() ? 0 : out.targets.front().para;
+
+    /* Merge: an identifier that is the owner of another target is not a
+     * target; repeated names keep the first mention, gaining the best
+     * qualifier and every file hint. */
+    std::vector<ha_target> merged;
+    for (const auto &t : out.targets) {
+        bool is_owner = false;
+        for (const auto &o : out.targets) {
+            std::vector<std::string> os = ha_qual_segments(o.name);
+            std::vector<std::string> ts = ha_qual_segments(t.name);
+            if (&o != &t && os.size() > ts.size() && std::equal(ts.begin(), ts.end(), os.begin())) {
+                is_owner = true;
+            }
+            if (&o != &t && !o.qualifier.empty()) {
+                /* "`m` of class `C`" then "`C`" again, or the enclosing
+                 * module of a qualifier ("`A::B`" for owner "`A::B::C`"). */
+                std::vector<std::string> qs = ha_qual_segments(o.qualifier);
+                if ((ts.size() == 1 && qs.back() == ts.back()) ||
+                    (ts.size() <= qs.size() && std::equal(ts.begin(), ts.end(), qs.begin()))) {
+                    is_owner = true;
+                }
+            }
+        }
+        if (is_owner) {
+            continue;
+        }
+        auto it = std::find_if(merged.begin(), merged.end(),
+                               [&](const ha_target &m) { return m.bare == t.bare; });
+        if (it == merged.end()) {
+            if (t.para == subject_para) {
+                merged.push_back(t);
+            }
+            continue;
+        }
+        bool better = !t.qualifier.empty() &&
+                      (it->qualifier.empty() || (t.strong_qualifier && !it->strong_qualifier));
+        if (better) {
+            it->qualifier = t.qualifier;
+            it->strong_qualifier = t.strong_qualifier;
+            if (it->name == it->bare) {
+                it->name = t.name;
+            }
+        }
+        for (const auto &h : t.file_hints) {
+            if (std::find(it->file_hints.begin(), it->file_hints.end(), h) ==
+                it->file_hints.end()) {
+                it->file_hints.push_back(h);
+            }
+        }
+    }
+    for (auto &t : merged) {
+        if (t.strong_qualifier && t.name == t.bare && !t.qualifier.empty()) {
+            t.name = t.qualifier + "." + t.bare;
+        }
+    }
+    if (merged.size() > HA_PROMPT_MAX_CANDIDATES) {
+        merged.resize(HA_PROMPT_MAX_CANDIDATES);
+    }
+    out.targets = merged;
+
+    /* No backticked identifier: fall back to code-looking prose tokens. */
+    if (!out.backticked) {
+        for (const auto &c : ha_prompt_candidates(prompt)) {
+            ha_prompt_add_target(out, c, 0);
+        }
+    }
+    for (auto &t : out.targets) {
+        if (t.bare.size() < 2) {
+            t.bare.clear();
+        }
+    }
+    out.targets.erase(std::remove_if(out.targets.begin(), out.targets.end(),
+                                     [](const ha_target &t) { return t.bare.empty(); }),
+                      out.targets.end());
+    return out;
+}
+
 /* Up to HA_PROMPT_NEIGHBOURS names from an inspect_symbol neighbour list. */
 static void ha_prompt_names(std::string &line, yyjson_val *arr, int total) {
     size_t idx;
@@ -1865,23 +2355,6 @@ static const ha_file_lines *ha_verify_load(ha_verifier *v, const std::string &re
     return &v->files.back();
 }
 
-static std::string ha_norm_ws(const std::string &in) {
-    std::string out;
-    bool space = false;
-    for (char c : in) {
-        if (isspace((unsigned char)c)) {
-            space = !out.empty();
-        } else {
-            if (space) {
-                out += ' ';
-                space = false;
-            }
-            out += c;
-        }
-    }
-    return out;
-}
-
 static bool ha_line_has_ident(const std::string &line, const std::string &name) {
     if (name.empty()) {
         return false;
@@ -1904,9 +2377,13 @@ static std::string ha_short_name(const std::string &name) {
     return cut == std::string::npos ? name : name.substr(cut + 1);
 }
 
-/* Check one location; *line_out gets the line read (when one was). When
- * `expected` is given, the line must also equal it after whitespace
- * normalization. Updates the verifier's tallies. */
+/* Check one location: the symbol's name must be on the indexed line or one
+ * of the next two (a signature can start with an export keyword, a return
+ * type or an annotation on the line the index records, and continue below).
+ * *line_out gets the indexed line. `expected` is unused: inspect_symbol reads
+ * its first source line from the file at query time, so comparing the two
+ * could only ever fail on whitespace or clipping — the false "stale" marks
+ * this replaced. Updates the verifier's tallies. */
 static int ha_verify_loc(ha_verifier *v, const char *rel, int line, const std::string &name,
                          const std::string *expected = nullptr, std::string *line_out = nullptr) {
     int state = HA_LOC_UNCHECKED;
@@ -1916,14 +2393,19 @@ static int ha_verify_loc(ha_verifier *v, const char *rel, int line, const std::s
             if ((size_t)line > fl->lines.size()) {
                 state = fl->truncated ? HA_LOC_UNCHECKED : HA_LOC_MISMATCH;
             } else {
+                (void)expected;
                 const std::string &text = fl->lines[(size_t)line - 1];
                 if (line_out) {
                     *line_out = text;
                 }
-                bool same =
-                    !expected || expected->empty() || ha_norm_ws(text) == ha_norm_ws(*expected);
-                state = ha_line_has_ident(text, ha_short_name(name)) && same ? HA_LOC_VERIFIED
-                                                                             : HA_LOC_MISMATCH;
+                state = HA_LOC_MISMATCH;
+                for (size_t k = (size_t)line - 1; k < fl->lines.size() && k < (size_t)line + 2;
+                     ++k) {
+                    if (ha_line_has_ident(fl->lines[k], ha_short_name(name))) {
+                        state = HA_LOC_VERIFIED;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1967,6 +2449,244 @@ static std::string ha_prompt_label(const ha_verifier &v) {
         label += " Locations marked (verified now) were also re-read from the file just now.";
     }
     return label;
+}
+
+/* ── Resolution ──────────────────────────────────────────────────────
+ * The hook picks the node itself instead of letting a bare-name lookup guess:
+ * qualifier first (the owner must appear among the node's qualified-name
+ * segments), then a file the prompt mentions, then definition over
+ * declaration. Anything still ambiguous is listed, never traced. */
+struct ha_node {
+    std::string qn, name, label, file;
+    int start_line = 0;
+    int end_line = 0;
+};
+
+static bool ha_label_is_symbol(const std::string &l) {
+    return ha_word_in(l, {"Function", "Method", "Class", "Interface", "Struct", "Enum", "Type",
+                          "Trait", "Declaration", "Macro", "Constructor", "Protocol", "Union",
+                          "TypeAlias", "Object", "Module", "Record"}) &&
+           l != "Module";
+}
+
+static bool ha_label_is_callable(const std::string &l) {
+    return l == "Function" || l == "Method" || l == "Constructor" || l == "Macro";
+}
+
+/* Qualified-name segments, split on '.' and '::'. */
+static std::vector<std::string> ha_qn_segments(const std::string &qn) {
+    return ha_qual_segments(qn);
+}
+
+/* How many trailing qualifier segments sit, in order, right before the
+ * node's own name in its qualified name (0: the qualifier is not there). */
+static int ha_qualifier_score(const ha_node &n, const std::string &qualifier) {
+    std::vector<std::string> q = ha_qual_segments(qualifier);
+    std::vector<std::string> s = ha_qn_segments(n.qn);
+    if (q.empty() || s.size() < 2) {
+        return 0;
+    }
+    s.pop_back(); /* the name itself */
+    int best = 0;
+    /* Immediate owner match counts most; a segment anywhere (Go package
+     * directories) counts once. */
+    for (size_t k = 1; k <= q.size() && k <= s.size(); ++k) {
+        if (std::equal(q.end() - (long)k, q.end(), s.end() - (long)k)) {
+            best = (int)k + 1;
+        }
+    }
+    if (best == 0 && std::find(s.begin(), s.end(), q.back()) != s.end()) {
+        best = 1;
+    }
+    return best;
+}
+
+static bool ha_path_matches(const std::string &file, const std::string &hint) {
+    if (file == hint) {
+        return true;
+    }
+    return file.size() > hint.size() &&
+           file.compare(file.size() - hint.size(), hint.size(), hint) == 0 &&
+           file[file.size() - hint.size() - 1] == '/';
+}
+
+/* Narrow the same-named nodes to the one the request means. Returns the
+ * remaining set (one node: resolved). */
+static std::vector<ha_node> ha_disambiguate(std::vector<ha_node> nodes, const ha_target &t,
+                                            const std::vector<std::string> &prompt_paths) {
+    auto keep_if = [&nodes](auto pred) {
+        std::vector<ha_node> kept;
+        for (const auto &n : nodes) {
+            if (pred(n)) {
+                kept.push_back(n);
+            }
+        }
+        if (!kept.empty()) {
+            nodes = kept;
+        }
+    };
+    keep_if([](const ha_node &n) { return ha_label_is_symbol(n.label); });
+    /* One location reported twice (a Ruby method also emitted as a Function
+     * by older indexes): keep the owned Method. */
+    std::vector<ha_node> uniq;
+    for (const auto &n : nodes) {
+        auto dup = std::find_if(uniq.begin(), uniq.end(), [&](const ha_node &u) {
+            return u.file == n.file && u.start_line == n.start_line;
+        });
+        if (dup == uniq.end()) {
+            uniq.push_back(n);
+        } else if (n.label == "Method" && dup->label != "Method") {
+            *dup = n;
+        }
+    }
+    nodes = uniq;
+    if (!t.qualifier.empty() && nodes.size() > 1) {
+        int best = 0;
+        for (const auto &n : nodes) {
+            best = std::max(best, ha_qualifier_score(n, t.qualifier));
+        }
+        if (best > 0) {
+            keep_if([&](const ha_node &n) { return ha_qualifier_score(n, t.qualifier) == best; });
+        }
+    }
+    if (nodes.size() > 1 && !t.file_hints.empty()) {
+        keep_if([&](const ha_node &n) {
+            for (const auto &h : t.file_hints) {
+                if (ha_path_matches(n.file, h)) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
+    if (nodes.size() > 1 && !prompt_paths.empty()) {
+        keep_if([&](const ha_node &n) {
+            for (const auto &h : prompt_paths) {
+                if (ha_path_matches(n.file, h)) {
+                    return true;
+                }
+            }
+            return false;
+        });
+    }
+    if (nodes.size() > 1) {
+        keep_if([](const ha_node &n) { return n.label != "Declaration"; });
+    }
+    if (nodes.size() > 1) {
+        keep_if([](const ha_node &n) { return ha_label_is_callable(n.label); });
+    }
+    return nodes;
+}
+
+/* "Signer.unsign" for "proj.django.core.signing.Signer.unsign": the qualified
+ * name without the project and the file's module path. */
+static std::string ha_display_name(const std::string &qn, const std::string &file,
+                                   const std::string &project) {
+    std::string rest = qn;
+    if (!project.empty() && rest.compare(0, project.size() + 1, project + ".") == 0) {
+        rest = rest.substr(project.size() + 1);
+    }
+    std::string module = file;
+    size_t dot = module.rfind('.');
+    size_t slash = module.rfind('/');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+        module.resize(dot);
+    }
+    for (char &c : module) {
+        if (c == '/') {
+            c = '.';
+        }
+    }
+    if (!module.empty() && rest.compare(0, module.size() + 1, module + ".") == 0) {
+        rest = rest.substr(module.size() + 1);
+    }
+    return rest.empty() ? qn : rest;
+}
+
+static std::vector<ha_node> ha_parse_nodes(yyjson_doc *d, std::string *root) {
+    std::vector<ha_node> out;
+    yyjson_val *r = d ? yyjson_doc_get_root(d) : nullptr;
+    if (root && ha_obj_str(r, "root")) {
+        *root = ha_obj_str(r, "root");
+    }
+    size_t idx;
+    size_t maxn;
+    yyjson_val *v;
+    yyjson_arr_foreach(yyjson_obj_get(r, "nodes"), idx, maxn, v) {
+        ha_node n;
+        n.qn = ha_obj_str(v, "qualified_name") ? ha_obj_str(v, "qualified_name") : "";
+        n.name = ha_obj_str(v, "name") ? ha_obj_str(v, "name") : "";
+        n.label = ha_obj_str(v, "label") ? ha_obj_str(v, "label") : "";
+        n.file = ha_obj_str(v, "file") ? ha_obj_str(v, "file") : "";
+        n.start_line = ha_obj_int(v, "start_line");
+        n.end_line = ha_obj_int(v, "end_line");
+        if (!n.qn.empty()) {
+            out.push_back(n);
+        }
+    }
+    return out;
+}
+
+/* ── Whole-word text scan ────────────────────────────────────────────
+ * Which indexed files mention `name` as a whole word: what a grep would show
+ * next to the graph's resolved callers. Parallel, bounded by a deadline;
+ * *complete is false when the deadline stopped it. */
+static std::vector<std::string> ha_scan_mentions(const std::string &root,
+                                                 const std::vector<std::string> &files,
+                                                 const std::string &name,
+                                                 std::chrono::steady_clock::time_point deadline,
+                                                 bool *complete) {
+    std::atomic<size_t> next{0};
+    std::atomic<bool> timed_out{false};
+    std::mutex mu;
+    std::vector<std::string> hits;
+    auto worker = [&]() {
+        std::string buf;
+        std::vector<std::string> local;
+        for (;;) {
+            size_t i = next.fetch_add(1);
+            if (i >= files.size()) {
+                break;
+            }
+            if ((i & 15) == 0 && std::chrono::steady_clock::now() >= deadline) {
+                timed_out = true;
+                break;
+            }
+            FILE *fp = fopen((root + "/" + files[i]).c_str(), "rb");
+            if (!fp) {
+                continue;
+            }
+            buf.resize(HA_SCAN_MAX_FILE_BYTES);
+            size_t n = fread(&buf[0], 1, buf.size(), fp);
+            fclose(fp);
+            std::string_view hay(buf.data(), n);
+            for (size_t pos = hay.find(name); pos != std::string_view::npos;
+                 pos = hay.find(name, pos + 1)) {
+                bool left = pos == 0 || !ha_ident_char((unsigned char)hay[pos - 1]);
+                size_t end = pos + name.size();
+                bool right = end >= hay.size() || !ha_ident_char((unsigned char)hay[end]);
+                if (left && right) {
+                    local.push_back(files[i]);
+                    break;
+                }
+            }
+        }
+        std::lock_guard<std::mutex> lock(mu);
+        hits.insert(hits.end(), local.begin(), local.end());
+    };
+    unsigned hw = std::thread::hardware_concurrency();
+    unsigned nthreads = hw == 0 ? 4 : std::min(hw, 16u);
+    std::vector<std::thread> pool;
+    for (unsigned k = 1; k < nthreads; ++k) {
+        pool.emplace_back(worker);
+    }
+    worker();
+    for (auto &th : pool) {
+        th.join();
+    }
+    *complete = !timed_out;
+    std::sort(hits.begin(), hits.end());
+    return hits;
 }
 
 /* One compact block for an inspect_symbol result; empty when it says nothing
@@ -2140,7 +2860,8 @@ static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &toke
 
 /* "a -> b -> c" with each hop's file:line, from a trace_path result. */
 static std::string ha_prompt_chain_line(yyjson_doc *d, const std::string &from,
-                                        const std::string &to, ha_verifier *v = nullptr) {
+                                        const std::string &to, ha_verifier *v = nullptr,
+                                        const std::string &project = std::string()) {
     yyjson_val *r = d ? yyjson_doc_get_root(d) : nullptr;
     if (!r || !yyjson_is_true(yyjson_obj_get(r, "path_found"))) {
         return {};
@@ -2160,7 +2881,11 @@ static std::string ha_prompt_chain_line(yyjson_doc *d, const std::string &from,
     yyjson_arr_foreach(path, idx, maxn, hop) {
         const char *name = ha_obj_str(hop, "name");
         const char *file = ha_obj_str(hop, "file");
-        snprintf(buf, sizeof(buf), "%s%.96s (%.300s:%d)", idx ? " -> " : "", name ? name : "?",
+        const char *hqn = ha_obj_str(hop, "qualified_name");
+        std::string shown = hqn && *hqn && !project.empty()
+                                ? ha_display_name(hqn, file ? file : "", project)
+                                : std::string(name ? name : "?");
+        snprintf(buf, sizeof(buf), "%s%.160s (%.300s:%d)", idx ? " -> " : "", shown.c_str(),
                  file ? file : "?", ha_obj_int(hop, "start_line"));
         line += buf;
         int state = ha_verify_loc(v, file, ha_obj_int(hop, "start_line"), name ? name : "");
@@ -2220,7 +2945,7 @@ static char *ha_prompt_payload(const std::vector<std::string> &blocks, size_t ma
 }
 
 static yyjson_doc *ha_prompt_inspect(cbm_mcp_server_t *srv, const char *project,
-                                     const std::string &token, bool *is_error) {
+                                     const std::string &token, bool callers_mode, bool *is_error) {
     yyjson_mut_doc *ad = yyjson_mut_doc_new(nullptr);
     yyjson_mut_val *args = yyjson_mut_obj(ad);
     yyjson_mut_doc_set_root(ad, args);
@@ -2229,7 +2954,9 @@ static yyjson_doc *ha_prompt_inspect(cbm_mcp_server_t *srv, const char *project,
     yyjson_mut_obj_add_int(ad, args, "source_lines", 1);
     yyjson_mut_obj_add_int(ad, args, "callers_limit", HA_PROMPT_NEIGHBOURS);
     yyjson_mut_obj_add_int(ad, args, "callees_limit", HA_PROMPT_NEIGHBOURS);
-    yyjson_mut_obj_add_int(ad, args, "max_bytes", 8000);
+    /* A callers request needs the complete caller-file rollup, so the reply
+     * must not be shrunk to fit a small budget. */
+    yyjson_mut_obj_add_int(ad, args, "max_bytes", callers_mode ? 400000 : 8000);
     char *encoded = yyjson_mut_write(ad, 0, nullptr);
     yyjson_mut_doc_free(ad);
     *is_error = false;
@@ -2261,7 +2988,7 @@ static std::string ha_prompt_trace(cbm_mcp_server_t *srv, const char *project,
      * prints nothing, so it verifies nothing. */
     ha_verifier scratch = *v;
     std::string line =
-        error ? std::string() : ha_prompt_chain_line(d, from_label, to_label, &scratch);
+        error ? std::string() : ha_prompt_chain_line(d, from_label, to_label, &scratch, project);
     if (!line.empty()) {
         *v = std::move(scratch);
     }
@@ -2269,29 +2996,155 @@ static std::string ha_prompt_trace(cbm_mcp_server_t *srv, const char *project,
     return line;
 }
 
-/* Resolve the candidates against the first indexed project at or above cwd.
+/* Files a caller rollup lists, re-read: does each still contain `name` as a
+ * whole word? Reads at most the first HA_SCAN_MAX_FILE_BYTES of each. */
+static bool ha_file_mentions(const std::string &root, const std::string &rel,
+                             const std::string &name) {
+    FILE *fp = fopen((root + "/" + rel).c_str(), "rb");
+    if (!fp) {
+        return false;
+    }
+    std::string buf;
+    buf.resize(HA_SCAN_MAX_FILE_BYTES);
+    size_t n = fread(&buf[0], 1, buf.size(), fp);
+    fclose(fp);
+    buf.resize(n);
+    return ha_line_has_ident(buf, name);
+}
+
+/* For a callers/usages/impact request: the complete caller-file rollup from
+ * the graph (each file re-checked on disk), the declaring headers, and the
+ * files a whole-word grep would add that the graph does not resolve as calls.
+ * Enough to answer "which files call X" without a grep, and to show where the
+ * graph and the text disagree. */
+static std::string ha_prompt_callers_block(yyjson_doc *d, const std::string &bare,
+                                           const std::string &root,
+                                           const std::vector<std::string> &mentions,
+                                           bool scan_complete, bool scanned) {
+    yyjson_val *r = d ? yyjson_doc_get_root(d) : nullptr;
+    if (!r) {
+        return {};
+    }
+    std::string out;
+    std::vector<std::string> listed;
+    yyjson_val *sym = yyjson_obj_get(r, "symbol");
+    if (const char *f = ha_obj_str(sym, "file")) {
+        listed.push_back(f);
+    }
+    /* Declarations. */
+    std::string decls;
+    size_t idx;
+    size_t maxn;
+    yyjson_val *v;
+    yyjson_arr_foreach(yyjson_obj_get(r, "declared_in"), idx, maxn, v) {
+        const char *f = ha_obj_str(v, "file");
+        if (!f || std::find(listed.begin(), listed.end(), f) != listed.end()) {
+            continue;
+        }
+        listed.push_back(f);
+        decls += (decls.empty() ? "" : ", ") + std::string(f) + ":" +
+                 std::to_string(ha_obj_int(v, "line"));
+    }
+    if (!decls.empty()) {
+        out += "\n  declared in: " + decls;
+    }
+    /* Caller files: the whole rollup, production and test. */
+    yyjson_val *files = yyjson_obj_get(r, "caller_files");
+    int total = ha_obj_int(r, "caller_files_total");
+    std::string list;
+    std::string missing;
+    int considered = 0;
+    int tests = 0;
+    yyjson_arr_foreach(files, idx, maxn, v) {
+        const char *f = ha_obj_str(v, "file");
+        if (!f) {
+            continue;
+        }
+        bool test = yyjson_is_true(yyjson_obj_get(v, "test"));
+        tests += test;
+        listed.push_back(f);
+        if (considered >= HA_PROMPT_MAX_CALLER_FILES) {
+            continue;
+        }
+        considered++;
+        bool on_disk = scanned && scan_complete
+                           ? std::binary_search(mentions.begin(), mentions.end(), std::string(f))
+                           : ha_file_mentions(root, f, bare);
+        if (!on_disk) {
+            missing += (missing.empty() ? "" : ", ") + std::string(f);
+            continue;
+        }
+        list += (list.empty() ? "" : ", ") + std::string(f) + (test ? " (test)" : "");
+    }
+    if (total < considered) {
+        total = considered;
+    }
+    if (total == 0) {
+        out += "\n  caller files: none resolved in the graph";
+    } else {
+        out += "\n  caller files (" + std::to_string(total) + ", " +
+               (considered >= total
+                    ? std::string("complete as indexed")
+                    : "showing " + std::to_string(considered) + " of " + std::to_string(total)) +
+               (tests ? "; " + std::to_string(tests) + " tests" : std::string()) +
+               "; each re-read and contains `" + bare + "`): " + list;
+    }
+    if (!missing.empty()) {
+        out += "\n  graph lists as callers but `" + bare +
+               "` is no longer in the file (stale, re-check): " + missing;
+    }
+    /* What a grep would add. */
+    if (scanned) {
+        std::vector<std::string> extra;
+        for (const auto &m : mentions) {
+            if (std::find(listed.begin(), listed.end(), m) == listed.end()) {
+                extra.push_back(m);
+            }
+        }
+        if (extra.empty()) {
+            out += "\n  also mention the name (not resolved as calls): none" +
+                   std::string(scan_complete ? "" : " found before the time budget");
+        } else {
+            out += "\n  also mention the name (not resolved as calls) (" +
+                   std::to_string(extra.size()) + "): ";
+            size_t k = 0;
+            for (; k < extra.size() && k < HA_PROMPT_MAX_MENTION_FILES; ++k) {
+                out += (k ? ", " : "") + extra[k];
+            }
+            if (k < extra.size()) {
+                out += ", +" + std::to_string(extra.size() - k) + " more";
+            }
+        }
+        if (!scan_complete) {
+            out += "\n  (the text scan stopped at its time budget; the list above may be "
+                   "incomplete)";
+        }
+    }
+    return out;
+}
+
+/* Resolve the targets against the first indexed project at or above cwd.
  * *indexed reports whether such a project exists (so the caller can choose
  * the unindexed fallback). Returns the hook JSON or NULL. */
-static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
-                               const std::vector<std::string> &cands, bool *indexed) {
+static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd, const ha_prompt_parse &req,
+                               bool *indexed) {
     *indexed = false;
+    const auto start = std::chrono::steady_clock::now();
     char dir[4096];
     snprintf(dir, sizeof(dir), "%s", cwd);
     char *project = nullptr;
-    yyjson_doc *first = nullptr;
-    bool first_error = false;
+    char *first = nullptr;
     for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
         char *name = cbm_project_name_from_path(dir);
         if (name) {
-            bool error = false;
-            yyjson_doc *d = ha_prompt_inspect(srv, name, cands[0], &error);
-            if (d && (!error || !ha_error_is_project_miss(d))) {
+            bool resolved = false;
+            char *json = cbm_mcp_symbol_nodes(srv, name, req.targets[0].bare.c_str(), &resolved);
+            if (resolved) {
                 project = name;
-                first = d;
-                first_error = error;
+                first = json;
                 break;
             }
-            yyjson_doc_free(d);
+            free(json);
             free(name);
         }
         if (!ha_strip_last_component(dir)) {
@@ -2302,49 +3155,108 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
         return nullptr;
     }
     *indexed = true;
+    const std::string proj = project;
+    free(project);
 
-    /* The project root is the directory the project name was derived from. */
+    std::string root;
     ha_verifier v;
-    v.root = dir;
-    v.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(HA_VERIFY_BUDGET_MS);
+    v.deadline = start + std::chrono::milliseconds(HA_VERIFY_BUDGET_MS);
+    const bool callers_mode = req.callers_intent && !req.chain_intent;
     std::vector<std::string> symbols;
-    std::vector<std::pair<std::string, std::string>> functions; /* trace name, label */
-    for (size_t i = 0; i < cands.size(); ++i) {
-        bool error = first_error;
-        yyjson_doc *d = first;
-        if (i > 0) {
-            d = ha_prompt_inspect(srv, project, cands[i], &error);
+    struct fn_t {
+        std::string qn, display;
+    };
+    std::vector<fn_t> functions;
+    std::vector<std::string> files;
+    bool files_loaded = false;
+    for (size_t i = 0; i < req.targets.size(); ++i) {
+        const ha_target &t = req.targets[i];
+        char *json =
+            i == 0 ? first : cbm_mcp_symbol_nodes(srv, proj.c_str(), t.bare.c_str(), nullptr);
+        yyjson_doc *nd = json ? yyjson_read(json, strlen(json), 0) : nullptr;
+        free(json);
+        std::vector<ha_node> nodes = ha_parse_nodes(nd, root.empty() ? &root : nullptr);
+        yyjson_doc_free(nd);
+        if (v.root.empty()) {
+            v.root = root.empty() ? std::string(dir) : root;
         }
+        nodes = ha_disambiguate(nodes, t, req.paths);
+        if (nodes.empty()) {
+            continue;
+        }
+        if (nodes.size() > 1) {
+            /* Still ambiguous: list where they are, guess nothing. */
+            std::string block = "- " + t.name + ": " + std::to_string(nodes.size()) +
+                                " matches, none chosen (name the class or file to pick one):";
+            for (size_t k = 0; k < nodes.size() && k < 4; ++k) {
+                int st = ha_verify_loc(&v, nodes[k].file.c_str(), nodes[k].start_line, t.bare);
+                block += (k ? "; " : " ") + ha_display_name(nodes[k].qn, nodes[k].file, proj) +
+                         " (" + nodes[k].label + ", " + nodes[k].file + ":" +
+                         std::to_string(nodes[k].start_line) + ")" + ha_loc_suffix(st);
+            }
+            if (nodes.size() > 4) {
+                block += "; +" + std::to_string(nodes.size() - 4) + " more";
+            }
+            symbols.push_back(block);
+            continue;
+        }
+        const ha_node &n = nodes.front();
+        std::string display = ha_display_name(n.qn, n.file, proj);
+        bool error = false;
+        yyjson_doc *d = ha_prompt_inspect(srv, proj.c_str(), n.qn, callers_mode, &error);
         std::string trace_name;
         std::string block =
-            error ? std::string() : ha_prompt_symbol_block(d, cands[i], &trace_name, nullptr, &v);
+            error ? std::string() : ha_prompt_symbol_block(d, display, &trace_name, nullptr, &v);
+        if (!block.empty() && callers_mode) {
+            bool complete = false;
+            std::vector<std::string> mentions;
+            if (!files_loaded) {
+                char *froot = nullptr;
+                char **flist = nullptr;
+                int fc = cbm_mcp_project_files(srv, proj.c_str(), &froot, &flist);
+                for (int k = 0; k < fc; ++k) {
+                    files.emplace_back(flist[k]);
+                }
+                if (froot && *froot && v.root.empty()) {
+                    v.root = froot;
+                }
+                cbm_mcp_free_project_files(froot, flist, fc < 0 ? 0 : fc);
+                files_loaded = true;
+            }
+            bool scanned = !files.empty();
+            if (scanned) {
+                mentions = ha_scan_mentions(v.root, files, t.bare,
+                                            start + std::chrono::milliseconds(HA_SCAN_BUDGET_MS),
+                                            &complete);
+            }
+            block += ha_prompt_callers_block(d, t.bare, v.root, mentions, complete, scanned);
+        }
         yyjson_doc_free(d);
         if (!block.empty()) {
             symbols.push_back(block);
         }
         if (!trace_name.empty()) {
-            functions.emplace_back(trace_name, cands[i]);
+            functions.push_back({trace_name, display});
         }
     }
 
     std::vector<std::string> blocks;
     int pairs = 0;
-    for (size_t i = 0; i < functions.size() && pairs < HA_PROMPT_MAX_PAIRS; ++i) {
+    for (size_t i = 0; i < functions.size() && pairs < HA_PROMPT_MAX_PAIRS && !callers_mode; ++i) {
         for (size_t j = i + 1; j < functions.size() && pairs < HA_PROMPT_MAX_PAIRS; ++j) {
             pairs++;
             const auto &a = functions[i];
             const auto &b = functions[j];
             std::string line =
-                ha_prompt_trace(srv, project, a.first, b.first, a.second, b.second, &v);
+                ha_prompt_trace(srv, proj.c_str(), a.qn, b.qn, a.display, b.display, &v);
             if (line.empty()) {
-                line = ha_prompt_trace(srv, project, b.first, a.first, b.second, a.second, &v);
+                line = ha_prompt_trace(srv, proj.c_str(), b.qn, a.qn, b.display, a.display, &v);
             }
             if (!line.empty()) {
                 blocks.push_back(line);
             }
         }
     }
-    free(project);
     blocks.insert(blocks.end(), symbols.begin(), symbols.end());
     return blocks.empty() ? nullptr
                           : ha_prompt_payload(blocks, HA_PROMPT_MAX_BYTES, ha_prompt_label(v));
@@ -2361,6 +3273,47 @@ char *cbm_prompt_candidates_for_testing(const char *prompt) {
         joined += (joined.empty() ? "" : "\n") + c;
     }
     return strdup(joined.c_str());
+}
+char *cbm_prompt_targets_for_testing(const char *prompt) {
+    ha_prompt_parse req = ha_prompt_parse_request(prompt);
+    std::string out = std::string("intent=") + (req.callers_intent ? "callers" : "-") +
+                      (req.chain_intent ? ",chain" : "");
+    for (const auto &t : req.targets) {
+        out += "\n" + t.name + "|" + t.qualifier + "|";
+        for (size_t k = 0; k < t.file_hints.size(); ++k) {
+            out += (k ? "," : "") + t.file_hints[k];
+        }
+    }
+    return strdup(out.c_str());
+}
+char *cbm_prompt_resolve_for_testing(const char *nodes_json, const char *prompt) {
+    ha_prompt_parse req = ha_prompt_parse_request(prompt);
+    yyjson_doc *nd = nodes_json ? yyjson_read(nodes_json, strlen(nodes_json), 0) : nullptr;
+    std::vector<ha_node> all = ha_parse_nodes(nd, nullptr);
+    yyjson_doc_free(nd);
+    if (req.targets.empty()) {
+        return nullptr;
+    }
+    std::vector<ha_node> picked = ha_disambiguate(all, req.targets[0], req.paths);
+    std::string out;
+    for (const auto &n : picked) {
+        out += (out.empty() ? "" : "\n") + n.qn;
+    }
+    return out.empty() ? nullptr : strdup(out.c_str());
+}
+char *cbm_prompt_callers_block_for_testing(const char *inspect_json, const char *bare,
+                                           const char *root, const char *const *files, int count) {
+    yyjson_doc *doc = inspect_json ? yyjson_read(inspect_json, strlen(inspect_json), 0) : nullptr;
+    std::vector<std::string> list;
+    for (int i = 0; i < count; ++i) {
+        list.emplace_back(files[i]);
+    }
+    bool complete = false;
+    std::vector<std::string> mentions = ha_scan_mentions(
+        root, list, bare, std::chrono::steady_clock::now() + std::chrono::seconds(5), &complete);
+    std::string block = ha_prompt_callers_block(doc, bare, root, mentions, complete, true);
+    yyjson_doc_free(doc);
+    return block.empty() ? nullptr : strdup(block.c_str());
 }
 static ha_verifier ha_test_verifier(const char *root) {
     ha_verifier v;
@@ -2447,9 +3400,8 @@ int cbm_cmd_hook_augment(void) {
         bool valid = cwd_ok && cwd && request &&
                      strlen(request) == yyjson_get_len(yyjson_obj_get(root, "prompt"));
         /* No code-looking token → no database work at all. */
-        std::vector<std::string> cands =
-            valid ? ha_prompt_candidates(request) : std::vector<std::string>();
-        if (!cands.empty()) {
+        ha_prompt_parse req = valid ? ha_prompt_parse_request(request) : ha_prompt_parse();
+        if (!req.targets.empty()) {
             ha_arm_deadline(HA_DEADLINE_PROMPT_MS);
             bool indexed = false;
             bool probed = false;
@@ -2457,7 +3409,7 @@ int cbm_cmd_hook_augment(void) {
             cbm_mcp_server_t *srv = cbm_mcp_server_new(nullptr);
             if (srv) {
                 cbm_mcp_server_set_scan_fallback(srv, false);
-                json = ha_prompt_context(srv, cwd, cands, &indexed);
+                json = ha_prompt_context(srv, cwd, req, &indexed);
                 probed = true;
                 cbm_mcp_server_free(srv);
             }

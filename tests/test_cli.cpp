@@ -3028,6 +3028,147 @@ TEST(cli_prompt_locations_are_reverified_from_disk) {
 #endif
 }
 
+/* Targets: when anything is backticked, only backticked identifiers count;
+ * examples and exclusions never do; owners qualify their member; paths are
+ * hints; rules paragraphs add no new targets. */
+TEST(cli_prompt_targets_follow_the_request) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    struct {
+        const char *prompt;
+        const char *expected;
+    } cases[] = {
+        {"Find the shortest chain of direct function calls that starts at the method `unsign` "
+         "of class `Signer` in django/core/signing.py (NOT `TimestampSigner.unsign`) and ends at "
+         "the function `salted_hmac` in django/utils/crypto.py.\n\nRules:\n- a `self.method(...)` "
+         "call counts.\n\nOutput ONLY names, starting with `unsign` and ending with `salted_hmac`.",
+         "intent=callers,chain\nSigner.unsign|Signer|django/core/signing.py\n"
+         "salted_hmac||django/utils/crypto.py"},
+        {"Repository under test: the repo.\n\nTarget: the function `dbAdd` (signature "
+         "`kvobj *dbAdd(redisDb *db)`), whose definition is in src/db.c.\n\nList every file that "
+         "contains a CALL to `dbAdd`.\n\nCount only real call sites. Do NOT count:\n- "
+         "declarations,\n- calls to different functions (e.g. `dbAddByLink`, `dbAddInternal`).\n",
+         "intent=callers\ndbAdd||src/db.c"},
+        {"find the shortest chain from `snapshotRestoreCommandFunc` to `ToMemberDir`.\n\nRules:\n"
+         "- Names are case-sensitive: `snapshotRestoreCommandFunc` and "
+         "`SnapshotRestoreCommandFunc` are two different functions, as are `ToWALDir` and "
+         "`ToWalDir`.",
+         "intent=-,chain\nsnapshotRestoreCommandFunc||\nToMemberDir||"},
+        {"find where the C++ member function `UpdateBoundaries` of the struct `FileMetaData` is "
+         "DEFINED, not a call site such as `meta.UpdateBoundaries(...)`.",
+         "intent=-\nFileMetaData.UpdateBoundaries|FileMetaData|"},
+        {"Find where the Go method `syncWatchers` is DEFINED (the line starting with `func`), "
+         "not a different function such as `syncWatchersLoop`; ignore `generated` dirs.",
+         "intent=-\nsyncWatchers||"},
+        {"I want to add a parameter to `handler_for_extension(extension)` defined in module "
+         "`ActionView::Template::Handlers` (the module is extended into `ActionView::Template`, "
+         "so it is called as `Template.handler_for_extension(...)`). Which files must I edit?",
+         "intent=callers\nActionView::Template::Handlers.handler_for_extension|"
+         "ActionView::Template::Handlers|"},
+        {"Change the `sendTelemetryEvent` method of the `TelemetryReporter` interface "
+         "(implemented by the inner function `sendTelemetryEvent` inside "
+         "`createTelemetryReporter`).",
+         "intent=callers\nTelemetryReporter.sendTelemetryEvent|TelemetryReporter|"},
+        {"Why does parseNextLayer call HTTPServer in src/net/server.cc?",
+         "intent=callers\nparseNextLayer||\nHTTPServer||"},
+    };
+    for (const auto &c : cases) {
+        char *got = cbm_prompt_targets_for_testing(c.prompt);
+        ASSERT_NOT_NULL(got);
+        if (strcmp(got, c.expected) != 0) {
+            printf("  prompt \"%.60s...\":\n  got      \"%s\"\n  expected \"%s\"\n", c.prompt, got,
+                   c.expected);
+        }
+        ASSERT_STR_EQ(got, c.expected);
+        free(got);
+    }
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* Resolution: qualifier, then file hint, then definition over declaration;
+ * anything still ambiguous stays ambiguous. */
+TEST(cli_prompt_resolution_disambiguates_or_refuses) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *signers =
+        R"({"nodes":[{"qualified_name":"p.django.core.signing.TimestampSigner.unsign","name":"unsign","label":"Method","file":"django/core/signing.py","start_line":303},)"
+        R"({"qualified_name":"p.django.core.signing.Signer.unsign","name":"unsign","label":"Method","file":"django/core/signing.py","start_line":247}]})";
+    char *got = cbm_prompt_resolve_for_testing(signers, "the method `unsign` of class `Signer`");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "p.django.core.signing.Signer.unsign");
+    free(got);
+    got = cbm_prompt_resolve_for_testing(signers, "the method `unsign`");
+    ASSERT_NOT_NULL(got);
+    ASSERT_NOT_NULL(strchr(got, '\n')); /* both remain: ambiguous */
+    free(got);
+
+    const char *two_langs =
+        R"({"nodes":[{"qualified_name":"p.tsc.internal.astnav.getTokenAtPosition","name":"getTokenAtPosition","label":"Function","file":"tsc/internal/astnav/tokens.go","start_line":37},)"
+        R"({"qualified_name":"p.packages.ts.src.ast.astnav.getTokenAtPosition","name":"getTokenAtPosition","label":"Function","file":"packages/ts/src/ast/astnav.ts","start_line":22}]})";
+    got = cbm_prompt_resolve_for_testing(
+        two_langs, "starts at `getTokenAtPosition` defined in packages/ts/src/ast/astnav.ts");
+    ASSERT_STR_EQ(got, "p.packages.ts.src.ast.astnav.getTokenAtPosition");
+    free(got);
+
+    const char *decl_def =
+        R"({"nodes":[{"qualified_name":"p.src.server.h.dbAdd","name":"dbAdd","label":"Declaration","file":"src/server.h","start_line":4324},)"
+        R"({"qualified_name":"p.src.db.dbAdd","name":"dbAdd","label":"Function","file":"src/db.c","start_line":472}]})";
+    got = cbm_prompt_resolve_for_testing(decl_def, "callers of `dbAdd`");
+    ASSERT_STR_EQ(got, "p.src.db.dbAdd");
+    free(got);
+
+    /* A method reported twice at one location (older Ruby indexes): one. */
+    const char *ruby =
+        R"({"nodes":[{"qualified_name":"p.lib.rel.ActiveRecord.Relation.create_or_find_by","name":"create_or_find_by","label":"Method","file":"lib/rel.rb","start_line":274},)"
+        R"({"qualified_name":"p.lib.rel.create_or_find_by","name":"create_or_find_by","label":"Function","file":"lib/rel.rb","start_line":274}]})";
+    got = cbm_prompt_resolve_for_testing(ruby, "where is `create_or_find_by` defined");
+    ASSERT_STR_EQ(got, "p.lib.rel.ActiveRecord.Relation.create_or_find_by");
+    free(got);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* Callers mode: the complete rollup, each file re-read; files that mention
+ * the name but are not graph callers are listed separately. */
+TEST(cli_prompt_callers_rollup_and_text_mentions) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-rollup-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    const char *names[] = {"def.c", "a.c", "b_test.c", "gone.c", "doc.md", "other.c", "near.c"};
+    const char *bodies[] = {"int target_fn(void) { return 1; }\n", "void a(void) { target_fn(); }\n",
+                            "void t(void) { target_fn(); }\n", "void g(void) {}\n",
+                            "See target_fn for details.\n", "void o(void) { other(); }\n",
+                            "int target_fn_extra = 1;\n"};
+    for (int i = 0; i < 7; ++i) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, names[i]);
+        write_test_file(path, bodies[i]);
+    }
+    const char *payload =
+        R"({"symbol":{"label":"Function","file":"def.c","start_line":1,"end_line":1},)"
+        R"("declared_in":[],"caller_files_total":3,"caller_files":[{"file":"a.c","call_sites":1},)"
+        R"({"file":"b_test.c","call_sites":1,"test":true},{"file":"gone.c","call_sites":1}]})";
+    char *block = cbm_prompt_callers_block_for_testing(payload, "target_fn", root, names, 7);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "caller files (3, complete as indexed; 1 tests; each re-read and "
+                                  "contains `target_fn`): a.c, b_test.c (test)"));
+    ASSERT_NOT_NULL(strstr(block, "no longer in the file (stale, re-check): gone.c"));
+    ASSERT_NOT_NULL(strstr(block, "also mention the name (not resolved as calls) (1): doc.md"));
+    ASSERT_NULL(strstr(block, "near.c")); /* target_fn_extra is not a whole-word mention */
+    ASSERT_NULL(strstr(block, "other.c"));
+    free(block);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
 TEST(cli_session_brief_formats_stored_inputs) {
 #ifdef CBM_ENABLE_TEST_SEAMS
     char *text = cbm_session_brief_format_for_testing(
@@ -3945,6 +4086,9 @@ SUITE(cli) {
     RUN_TEST(cli_prompt_chain_and_payload_budget);
     RUN_TEST(cli_claude_prompt_hook_install_remove);
     RUN_TEST(cli_session_brief_formats_stored_inputs);
+    RUN_TEST(cli_prompt_targets_follow_the_request);
+    RUN_TEST(cli_prompt_resolution_disambiguates_or_refuses);
+    RUN_TEST(cli_prompt_callers_rollup_and_text_mentions);
     RUN_TEST(cli_prompt_locations_are_reverified_from_disk);
     RUN_TEST(cli_source_context_preserves_interleaved_paths);
     RUN_TEST(cli_hook_augment_bash_pattern_extractor);

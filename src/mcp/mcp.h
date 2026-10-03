@@ -170,6 +170,23 @@ void cbm_mcp_server_set_scan_fallback(cbm_mcp_server_t *srv, bool enabled);
 #define CBM_MCP_BRIEF_LIVE_MAX_NODES 200000
 char *cbm_mcp_session_brief_json(cbm_mcp_server_t *srv, const char *project, bool *resolved);
 
+/* Every node named exactly `name` in an indexed project, as JSON
+ * {"root":<project root>,"nodes":[{qualified_name,name,label,file,start_line,
+ * end_line}...],"total":N} (at most 64 nodes listed). The hook disambiguates
+ * these itself (qualifier, file hint, definition over declaration) before it
+ * asks inspect_symbol about one exact qualified name. *resolved is true when
+ * the project is indexed. Caller frees. */
+char *cbm_mcp_symbol_nodes(cbm_mcp_server_t *srv, const char *project, const char *name,
+                           bool *resolved);
+
+/* The project's indexed files (repo-relative) and root path, for a bounded
+ * whole-word text scan. Returns the file count, or -1 when the project is not
+ * indexed. *files_out is a malloc'd array of malloc'd strings; free with
+ * cbm_mcp_free_project_files. */
+int cbm_mcp_project_files(cbm_mcp_server_t *srv, const char *project, char **root_out,
+                          char ***files_out);
+void cbm_mcp_free_project_files(char *root, char **files, int count);
+
 /* Coverage note (#963) for one repo-relative file, read straight from the
  * project's index_coverage rows.
  *
