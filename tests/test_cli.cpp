@@ -14,6 +14,8 @@
 #include "test_helpers.h"
 #include <cli/cli.h>
 #include <foundation/yaml.h>
+#include <yyjson/yyjson.h>
+#include <string>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -2742,40 +2744,218 @@ TEST(cli_task_context_preserves_source_and_budget) {
 #endif
 }
 
-TEST(cli_request_chain_requires_explicit_read_only_endpoints) {
+/* UserPromptSubmit candidates: code-looking identifiers only, in order,
+ * deduplicated, at most six; prose words never reach the database. */
+TEST(cli_prompt_candidates_select_code_identifiers) {
 #ifdef CBM_ENABLE_TEST_SEAMS
-    const char *positive[] = {
-        "Show the call chain from `Entry` to `Target`.",
-        "Read only; do not edit. Trace the call chain from `Entry` to `Target`.",
-        "FIND THE CALL CHAIN FROM `Entry` TO `Target`."
+    struct {
+        const char *prompt;
+        const char *expected; /* NULL: no candidates */
+    } cases[] = {
+        {"Find the defining signature of capacity_function_3. Return exactly one path.",
+         "capacity_function_3"},
+        {"Find the shortest direct-call chain from a_function to d_function, including both.",
+         "a_function\nd_function"},
+        {"Why does parseNextLayer call HTTPServer and Layer::parse here?",
+         "parseNextLayer\nHTTPServer\nLayer::parse"},
+        {"How does sha256 relate to Widget.render and Widget.render again?",
+         "sha256\nWidget.render"},
+        {"Explain `update` and `target()` but not update or target.", "update\ntarget"},
+        {"Please explain what this Function does and Where the README lives.", NULL},
+        {"Fix the bug in the parser so that every test passes.", NULL},
+        {"Look at src/cli/hook_augment.cpp and mail me@example_corp.com", NULL},
+        {"Short ids: a_b, x1, `foo`.", NULL},
+        {"Here is a log:\n```cpp\nint fenced_symbol_one() { return inner_call(); }\n```\nNow "
+         "check outer_symbol.",
+         "outer_symbol"},
+        {"```\nonly_in_fence\n```", NULL},
+        {"one_a two_b three_c four_d five_e six_f seven_g eight_h",
+         "one_a\ntwo_b\nthree_c\nfour_d\nfive_e\nsix_f"},
+        {"Unterminated `span_symbol and more_text", "span_symbol\nmore_text"},
     };
-    for (const char *request : positive) {
-        char *result = cbm_request_chain_for_testing(request);
-        ASSERT_NOT_NULL(result);
-        ASSERT_STR_EQ(result, "Entry -> Target");
-        free(result);
+    for (const auto &c : cases) {
+        char *got = cbm_prompt_candidates_for_testing(c.prompt);
+        if (!c.expected) {
+            if (got) {
+                printf("  unexpected candidates for \"%s\": %s\n", c.prompt, got);
+            }
+            ASSERT_NULL(got);
+            continue;
+        }
+        ASSERT_NOT_NULL(got);
+        if (strcmp(got, c.expected) != 0) {
+            printf("  prompt \"%s\": got \"%s\"\n", c.prompt, got);
+        }
+        ASSERT_STR_EQ(got, c.expected);
+        free(got);
     }
-    const char *negative[] = {
-        "Do NOT show the call chain from `Entry` to `Target`.",
-        "Show the call chain from `Entry` to `Target` and modify it.",
-        "Show the call chain from `Entry` to `Target`. Find the call chain from `Other` to `Target`.",
-        "```Show the call chain from `Entry` to `Target`.```",
-        "Show the call chain from `Entry|Other` to `Target`.",
-        "Show the call chain from Entry to Target.",
-        "Show the call chain from `Entry` to",
-        "Show the call chain from `Entry` t",
-        "Show the call chain from `Entry`",
-        "Show the call chain from",
-        "Who calls `Entry`?"
-    };
-    for (const char *request : negative) {
-        ASSERT_NULL(cbm_request_chain_for_testing(request));
-    }
-    ASSERT_NULL(cbm_request_chain_for_testing(nullptr));
+    ASSERT_NULL(cbm_prompt_candidates_for_testing(nullptr));
+    ASSERT_NULL(cbm_prompt_candidates_for_testing(""));
     PASS();
 #else
     SKIP("requires CBM_TEST_SEAMS");
 #endif
+}
+
+TEST(cli_prompt_symbol_block_formats_graph_facts) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *payload =
+        R"({"symbol":{"name":"capacity_function_3","qualified_name":"p.src.cap.capacity_function_3",)"
+        R"("label":"Function","file":"src/cap.cpp","start_line":12,"end_line":20},)"
+        R"("source":"int capacity_function_3(int x) {\n","declared_in":[{"file":"include/cap.h","line":5}],)"
+        R"("declared_in_total":1,"index":{"file_modified_after_index":false},)"
+        R"("callers":[{"name":"c1"},{"name":"c2"},{"name":"c3"}],"callers_total":7,)"
+        R"("related_tests_total":2,"callees":[{"name":"leaf"}],"callees_total":1})";
+    char *trace = nullptr;
+    char *block = cbm_prompt_symbol_block_for_testing(payload, "capacity_function_3", &trace);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "- capacity_function_3: Function at src/cap.cpp:12-20"));
+    ASSERT_NOT_NULL(strstr(block, "declared at include/cap.h:5"));
+    ASSERT_NOT_NULL(strstr(block, "\n  int capacity_function_3(int x) {"));
+    ASSERT_NOT_NULL(strstr(block, "callers 7 (+2 in tests): c1, c2, c3, +4 more"));
+    ASSERT_NOT_NULL(strstr(block, "callees 1: leaf"));
+    ASSERT_NOT_NULL(trace);
+    ASSERT_STR_EQ(trace, "p.src.cap.capacity_function_3");
+    free(trace);
+    free(block);
+
+    /* A class is reported but never traced; a declaration-only symbol says so. */
+    block = cbm_prompt_symbol_block_for_testing(
+        R"({"symbol":{"label":"Declaration","file":"a.h","start_line":3,"end_line":3},"callers_total":0,"callees_total":0})",
+        "ns::Thing", &trace);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "declaration only"));
+    ASSERT_NULL(trace);
+    free(block);
+
+    block = cbm_prompt_symbol_block_for_testing(
+        R"({"status":"ambiguous","suggestions":[{"qualified_name":"a.run","label":"Function","file_path":"a.cpp"},{"qualified_name":"b.run","label":"Method","file_path":"b.cpp"}]})",
+        "run_task", &trace);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "2 matches: a.run (Function, a.cpp), b.run (Method, b.cpp)"));
+    ASSERT_NULL(trace);
+    free(block);
+
+    ASSERT_NULL(cbm_prompt_symbol_block_for_testing(R"({"error":"symbol not found"})", "x_y",
+                                                    &trace));
+    ASSERT_NULL(cbm_prompt_symbol_block_for_testing("not json", "x_y", &trace));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_prompt_chain_and_payload_budget) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char *line = cbm_prompt_chain_line_for_testing(
+        R"({"path_found":true,"path":[{"name":"a_function","file":"a.cpp","start_line":3},)"
+        R"({"name":"b_function","file":"b.cpp","start_line":4},{"name":"d_function","file":"d.cpp","start_line":5}]})",
+        "a_function", "d_function");
+    ASSERT_NOT_NULL(line);
+    ASSERT_STR_EQ(line, "- call chain a_function -> d_function (2 hops): a_function (a.cpp:3) -> "
+                        "b_function (b.cpp:4) -> d_function (d.cpp:5)");
+    free(line);
+    ASSERT_NULL(cbm_prompt_chain_line_for_testing(R"({"path_found":false,"path":[]})", "a", "b"));
+
+    /* Everything fits: label first, blocks in order, valid JSON. */
+    const char *small[] = {"- one: Function at a.cpp:1-2\n  int one() {", "- two: Class at b.h:3-9"};
+    char *json = cbm_prompt_payload_for_testing(small, 2, 4000);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NOT_NULL(strstr(json, "\"hookEventName\":\"UserPromptSubmit\""));
+    ASSERT_NOT_NULL(strstr(json, "[code-cortex] graph facts for symbols in your request"));
+    ASSERT_NOT_NULL(strstr(json, "- two: Class at b.h:3-9"));
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_doc_free(doc);
+    free(json);
+
+    /* Over budget: whole lines are dropped, the JSON stays valid and bounded. */
+    std::string big_a = "- big_a: Function at a.cpp:1-2\n  " + std::string(1500, 'x') + "\n  " +
+                        std::string(1500, 'y');
+    std::string big_b = "- big_b: Function at b.cpp:1-2\n  " + std::string(1500, 'z');
+    const char *big[] = {big_a.c_str(), big_b.c_str()};
+    json = cbm_prompt_payload_for_testing(big, 2, 4000);
+    ASSERT_NOT_NULL(json);
+    ASSERT_TRUE(strlen(json) <= 4000);
+    ASSERT_NOT_NULL(strstr(json, "yyyy"));
+    ASSERT_NOT_NULL(strstr(json, "- big_b: Function at b.cpp:1-2")); /* cut at a line */
+    ASSERT_NULL(strstr(json, "zzzz"));
+    doc = yyjson_read(json, strlen(json), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_doc_free(doc);
+    free(json);
+    json = cbm_prompt_payload_for_testing(big, 2, 3000);
+    ASSERT_NOT_NULL(json);
+    ASSERT_TRUE(strlen(json) <= 3000);
+    ASSERT_NOT_NULL(strstr(json, "xxxx"));
+    ASSERT_NULL(strstr(json, "yyyy"));
+    free(json);
+    /* Not even the first line fits: nothing, never partial output. */
+    ASSERT_NULL(cbm_prompt_payload_for_testing(big, 2, 200));
+    ASSERT_NULL(cbm_prompt_payload_for_testing(big, 0, 4000));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* The UserPromptSubmit hook has no matcher, so ownership is the shim command:
+ * install adds exactly one entry, re-install replaces it, and uninstall
+ * removes it while a user's own UserPromptSubmit hook survives both. */
+TEST(cli_claude_prompt_hook_install_remove) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-prompt-hook-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char settingspath[512];
+    snprintf(settingspath, sizeof(settingspath), "%s/settings.json", tmpdir);
+    write_test_file(settingspath,
+                    "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\","
+                    "\"command\":\"echo user-own-hook\"}]}]}}");
+
+    ASSERT_EQ(cbm_upsert_claude_prompt_hooks(settingspath), 0);
+    ASSERT_EQ(cbm_upsert_claude_prompt_hooks(settingspath), 0);
+    const char *data = read_test_file(settingspath);
+    ASSERT_NOT_NULL(data);
+    yyjson_doc *doc = yyjson_read(data, strlen(data), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *arr =
+        yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(doc), "hooks"), "UserPromptSubmit");
+    ASSERT_NOT_NULL(arr);
+    ASSERT_EQ((int)yyjson_arr_size(arr), 2);
+    int ours = 0;
+    size_t i, n;
+    yyjson_val *entry;
+    yyjson_arr_foreach(arr, i, n, entry) {
+        yyjson_val *h = yyjson_arr_get(yyjson_obj_get(entry, "hooks"), 0);
+        const char *cmd = yyjson_get_str(yyjson_obj_get(h, "command"));
+        if (cmd && strstr(cmd, "cbm-code-discovery-gate")) {
+            ours++;
+            ASSERT_NULL(yyjson_obj_get(entry, "matcher"));
+            ASSERT_TRUE(yyjson_get_int(yyjson_obj_get(h, "timeout")) > 0);
+        }
+    }
+    yyjson_doc_free(doc);
+    ASSERT_EQ(ours, 1);
+
+    /* The other Claude hooks do not touch the prompt entry. */
+    ASSERT_EQ(cbm_upsert_claude_hooks(settingspath), 0);
+    ASSERT_EQ(cbm_remove_claude_hooks(settingspath), 0);
+    data = read_test_file(settingspath);
+    ASSERT_NOT_NULL(strstr(data, "UserPromptSubmit"));
+    ASSERT_NOT_NULL(strstr(data, "cbm-code-discovery-gate"));
+
+    ASSERT_EQ(cbm_remove_claude_prompt_hooks(settingspath), 0);
+    data = read_test_file(settingspath);
+    ASSERT_NULL(strstr(data, "cbm-code-discovery-gate"));
+    ASSERT_NOT_NULL(strstr(data, "user-own-hook"));
+    /* A second remove only finds the user's entry, which it must leave. */
+    ASSERT_EQ(cbm_remove_claude_prompt_hooks(settingspath), 0);
+    data = read_test_file(settingspath);
+    ASSERT_NOT_NULL(strstr(data, "user-own-hook"));
+
+    test_rmdir_r(tmpdir);
+    PASS();
 }
 
 TEST(cli_definition_context_prioritizes_qualified_matches) {
@@ -3605,7 +3785,10 @@ SUITE(cli) {
     RUN_TEST(cli_task_context_preserves_source_and_budget);
     RUN_TEST(cli_request_context_selects_only_unambiguous_symbols);
     RUN_TEST(cli_definition_context_prioritizes_qualified_matches);
-    RUN_TEST(cli_request_chain_requires_explicit_read_only_endpoints);
+    RUN_TEST(cli_prompt_candidates_select_code_identifiers);
+    RUN_TEST(cli_prompt_symbol_block_formats_graph_facts);
+    RUN_TEST(cli_prompt_chain_and_payload_budget);
+    RUN_TEST(cli_claude_prompt_hook_install_remove);
     RUN_TEST(cli_source_context_preserves_interleaved_paths);
     RUN_TEST(cli_hook_augment_bash_pattern_extractor);
     RUN_TEST(cli_remove_claude_hooks);

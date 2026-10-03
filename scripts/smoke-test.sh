@@ -607,6 +607,22 @@ sys.exit(0 if ok else 1)
 fi
 echo "OK 8d2: Claude Code PostToolUse hook (matcher=Edit|Write|MultiEdit)"
 
+# 8d3: UserPromptSubmit hook — same shim, no matcher (the event takes none);
+# ownership is the shim command.
+if ! cat "$FAKE_HOME/.claude/settings.json" 2>/dev/null | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+hooks = d.get('hooks', {}).get('UserPromptSubmit', [])
+ok = any('matcher' not in h and
+         any('cbm-code-discovery-gate' in x.get('command', '') for x in h.get('hooks', []))
+         for h in hooks)
+sys.exit(0 if ok else 1)
+" 2>/dev/null; then
+  echo "FAIL 8d3: UserPromptSubmit hook missing"
+  exit 1
+fi
+echo "OK 8d3: Claude Code UserPromptSubmit hook"
+
 # 8e: Claude Code shim script — must be non-blocking augmenter, not a gate.
 if [ "$(uname -s)" != "MINGW64_NT" ] 2>/dev/null; then
   GATE_SCRIPT="$FAKE_HOME/.claude/hooks/cbm-code-discovery-gate"

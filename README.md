@@ -68,8 +68,11 @@ In Claude Code the graph mostly arrives as context rather than as a tool the age
 choose: a SessionStart hook prints a short architecture brief for the repository you are in,
 a PreToolUse hook on searches adds what grep cannot show for an exact symbol (definition vs
 declaration, caller and test counts with call-site lines, callers from other languages), and
-a PostToolUse hook on edits reports the blast radius of the file you just changed. All hooks
-are non-blocking and bounded (300 ms for searches, 1.5 s after edits, 3 s at session start).
+a PostToolUse hook on edits reports the blast radius of the file you just changed, and a
+UserPromptSubmit hook resolves the code identifiers your prompt names (definition, first source
+line, direct callers and callees, and the call chain between named functions). All hooks are
+non-blocking and bounded (300 ms for searches, 1.5 s after edits and per prompt, 3 s at session
+start).
 
 Other subcommands: `doctor` (checks the install, hooks, and whether the current directory is
 indexed), `config set auto_index true`, `update`, `uninstall`.

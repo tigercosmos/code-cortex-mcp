@@ -218,6 +218,10 @@ int cbm_upsert_claude_hooks(const char *settings_path);
 /* PostToolUse(Edit|Write|MultiEdit) blast-radius hook; same shim script. */
 int cbm_upsert_claude_post_hooks(const char *settings_path);
 int cbm_remove_claude_post_hooks(const char *settings_path);
+/* UserPromptSubmit hook (no matcher): graph facts for the symbols a prompt
+ * names, before the model's first turn; same shim script. */
+int cbm_upsert_claude_prompt_hooks(const char *settings_path);
+int cbm_remove_claude_prompt_hooks(const char *settings_path);
 
 /* Remove our PreToolUse hook from Claude Code settings.json.
  * Returns 0 on success. */
@@ -359,7 +363,14 @@ char *cbm_task_context_for_testing(const char *json, size_t max_bytes);
 char *cbm_source_context_for_testing(const char *events, size_t max_bytes, bool complete);
 char *cbm_definition_context_for_testing(const char *events, const char *symbol, size_t max_bytes);
 char *cbm_request_symbol_for_testing(const char *request, bool automatic);
-char *cbm_request_chain_for_testing(const char *request);
+/* UserPromptSubmit context: candidates joined by '\n'; one symbol block from an
+ * inspect_symbol payload (*trace_name: name to trace, or NULL); one chain line
+ * from a trace_path payload; the rendered hook JSON for blocks under max_bytes. */
+char *cbm_prompt_candidates_for_testing(const char *prompt);
+char *cbm_prompt_symbol_block_for_testing(const char *inspect_json, const char *token,
+                                          char **trace_name);
+char *cbm_prompt_chain_line_for_testing(const char *trace_json, const char *from, const char *to);
+char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_t max_bytes);
 #endif
 
 /* Extract a search pattern from a Bash tool command (rg/grep/ag/ack/ugrep/

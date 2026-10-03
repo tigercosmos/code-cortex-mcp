@@ -1949,18 +1949,30 @@ static const char *const cmm_gemini_old_matchers[] = {
 static bool is_cmm_hook_entry(yyjson_mut_val *entry, const char *matcher_str,
                               const char *const *old_matchers, const char *require_command_substr) {
     yyjson_mut_val *matcher = yyjson_mut_obj_get(entry, "matcher");
-    if (!matcher || !yyjson_mut_is_str(matcher)) {
-        return false;
-    }
-    const char *val = yyjson_mut_get_str(matcher);
-    if (!val) {
-        return false;
-    }
-    bool matcher_ok = strcmp(val, matcher_str) == 0;
-    /* Also match old versions for backwards-compatible upgrade */
-    for (int i = 0; !matcher_ok && old_matchers && old_matchers[i]; i++) {
-        if (strcmp(val, old_matchers[i]) == 0) {
-            matcher_ok = true;
+    bool matcher_ok;
+    if (!matcher_str) {
+        /* Matcherless events (UserPromptSubmit): the entry carries no matcher
+         * (or an empty one), and ownership is the command alone, so a command
+         * substring is mandatory. */
+        const char *mv = matcher && yyjson_mut_is_str(matcher) ? yyjson_mut_get_str(matcher) : NULL;
+        if (!require_command_substr || (matcher && (!mv || mv[0]))) {
+            return false;
+        }
+        matcher_ok = true;
+    } else {
+        if (!matcher || !yyjson_mut_is_str(matcher)) {
+            return false;
+        }
+        const char *val = yyjson_mut_get_str(matcher);
+        if (!val) {
+            return false;
+        }
+        matcher_ok = strcmp(val, matcher_str) == 0;
+        /* Also match old versions for backwards-compatible upgrade */
+        for (int i = 0; !matcher_ok && old_matchers && old_matchers[i]; i++) {
+            if (strcmp(val, old_matchers[i]) == 0) {
+                matcher_ok = true;
+            }
         }
     }
     if (!matcher_ok) {
@@ -2056,7 +2068,9 @@ static int upsert_hooks_json(hooks_upsert_args_t args) {
 
     /* Build our hook entry */
     yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
-    yyjson_mut_obj_add_str(mdoc, entry, "matcher", matcher_str);
+    if (matcher_str) {
+        yyjson_mut_obj_add_str(mdoc, entry, "matcher", matcher_str);
+    }
 
     yyjson_mut_val *hooks_arr = yyjson_mut_arr(mdoc);
     yyjson_mut_val *hook_obj = yyjson_mut_obj(mdoc);
@@ -2186,6 +2200,34 @@ int cbm_remove_claude_post_hooks(const char *settings_path) {
         .settings_path = settings_path,
         .hook_event = "PostToolUse",
         .matcher_str = CMM_POST_HOOK_MATCHER,
+        .match_command_substr = CMM_HOOK_GATE_SCRIPT,
+    });
+}
+
+/* UserPromptSubmit: the same shim; the binary resolves the identifiers the
+ * prompt names and adds their graph facts before the model's first turn.
+ * The event takes no matcher, so ownership is claimed by the command alone —
+ * a user's own UserPromptSubmit hooks are never clobbered or removed. */
+#define CMM_PROMPT_HOOK_TIMEOUT_SEC 5
+
+int cbm_upsert_claude_prompt_hooks(const char *settings_path) {
+    char command[CLI_BUF_1K];
+    cbm_resolve_hook_command(CMM_HOOK_GATE_SCRIPT, command, sizeof(command));
+    return upsert_hooks_json((hooks_upsert_args_t){
+        .settings_path = settings_path,
+        .hook_event = "UserPromptSubmit",
+        .matcher_str = NULL,
+        .command_str = command,
+        .timeout_sec = CMM_PROMPT_HOOK_TIMEOUT_SEC,
+        .match_command_substr = CMM_HOOK_GATE_SCRIPT,
+    });
+}
+
+int cbm_remove_claude_prompt_hooks(const char *settings_path) {
+    return remove_hooks_json((hooks_remove_args_t){
+        .settings_path = settings_path,
+        .hook_event = "UserPromptSubmit",
+        .matcher_str = NULL,
         .match_command_substr = CMM_HOOK_GATE_SCRIPT,
     });
 }
@@ -3477,6 +3519,7 @@ static void install_claude_code_config(const char *home, const char *binary_path
     if (!dry_run) {
         cbm_upsert_claude_hooks(settings_path);
         cbm_upsert_claude_post_hooks(settings_path);
+        cbm_upsert_claude_prompt_hooks(settings_path);
         cbm_install_hook_gate_script(home, binary_path);
         cbm_install_session_reminder_script(home, binary_path);
         cbm_upsert_session_hooks(settings_path);
@@ -3486,6 +3529,7 @@ static void install_claude_code_config(const char *home, const char *binary_path
     printf("  hooks: PreToolUse (Grep/Glob/Bash: exact-symbol facts grep cannot show; "
            "Read: coverage note; non-blocking)\n");
     printf("  hooks: PostToolUse (Edit/Write/MultiEdit: blast radius of the edited file)\n");
+    printf("  hooks: UserPromptSubmit (graph facts for the symbols your prompt names)\n");
     printf("  hooks: SessionStart (architecture brief on startup/resume/clear/compact)\n");
     printf("  hooks: SubagentStart (when to use the graph, for subagents)\n");
 
@@ -4205,10 +4249,12 @@ static void uninstall_claude_code(const char *home, bool dry_run) {
     if (!dry_run) {
         cbm_remove_claude_hooks(settings_path);
         cbm_remove_claude_post_hooks(settings_path);
+        cbm_remove_claude_prompt_hooks(settings_path);
         cbm_remove_session_hooks(settings_path);
         cbm_remove_claude_subagent_hooks(settings_path);
     }
-    printf("  removed PreToolUse + PostToolUse + SessionStart + SubagentStart hooks\n");
+    printf("  removed PreToolUse + PostToolUse + UserPromptSubmit + SessionStart + "
+           "SubagentStart hooks\n");
 }
 
 /* Remove MCP + instructions for a generic agent. */
@@ -5059,6 +5105,33 @@ int cbm_cli_print_tool_help(const char *tool_name) {
  * Claude Code / Codex integration files reference this binary and the
  * current hook matchers. */
 
+/* True when settings.json has a UserPromptSubmit entry whose command runs our
+ * shim. Parsed, not substring-matched: the event name alone may belong to a
+ * user's own hook. */
+static bool doctor_has_prompt_hook(const char *settings_path) {
+    yyjson_doc *doc = read_json_file(settings_path);
+    if (!doc) {
+        return false;
+    }
+    yyjson_val *arr =
+        yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(doc), "hooks"), "UserPromptSubmit");
+    bool found = false;
+    size_t i;
+    size_t n;
+    yyjson_val *entry;
+    yyjson_arr_foreach(arr, i, n, entry) {
+        size_t j;
+        size_t m;
+        yyjson_val *h;
+        yyjson_arr_foreach(yyjson_obj_get(entry, "hooks"), j, m, h) {
+            const char *cmd = yyjson_get_str(yyjson_obj_get(h, "command"));
+            found |= cmd && strstr(cmd, CMM_HOOK_GATE_SCRIPT) != NULL;
+        }
+    }
+    yyjson_doc_free(doc);
+    return found;
+}
+
 static char *doctor_read_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -5211,14 +5284,16 @@ int cbm_cmd_doctor(const char *version) {
             bool post = strstr(settings, "\"PostToolUse\"") != NULL &&
                         strstr(settings, "\"" CMM_POST_HOOK_MATCHER "\"") != NULL;
             bool session = strstr(settings, CMM_SESSION_REMINDER_SCRIPT) != NULL;
-            if (pre && post && session) {
-                printf("  OK   Claude Code hooks: PreToolUse(%s), PostToolUse(%s), SessionStart\n",
+            bool prompt = doctor_has_prompt_hook(path);
+            if (pre && post && session && prompt) {
+                printf("  OK   Claude Code hooks: PreToolUse(%s), PostToolUse(%s), "
+                       "UserPromptSubmit, SessionStart\n",
                        CMM_HOOK_MATCHER, CMM_POST_HOOK_MATCHER);
             } else {
                 printf("  WARN Claude Code hooks out of date (PreToolUse %s, PostToolUse %s, "
-                       "SessionStart %s). Fix: code-cortex-mcp install -y\n",
+                       "UserPromptSubmit %s, SessionStart %s). Fix: code-cortex-mcp install -y\n",
                        pre ? "ok" : "missing/old matcher", post ? "ok" : "missing",
-                       session ? "ok" : "missing");
+                       prompt ? "ok" : "missing", session ? "ok" : "missing");
                 warnings++;
             }
             free(settings);

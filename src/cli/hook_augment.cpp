@@ -15,6 +15,10 @@
  *   PreToolUse Read       -> coverage note when the file was not fully indexed.
  *   PostToolUse Edit/Write-> blast radius of the edited file: direct callers of
  *                            the symbols it defines, by file, tests separated.
+ *   UserPromptSubmit      -> for each code-looking identifier in the prompt that
+ *                            resolves in the index: kind, path:lines, defining
+ *                            line, caller/callee counts and names; plus the
+ *                            call chain between named functions (<= 4 KB).
  *
  * Cardinal rule: this NEVER blocks a tool call. Every error, timeout, missing
  * project, or short/odd pattern path results in `exit 0` with NO stdout
@@ -231,24 +235,32 @@ static char *ha_resolve_coverage(cbm_mcp_server_t *srv, const char *file_path) {
     return NULL;
 }
 
-/* Emit a hookSpecificOutput additionalContext payload to stdout (exactly once). */
-static void ha_emit(const char *event, const char *text, size_t max_bytes = 0) {
+/* Render a hookSpecificOutput additionalContext payload. Caller frees. */
+static char *ha_render(const char *event, const char *text) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) {
+        return NULL;
+    }
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
     yyjson_mut_val *hso = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, hso, "hookEventName", event);
     yyjson_mut_obj_add_str(doc, hso, "additionalContext", text);
     yyjson_mut_obj_add_val(doc, root, "hookSpecificOutput", hso);
-
     char *json = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    return json;
+}
+
+/* Emit a hookSpecificOutput additionalContext payload to stdout (exactly once). */
+static void ha_emit(const char *event, const char *text, size_t max_bytes = 0) {
+    char *json = ha_render(event, text);
     if (json) {
         if (!max_bytes || strlen(json) <= max_bytes) {
             fputs(json, stdout);
         }
         free(json);
     }
-    yyjson_mut_doc_free(doc);
 }
 
 /* True for an absolute path we can walk up: POSIX "/..." or a Windows drive
@@ -1066,86 +1078,6 @@ static bool ha_request_is_lookup(const char *request) {
     return lookup && definition;
 }
 
-/* Require an explicit, read-only request with two quoted endpoints. Other
- * relationship questions remain ordinary agent investigations. */
-static bool ha_request_chain(const char *request, std::string &from, std::string &to) {
-    if (!request || strstr(request, "```")) {
-        return false;
-    }
-    std::string lower;
-    for (const char *p = request; *p; ++p) {
-        lower += (char)tolower((unsigned char)*p);
-    }
-    bool quoted = false;
-    std::string previous;
-    for (const char *p = request; *p;) {
-        if (*p == '`') {
-            quoted = !quoted;
-            ++p;
-        } else if (quoted || !isalpha((unsigned char)*p)) {
-            ++p;
-        } else {
-            std::string word;
-            while (isalpha((unsigned char)*p)) {
-                word += (char)tolower((unsigned char)*p++);
-            }
-            const char *edits[] = {"add",    "fix",    "edit",   "modify",   "change",    "update",
-                                   "rename", "remove", "delete", "refactor", "implement", "repair"};
-            if (previous != "not" && previous != "never" &&
-                std::ranges::any_of(edits, [&word](const char *edit) { return word == edit; })) {
-                return false;
-            }
-            previous = word;
-        }
-    }
-    bool found = false;
-    for (const char *phrase :
-         {"show the call chain from", "trace the call chain from", "find the call chain from"}) {
-        for (size_t pos = lower.find(phrase); pos != std::string::npos;
-             pos = lower.find(phrase, pos + 1)) {
-            if (pos && (isalnum((unsigned char)request[pos - 1]) || request[pos - 1] == '_')) {
-                continue;
-            }
-            const char *before = lower.c_str() + pos;
-            std::string prev = ha_previous_word(lower.c_str(), before);
-            if (prev == "not" || prev == "never") {
-                return false;
-            }
-            const char *p = request + pos + strlen(phrase);
-            while (isspace((unsigned char)*p))
-                ++p;
-            if (*p++ != '`')
-                return false;
-            const char *end = strchr(p, '`');
-            if (!end)
-                return false;
-            std::string a(p, end);
-            p = end + 1;
-            while (isspace((unsigned char)*p))
-                ++p;
-            if (tolower((unsigned char)p[0]) != 't' || !p[1] ||
-                tolower((unsigned char)p[1]) != 'o' || !isspace((unsigned char)p[2]))
-                return false;
-            p += 2;
-            while (isspace((unsigned char)*p))
-                ++p;
-            if (*p++ != '`')
-                return false;
-            end = strchr(p, '`');
-            if (!end)
-                return false;
-            std::string b(p, end);
-            if (!ha_request_identifier(a) || !ha_request_identifier(b) ||
-                (found && (a != from || b != to)))
-                return false;
-            from = a;
-            to = b;
-            found = true;
-        }
-    }
-    return found;
-}
-
 #ifdef CBM_ENABLE_TEST_SEAMS
 char *cbm_request_symbol_for_testing(const char *request, bool automatic) {
     if (automatic && !ha_request_is_lookup(request)) {
@@ -1153,10 +1085,6 @@ char *cbm_request_symbol_for_testing(const char *request, bool automatic) {
     }
     std::string symbol = ha_request_symbol(request);
     return symbol.empty() ? nullptr : strdup(symbol.c_str());
-}
-char *cbm_request_chain_for_testing(const char *request) {
-    std::string from, to;
-    return ha_request_chain(request, from, to) ? strdup((from + " -> " + to).c_str()) : nullptr;
 }
 #endif
 
@@ -1609,46 +1537,6 @@ static char *ha_walk_session(cbm_mcp_server_t *srv, const char *start) {
     return NULL;
 }
 
-static char *ha_walk_chain(cbm_mcp_server_t *srv, const char *start, const char *from,
-                           const char *to) {
-    char dir[4096];
-    snprintf(dir, sizeof(dir), "%s", start);
-    for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); ++level) {
-        char *project = cbm_project_name_from_path(dir);
-        if (!project)
-            return nullptr;
-        yyjson_mut_doc *args_doc = yyjson_mut_doc_new(nullptr);
-        yyjson_mut_val *args = yyjson_mut_obj(args_doc);
-        yyjson_mut_doc_set_root(args_doc, args);
-        yyjson_mut_obj_add_str(args_doc, args, "project", project);
-        yyjson_mut_obj_add_str(args_doc, args, "function_name", to);
-        yyjson_mut_obj_add_str(args_doc, args, "from_function", from);
-        yyjson_mut_obj_add_str(args_doc, args, "direction", "inbound");
-        yyjson_mut_obj_add_int(args_doc, args, "depth", 6);
-        yyjson_mut_obj_add_int(args_doc, args, "source_context", 2);
-        yyjson_mut_obj_add_int(args_doc, args, "max_bytes", 5000);
-        char *encoded = yyjson_mut_write(args_doc, 0, nullptr);
-        bool error = false;
-        yyjson_doc *result = encoded ? ha_call(srv, "trace_path", encoded, &error) : nullptr;
-        bool project_missing = error && ha_error_is_project_miss(result);
-        yyjson_val *body = yyjson_doc_get_root(result);
-        size_t bytes = 0;
-        char *text = !error && yyjson_is_true(yyjson_obj_get(body, "path_found"))
-                         ? yyjson_write(result, 0, &bytes)
-                         : nullptr;
-        yyjson_doc_free(result);
-        free(encoded);
-        yyjson_mut_doc_free(args_doc);
-        free(project);
-        if (text && bytes <= 5000)
-            return text;
-        free(text);
-        if (!project_missing || !ha_strip_last_component(dir))
-            break;
-    }
-    return nullptr;
-}
-
 static char *ha_walk_edit(cbm_mcp_server_t *srv, const char *file_path) {
     char dir[4096];
     snprintf(dir, sizeof(dir), "%s", file_path);
@@ -1691,6 +1579,557 @@ static bool ha_norm_abs(const char *in, char *out, size_t out_sz) {
     return cbm_hook_path_is_abs(out);
 }
 
+/* ── UserPromptSubmit: graph facts for the symbols a prompt names ─────
+ * Before the model's first turn, resolve every code-looking identifier the
+ * user wrote against the cwd's index and hand the model what it would
+ * otherwise grep for: where each symbol is defined, its first source line,
+ * its direct neighbours, and — when two or more are functions — the call
+ * chain between them. Prose words never reach the database: a prompt with no
+ * code-looking token exits before the server is even created. */
+#define HA_PROMPT_MAX_CANDIDATES 6
+#define HA_PROMPT_MAX_BYTES 4000
+#define HA_PROMPT_MAX_PAIRS 3
+#define HA_PROMPT_NEIGHBOURS 3
+#define HA_PROMPT_SIG_MAX 200
+#define HA_PROMPT_TRACE_DEPTH 6
+#define HA_PROMPT_TRACE_WORK 5000
+#define HA_DEADLINE_PROMPT_MS 1500
+#define HA_PROMPT_LABEL                                                                       \
+    "[code-cortex] graph facts for symbols in your request (from the index; verify with the " \
+    "file if it may have changed):"
+
+static bool ha_ident_start(unsigned char c) {
+    return isalpha(c) || c == '_';
+}
+
+static bool ha_ident_char(unsigned char c) {
+    return isalnum(c) || c == '_';
+}
+
+/* Code rather than prose: a separator ('_', '::', '.'), a digit, or an inner
+ * capital (camelCase, PascalCase with a hump, HTTPServer). ALLCAPS words and
+ * Capitalised sentence starts are prose. */
+static bool ha_token_looks_like_code(const std::string &t) {
+    bool alpha = false;
+    bool code = false;
+    for (size_t i = 0; i < t.size(); ++i) {
+        unsigned char c = (unsigned char)t[i];
+        alpha |= isalpha(c) != 0;
+        if (c == '_' || c == '.' || c == ':' || isdigit(c)) {
+            code = true;
+        } else if (i > 0 && isupper(c) &&
+                   (islower((unsigned char)t[i - 1]) || isdigit((unsigned char)t[i - 1]) ||
+                    (i + 1 < t.size() && islower((unsigned char)t[i + 1])))) {
+            code = true;
+        }
+    }
+    return alpha && code;
+}
+
+/* "hook_augment.cpp" names a file, not a symbol. */
+static bool ha_token_is_filename(const std::string &t) {
+    size_t dot = t.rfind('.');
+    if (dot == std::string::npos || t.find("::") != std::string::npos) {
+        return false;
+    }
+    static const char *const kExt[] = {
+        "c",    "cc",  "cpp", "cxx", "h",     "hh",   "hpp",  "hxx",   "py",  "pyi",
+        "js",   "jsx", "ts",  "tsx", "go",    "rs",   "java", "kt",    "cs",  "swift",
+        "rb",   "php", "md",  "txt", "json",  "yaml", "yml",  "toml",  "sh",  "cmake",
+        "html", "css", "sql", "lua", "zig",   "m",    "mm",   "scala", "ini", "cfg",
+        "lock", "log", "csv", "xml", "proto", "rst",  "in",   "mk",    NULL,
+    };
+    std::string ext = t.substr(dot + 1);
+    for (int i = 0; kExt[i]; ++i) {
+        if (ext == kExt[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void ha_prompt_add(std::vector<std::string> &out, const std::string &tok) {
+    if (out.size() >= HA_PROMPT_MAX_CANDIDATES || tok.size() < HA_MIN_TOKEN ||
+        !ha_request_identifier(tok) || ha_token_is_filename(tok) ||
+        std::find(out.begin(), out.end(), tok) != out.end()) {
+        return;
+    }
+    out.push_back(tok);
+}
+
+/* Identifier runs joined by "::" or "." in [begin, end); only code-looking
+ * ones are kept. Tokens touching a path or address character ('/', '\\',
+ * '@') are path components or e-mail parts, not symbols. */
+static void ha_prompt_scan_plain(const char *begin, const char *end,
+                                 std::vector<std::string> &out) {
+    const char *p = begin;
+    while (p < end && out.size() < HA_PROMPT_MAX_CANDIDATES) {
+        if (!ha_ident_start((unsigned char)*p) ||
+            (p > begin && ha_ident_char((unsigned char)p[-1]))) {
+            ++p;
+            continue;
+        }
+        const char *s = p;
+        for (;;) {
+            while (p < end && ha_ident_char((unsigned char)*p)) {
+                ++p;
+            }
+            if (p + 2 < end && p[0] == ':' && p[1] == ':' && ha_ident_start((unsigned char)p[2])) {
+                p += 2;
+                continue;
+            }
+            if (p + 1 < end && p[0] == '.' && ha_ident_start((unsigned char)p[1])) {
+                ++p;
+                continue;
+            }
+            break;
+        }
+        bool pathlike = (s > begin && strchr("/\\@", s[-1])) || (p < end && strchr("/\\@", *p));
+        std::string tok(s, p);
+        if (!pathlike && ha_token_looks_like_code(tok)) {
+            ha_prompt_add(out, tok);
+        }
+    }
+}
+
+/* Every code-looking identifier in the prompt, in order of appearance, at
+ * most HA_PROMPT_MAX_CANDIDATES. Backtick-quoted identifiers are taken as
+ * written (a plain lowercase name counts when quoted); fenced ``` blocks are
+ * skipped — pasted code and logs are examples, not requests. */
+static std::vector<std::string> ha_prompt_candidates(const char *prompt) {
+    std::vector<std::string> out;
+    if (!prompt) {
+        return out;
+    }
+    const char *p = prompt;
+    const char *plain = p; /* start of the current unquoted stretch */
+    bool fenced = false;
+    while (*p && out.size() < HA_PROMPT_MAX_CANDIDATES) {
+        if (p[0] == '`' && p[1] == '`' && p[2] == '`') {
+            if (!fenced) {
+                ha_prompt_scan_plain(plain, p, out);
+            }
+            fenced = !fenced;
+            p += 3;
+            while (*p == '`') {
+                ++p;
+            }
+            plain = p;
+            continue;
+        }
+        if (fenced || *p != '`') {
+            ++p;
+            continue;
+        }
+        ha_prompt_scan_plain(plain, p, out);
+        size_t ticks = 0;
+        while (p[ticks] == '`') {
+            ++ticks;
+        }
+        const char *body = p + ticks;
+        const char *close = body;
+        for (; *close; ++close) {
+            size_t n = 0;
+            while (close[n] == '`') {
+                ++n;
+            }
+            if (n == ticks) {
+                break;
+            }
+            if (n) {
+                close += n - 1;
+            }
+        }
+        if (!*close) {
+            p = body; /* unterminated span: scan the rest as prose */
+            plain = p;
+            continue;
+        }
+        std::string span(body, close);
+        size_t a = span.find_first_not_of(" \t");
+        size_t b = span.find_last_not_of(" \t");
+        span = a == std::string::npos ? std::string() : span.substr(a, b - a + 1);
+        if (span.size() > 2 && span.compare(span.size() - 2, 2, "()") == 0) {
+            span.resize(span.size() - 2);
+        }
+        if (ha_request_identifier(span)) {
+            ha_prompt_add(out, span);
+        } else {
+            ha_prompt_scan_plain(body, close, out);
+        }
+        p = close + ticks;
+        plain = p;
+    }
+    if (!fenced && out.size() < HA_PROMPT_MAX_CANDIDATES) {
+        ha_prompt_scan_plain(plain, p + strlen(p), out);
+    }
+    return out;
+}
+
+/* Up to HA_PROMPT_NEIGHBOURS names from an inspect_symbol neighbour list. */
+static void ha_prompt_names(std::string &line, yyjson_val *arr, int total) {
+    size_t idx;
+    size_t maxn;
+    yyjson_val *v;
+    int shown = 0;
+    if (!arr || !yyjson_is_arr(arr)) {
+        return;
+    }
+    yyjson_arr_foreach(arr, idx, maxn, v) {
+        const char *name = ha_obj_str(v, "name");
+        if (!name || !*name || shown >= HA_PROMPT_NEIGHBOURS) {
+            continue;
+        }
+        line += shown ? ", " : ": ";
+        line += std::string(name).substr(0, HA_MAX_TOKEN);
+        shown++;
+    }
+    if (shown && total > shown) {
+        line += ", +" + std::to_string(total - shown) + " more";
+    }
+}
+
+/* One compact block for an inspect_symbol result; empty when it says nothing
+ * useful (not found, metadata omitted). *trace_name gets the name to trace
+ * from/to when the symbol is a function or method, else stays empty. */
+static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &token,
+                                          std::string *trace_name) {
+    if (trace_name) {
+        trace_name->clear();
+    }
+    yyjson_val *r = d ? yyjson_doc_get_root(d) : nullptr;
+    if (!r || !yyjson_is_obj(r) || yyjson_obj_get(r, "error")) {
+        return {};
+    }
+    char buf[640];
+    const char *status = ha_obj_str(r, "status");
+    if (status && strcmp(status, "ambiguous") == 0) {
+        yyjson_val *sugg = yyjson_obj_get(r, "suggestions");
+        size_t n = (sugg && yyjson_is_arr(sugg)) ? yyjson_arr_size(sugg) : 0;
+        if (n == 0) {
+            return {};
+        }
+        std::string block = "- " + token + ": " + std::to_string(n) + " matches";
+        size_t idx;
+        size_t maxn;
+        yyjson_val *s;
+        size_t shown = 0;
+        yyjson_arr_foreach(sugg, idx, maxn, s) {
+            if (shown >= HA_PROMPT_NEIGHBOURS) {
+                break;
+            }
+            const char *qn = ha_obj_str(s, "qualified_name");
+            const char *label = ha_obj_str(s, "label");
+            const char *file = ha_obj_str(s, "file_path");
+            snprintf(buf, sizeof(buf), "%s %.160s (%.32s, %.200s)", shown ? "," : ":",
+                     qn ? qn : "?", label ? label : "?", file ? file : "?");
+            block += buf;
+            shown++;
+        }
+        if (n > shown) {
+            block += ", +" + std::to_string(n - shown) + " more";
+        }
+        return block;
+    }
+    yyjson_val *sym = yyjson_obj_get(r, "symbol");
+    const char *file = ha_obj_str(sym, "file");
+    if (!sym || !file || !*file || yyjson_is_true(yyjson_obj_get(r, "metadata_omitted"))) {
+        return {};
+    }
+    const char *label = ha_obj_str(sym, "label");
+    bool declaration = label && strcmp(label, "Declaration") == 0;
+    snprintf(buf, sizeof(buf), "- %s: %.32s at %.300s:%d-%d", token.c_str(),
+             label && *label ? label : "symbol", file, ha_obj_int(sym, "start_line"),
+             ha_obj_int(sym, "end_line"));
+    std::string block = buf;
+    if (declaration) {
+        block += " (declaration only; no definition indexed)";
+    }
+    yyjson_val *decl = yyjson_obj_get(r, "declared_in");
+    size_t ndecl = (decl && yyjson_is_arr(decl)) ? yyjson_arr_size(decl) : 0;
+    if (ndecl > 0) {
+        yyjson_val *d0 = yyjson_arr_get(decl, 0);
+        const char *df = ha_obj_str(d0, "file");
+        int total = ha_obj_int(r, "declared_in_total");
+        snprintf(buf, sizeof(buf), "; definition, declared at %.300s:%d%s", df ? df : "?",
+                 ha_obj_int(d0, "line"), total > 1 ? " (+more)" : "");
+        block += buf;
+    }
+    yyjson_val *also = yyjson_obj_get(r, "also_defined_as");
+    if (also && yyjson_is_arr(also) && yyjson_arr_size(also) > 0) {
+        yyjson_val *a0 = yyjson_arr_get(also, 0);
+        const char *al = ha_obj_str(a0, "label");
+        const char *af = ha_obj_str(a0, "file");
+        snprintf(buf, sizeof(buf), "; also %.32s at %.300s:%d%s", al ? al : "symbol", af ? af : "?",
+                 ha_obj_int(a0, "start_line"), yyjson_arr_size(also) > 1 ? " (+more)" : "");
+        block += buf;
+    }
+    if (yyjson_is_true(yyjson_obj_get(yyjson_obj_get(r, "index"), "file_modified_after_index"))) {
+        block += "; NOTE: file changed after indexing";
+    }
+
+    /* First source line (the defining line), else the stored signature. */
+    std::string sig;
+    const char *source = ha_obj_str(r, "source");
+    if (source) {
+        const char *eol = strchr(source, '\n');
+        sig.assign(source, eol ? (size_t)(eol - source) : strlen(source));
+    } else if (const char *s = ha_obj_str(sym, "signature")) {
+        sig = s;
+    }
+    size_t a = sig.find_first_not_of(" \t\r");
+    size_t b = sig.find_last_not_of(" \t\r");
+    sig = a == std::string::npos ? std::string() : sig.substr(a, b - a + 1);
+    if (sig.size() > HA_PROMPT_SIG_MAX) {
+        sig.resize(HA_PROMPT_SIG_MAX);
+        sig += "...";
+    }
+    if (!sig.empty()) {
+        block += "\n  " + sig;
+    }
+
+    int callers = ha_obj_int(r, "callers_total");
+    int tests = ha_obj_int(r, "related_tests_total");
+    int callees = ha_obj_int(r, "callees_total");
+    std::string rel = "\n  callers " + std::to_string(callers);
+    if (tests > 0) {
+        rel += " (+" + std::to_string(tests) + " in tests)";
+    }
+    ha_prompt_names(rel, yyjson_obj_get(r, "callers"), callers);
+    rel += "; callees " + std::to_string(callees);
+    ha_prompt_names(rel, yyjson_obj_get(r, "callees"), callees);
+    block += rel;
+
+    if (trace_name && label && (strcmp(label, "Function") == 0 || strcmp(label, "Method") == 0)) {
+        const char *qn = ha_obj_str(sym, "qualified_name");
+        *trace_name = qn && *qn ? qn : token;
+    }
+    return block;
+}
+
+/* "a -> b -> c" with each hop's file:line, from a trace_path result. */
+static std::string ha_prompt_chain_line(yyjson_doc *d, const std::string &from,
+                                        const std::string &to) {
+    yyjson_val *r = d ? yyjson_doc_get_root(d) : nullptr;
+    if (!r || !yyjson_is_true(yyjson_obj_get(r, "path_found"))) {
+        return {};
+    }
+    yyjson_val *path = yyjson_obj_get(r, "path");
+    size_t n = (path && yyjson_is_arr(path)) ? yyjson_arr_size(path) : 0;
+    if (n < 2) {
+        return {};
+    }
+    std::string line = "- call chain " + from + " -> " + to + " (" + std::to_string(n - 1) +
+                       " hop" + (n - 1 == 1 ? "" : "s") + "): ";
+    size_t idx;
+    size_t maxn;
+    yyjson_val *hop;
+    char buf[512];
+    yyjson_arr_foreach(path, idx, maxn, hop) {
+        const char *name = ha_obj_str(hop, "name");
+        const char *file = ha_obj_str(hop, "file");
+        snprintf(buf, sizeof(buf), "%s%.96s (%.300s:%d)", idx ? " -> " : "", name ? name : "?",
+                 file ? file : "?", ha_obj_int(hop, "start_line"));
+        line += buf;
+    }
+    return line;
+}
+
+/* The hook JSON for the label plus as many blocks as fit in max_bytes of
+ * rendered output. A block that does not fit whole is cut at a line
+ * boundary; nothing is ever cut inside a line or the JSON. NULL when no
+ * block fits. */
+static char *ha_prompt_payload(const std::vector<std::string> &blocks, size_t max_bytes) {
+    std::string text = HA_PROMPT_LABEL;
+    bool any = false;
+    char *best = nullptr;
+    for (const auto &block : blocks) {
+        std::string candidate = block;
+        bool fitted = false;
+        for (;;) {
+            std::string trial = text + "\n" + candidate;
+            char *json = ha_render("UserPromptSubmit", trial.c_str());
+            if (json && strlen(json) <= max_bytes) {
+                free(best);
+                best = json;
+                text = trial;
+                any = true;
+                fitted = true;
+                break;
+            }
+            free(json);
+            size_t cut = candidate.rfind('\n');
+            if (cut == std::string::npos) {
+                break;
+            }
+            candidate.resize(cut);
+        }
+        if (!fitted || candidate.size() != block.size()) {
+            break; /* budget exhausted */
+        }
+    }
+    if (!any) {
+        free(best);
+        return nullptr;
+    }
+    return best;
+}
+
+static yyjson_doc *ha_prompt_inspect(cbm_mcp_server_t *srv, const char *project,
+                                     const std::string &token, bool *is_error) {
+    yyjson_mut_doc *ad = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_val *args = yyjson_mut_obj(ad);
+    yyjson_mut_doc_set_root(ad, args);
+    yyjson_mut_obj_add_str(ad, args, "project", project);
+    yyjson_mut_obj_add_strncpy(ad, args, "symbol", token.data(), token.size());
+    yyjson_mut_obj_add_int(ad, args, "source_lines", 1);
+    yyjson_mut_obj_add_int(ad, args, "callers_limit", HA_PROMPT_NEIGHBOURS);
+    yyjson_mut_obj_add_int(ad, args, "callees_limit", HA_PROMPT_NEIGHBOURS);
+    yyjson_mut_obj_add_int(ad, args, "max_bytes", 8000);
+    char *encoded = yyjson_mut_write(ad, 0, nullptr);
+    yyjson_mut_doc_free(ad);
+    *is_error = false;
+    yyjson_doc *d = encoded ? ha_call(srv, "inspect_symbol", encoded, is_error) : nullptr;
+    free(encoded);
+    return d;
+}
+
+static std::string ha_prompt_trace(cbm_mcp_server_t *srv, const char *project,
+                                   const std::string &from, const std::string &to,
+                                   const std::string &from_label, const std::string &to_label) {
+    yyjson_mut_doc *ad = yyjson_mut_doc_new(nullptr);
+    yyjson_mut_val *args = yyjson_mut_obj(ad);
+    yyjson_mut_doc_set_root(ad, args);
+    yyjson_mut_obj_add_str(ad, args, "project", project);
+    yyjson_mut_obj_add_strncpy(ad, args, "function_name", to.data(), to.size());
+    yyjson_mut_obj_add_strncpy(ad, args, "from_function", from.data(), from.size());
+    yyjson_mut_obj_add_str(ad, args, "direction", "inbound");
+    yyjson_mut_obj_add_int(ad, args, "depth", HA_PROMPT_TRACE_DEPTH);
+    yyjson_mut_obj_add_int(ad, args, "max_work", HA_PROMPT_TRACE_WORK);
+    yyjson_mut_obj_add_int(ad, args, "max_bytes", 8000);
+    char *encoded = yyjson_mut_write(ad, 0, nullptr);
+    yyjson_mut_doc_free(ad);
+    bool error = false;
+    yyjson_doc *d = encoded ? ha_call(srv, "trace_path", encoded, &error) : nullptr;
+    free(encoded);
+    std::string line = error ? std::string() : ha_prompt_chain_line(d, from_label, to_label);
+    yyjson_doc_free(d);
+    return line;
+}
+
+/* Resolve the candidates against the first indexed project at or above cwd.
+ * *indexed reports whether such a project exists (so the caller can choose
+ * the unindexed fallback). Returns the hook JSON or NULL. */
+static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
+                               const std::vector<std::string> &cands, bool *indexed) {
+    *indexed = false;
+    char dir[4096];
+    snprintf(dir, sizeof(dir), "%s", cwd);
+    char *project = nullptr;
+    yyjson_doc *first = nullptr;
+    bool first_error = false;
+    for (int level = 0; level < HA_MAX_WALKUP && cbm_hook_path_is_abs(dir); level++) {
+        char *name = cbm_project_name_from_path(dir);
+        if (name) {
+            bool error = false;
+            yyjson_doc *d = ha_prompt_inspect(srv, name, cands[0], &error);
+            if (d && (!error || !ha_error_is_project_miss(d))) {
+                project = name;
+                first = d;
+                first_error = error;
+                break;
+            }
+            yyjson_doc_free(d);
+            free(name);
+        }
+        if (!ha_strip_last_component(dir)) {
+            break;
+        }
+    }
+    if (!project) {
+        return nullptr;
+    }
+    *indexed = true;
+
+    std::vector<std::string> symbols;
+    std::vector<std::pair<std::string, std::string>> functions; /* trace name, label */
+    for (size_t i = 0; i < cands.size(); ++i) {
+        bool error = first_error;
+        yyjson_doc *d = first;
+        if (i > 0) {
+            d = ha_prompt_inspect(srv, project, cands[i], &error);
+        }
+        std::string trace_name;
+        std::string block =
+            error ? std::string() : ha_prompt_symbol_block(d, cands[i], &trace_name);
+        yyjson_doc_free(d);
+        if (!block.empty()) {
+            symbols.push_back(block);
+        }
+        if (!trace_name.empty()) {
+            functions.emplace_back(trace_name, cands[i]);
+        }
+    }
+
+    std::vector<std::string> blocks;
+    int pairs = 0;
+    for (size_t i = 0; i < functions.size() && pairs < HA_PROMPT_MAX_PAIRS; ++i) {
+        for (size_t j = i + 1; j < functions.size() && pairs < HA_PROMPT_MAX_PAIRS; ++j) {
+            pairs++;
+            const auto &a = functions[i];
+            const auto &b = functions[j];
+            std::string line = ha_prompt_trace(srv, project, a.first, b.first, a.second, b.second);
+            if (line.empty()) {
+                line = ha_prompt_trace(srv, project, b.first, a.first, b.second, a.second);
+            }
+            if (!line.empty()) {
+                blocks.push_back(line);
+            }
+        }
+    }
+    free(project);
+    blocks.insert(blocks.end(), symbols.begin(), symbols.end());
+    return blocks.empty() ? nullptr : ha_prompt_payload(blocks, HA_PROMPT_MAX_BYTES);
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+char *cbm_prompt_candidates_for_testing(const char *prompt) {
+    std::vector<std::string> cands = ha_prompt_candidates(prompt);
+    if (cands.empty()) {
+        return nullptr;
+    }
+    std::string joined;
+    for (const auto &c : cands) {
+        joined += (joined.empty() ? "" : "\n") + c;
+    }
+    return strdup(joined.c_str());
+}
+char *cbm_prompt_symbol_block_for_testing(const char *inspect_json, const char *token,
+                                          char **trace_name) {
+    yyjson_doc *doc = inspect_json ? yyjson_read(inspect_json, strlen(inspect_json), 0) : nullptr;
+    std::string name;
+    std::string block = ha_prompt_symbol_block(doc, token ? token : "", &name);
+    yyjson_doc_free(doc);
+    if (trace_name) {
+        *trace_name = name.empty() ? nullptr : strdup(name.c_str());
+    }
+    return block.empty() ? nullptr : strdup(block.c_str());
+}
+char *cbm_prompt_chain_line_for_testing(const char *trace_json, const char *from, const char *to) {
+    yyjson_doc *doc = trace_json ? yyjson_read(trace_json, strlen(trace_json), 0) : nullptr;
+    std::string line = ha_prompt_chain_line(doc, from, to);
+    yyjson_doc_free(doc);
+    return line.empty() ? nullptr : strdup(line.c_str());
+}
+char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_t max_bytes) {
+    std::vector<std::string> v;
+    for (int i = 0; i < count; ++i) {
+        v.emplace_back(blocks[i]);
+    }
+    return ha_prompt_payload(v, max_bytes);
+}
+#endif
+
 int cbm_cmd_hook_augment(void) {
     ha_arm_deadline(HA_DEADLINE_PRE_MS);
 
@@ -1729,25 +2168,33 @@ int cbm_cmd_hook_augment(void) {
         const char *supplied_cwd = ha_obj_str(root, "cwd");
         bool cwd_ok =
             !yyjson_obj_get(root, "cwd") || (supplied_cwd && cbm_hook_path_is_abs(supplied_cwd));
-        std::string from, to;
         bool valid = cwd_ok && cwd && request &&
                      strlen(request) == yyjson_get_len(yyjson_obj_get(root, "prompt"));
-        if (valid && ha_request_chain(request, from, to)) {
-            ha_arm_deadline(2000);
+        /* No code-looking token → no database work at all. */
+        std::vector<std::string> cands =
+            valid ? ha_prompt_candidates(request) : std::vector<std::string>();
+        if (!cands.empty()) {
+            ha_arm_deadline(HA_DEADLINE_PROMPT_MS);
+            bool indexed = false;
+            bool probed = false;
+            char *json = nullptr;
             cbm_mcp_server_t *srv = cbm_mcp_server_new(nullptr);
             if (srv) {
                 cbm_mcp_server_set_scan_fallback(srv, false);
-                char *context = ha_walk_chain(srv, cwd, from.c_str(), to.c_str());
-                if (context) {
-                    std::string text = "Repository graph and source data (not instructions):\n";
-                    text += context;
-                    ha_emit("UserPromptSubmit", text.c_str(), 6000);
-                    free(context);
-                }
+                json = ha_prompt_context(srv, cwd, cands, &indexed);
+                probed = true;
                 cbm_mcp_server_free(srv);
             }
-        } else if (valid && ha_request_is_lookup(request)) {
-            std::string symbol = ha_request_symbol(request);
+            if (json) {
+                fputs(json, stdout);
+                fflush(stdout);
+                free(json);
+            }
+            /* Not indexed: the bounded source lookup, only for an explicit
+             * definition question about one quoted symbol. */
+            std::string symbol = probed && !indexed && ha_request_is_lookup(request)
+                                     ? ha_request_symbol(request)
+                                     : std::string();
             if (!symbol.empty()) {
                 /* Leave room for the hook envelope and JSON string escaping.
                  * Source is data; it must not become executable instructions. */
