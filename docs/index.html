@@ -305,7 +305,9 @@
             only prompt, the agent free to use any tool. The <code>mcp</code> arm has the product
             installed; the <code>shell</code> arm has an empty configuration and no MCP servers.
             Paired wall-time ratio mcp / shell, geometric mean over pairs both arms answered
-            correctly. Lower is faster.
+            correctly. Lower is faster. The table is the synthetic C++ task set, where every symbol
+            resolves exactly. On 32 real-repository tasks in seven languages the same build was not
+            faster overall (1.05 on Opus, 0.95 on Fable); only call chains were (0.80 and 0.77).
         </p>
         <div class="table-wrap">
         <table class="num">

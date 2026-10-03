@@ -157,7 +157,16 @@ comparison.
 ### Complete-task performance
 
 Agent-level comparison on 2026-10-03: a fresh Claude Code session per task, the task as
-the only prompt, and the agent free to use any tool. The `mcp` arm has the product
+the only prompt, and the agent free to use any tool. Two task sets were run and they
+disagree, so read both. On **real repositories** (32 tasks: redis, rocksdb, etcd, django,
+rails, TypeScript, elasticsearch, neovim × locate / callers / call chain / impact, two
+repetitions, 256 sessions) the installed product was **not faster overall**: time ratio
+1.05 on Opus 5.5 (p = 0.005, slower) and 0.95 on Fable 5.1 (p = 0.70). Call chains were
+faster (0.80 and 0.77); callers and impact questions were slower on Opus (1.13 and 1.26)
+because the prompt hook listed three callers where the task needed the complete file set,
+resolved unrelated identifiers, and missed qualified and Ruby method names. The tables
+below are the **synthetic C++ corpora**, where every symbol is unique and resolves exactly;
+they show the ceiling of the approach, not what to expect on your code. The `mcp` arm has the product
 installed (`code-cortex-mcp install`: MCP server, hooks, skill); the `shell` arm has an
 empty Claude Code configuration and no MCP servers. The prompt never mentions the graph.
 Ratios are paired wall time mcp / shell over task pairs both arms answered correctly,

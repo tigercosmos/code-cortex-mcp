@@ -93,7 +93,9 @@ The 2026-10-03 run measured full Claude Code sessions, not isolated graph calls:
 session per task, the task as the only prompt, the agent free to use any tool, and the timer
 around the whole process (startup, hooks, MCP connection, every model turn).
 
-With the product installed, Opus 5.5 finished the same tasks in 0.557 of the shell-only time
+On 32 real-repository tasks in seven languages the installed product was not faster overall
+(time ratio 1.05 on Opus 5.5, 0.95 on Fable 5.1); only call chains were (0.80 and 0.77). On the
+synthetic C++ task set, where every symbol resolves exactly, Opus 5.5 finished in 0.557 of the shell-only time
 (48 pairs) and Fable 5.1 in 0.622 (38 exact-match pairs). The agent called no MCP tool; the time
 came from the UserPromptSubmit hook that puts verified definition locations and call chains into
 the context before the first turn, and from a SessionStart brief that is stored at index time so
