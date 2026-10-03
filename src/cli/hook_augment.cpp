@@ -1578,16 +1578,27 @@ static bool ha_norm_abs(const char *in, char *out, size_t out_sz) {
 #define HA_PROMPT_TRACE_DEPTH 6
 #define HA_PROMPT_TRACE_WORK 5000
 #define HA_DEADLINE_PROMPT_MS 1500
-/* The label states what was checked: each resolved symbol's defining file
- * against the index time (inspect_symbol's file_modified_after_index, which
- * compares the file's mtime with the project's indexed_at — an mtime check,
- * not a content hash). An unflagged label invites no verification grep. */
+/* The label states exactly what was checked, so the model has nothing left
+ * to verify with a grep of its own:
+ *  - VERIFIED: every location printed was re-read from its file just now
+ *    (ha_verify_loc) and still holds the symbol at that line.
+ *  - FRESH/STALE: the fallback when a file could not be re-read (unreadable,
+ *    over the read caps, or out of time). It reports inspect_symbol's
+ *    file_modified_after_index, which compares the file's mtime with the
+ *    project's indexed_at — an mtime check, not a content check. */
+#define HA_PROMPT_LABEL_VERIFIED                                                              \
+    "[code-cortex] graph facts for symbols in your request. Each location below was re-read " \
+    "from the file just now and matches the index, so a grep for these names would return "   \
+    "the same path:line."
 #define HA_PROMPT_LABEL_FRESH                                                                 \
     "[code-cortex] graph facts for symbols in your request (from the index; source files of " \
     "these symbols unchanged since indexing):"
 #define HA_PROMPT_LABEL_STALE                                                                \
     "[code-cortex] graph facts for symbols in your request (from the index; entries marked " \
     "stale have a file modified after indexing, re-check those):"
+#define HA_VERIFY_MAX_FILES 8
+#define HA_VERIFY_MAX_FILE_BYTES (2 * 1024 * 1024)
+#define HA_VERIFY_BUDGET_MS 800 /* of the 1500 ms event deadline */
 
 static bool ha_ident_start(unsigned char c) {
     return isalpha(c) || c == '_';
@@ -1780,11 +1791,188 @@ static void ha_prompt_names(std::string &line, yyjson_val *arr, int total) {
     }
 }
 
+/* ── Location re-check ──────────────────────────────────────────────
+ * Re-read each printed location from disk and confirm the indexed line still
+ * holds the symbol, so the context can say "verified now" instead of inviting
+ * a confirmation grep. Bounded: at most HA_VERIFY_MAX_FILES files, each read
+ * sequentially up to HA_VERIFY_MAX_FILE_BYTES, within HA_VERIFY_BUDGET_MS.
+ * Anything not checked stays UNCHECKED and falls back to the mtime wording. */
+enum { HA_LOC_UNCHECKED = -1, HA_LOC_MISMATCH = 0, HA_LOC_VERIFIED = 1 };
+
+struct ha_file_lines {
+    std::string rel;
+    bool ok = false;
+    bool truncated = false; /* the byte cap cut the file: lines past it are unknown */
+    std::vector<std::string> lines;
+};
+
+struct ha_verifier {
+    std::string root; /* empty: verification off */
+    std::chrono::steady_clock::time_point deadline;
+    std::vector<ha_file_lines> files;
+    int verified = 0;
+    int mismatched = 0;
+    int unchecked = 0;
+    bool mtime_stale = false; /* an unchecked location whose file changed by mtime */
+    std::vector<std::string> recheck;
+};
+
+static const ha_file_lines *ha_verify_load(ha_verifier *v, const std::string &rel) {
+    for (const auto &f : v->files) {
+        if (f.rel == rel) {
+            return &f;
+        }
+    }
+    if ((int)v->files.size() >= HA_VERIFY_MAX_FILES ||
+        std::chrono::steady_clock::now() >= v->deadline) {
+        return nullptr;
+    }
+    ha_file_lines fl;
+    fl.rel = rel;
+    /* Repository-relative paths only: never follow ".." or an absolute path
+     * out of the project root. */
+    bool safe = !rel.empty() && rel[0] != '/' && rel.find('\\') == std::string::npos &&
+                rel != ".." && rel.rfind("../", 0) != 0 && rel.find("/../") == std::string::npos;
+    FILE *fp = safe ? fopen((v->root + "/" + rel).c_str(), "rb") : nullptr;
+    if (fp) {
+        std::string data;
+        data.resize(HA_VERIFY_MAX_FILE_BYTES + 1);
+        size_t n = fread(&data[0], 1, data.size(), fp);
+        fl.ok = !ferror(fp);
+        fclose(fp);
+        fl.truncated = n > HA_VERIFY_MAX_FILE_BYTES;
+        data.resize(fl.truncated ? HA_VERIFY_MAX_FILE_BYTES : n);
+        size_t start = 0;
+        while (fl.ok && start <= data.size()) {
+            size_t eol = data.find('\n', start);
+            if (eol == std::string::npos) {
+                if (start < data.size() && !fl.truncated) {
+                    fl.lines.push_back(data.substr(start));
+                }
+                break;
+            }
+            size_t len = eol - start;
+            if (len && data[eol - 1] == '\r') {
+                len--;
+            }
+            fl.lines.push_back(data.substr(start, len));
+            start = eol + 1;
+        }
+    }
+    v->files.push_back(std::move(fl));
+    return &v->files.back();
+}
+
+static std::string ha_norm_ws(const std::string &in) {
+    std::string out;
+    bool space = false;
+    for (char c : in) {
+        if (isspace((unsigned char)c)) {
+            space = !out.empty();
+        } else {
+            if (space) {
+                out += ' ';
+                space = false;
+            }
+            out += c;
+        }
+    }
+    return out;
+}
+
+static bool ha_line_has_ident(const std::string &line, const std::string &name) {
+    if (name.empty()) {
+        return false;
+    }
+    for (size_t pos = line.find(name); pos != std::string::npos; pos = line.find(name, pos + 1)) {
+        bool left = pos == 0 || !ha_ident_char((unsigned char)line[pos - 1]);
+        size_t end = pos + name.size();
+        bool right = end >= line.size() || !ha_ident_char((unsigned char)line[end]);
+        if (left && right) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The identifier a location's line must contain: the last segment of a
+ * qualified name ("ns::Widget.render" -> "render"). */
+static std::string ha_short_name(const std::string &name) {
+    size_t cut = name.find_last_of(".:");
+    return cut == std::string::npos ? name : name.substr(cut + 1);
+}
+
+/* Check one location; *line_out gets the line read (when one was). When
+ * `expected` is given, the line must also equal it after whitespace
+ * normalization. Updates the verifier's tallies. */
+static int ha_verify_loc(ha_verifier *v, const char *rel, int line, const std::string &name,
+                         const std::string *expected = nullptr, std::string *line_out = nullptr) {
+    int state = HA_LOC_UNCHECKED;
+    if (v && !v->root.empty() && rel && *rel && line > 0 && !name.empty()) {
+        const ha_file_lines *fl = ha_verify_load(v, rel);
+        if (fl && fl->ok) {
+            if ((size_t)line > fl->lines.size()) {
+                state = fl->truncated ? HA_LOC_UNCHECKED : HA_LOC_MISMATCH;
+            } else {
+                const std::string &text = fl->lines[(size_t)line - 1];
+                if (line_out) {
+                    *line_out = text;
+                }
+                bool same =
+                    !expected || expected->empty() || ha_norm_ws(text) == ha_norm_ws(*expected);
+                state = ha_line_has_ident(text, ha_short_name(name)) && same ? HA_LOC_VERIFIED
+                                                                             : HA_LOC_MISMATCH;
+            }
+        }
+    }
+    if (v) {
+        (state == HA_LOC_VERIFIED   ? v->verified
+         : state == HA_LOC_MISMATCH ? v->mismatched
+                                    : v->unchecked)++;
+    }
+    return state;
+}
+
+static const char *ha_loc_suffix(int state) {
+    return state == HA_LOC_VERIFIED   ? " (verified now)"
+           : state == HA_LOC_MISMATCH ? " (stale: line changed since indexing, re-check)"
+                                      : "";
+}
+
+/* The label for what the verifier saw (see HA_PROMPT_LABEL_VERIFIED). */
+static std::string ha_prompt_label(const ha_verifier &v) {
+    if (v.mismatched > 0 || v.mtime_stale) {
+        std::string names;
+        for (const auto &n : v.recheck) {
+            if (names.find(n) == std::string::npos) {
+                names += (names.empty() ? "" : ", ") + n;
+            }
+        }
+        std::string label = "[code-cortex] graph facts for symbols in your request (from the "
+                            "index). Re-check before relying on: " +
+                            names + " (marked stale).";
+        if (v.verified > 0) {
+            label += " Locations marked (verified now) were re-read from the file just now and "
+                     "match the index.";
+        }
+        return label;
+    }
+    if (v.verified > 0 && v.unchecked == 0) {
+        return HA_PROMPT_LABEL_VERIFIED;
+    }
+    std::string label = HA_PROMPT_LABEL_FRESH;
+    if (v.verified > 0) {
+        label += " Locations marked (verified now) were also re-read from the file just now.";
+    }
+    return label;
+}
+
 /* One compact block for an inspect_symbol result; empty when it says nothing
  * useful (not found, metadata omitted). *trace_name gets the name to trace
  * from/to when the symbol is a function or method, else stays empty. */
 static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &token,
-                                          std::string *trace_name, bool *stale = nullptr) {
+                                          std::string *trace_name, bool *stale = nullptr,
+                                          ha_verifier *v = nullptr) {
     if (trace_name) {
         trace_name->clear();
     }
@@ -1832,10 +2020,26 @@ static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &toke
     }
     const char *label = ha_obj_str(sym, "label");
     bool declaration = label && strcmp(label, "Declaration") == 0;
+    const char *sym_name = ha_obj_str(sym, "name");
+    std::string name = sym_name && *sym_name ? sym_name : token;
+
+    /* First source line as inspect_symbol returned it (the defining line). */
+    std::string first;
+    const char *source = ha_obj_str(r, "source");
+    if (source) {
+        const char *eol = strchr(source, '\n');
+        first.assign(source, eol ? (size_t)(eol - source) : strlen(source));
+    }
+    int unchecked_before = v ? v->unchecked : 0;
+    std::string read_line;
+    int loc = ha_verify_loc(v, file, ha_obj_int(sym, "start_line"), name, &first, &read_line);
+    bool needs_recheck = loc == HA_LOC_MISMATCH;
+
     snprintf(buf, sizeof(buf), "- %s: %.32s at %.300s:%d-%d", token.c_str(),
              label && *label ? label : "symbol", file, ha_obj_int(sym, "start_line"),
              ha_obj_int(sym, "end_line"));
     std::string block = buf;
+    block += ha_loc_suffix(loc);
     if (declaration) {
         block += " (declaration only; no definition indexed)";
     }
@@ -1845,34 +2049,57 @@ static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &toke
         yyjson_val *d0 = yyjson_arr_get(decl, 0);
         const char *df = ha_obj_str(d0, "file");
         int total = ha_obj_int(r, "declared_in_total");
-        snprintf(buf, sizeof(buf), "; definition, declared at %.300s:%d%s", df ? df : "?",
-                 ha_obj_int(d0, "line"), total > 1 ? " (+more)" : "");
+        snprintf(buf, sizeof(buf), "; definition, declared at %.300s:%d", df ? df : "?",
+                 ha_obj_int(d0, "line"));
         block += buf;
+        int dloc = ha_verify_loc(v, df, ha_obj_int(d0, "line"), name);
+        needs_recheck |= dloc == HA_LOC_MISMATCH;
+        block += ha_loc_suffix(dloc);
+        block += total > 1 ? " (+more)" : "";
     }
     yyjson_val *also = yyjson_obj_get(r, "also_defined_as");
     if (also && yyjson_is_arr(also) && yyjson_arr_size(also) > 0) {
         yyjson_val *a0 = yyjson_arr_get(also, 0);
         const char *al = ha_obj_str(a0, "label");
         const char *af = ha_obj_str(a0, "file");
-        snprintf(buf, sizeof(buf), "; also %.32s at %.300s:%d%s", al ? al : "symbol", af ? af : "?",
-                 ha_obj_int(a0, "start_line"), yyjson_arr_size(also) > 1 ? " (+more)" : "");
+        snprintf(buf, sizeof(buf), "; also %.32s at %.300s:%d", al ? al : "symbol", af ? af : "?",
+                 ha_obj_int(a0, "start_line"));
         block += buf;
+        const char *aqn = ha_obj_str(a0, "qualified_name");
+        int aloc = ha_verify_loc(v, af, ha_obj_int(a0, "start_line"), aqn ? aqn : name);
+        needs_recheck |= aloc == HA_LOC_MISMATCH;
+        block += ha_loc_suffix(aloc);
+        block += yyjson_arr_size(also) > 1 ? " (+more)" : "";
     }
-    if (yyjson_is_true(yyjson_obj_get(yyjson_obj_get(r, "index"), "file_modified_after_index"))) {
+    bool modified =
+        yyjson_is_true(yyjson_obj_get(yyjson_obj_get(r, "index"), "file_modified_after_index"));
+    bool any_unchecked = v ? v->unchecked > unchecked_before : true;
+    if (modified && any_unchecked && !needs_recheck) {
+        /* Not re-read: only the mtime says the file changed. */
         block += "; stale: file modified after indexing, re-check";
+        needs_recheck = true;
+        if (v) {
+            v->mtime_stale = true;
+        }
+    } else if (modified && loc == HA_LOC_VERIFIED) {
+        block += "; file edited after indexing (location still matches; callers may lag)";
+    }
+    if (needs_recheck) {
         if (stale) {
             *stale = true;
         }
+        if (v) {
+            v->recheck.push_back(token);
+        }
     }
 
-    /* First source line (the defining line), else the stored signature. */
-    std::string sig;
-    const char *source = ha_obj_str(r, "source");
-    if (source) {
-        const char *eol = strchr(source, '\n');
-        sig.assign(source, eol ? (size_t)(eol - source) : strlen(source));
-    } else if (const char *s = ha_obj_str(sym, "signature")) {
-        sig = s;
+    /* The defining line: as just re-read when it was, else as inspect_symbol
+     * returned it, else the stored signature. */
+    std::string sig = loc != HA_LOC_UNCHECKED && !read_line.empty() ? read_line : first;
+    if (sig.empty()) {
+        if (const char *s = ha_obj_str(sym, "signature")) {
+            sig = s;
+        }
     }
     size_t a = sig.find_first_not_of(" \t\r");
     size_t b = sig.find_last_not_of(" \t\r");
@@ -1882,7 +2109,12 @@ static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &toke
         sig += "...";
     }
     if (!sig.empty()) {
-        block += "\n  " + sig;
+        /* A failed re-check shows what the indexed line holds now, so the
+         * model does not take it for the definition. */
+        block +=
+            loc == HA_LOC_MISMATCH
+                ? "\n  line " + std::to_string(ha_obj_int(sym, "start_line")) + " now reads: " + sig
+                : "\n  " + sig;
     }
 
     int callers = ha_obj_int(r, "callers_total");
@@ -1906,7 +2138,7 @@ static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &toke
 
 /* "a -> b -> c" with each hop's file:line, from a trace_path result. */
 static std::string ha_prompt_chain_line(yyjson_doc *d, const std::string &from,
-                                        const std::string &to) {
+                                        const std::string &to, ha_verifier *v = nullptr) {
     yyjson_val *r = d ? yyjson_doc_get_root(d) : nullptr;
     if (!r || !yyjson_is_true(yyjson_obj_get(r, "path_found"))) {
         return {};
@@ -1922,12 +2154,24 @@ static std::string ha_prompt_chain_line(yyjson_doc *d, const std::string &from,
     size_t maxn;
     yyjson_val *hop;
     char buf[512];
+    size_t verified = 0;
     yyjson_arr_foreach(path, idx, maxn, hop) {
         const char *name = ha_obj_str(hop, "name");
         const char *file = ha_obj_str(hop, "file");
         snprintf(buf, sizeof(buf), "%s%.96s (%.300s:%d)", idx ? " -> " : "", name ? name : "?",
                  file ? file : "?", ha_obj_int(hop, "start_line"));
         line += buf;
+        int state = ha_verify_loc(v, file, ha_obj_int(hop, "start_line"), name ? name : "");
+        if (state == HA_LOC_MISMATCH) {
+            line += " [stale: line changed since indexing, re-check]";
+            if (v && name) {
+                v->recheck.push_back(name);
+            }
+        }
+        verified += state == HA_LOC_VERIFIED;
+    }
+    if (verified == n) {
+        line += " (verified now)";
     }
     return line;
 }
@@ -1937,8 +2181,8 @@ static std::string ha_prompt_chain_line(yyjson_doc *d, const std::string &from,
  * boundary; nothing is ever cut inside a line or the JSON. NULL when no
  * block fits. */
 static char *ha_prompt_payload(const std::vector<std::string> &blocks, size_t max_bytes,
-                               bool any_stale) {
-    std::string text = any_stale ? HA_PROMPT_LABEL_STALE : HA_PROMPT_LABEL_FRESH;
+                               const std::string &label) {
+    std::string text = label;
     bool any = false;
     char *best = nullptr;
     for (const auto &block : blocks) {
@@ -1994,7 +2238,8 @@ static yyjson_doc *ha_prompt_inspect(cbm_mcp_server_t *srv, const char *project,
 
 static std::string ha_prompt_trace(cbm_mcp_server_t *srv, const char *project,
                                    const std::string &from, const std::string &to,
-                                   const std::string &from_label, const std::string &to_label) {
+                                   const std::string &from_label, const std::string &to_label,
+                                   ha_verifier *v) {
     yyjson_mut_doc *ad = yyjson_mut_doc_new(nullptr);
     yyjson_mut_val *args = yyjson_mut_obj(ad);
     yyjson_mut_doc_set_root(ad, args);
@@ -2010,7 +2255,14 @@ static std::string ha_prompt_trace(cbm_mcp_server_t *srv, const char *project,
     bool error = false;
     yyjson_doc *d = encoded ? ha_call(srv, "trace_path", encoded, &error) : nullptr;
     free(encoded);
-    std::string line = error ? std::string() : ha_prompt_chain_line(d, from_label, to_label);
+    /* Tally the hops only for the orientation that is kept: a failed trace
+     * prints nothing, so it verifies nothing. */
+    ha_verifier scratch = *v;
+    std::string line =
+        error ? std::string() : ha_prompt_chain_line(d, from_label, to_label, &scratch);
+    if (!line.empty()) {
+        *v = std::move(scratch);
+    }
     yyjson_doc_free(d);
     return line;
 }
@@ -2049,9 +2301,12 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
     }
     *indexed = true;
 
+    /* The project root is the directory the project name was derived from. */
+    ha_verifier v;
+    v.root = dir;
+    v.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(HA_VERIFY_BUDGET_MS);
     std::vector<std::string> symbols;
     std::vector<std::pair<std::string, std::string>> functions; /* trace name, label */
-    bool any_stale = false;
     for (size_t i = 0; i < cands.size(); ++i) {
         bool error = first_error;
         yyjson_doc *d = first;
@@ -2059,10 +2314,8 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
             d = ha_prompt_inspect(srv, project, cands[i], &error);
         }
         std::string trace_name;
-        bool block_stale = false;
         std::string block =
-            error ? std::string() : ha_prompt_symbol_block(d, cands[i], &trace_name, &block_stale);
-        any_stale |= block_stale;
+            error ? std::string() : ha_prompt_symbol_block(d, cands[i], &trace_name, nullptr, &v);
         yyjson_doc_free(d);
         if (!block.empty()) {
             symbols.push_back(block);
@@ -2079,9 +2332,10 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
             pairs++;
             const auto &a = functions[i];
             const auto &b = functions[j];
-            std::string line = ha_prompt_trace(srv, project, a.first, b.first, a.second, b.second);
+            std::string line =
+                ha_prompt_trace(srv, project, a.first, b.first, a.second, b.second, &v);
             if (line.empty()) {
-                line = ha_prompt_trace(srv, project, b.first, a.first, b.second, a.second);
+                line = ha_prompt_trace(srv, project, b.first, a.first, b.second, a.second, &v);
             }
             if (!line.empty()) {
                 blocks.push_back(line);
@@ -2090,7 +2344,8 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
     }
     free(project);
     blocks.insert(blocks.end(), symbols.begin(), symbols.end());
-    return blocks.empty() ? nullptr : ha_prompt_payload(blocks, HA_PROMPT_MAX_BYTES, any_stale);
+    return blocks.empty() ? nullptr
+                          : ha_prompt_payload(blocks, HA_PROMPT_MAX_BYTES, ha_prompt_label(v));
 }
 
 #ifdef CBM_ENABLE_TEST_SEAMS
@@ -2105,20 +2360,36 @@ char *cbm_prompt_candidates_for_testing(const char *prompt) {
     }
     return strdup(joined.c_str());
 }
+static ha_verifier ha_test_verifier(const char *root) {
+    ha_verifier v;
+    v.root = root ? root : "";
+    v.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(HA_VERIFY_BUDGET_MS);
+    return v;
+}
 char *cbm_prompt_symbol_block_for_testing(const char *inspect_json, const char *token,
-                                          char **trace_name, bool *stale) {
+                                          char **trace_name, bool *stale, const char *root,
+                                          char **label) {
     yyjson_doc *doc = inspect_json ? yyjson_read(inspect_json, strlen(inspect_json), 0) : nullptr;
     std::string name;
-    std::string block = ha_prompt_symbol_block(doc, token ? token : "", &name, stale);
+    ha_verifier v = ha_test_verifier(root);
+    std::string block = ha_prompt_symbol_block(doc, token ? token : "", &name, stale, &v);
+    if (label) {
+        *label = strdup(ha_prompt_label(v).c_str());
+    }
     yyjson_doc_free(doc);
     if (trace_name) {
         *trace_name = name.empty() ? nullptr : strdup(name.c_str());
     }
     return block.empty() ? nullptr : strdup(block.c_str());
 }
-char *cbm_prompt_chain_line_for_testing(const char *trace_json, const char *from, const char *to) {
+char *cbm_prompt_chain_line_for_testing(const char *trace_json, const char *from, const char *to,
+                                        const char *root, char **label) {
     yyjson_doc *doc = trace_json ? yyjson_read(trace_json, strlen(trace_json), 0) : nullptr;
-    std::string line = ha_prompt_chain_line(doc, from, to);
+    ha_verifier v = ha_test_verifier(root);
+    std::string line = ha_prompt_chain_line(doc, from, to, &v);
+    if (label) {
+        *label = strdup(ha_prompt_label(v).c_str());
+    }
     yyjson_doc_free(doc);
     return line.empty() ? nullptr : strdup(line.c_str());
 }
@@ -2128,7 +2399,8 @@ char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_
     for (int i = 0; i < count; ++i) {
         v.emplace_back(blocks[i]);
     }
-    return ha_prompt_payload(v, max_bytes, any_stale);
+    return ha_prompt_payload(v, max_bytes,
+                             any_stale ? HA_PROMPT_LABEL_STALE : HA_PROMPT_LABEL_FRESH);
 }
 #endif
 

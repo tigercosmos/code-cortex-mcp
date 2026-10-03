@@ -365,13 +365,17 @@ char *cbm_definition_context_for_testing(const char *events, const char *symbol,
 char *cbm_request_symbol_for_testing(const char *request, bool automatic);
 /* UserPromptSubmit context: candidates joined by '\n'; one symbol block from an
  * inspect_symbol payload (*trace_name: name to trace, or NULL); one chain line
- * from a trace_path payload; the rendered hook JSON for blocks under max_bytes. */
+ * from a trace_path payload; the rendered hook JSON for blocks under max_bytes.
+ * `root` (NULL: off) re-reads the printed locations under that directory;
+ * *label (optional, caller frees) gets the label for what was verified. */
 /* SessionStart brief text from stored brief inputs JSON (NULL when unusable). */
 char *cbm_session_brief_format_for_testing(const char *project, const char *json);
 char *cbm_prompt_candidates_for_testing(const char *prompt);
 char *cbm_prompt_symbol_block_for_testing(const char *inspect_json, const char *token,
-                                          char **trace_name, bool *stale);
-char *cbm_prompt_chain_line_for_testing(const char *trace_json, const char *from, const char *to);
+                                          char **trace_name, bool *stale, const char *root,
+                                          char **label);
+char *cbm_prompt_chain_line_for_testing(const char *trace_json, const char *from, const char *to,
+                                        const char *root, char **label);
 char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_t max_bytes,
                                      bool any_stale);
 #endif

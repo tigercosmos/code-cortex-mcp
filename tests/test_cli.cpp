@@ -2808,7 +2808,7 @@ TEST(cli_prompt_symbol_block_formats_graph_facts) {
         R"("related_tests_total":2,"callees":[{"name":"leaf"}],"callees_total":1})";
     char *trace = nullptr;
     bool stale = true;
-    char *block = cbm_prompt_symbol_block_for_testing(payload, "capacity_function_3", &trace, &stale);
+    char *block = cbm_prompt_symbol_block_for_testing(payload, "capacity_function_3", &trace, &stale, nullptr, nullptr);
     ASSERT_NOT_NULL(block);
     ASSERT_NOT_NULL(strstr(block, "- capacity_function_3: Function at src/cap.cpp:12-20"));
     ASSERT_NOT_NULL(strstr(block, "declared at include/cap.h:5"));
@@ -2825,7 +2825,7 @@ TEST(cli_prompt_symbol_block_formats_graph_facts) {
     /* A class is reported but never traced; a declaration-only symbol says so. */
     block = cbm_prompt_symbol_block_for_testing(
         R"({"symbol":{"label":"Declaration","file":"a.h","start_line":3,"end_line":3},"callers_total":0,"callees_total":0})",
-        "ns::Thing", &trace, &stale);
+        "ns::Thing", &trace, &stale, nullptr, nullptr);
     ASSERT_NOT_NULL(block);
     ASSERT_NOT_NULL(strstr(block, "declaration only"));
     ASSERT_NULL(trace);
@@ -2833,20 +2833,20 @@ TEST(cli_prompt_symbol_block_formats_graph_facts) {
 
     block = cbm_prompt_symbol_block_for_testing(
         R"({"status":"ambiguous","suggestions":[{"qualified_name":"a.run","label":"Function","file_path":"a.cpp"},{"qualified_name":"b.run","label":"Method","file_path":"b.cpp"}]})",
-        "run_task", &trace, nullptr);
+        "run_task", &trace, nullptr, nullptr, nullptr);
     ASSERT_NOT_NULL(block);
     ASSERT_NOT_NULL(strstr(block, "2 matches: a.run (Function, a.cpp), b.run (Method, b.cpp)"));
     ASSERT_NULL(trace);
     free(block);
 
     ASSERT_NULL(cbm_prompt_symbol_block_for_testing(R"({"error":"symbol not found"})", "x_y",
-                                                    &trace, nullptr));
-    ASSERT_NULL(cbm_prompt_symbol_block_for_testing("not json", "x_y", &trace, nullptr));
+                                                    &trace, nullptr, nullptr, nullptr));
+    ASSERT_NULL(cbm_prompt_symbol_block_for_testing("not json", "x_y", &trace, nullptr, nullptr, nullptr));
 
     /* A defining file modified after indexing is flagged per block. */
     block = cbm_prompt_symbol_block_for_testing(
         R"({"symbol":{"label":"Function","file":"s.cpp","start_line":1,"end_line":2},"index":{"file_modified_after_index":true},"callers_total":0,"callees_total":0})",
-        "stale_fn", &trace, &stale);
+        "stale_fn", &trace, &stale, nullptr, nullptr);
     ASSERT_NOT_NULL(block);
     ASSERT_TRUE(stale);
     ASSERT_NOT_NULL(strstr(block, "stale: file modified after indexing, re-check"));
@@ -2863,12 +2863,13 @@ TEST(cli_prompt_chain_and_payload_budget) {
     char *line = cbm_prompt_chain_line_for_testing(
         R"({"path_found":true,"path":[{"name":"a_function","file":"a.cpp","start_line":3},)"
         R"({"name":"b_function","file":"b.cpp","start_line":4},{"name":"d_function","file":"d.cpp","start_line":5}]})",
-        "a_function", "d_function");
+        "a_function", "d_function", nullptr, nullptr);
     ASSERT_NOT_NULL(line);
     ASSERT_STR_EQ(line, "- call chain a_function -> d_function (2 hops): a_function (a.cpp:3) -> "
                         "b_function (b.cpp:4) -> d_function (d.cpp:5)");
     free(line);
-    ASSERT_NULL(cbm_prompt_chain_line_for_testing(R"({"path_found":false,"path":[]})", "a", "b"));
+    ASSERT_NULL(cbm_prompt_chain_line_for_testing(R"({"path_found":false,"path":[]})", "a", "b", nullptr,
+                                                nullptr));
 
     /* Everything fits: label first, blocks in order, valid JSON. */
     const char *small[] = {"- one: Function at a.cpp:1-2\n  int one() {", "- two: Class at b.h:3-9"};
@@ -2913,6 +2914,114 @@ TEST(cli_prompt_chain_and_payload_budget) {
     /* Not even the first line fits: nothing, never partial output. */
     ASSERT_NULL(cbm_prompt_payload_for_testing(big, 2, 200, false));
     ASSERT_NULL(cbm_prompt_payload_for_testing(big, 0, 4000, false));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* The hook re-reads every printed location so the model has nothing left to
+ * confirm with a grep: verified lines say so, an edited line is flagged, and
+ * an unreadable file falls back to the mtime wording without a claim. */
+TEST(cli_prompt_locations_are_reverified_from_disk) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-verify-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/src", root);
+    ASSERT_EQ(mkdir(path, 0755), 0);
+    snprintf(path, sizeof(path), "%s/inc", root);
+    ASSERT_EQ(mkdir(path, 0755), 0);
+    char src[512], hdr[512];
+    snprintf(src, sizeof(src), "%s/src/w.cpp", root);
+    snprintf(hdr, sizeof(hdr), "%s/inc/w.h", root);
+    write_test_file(src, "// widget\nint widget_fn(int  x) {\n    return helper_fn(x);\n}\n"
+                         "int helper_fn(int x) {\n    return x;\n}\n");
+    write_test_file(hdr, "int widget_fn(int x);\n");
+    const char *payload =
+        R"({"symbol":{"name":"widget_fn","label":"Function","file":"src/w.cpp","start_line":2,)"
+        R"("end_line":4},"source":"int widget_fn(int  x) {\n","declared_in":[{"file":"inc/w.h","line":1}],)"
+        R"("declared_in_total":1,"index":{"file_modified_after_index":false},"callers_total":0,"callees_total":1})";
+
+    /* Verified: both locations re-read and matching; the label says so. */
+    bool stale = true;
+    char *label = nullptr;
+    char *block = cbm_prompt_symbol_block_for_testing(payload, "widget_fn", nullptr, &stale, root,
+                                                      &label);
+    ASSERT_NOT_NULL(block);
+    ASSERT_FALSE(stale);
+    ASSERT_NOT_NULL(strstr(block, "src/w.cpp:2-4 (verified now)"));
+    ASSERT_NOT_NULL(strstr(block, "declared at inc/w.h:1 (verified now)"));
+    ASSERT_NOT_NULL(strstr(block, "\n  int widget_fn(int  x) {"));
+    ASSERT_NOT_NULL(label);
+    ASSERT_STR_EQ(label, "[code-cortex] graph facts for symbols in your request. Each location "
+                         "below was re-read from the file just now and matches the index, so a "
+                         "grep for these names would return the same path:line.");
+    free(label);
+    free(block);
+
+    /* Chain hops: every hop line names its function. */
+    const char *chain = R"({"path_found":true,"path":[{"name":"widget_fn","file":"src/w.cpp","start_line":2},)"
+                        R"({"name":"helper_fn","file":"src/w.cpp","start_line":5}]})";
+    char *line = cbm_prompt_chain_line_for_testing(chain, "widget_fn", "helper_fn", root, &label);
+    ASSERT_NOT_NULL(line);
+    ASSERT_NOT_NULL(strstr(line, "helper_fn (src/w.cpp:5) (verified now)"));
+    ASSERT_NOT_NULL(strstr(label, "Each location below was re-read"));
+    free(label);
+    free(line);
+
+    /* Mismatch: the defining line was edited after indexing. */
+    write_test_file(src, "// widget\nint renamed_fn(int x) {\n    return helper_fn(x);\n}\n"
+                         "int helper_fn(int x) {\n    return x;\n}\n");
+    block = cbm_prompt_symbol_block_for_testing(payload, "widget_fn", nullptr, &stale, root, &label);
+    ASSERT_NOT_NULL(block);
+    ASSERT_TRUE(stale);
+    ASSERT_NOT_NULL(strstr(block, "src/w.cpp:2-4 (stale: line changed since indexing, re-check)"));
+    ASSERT_NOT_NULL(strstr(block, "declared at inc/w.h:1 (verified now)"));
+    ASSERT_NOT_NULL(strstr(block, "\n  line 2 now reads: int renamed_fn(int x) {"));
+    ASSERT_NOT_NULL(strstr(label, "Re-check before relying on: widget_fn (marked stale)."));
+    ASSERT_NULL(strstr(label, "Each location below"));
+    free(label);
+    free(block);
+    line = cbm_prompt_chain_line_for_testing(chain, "widget_fn", "helper_fn", root, &label);
+    ASSERT_NOT_NULL(line);
+    ASSERT_NOT_NULL(strstr(line, "widget_fn (src/w.cpp:2) [stale: line changed since indexing"));
+    ASSERT_NULL(strstr(line, "(verified now)"));
+    ASSERT_NOT_NULL(strstr(label, "Re-check before relying on: widget_fn"));
+    free(label);
+    free(line);
+
+    /* A line past the end of the file is a mismatch too. */
+    write_test_file(src, "// emptied\n");
+    block = cbm_prompt_symbol_block_for_testing(payload, "widget_fn", nullptr, &stale, root, &label);
+    ASSERT_NOT_NULL(strstr(block, "(stale: line changed since indexing, re-check)"));
+    free(label);
+    free(block);
+
+    /* Unreadable: no claim either way; the mtime wording stands. */
+    char missing[512];
+    snprintf(missing, sizeof(missing), "%s/no-such-dir", root);
+    block = cbm_prompt_symbol_block_for_testing(payload, "widget_fn", nullptr, &stale, missing,
+                                                &label);
+    ASSERT_NOT_NULL(block);
+    ASSERT_FALSE(stale);
+    ASSERT_NULL(strstr(block, "verified now"));
+    ASSERT_NULL(strstr(block, "stale"));
+    ASSERT_NOT_NULL(strstr(label, "unchanged since indexing"));
+    free(label);
+    free(block);
+
+    /* Never read outside the project root. */
+    const char *escape = R"({"symbol":{"name":"widget_fn","label":"Function","file":"../w.cpp","start_line":2,"end_line":4},"callers_total":0,"callees_total":0})";
+    block = cbm_prompt_symbol_block_for_testing(escape, "widget_fn", nullptr, &stale, root, &label);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NULL(strstr(block, "verified now"));
+    free(label);
+    free(block);
+
+    test_rmdir_r(root);
     PASS();
 #else
     SKIP("requires CBM_TEST_SEAMS");
@@ -3836,6 +3945,7 @@ SUITE(cli) {
     RUN_TEST(cli_prompt_chain_and_payload_budget);
     RUN_TEST(cli_claude_prompt_hook_install_remove);
     RUN_TEST(cli_session_brief_formats_stored_inputs);
+    RUN_TEST(cli_prompt_locations_are_reverified_from_disk);
     RUN_TEST(cli_source_context_preserves_interleaved_paths);
     RUN_TEST(cli_hook_augment_bash_pattern_extractor);
     RUN_TEST(cli_remove_claude_hooks);
