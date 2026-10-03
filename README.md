@@ -156,37 +156,40 @@ comparison.
 
 ### Complete-task performance
 
-A controlled, uncontended Linux run on 2026-09-10 compared complete tasks with the current
-Code Cortex MCP, pure shell tools, and pinned upstream codebase-memory-mcp. Lower ratios are
-faster. Each total contains only matched pairs for which both answers were terminal,
-source-correct, and exact; failed answers were not retried or assigned an estimated time.
+Agent-level comparison on 2026-10-03: a fresh Claude Code session per task, the task as
+the only prompt, and the agent free to use any tool. The `mcp` arm has the product
+installed (`code-cortex-mcp install`: MCP server, hooks, skill); the `shell` arm has an
+empty Claude Code configuration and no MCP servers. The prompt never mentions the graph.
+Ratios are paired wall time mcp / shell over task pairs both arms answered correctly,
+geometric mean; lower is faster.
 
-| Comparison | Eligible pairs | Matched task time | Geometric time ratio | Reduction |
-|---|---:|---:|---:|---:|
-| Code Cortex / shell | 22 / 24 | 213.806 s / 505.603 s | **0.421** | **57.9%** |
-| Code Cortex / upstream | 14 / 16 | 142.740 s / 207.004 s | **0.626** | **37.4%** |
-| Upstream / shell | 16 / 16 | 253.507 s / 376.071 s | **0.712** | **28.8%** |
-
-| Comparison | 10K lines | 1M lines | 100M lines | One-shot | Multi-step |
+| Model | Pairs | Time ratio | Reduction | Faster in | Sign test p |
 |---|---:|---:|---:|---:|---:|
-| Code Cortex / shell | 57.7% (8/8) | 56.1% (6/8) | 59.4% (8/8) | 33.3% (12/12) | 75.7% (10/12) |
-| Code Cortex / upstream | 37.8% (8/8) | 36.9% (6/8) | unavailable | 33.3% (8/8) | 42.6% (6/8) |
-| Upstream / shell | 31.9% (8/8) | 25.6% (8/8) | unavailable | 2.2% (8/8) | 48.2% (8/8) |
+| Claude Opus 5.5 | 48 / 48 | **0.557** | **44%** | 40 / 48 | < 0.0001 |
+| Claude Fable 5.1 | 38 / 48 | **0.622** | **38%** | 26 / 38 | 0.034 |
 
-The run used fresh `gpt-5.6-sol` sessions at medium reasoning effort and warm synthetic C++
-indexes. It serialized all 64 sessions on the same 32-core host and included MCP startup,
-initialization, tool discovery, retrieval, the candidate's post-retrieval topology scan, and
-the model session in complete-task time. Fixture generation and indexing were outside the task
-timer. The candidate was `0aa36e53`; upstream was `1db8bace`. Candidate and upstream used
-task-equivalent one-call adapters and supplied byte-identical normalized context on all 16
-shared tasks.
+| Model | 10K lines | 1M lines | 100M lines | Definition lookup | 3-hop call chain |
+|---|---:|---:|---:|---:|---:|
+| Claude Opus 5.5 | 0.584 | 0.554 | 0.534 | 0.815 | 0.381 |
+| Claude Fable 5.1 | 0.554 | 0.810 | 0.566 | 0.854 | 0.362 |
 
-Code Cortex completed 22 of 24 answers exactly; its two incorrect 1M multi-step responses had
-source-correct retrieval but added text to required symbol names. Shell completed 24/24 and
-upstream completed 16/16. Upstream has no 100M timing: indexing exceeded both sealed 4 GiB and
-32 GiB memory budgets, and no time was imputed. These results establish the stated benefit for
-the measured warm-index lookup and three-hop-chain tasks, not for edits, cold indexing, every
-language, or every task shape.
+Conditions: 24 tasks (`scripts/benchmark-agent/tasks.json`: four definition lookups and
+four shortest call chains on each of three synthetic C++ corpora), two repetitions, 192
+sessions, all on one otherwise idle 32-core Linux host, serial, Claude Code 2.1.287,
+default effort, warm indexes, binary at the commit that introduced the prompt hook. The
+agent called no MCP tool in any session; the time came from the hooks that `install`
+registers. The UserPromptSubmit hook resolves the identifiers in the prompt against the
+graph, re-reads each location from disk, and places the verified facts in the context
+before the first model turn. The mean session went from 3.0 to 1.8 model turns (Fable) and
+from 3.1 to 1.2 (Opus). Fable's ten "shell" misses were exact-match failures where it
+added a sentence before a correct answer; graded leniently, its ratio is 0.642 over 48
+pairs (p = 0.013). Cost per session was 14% (Fable) to 23% (Opus) higher in the `mcp` arm
+because the tool schemas, session brief and hook text are uncached input.
+
+Before this change the same harness measured a tie (Fable 0.93, Opus 0.97). The earlier
+"57.9% faster than shell" figure in this section came from a different protocol in which
+the harness itself made one graph call and pasted the answer into the prompt; it is
+superseded. Harness, task set and corpus generator: `scripts/benchmark-agent/`.
 
 ### Full-index performance
 
