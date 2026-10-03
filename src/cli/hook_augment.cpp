@@ -1452,7 +1452,9 @@ static char *ha_format_session_brief(const char *project, const char *json) {
               "\nUse the graph for what grep cannot do: inspect_symbol(<name>) for direct "
               "callers with call-site lines, the tests that cover a symbol and callers from other "
               "languages; trace_path for multi-hop call chains; detect_changes for the blast "
-              "radius of your edits. Plain grep is fine for text and for an exact identifier. The "
+              "radius of your edits. Plain grep is fine for free text. When a [code-cortex] note "
+              "marks a location \"(verified now)\", that path:line was re-read from disk when "
+              "your prompt was submitted; a grep for the same name returns the same line. The "
               "project argument is optional inside this repository. Graph answers for partially "
               "parsed files are lower bounds (results say so).");
     return text;
