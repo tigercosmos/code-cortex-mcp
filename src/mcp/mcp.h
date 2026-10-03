@@ -172,7 +172,7 @@ char *cbm_mcp_session_brief_json(cbm_mcp_server_t *srv, const char *project, boo
 
 /* Every node named exactly `name` in an indexed project, as JSON
  * {"root":<project root>,"nodes":[{qualified_name,name,label,file,start_line,
- * end_line}...],"total":N} (at most 64 nodes listed). The hook disambiguates
+ * end_line}...],"total":N} (at most 1000 nodes listed). The hook disambiguates
  * these itself (qualifier, file hint, definition over declaration) before it
  * asks inspect_symbol about one exact qualified name. *resolved is true when
  * the project is indexed. Caller frees. */

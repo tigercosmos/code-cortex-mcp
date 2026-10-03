@@ -363,30 +363,29 @@ char *cbm_task_context_for_testing(const char *json, size_t max_bytes);
 char *cbm_source_context_for_testing(const char *events, size_t max_bytes, bool complete);
 char *cbm_definition_context_for_testing(const char *events, const char *symbol, size_t max_bytes);
 char *cbm_request_symbol_for_testing(const char *request, bool automatic);
-/* UserPromptSubmit context: candidates joined by '\n'; one symbol block from an
- * inspect_symbol payload (*trace_name: name to trace, or NULL); one chain line
- * from a trace_path payload; the rendered hook JSON for blocks under max_bytes.
- * `root` (NULL: off) re-reads the printed locations under that directory;
- * *label (optional, caller frees) gets the label for what was verified. */
 /* SessionStart brief text from stored brief inputs JSON (NULL when unusable). */
 char *cbm_session_brief_format_for_testing(const char *project, const char *json);
+/* UserPromptSubmit context seams. Candidates: code-looking prose tokens joined
+ * by '\n'. Targets: "intent=<callers|->[,chain]" then one
+ * "name|qualifier|hint,hint" line per target. Resolve: the node(s) the first
+ * target resolves to among nodes_json ({"nodes":[...]} as
+ * cbm_mcp_symbol_nodes returns it; QNs under project "p"), one QN per line.
+ * Display: the printed name for a QN. Evidence: the block for facts_json
+ * ({display,bare,label,defs:[[file,line]],decls,calls,caller_files,in_graph})
+ * scanning `files` under `root` at a collapse level. Chain: the chain block
+ * for a trace_path payload, call sites read under `root`. Payload: the hook
+ * JSON for blocks under max_bytes. Session: record `record` (when non-NULL)
+ * for session_id, then whether `name` is covered. */
 char *cbm_prompt_candidates_for_testing(const char *prompt);
-/* "intent=<callers|->[,chain]" then one "name|qualifier|hint,hint" line per target. */
 char *cbm_prompt_targets_for_testing(const char *prompt);
-/* The node(s) the first prompt target resolves to among nodes_json
- * ({"nodes":[...]} as cbm_mcp_symbol_nodes returns it), one QN per line. */
 char *cbm_prompt_resolve_for_testing(const char *nodes_json, const char *prompt);
-/* The callers rollup lines for an inspect_symbol payload, scanning `files`
- * under `root` for whole-word mentions of `bare`. */
-char *cbm_prompt_callers_block_for_testing(const char *inspect_json, const char *bare,
-                                           const char *root, const char *const *files, int count);
-char *cbm_prompt_symbol_block_for_testing(const char *inspect_json, const char *token,
-                                          char **trace_name, bool *stale, const char *root,
-                                          char **label);
-char *cbm_prompt_chain_line_for_testing(const char *trace_json, const char *from, const char *to,
-                                        const char *root, char **label);
+char *cbm_prompt_display_for_testing(const char *qn, const char *file);
+char *cbm_prompt_evidence_for_testing(const char *root, const char *facts_json,
+                                      const char *const *files, int count, int level);
+char *cbm_prompt_chain_for_testing(const char *root, const char *trace_json);
 char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_t max_bytes,
-                                     bool any_stale);
+                                     const char *label);
+bool cbm_session_covers_for_testing(const char *session_id, const char *name, const char *record);
 #endif
 
 /* Extract a search pattern from a Bash tool command (rg/grep/ag/ack/ugrep/

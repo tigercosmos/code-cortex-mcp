@@ -1841,7 +1841,7 @@ char *cbm_mcp_symbol_nodes(cbm_mcp_server_t *srv, const char *project, const cha
     yyjson_mut_obj_add_strcpy(doc, root, "root", proj.root_path ? proj.root_path : "");
     cbm_project_free_fields(&proj);
     yyjson_mut_val *arr = yyjson_mut_arr(doc);
-    enum { SYMBOL_NODES_MAX = 64 };
+    enum { SYMBOL_NODES_MAX = 1000 };
     for (int i = 0; i < count && i < SYMBOL_NODES_MAX; i++) {
         yyjson_mut_val *item = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_strcpy(doc, item, "qualified_name",

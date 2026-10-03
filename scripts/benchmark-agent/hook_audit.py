@@ -1,28 +1,33 @@
 #!/usr/bin/env python3
-"""Audit the UserPromptSubmit hook against the real-repo benchmark tasks.
+"""Audit the UserPromptSubmit hook against benchmark task files, without a model.
 
-No model is involved: for each task, the hook receives exactly what Claude Code
-would send before the first turn (the benchmark preamble plus the question),
-and its additionalContext is graded against the task's ground truth.
+For each task the hook receives what Claude Code sends before the first turn
+(the benchmark preamble plus the question) and its additionalContext is graded
+against the task's ground truth.
 
 Per task it reports:
-  ms / bytes    hook wall time and payload size
-  locate        the gold path:line is present
-  callers/impact
-                recall of the gold files over the union of every path printed;
-                graph recall (paths outside "also mention" lines only); and the
-                number of non-gold files the graph lists as callers (precision)
-  callchain     the gold chain (bare names, in order) is printed
-  stale         number of "stale" marks
-  noise         symbol blocks whose name is not the asked symbol
+  ms / bytes   hook wall time and payload size
+  answer       locate: the gold path:line is present; set tasks: recall of the
+               gold files over every path printed; chains: the gold chain is
+               printed, in order
+  evidence     what a verification grep would show, printed as match lines
+               (`path:line: <source>`): locate: the gold path:line has its own
+               line; set tasks: every gold file has at least one match line;
+               chains: every hop has a call-site line
+  graph        set tasks: gold files the graph resolves as callers vs not, and
+               non-gold files it lists as callers
+  stale        "stale" marks
+  leaks        synthetic internal names (__decl_...) in the output
+  noise        symbol blocks whose name is not the asked symbol
 
 Usage:
   hook_audit.py --bin <code-cortex-mcp> --cache <CBM_CACHE_DIR> --home <HOME>
-                --tasks tasks_real.json --repos ~/bench [--out audit.json]
+                --tasks tasks.json[,more.json] --repos <dir>[,<dir>] [--out audit.json]
                 [--only id,id] [--show]
 
-repo_path in the task file may point at another host; the repository is taken
-from --repos/<repo_key lowercased> and the path inside the question is rewritten.
+repo_path in a task file may point at another host: the repository is taken
+from <repos dir>/<repo_key lowercased> (the n-th --repos entry for the n-th
+task file) and the path inside the question is rewritten to it.
 """
 import argparse
 import json
@@ -34,7 +39,47 @@ import time
 
 PREAMBLE = ("Work only in this repository. Read only: do not edit files, build, or run tests. "
             "Do not use the network. Complete the task without asking questions.\n\n")
-PATH_RE = re.compile(r"(?<![\w./-])((?:[\w.@+-]+/)+[\w.@+-]+\.[A-Za-z0-9]+)(?=[:\s,;)\]]|$)")
+PATH_RE = re.compile(r"(?<![\w./+-])((?:[\w.@+-]+/)+[\w.@+-]+\.[A-Za-z0-9]+)(?=[:\s,;)\]]|$)")
+MATCH_LINE_RE = re.compile(r"((?:[\w.@+-]+/)*[\w.@+-]+\.[A-Za-z0-9]+):(\d+): ")
+
+# Asked symbols for task files that do not carry a "symbol" field.
+PREV_SYMBOLS = {
+    "ladder_jansson_locate": "error_set",
+    "ladder_jansson_callers": "json_object_set_new",
+    "ladder_jansson_callchain": "json_load_file -> hashtable_set",
+    "ladder_jansson_impact": "json_array_append_new",
+    "ladder_lz4_locate": "LZ4F_decompress",
+    "ladder_lz4_callers": "LZ4_decompress_safe",
+    "ladder_lz4_callchain": "LZ4IO_decompressFilename -> LZ4F_decompress",
+    "ladder_lz4_impact": "LZ4_decompress_safe",
+    "ladder_elfuse_locate": "hvf_apply_file_overlay",
+    "ladder_elfuse_callers": "fd_alloc",
+    "ladder_elfuse_callchain": "sys_munmap -> timespec_normalize",
+    "ladder_elfuse_impact": "fd_alloc",
+    "ladder_pcapplusplus_locate": "getFieldByName",
+    "ladder_pcapplusplus_callers": "hexStringToByteArray",
+    "ladder_pcapplusplus_callchain": "fromPEMFile -> decodeToByteArray",
+    "ladder_cgal_locate": "centroid",
+    "ladder_cgal_callers": "sdf_values",
+    "ladder_cgal_callchain": "halfspace_intersection_3 -> find_visible_set",
+    "ladder_cgal_impact": "polygon_soup_to_polygon_mesh",
+    "ladder_opencv_locate": "getMatVector",
+    "ladder_opencv_callers": "borderInterpolate",
+    "ladder_opencv_callchain": "seamlessClone -> dst",
+    "ladder_opencv_impact": "typeToStr",
+    "main_pcapplusplus_callers": "fnvHash",
+    "main_pcapplusplus_callchain": "fromPEMFile -> decodeToByteArray",
+    "main_pcapplusplus_impact": "hexStringToByteArray",
+    "main_pcapplusplus_hierarchy": "TLVRecord",
+    "main_pcapplusplus_locate": "getNextPacket",
+    "main_pcapplusplus_textcfg": "",
+    "main_codecortex_callers": "cbm_validate_shell_arg",
+    "main_codecortex_callchain": "cbm_discover_ex2 -> cbm_disambiguate_m",
+    "main_codecortex_impact": "cbm_json_escape",
+    "main_codecortex_hierarchy": "seq_pass_fn",
+    "main_codecortex_textcfg": "",
+}
+OUT_OF_SCOPE_KINDS = {"set_of_names", "exact_string"}
 
 
 def bare(name):
@@ -42,11 +87,13 @@ def bare(name):
 
 
 def asked_names(task):
-    return {bare(part) for part in task.get("symbol", "").split("->") if part.strip()}
+    sym = task.get("symbol", PREV_SYMBOLS.get(task["id"], ""))
+    return {bare(part) for part in sym.split("->") if part.strip()}
 
 
 def run_hook(binary, env, cwd, prompt):
-    payload = json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": cwd, "prompt": prompt})
+    payload = json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": cwd, "prompt": prompt,
+                          "session_id": "audit"})
     t0 = time.perf_counter()
     proc = subprocess.run([binary, "hook-augment"], input=payload, capture_output=True, text=True,
                           env=env, timeout=30)
@@ -72,59 +119,112 @@ def chain_lines(text):
     return chains
 
 
+def chain_evidence(text):
+    """Hop call-site lines printed under a chain: '    A -> B: path:line: src'."""
+    hops = []
+    for line in text.splitlines():
+        m = re.match(r"\s+(\S+) -> (\S+): " + MATCH_LINE_RE.pattern, line)
+        if m:
+            hops.append((bare(m.group(1)), bare(m.group(2))))
+    return hops
+
+
 def symbol_blocks(text):
     names = []
     for line in text.splitlines():
-        m = re.match(r"- (?!call chain)([^:\s][^\s]*?): ", line)
+        m = re.match(r"- (?!call chain)((?:[^:\s(]|::)+)[:\s]", line)
         if m:
             names.append(m.group(1))
     return names
 
 
+def sections(text):
+    """Map each printed path to the section it appears under."""
+    out = {"located": set(), "graph": set(), "other": set(), "mention": set(), "evidence": set()}
+    section = "graph"
+    cur_dir = ""
+    for line in text.splitlines():
+        s = line.strip()
+        low = s.lower()
+        # Directory-grouped listings: "    dir/" then "      file:line: src".
+        if re.match(r"^\s{4}\S+/$", line):
+            cur_dir = s if s != "./" else ""
+            continue
+        g = re.match(r"^\s{6}([^\s:]+?)(?::(\d+): | \(\d+ matches\))", line)
+        if g and cur_dir is not None and "/" not in g.group(1):
+            path = cur_dir + g.group(1)
+            out["mention" if section == "mention" else section].add(path)
+            if g.group(2):
+                out["evidence"].add(path)
+            continue
+        if not line.startswith("      "):
+            cur_dir = ""
+        if line.startswith("- "):
+            section = "located" if " at " in line or "(" in line else "graph"
+        elif low.startswith(("definition", "declaration", "declared in")):
+            section = "located"
+        elif low.startswith(("calls (graph", "caller files")):
+            section = "graph"
+        elif low.startswith("other whole-word") or "also mention" in low:
+            section = "mention"
+        for m in MATCH_LINE_RE.finditer(line):
+            out["evidence"].add(m.group(1))
+        found = set(PATH_RE.findall(line))
+        key = "mention" if "also mention" in low else section
+        out[key].update(found)
+        if low.startswith(("caller files", "declared in")):
+            # header lines that list files inline (older format)
+            pass
+    return out
+
+
 def grade(task, text):
     kind = task["answer_kind"]
     gold = task["ground_truth"]
-    res = {}
+    res = {"scored": kind not in OUT_OF_SCOPE_KINDS}
     if kind == "path_and_line":
         hit = False
-        for g in gold + task.get("alternates", []):
+        evid = False
+        alts = []
+        for a in task.get("alternates", []):
+            alts.extend(a if isinstance(a, list) else [a])
+        for g in gold + alts:
             for m in re.finditer(re.escape(g), text):
                 end = m.end()
                 if end >= len(text) or not text[end].isdigit():
                     hit = True
+                    if text[end:end + 2] == ": ":
+                        evid = True
         res["ok"] = hit
+        res["evidence"] = evid
     elif kind == "set_of_paths":
         gold_set = set(gold)
-        # graph: files the graph lists as callers ("caller files" lines, or any
-        # path outside the location/declaration/also-mention lines for older
-        # output formats); located: the definition and declaration lines.
-        graph, mention, located = set(), set(), set()
-        for line in text.splitlines():
-            found = set(PATH_RE.findall(line))
-            if "also mention" in line:
-                mention.update(found)
-            elif line.startswith("- ") and " at " in line or "declared in:" in line:
-                located.update(found)
-            else:
-                graph.update(found)
-        union = graph | mention | located
-        graph_or_located = graph | located
+        sec = sections(text)
+        union = sec["located"] | sec["graph"] | sec["mention"] | sec["other"]
         res["recall"] = len(gold_set & union) / len(gold_set) if gold_set else 1.0
-        res["graph_recall"] = (len(gold_set & graph_or_located) / len(gold_set)
+        res["graph_recall"] = (len(gold_set & (sec["graph"] | sec["located"])) / len(gold_set)
                                if gold_set else 1.0)
-        res["graph_extra"] = sorted(graph - gold_set)
+        res["graph_extra"] = sorted(sec["graph"] - gold_set)
         res["missing"] = sorted(gold_set - union)
-        res["graph_missing"] = sorted(gold_set - graph_or_located)
-        res["located_extra"] = sorted(located - gold_set)
-        res["mention_extra"] = sorted(mention - gold_set)
+        res["graph_missing"] = sorted(gold_set - sec["graph"] - sec["located"])
+        res["mention_extra"] = sorted(sec["mention"] - gold_set)
+        res["evidence_missing"] = sorted(gold_set - sec["evidence"])
         res["ok"] = res["recall"] == 1.0
-    elif kind == "ordered_names":
+        res["evidence"] = not res["evidence_missing"]
+    elif kind in ("ordered_names", "ordered_list"):
         want = [bare(g) for g in gold]
-        res["ok"] = any(c == want for c in chain_lines(text))
         res["chains"] = chain_lines(text)
-    res["stale"] = text.count("stale")
+        res["ok"] = any(c == want for c in res["chains"])
+        hops = set(chain_evidence(text))
+        res["evidence"] = res["ok"] and all((want[i], want[i + 1]) in hops
+                                            for i in range(len(want) - 1))
+    else:
+        res["ok"] = False
+        res["evidence"] = False
+    res["stale"] = len(re.findall(r"\bstale\b", text))
+    res["leaks"] = len(re.findall(r"__decl_", text))
     asked = asked_names(task)
-    res["noise"] = [n for n in symbol_blocks(text) if bare(n) not in asked]
+    res["noise"] = [n for n in symbol_blocks(text) if asked and bare(n) not in asked]
     return res
 
 
@@ -139,14 +239,20 @@ def main():
     ap.add_argument("--only")
     ap.add_argument("--show", action="store_true")
     args = ap.parse_args()
-    tasks = json.load(open(args.tasks))
+    task_files = args.tasks.split(",")
+    repo_dirs = args.repos.split(",")
+    tasks = []
+    for i, tf in enumerate(task_files):
+        for t in json.load(open(tf)):
+            t["_repos"] = os.path.expanduser(repo_dirs[min(i, len(repo_dirs) - 1)])
+            tasks.append(t)
     if args.only:
         keep = set(args.only.split(","))
         tasks = [t for t in tasks if t["id"] in keep]
     env = dict(os.environ, HOME=args.home, CBM_CACHE_DIR=args.cache)
     rows = []
     for t in tasks:
-        repo = os.path.join(os.path.expanduser(args.repos), t["repo_key"].lower())
+        repo = os.path.join(t["_repos"], t["repo_key"].lower())
         question = t["question"].replace(t["repo_path"], repo)
         ms, nbytes, text = run_hook(args.bin, env, repo, PREAMBLE + question)
         g = grade(t, text)
@@ -155,34 +261,42 @@ def main():
         if args.show:
             print(f"===== {t['id']} ({ms:.0f} ms, {nbytes} B)\n{text}\n")
 
-    print(f"{'task':26} {'ms':>7} {'bytes':>6}  {'result':28} stale noise")
+    print(f"{'task':30} {'ms':>7} {'bytes':>6}  {'answer':24} {'evid':5} stale leak noise")
     for r in rows:
-        if r["kind"] == "set_of_paths":
-            res = (f"recall {r['recall']:.2f} graph {r['graph_recall']:.2f} "
-                   f"+{len(r['graph_extra'])}")
+        if not r["scored"]:
+            res = "out of scope"
+        elif r["kind"] == "set_of_paths":
+            res = f"recall {r['recall']:.2f} graph {r['graph_recall']:.2f} +{len(r['graph_extra'])}"
         else:
             res = "OK" if r["ok"] else "miss"
-        print(f"{r['id']:26} {r['ms']:7.1f} {r['bytes']:6}  {res:28} {r['stale']:5} "
-              f"{','.join(r['noise'])[:60]}")
+        ev = "-" if not r["scored"] else ("yes" if r["evidence"] else "NO")
+        print(f"{r['id']:30} {r['ms']:7.1f} {r['bytes']:6}  {res:24} {ev:5} {r['stale']:5} "
+              f"{r['leaks']:4} {','.join(r['noise'])[:50]}")
     times = sorted(r["ms"] for r in rows)
     p95 = times[min(len(times) - 1, int(round(0.95 * (len(times) - 1))))] if times else 0
     by = {}
     for r in rows:
-        k = r["id"].split("_", 1)[1]
+        k = r["kind"]
         by.setdefault(k, []).append(r)
     print()
     for k, rs in sorted(by.items()):
-        print(f"{k:10} ok {sum(r['ok'] for r in rs)}/{len(rs)}")
-    print(f"noise blocks {sum(len(r['noise']) for r in rows)}, stale marks "
-          f"{sum(r['stale'] for r in rows)}, median {statistics.median(times):.1f} ms, "
-          f"p95 {p95:.1f} ms, max {times[-1]:.1f} ms" if times else "no tasks")
+        rs_s = [r for r in rs if r["scored"]]
+        print(f"{k:14} answer ok {sum(r['ok'] for r in rs_s)}/{len(rs_s)}  "
+              f"evidence complete {sum(r['evidence'] for r in rs_s)}/{len(rs_s)}"
+              + (f"  ({len(rs) - len(rs_s)} out of scope)" if len(rs) != len(rs_s) else ""))
+    scored = [r for r in rows if r["scored"]]
+    print(f"evidence complete {sum(r['evidence'] for r in scored)}/{len(scored)}, "
+          f"noise blocks {sum(len(r['noise']) for r in rows)}, stale marks "
+          f"{sum(r['stale'] for r in rows)}, leaked internal names {sum(r['leaks'] for r in rows)}")
+    if times:
+        print(f"hook ms: median {statistics.median(times):.1f}, p95 {p95:.1f}, max {times[-1]:.1f}")
     print("\ngraph vs gold (set tasks):")
     for r in rows:
         if r["kind"] != "set_of_paths":
             continue
-        print(f"  {r['id']}: graph missing {r['graph_missing']} | graph extra {r['graph_extra']}"
-              f" | definition/declaration not in gold {r['located_extra']}"
-              f" | mention extra {len(r['mention_extra'])}")
+        print(f"  {r['id']}: not graph-resolved {r['graph_missing']} | graph extra "
+              f"{r['graph_extra']} | no match line {r['evidence_missing']} | non-gold mentions "
+              f"{len(r['mention_extra'])}")
     if args.out:
         json.dump(rows, open(args.out, "w"), indent=1)
 
