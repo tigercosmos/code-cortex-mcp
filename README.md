@@ -158,16 +158,35 @@ comparison.
 ### Complete-task performance
 
 Agent-level comparison on 2026-10-03: a fresh Claude Code session per task, the task as
-the only prompt, and the agent free to use any tool. Two task sets were run and they
-disagree, so read both. On **real repositories** (32 tasks: redis, rocksdb, etcd, django,
-rails, TypeScript, elasticsearch, neovim × locate / callers / call chain / impact, two
-repetitions, 256 sessions) the installed product was **not faster overall**: time ratio
-1.05 on Opus 5.5 (p = 0.005, slower) and 0.95 on Fable 5.1 (p = 0.70). Call chains were
-faster (0.80 and 0.77); callers and impact questions were slower on Opus (1.13 and 1.26)
-because the prompt hook listed three callers where the task needed the complete file set,
-resolved unrelated identifiers, and missed qualified and Ruby method names. The tables
-below are the **synthetic C++ corpora**, where every symbol is unique and resolves exactly;
-they show the ceiling of the approach, not what to expect on your code. The `mcp` arm has the product
+the only prompt, and the agent free to use any tool. Results differ sharply between
+real repositories and a synthetic corpus, so read both.
+
+**Real repositories** (final build; mcp / shell wall time, geometric mean over pairs both
+arms answered correctly):
+
+| Task set | Opus 5.5 | Fable 5.1 |
+|---|---:|---:|
+| 32 tasks in 7 languages (redis, rocksdb, etcd, django, rails, TypeScript, elasticsearch, neovim), 2 reps | 0.846 (p = 0.03) | 0.877 (p = 0.24) |
+| 34 earlier audited C/C++ tasks (jansson, lz4, elfuse, PcapPlusPlus, cgal, opencv, this repo), 1 rep | 0.763 (p = 0.12) | 0.654 (p = 0.0002) |
+
+| Archetype (7-language set) | Opus 5.5 | Fable 5.1 |
+|---|---:|---:|
+| Call chain | 0.724 | 0.730 |
+| Locate a definition | 0.775 | 0.769 |
+| Callers (file set) | 0.992 | 1.024 |
+| Impact of a signature change | 0.922 | 0.964 |
+
+Call chains are consistently 27-56% faster. Questions a single grep answers gain little:
+the prompt hook already prints that grep's output, but the agent re-runs the search in
+most sessions (it answered without any tool in 27 of 64 Opus sessions and 8 of 64 Fable
+sessions). When it does answer from the block, a session takes 4.9 s against 7.2 s for a
+one-grep session. Accuracy is equal in both arms; every strict miss was a correct chain
+with a sentence in front. With the first version of the hook the same tasks measured
+1.05 (Opus) and 0.95 (Fable): the gains above came from resolving only the asked symbol,
+printing complete match lines, fixing duplicate Ruby method nodes and false stale marks.
+
+The tables below are the **synthetic C++ corpora**, where every symbol is unique and
+resolves exactly; they show the ceiling of the approach, not what to expect on your code. The `mcp` arm has the product
 installed (`code-cortex-mcp install`: MCP server, hooks, skill); the `shell` arm has an
 empty Claude Code configuration and no MCP servers. The prompt never mentions the graph.
 Ratios are paired wall time mcp / shell over task pairs both arms answered correctly,
