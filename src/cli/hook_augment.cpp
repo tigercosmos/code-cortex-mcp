@@ -3783,9 +3783,14 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd, const ha_
         scanned_any
             ? "[code-cortex] Read from disk at prompt time (equivalent to `grep -rnw " + joined +
                   "` over the " + std::to_string(scanned_files) +
-                  " source files, plus call resolution from the code graph):"
+                  " source files, plus call resolution from the code graph). The files were read "
+                  "when this prompt was submitted, so running that search again returns these "
+                  "same lines; answer from them, and search only for what is not shown:"
             : std::string("[code-cortex] Read from disk at prompt time (each line below re-read "
-                          "from its file, plus call resolution from the code graph):");
+                          "from its file, plus call resolution from the code graph). The files were "
+                          "read when this prompt was submitted, so reading them again returns "
+                          "these same lines; answer from them, and search only for what is not "
+                          "shown:");
     *covered = names;
     return ha_prompt_payload(blocks, HA_PROMPT_MAX_BYTES, label);
 }
