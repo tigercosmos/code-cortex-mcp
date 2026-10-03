@@ -599,7 +599,7 @@ TEST(cli_guidance_preserves_optional_graph_and_source_limits) {
     for (const char *content : contents) {
         ASSERT_NOT_NULL(content);
         // Routing must include cost and a shell default, not task-label triggers.
-        ASSERT_NOT_NULL(strstr(content, "Default to shell search"));
+        ASSERT_NOT_NULL(strstr(content, "default to shell search"));
         ASSERT_NOT_NULL(strstr(content, "indexing"));
         ASSERT_NOT_NULL(strstr(content, "explicit graph request"));
         ASSERT_NOT_NULL(strstr(
