@@ -311,6 +311,61 @@ TEST(pipeline_incremental_preserves_classified_version) {
     ASSERT_EQ(count, 1);
     PASS();
 }
+/* Every successful index run leaves the SessionStart brief inputs in the
+ * database: a full run computes them, an incremental run that rebuilds the
+ * file recomputes them (small graph), and a no-op run leaves them alone. */
+static char *pl_stored_brief(const char *dbpath, const char *project) {
+    cbm_store_t *st = cbm_store_open_path(dbpath);
+    char *json = nullptr;
+    if (st) {
+        (void)cbm_store_session_brief_get(st, project, &json);
+        cbm_store_close(st);
+    }
+    return json;
+}
+
+TEST(pipeline_stores_session_brief_on_full_and_incremental_runs) {
+    char root[256] = "/tmp/cbm_brief_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(root));
+    char dbpath[512], a[512], b[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/graph.db", root);
+    snprintf(a, sizeof(a), "%s/a.cpp", root);
+    snprintf(b, sizeof(b), "%s/b.cpp", root);
+    th_write_file(a, "int leaf_fn() { return 1; }\nint mid_fn() { return leaf_fn(); }\n");
+    th_write_file(b, "int top_fn() { return 2; }\n");
+    std::string project;
+    for (int run = 0; run < 3; run++) {
+        if (run == 2) {
+            th_append_file(b, "int added_fn() { return top_fn(); }\n");
+        }
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(root, dbpath, CBM_MODE_FAST);
+        ASSERT_NOT_NULL(pipeline);
+        project = cbm_pipeline_project_name(pipeline);
+        int rc = cbm_pipeline_run(pipeline);
+        cbm_pipeline_free(pipeline);
+        ASSERT_EQ(rc, 0);
+        char *json = pl_stored_brief(dbpath, project.c_str());
+        ASSERT_NOT_NULL(json);
+        ASSERT_NOT_NULL(strstr(json, "\"nodes\":"));
+        ASSERT_NOT_NULL(strstr(json, "\"languages\":["));
+        free(json);
+    }
+    /* The incremental run recomputed the counts, so they include added_fn. */
+    cbm_store_t *st = cbm_store_open_path(dbpath);
+    ASSERT_NOT_NULL(st);
+    int nodes = cbm_store_count_nodes(st, project.c_str());
+    char *json = nullptr;
+    ASSERT_EQ(cbm_store_session_brief_get(st, project.c_str(), &json), CBM_STORE_OK);
+    cbm_store_close(st);
+    char expect[64];
+    snprintf(expect, sizeof(expect), "\"nodes\":%d,", nodes);
+    bool counts_fresh = strstr(json, expect) != nullptr;
+    free(json);
+    th_rmtree(root);
+    ASSERT_TRUE(counts_fresh);
+    PASS();
+}
+
 TEST(pipeline_initial_preserves_extracted_version) {
     char root[256] = "/tmp/cbm_version_race_XXXXXX";
     ASSERT_NOT_NULL(cbm_mkdtemp(root));
@@ -9004,6 +9059,7 @@ SUITE(pipeline) {
 #ifdef CBM_ENABLE_TEST_SEAMS
     RUN_TEST(pipeline_incremental_preserves_classified_version);
     RUN_TEST(pipeline_initial_preserves_extracted_version);
+    RUN_TEST(pipeline_stores_session_brief_on_full_and_incremental_runs);
 #endif
 }
 

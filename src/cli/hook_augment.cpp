@@ -1374,108 +1374,79 @@ char *cbm_hook_symbol_brief_for_testing(const char *json, const char *token) {
  * Replaces the "ALWAYS use graph tools" directive — which measurably made
  * the agent search more without using the graph — with the one thing the
  * graph had that grep could not produce: a 1-2 KB architecture brief. */
-static int ha_cmp_degree_desc(const void *a, const void *b) {
-    const int *x = (const int *)a;
-    const int *y = (const int *)b;
-    return (y[1] > x[1]) - (y[1] < x[1]);
-}
-
-static char *ha_session_brief(cbm_mcp_server_t *srv, const char *project, bool *resolved) {
-    *resolved = false;
-    char args[512];
-    snprintf(args, sizeof(args), "{\"project\":\"%s\"}", project);
-    bool is_error = false;
-    yyjson_doc *arch = ha_call(srv, "get_architecture", args, &is_error);
-    if (is_error || !arch) {
-        yyjson_doc_free(arch);
+/* Format the brief from its stored inputs (cbm_mcp_session_brief_json). The
+ * inputs are computed at index time, so this is one row read even on a
+ * multi-million-node graph; an index without a stored brief that is too
+ * large to compute live yields a one-line brief with an approximate size. */
+static char *ha_format_session_brief(const char *project, const char *json) {
+    yyjson_doc *doc = json ? yyjson_read(json, strlen(json), 0) : NULL;
+    yyjson_val *ar = doc ? yyjson_doc_get_root(doc) : NULL;
+    if (!ar || !yyjson_is_obj(ar)) {
+        yyjson_doc_free(doc);
         return NULL;
     }
-    *resolved = true;
-    yyjson_val *ar = yyjson_doc_get_root(arch);
     char *text = (char *)malloc(HA_TEXT_SZ);
     if (!text) {
-        yyjson_doc_free(arch);
+        yyjson_doc_free(doc);
         return NULL;
     }
     int off = 0;
-    HA_APPEND(text, HA_TEXT_SZ, off,
-              "code-cortex: this repository is indexed as \"%s\" (%d symbols, %d edges", project,
-              ha_obj_int(ar, "total_nodes"), ha_obj_int(ar, "total_edges"));
-    yyjson_val *langs = yyjson_obj_get(ar, "languages");
-    if (langs && yyjson_is_arr(langs) && yyjson_arr_size(langs) > 0) {
-        HA_APPEND(text, HA_TEXT_SZ, off, "; ");
+    if (yyjson_is_true(yyjson_obj_get(ar, "approximate"))) {
+        HA_APPEND(text, HA_TEXT_SZ, off,
+                  "code-cortex: this repository is indexed as \"%s\" (about %d symbols). Its "
+                  "architecture brief is stored by the next index_repository run.",
+                  project, ha_obj_int(ar, "nodes"));
+    } else {
+        HA_APPEND(text, HA_TEXT_SZ, off,
+                  "code-cortex: this repository is indexed as \"%s\" (%d symbols, %d edges",
+                  project, ha_obj_int(ar, "nodes"), ha_obj_int(ar, "edges"));
         size_t idx;
         size_t maxn;
-        yyjson_val *l;
+        yyjson_val *it;
         size_t shown = 0;
-        yyjson_arr_foreach(langs, idx, maxn, l) {
+        yyjson_val *langs = yyjson_obj_get(ar, "languages");
+        yyjson_arr_foreach(langs, idx, maxn, it) {
             if (shown >= 4) {
                 break;
             }
-            HA_APPEND(text, HA_TEXT_SZ, off, "%s%s %d files", shown ? ", " : "",
-                      ha_obj_str(l, "language") ? ha_obj_str(l, "language") : "?",
-                      ha_obj_int(l, "file_count"));
+            HA_APPEND(text, HA_TEXT_SZ, off, "%s%s %d files", shown ? ", " : "; ",
+                      ha_obj_str(it, "language") ? ha_obj_str(it, "language") : "?",
+                      ha_obj_int(it, "file_count"));
             shown++;
         }
-    }
-    HA_APPEND(text, HA_TEXT_SZ, off, ").");
-    yyjson_val *pkgs = yyjson_obj_get(ar, "packages");
-    if (pkgs && yyjson_is_arr(pkgs) && yyjson_arr_size(pkgs) > 0) {
-        HA_APPEND(text, HA_TEXT_SZ, off, " Largest modules: ");
-        size_t idx;
-        size_t maxn;
-        yyjson_val *p;
-        size_t shown = 0;
-        yyjson_arr_foreach(pkgs, idx, maxn, p) {
+        HA_APPEND(text, HA_TEXT_SZ, off, ").");
+        shown = 0;
+        yyjson_val *pkgs = yyjson_obj_get(ar, "packages");
+        yyjson_arr_foreach(pkgs, idx, maxn, it) {
             if (shown >= 6) {
                 break;
             }
-            HA_APPEND(text, HA_TEXT_SZ, off, "%s%s (%d)", shown ? ", " : "",
-                      ha_obj_str(p, "name") ? ha_obj_str(p, "name") : "?",
-                      ha_obj_int(p, "node_count"));
+            HA_APPEND(text, HA_TEXT_SZ, off, "%s%s (%d)", shown ? ", " : " Largest modules: ",
+                      ha_obj_str(it, "name") ? ha_obj_str(it, "name") : "?",
+                      ha_obj_int(it, "node_count"));
             shown++;
         }
-        HA_APPEND(text, HA_TEXT_SZ, off, ".");
-    }
-    yyjson_doc_free(arch);
-
-    /* Most-called functions: the centrality signal nothing in a shell has. */
-    snprintf(args, sizeof(args),
-             "{\"project\":\"%s\",\"label\":\"Function\",\"min_degree\":8,\"relationship\":"
-             "\"CALLS\",\"direction\":\"inbound\",\"limit\":120}",
-             project);
-    yyjson_doc *central = ha_call(srv, "search_graph", args, &is_error);
-    if (!is_error && central) {
-        yyjson_val *cr = yyjson_doc_get_root(central);
-        yyjson_val *results = yyjson_obj_get(cr, "results");
-        size_t n = (results && yyjson_is_arr(results)) ? yyjson_arr_size(results) : 0;
-        if (n > 0) {
-            enum { MAX_CENTRAL = 120 };
-            int order[MAX_CENTRAL][2];
-            size_t cnt = 0;
-            size_t idx;
-            size_t maxn;
-            yyjson_val *item;
-            yyjson_arr_foreach(results, idx, maxn, item) {
-                if (cnt >= MAX_CENTRAL) {
-                    break;
-                }
-                order[cnt][0] = (int)idx;
-                order[cnt][1] = ha_obj_int(item, "in_degree");
-                cnt++;
+        if (shown) {
+            HA_APPEND(text, HA_TEXT_SZ, off, ".");
+        }
+        shown = 0;
+        yyjson_val *central = yyjson_obj_get(ar, "central");
+        yyjson_arr_foreach(central, idx, maxn, it) {
+            if (shown >= 8) {
+                break;
             }
-            qsort(order, cnt, sizeof(order[0]), ha_cmp_degree_desc);
-            HA_APPEND(text, HA_TEXT_SZ, off, " Most-called functions: ");
-            for (size_t i = 0; i < cnt && i < 8; i++) {
-                yyjson_val *it = yyjson_arr_get(results, (size_t)order[i][0]);
-                HA_APPEND(text, HA_TEXT_SZ, off, "%s%s (%d callers, %s)", i ? ", " : "",
-                          ha_obj_str(it, "name") ? ha_obj_str(it, "name") : "?", order[i][1],
-                          ha_obj_str(it, "file_path") ? ha_obj_str(it, "file_path") : "?");
-            }
+            HA_APPEND(text, HA_TEXT_SZ, off, "%s%s (%d callers, %s)",
+                      shown ? ", " : " Most-called functions: ",
+                      ha_obj_str(it, "name") ? ha_obj_str(it, "name") : "?",
+                      ha_obj_int(it, "in_degree"),
+                      ha_obj_str(it, "file_path") ? ha_obj_str(it, "file_path") : "?");
+            shown++;
+        }
+        if (shown) {
             HA_APPEND(text, HA_TEXT_SZ, off, ".");
         }
     }
-    yyjson_doc_free(central);
+    yyjson_doc_free(doc);
 
     HA_APPEND(text, HA_TEXT_SZ, off,
               "\nUse the graph for what grep cannot do: inspect_symbol(<name>) for direct "
@@ -1484,6 +1455,19 @@ static char *ha_session_brief(cbm_mcp_server_t *srv, const char *project, bool *
               "radius of your edits. Plain grep is fine for text and for an exact identifier. The "
               "project argument is optional inside this repository. Graph answers for partially "
               "parsed files are lower bounds (results say so).");
+    return text;
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+char *cbm_session_brief_format_for_testing(const char *project, const char *json) {
+    return ha_format_session_brief(project, json);
+}
+#endif
+
+static char *ha_session_brief(cbm_mcp_server_t *srv, const char *project, bool *resolved) {
+    char *json = cbm_mcp_session_brief_json(srv, project, resolved);
+    char *text = json ? ha_format_session_brief(project, json) : NULL;
+    free(json);
     return text;
 }
 
@@ -1594,9 +1578,16 @@ static bool ha_norm_abs(const char *in, char *out, size_t out_sz) {
 #define HA_PROMPT_TRACE_DEPTH 6
 #define HA_PROMPT_TRACE_WORK 5000
 #define HA_DEADLINE_PROMPT_MS 1500
-#define HA_PROMPT_LABEL                                                                       \
-    "[code-cortex] graph facts for symbols in your request (from the index; verify with the " \
-    "file if it may have changed):"
+/* The label states what was checked: each resolved symbol's defining file
+ * against the index time (inspect_symbol's file_modified_after_index, which
+ * compares the file's mtime with the project's indexed_at — an mtime check,
+ * not a content hash). An unflagged label invites no verification grep. */
+#define HA_PROMPT_LABEL_FRESH                                                                 \
+    "[code-cortex] graph facts for symbols in your request (from the index; source files of " \
+    "these symbols unchanged since indexing):"
+#define HA_PROMPT_LABEL_STALE                                                                \
+    "[code-cortex] graph facts for symbols in your request (from the index; entries marked " \
+    "stale have a file modified after indexing, re-check those):"
 
 static bool ha_ident_start(unsigned char c) {
     return isalpha(c) || c == '_';
@@ -1793,9 +1784,12 @@ static void ha_prompt_names(std::string &line, yyjson_val *arr, int total) {
  * useful (not found, metadata omitted). *trace_name gets the name to trace
  * from/to when the symbol is a function or method, else stays empty. */
 static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &token,
-                                          std::string *trace_name) {
+                                          std::string *trace_name, bool *stale = nullptr) {
     if (trace_name) {
         trace_name->clear();
+    }
+    if (stale) {
+        *stale = false;
     }
     yyjson_val *r = d ? yyjson_doc_get_root(d) : nullptr;
     if (!r || !yyjson_is_obj(r) || yyjson_obj_get(r, "error")) {
@@ -1865,7 +1859,10 @@ static std::string ha_prompt_symbol_block(yyjson_doc *d, const std::string &toke
         block += buf;
     }
     if (yyjson_is_true(yyjson_obj_get(yyjson_obj_get(r, "index"), "file_modified_after_index"))) {
-        block += "; NOTE: file changed after indexing";
+        block += "; stale: file modified after indexing, re-check";
+        if (stale) {
+            *stale = true;
+        }
     }
 
     /* First source line (the defining line), else the stored signature. */
@@ -1939,8 +1936,9 @@ static std::string ha_prompt_chain_line(yyjson_doc *d, const std::string &from,
  * rendered output. A block that does not fit whole is cut at a line
  * boundary; nothing is ever cut inside a line or the JSON. NULL when no
  * block fits. */
-static char *ha_prompt_payload(const std::vector<std::string> &blocks, size_t max_bytes) {
-    std::string text = HA_PROMPT_LABEL;
+static char *ha_prompt_payload(const std::vector<std::string> &blocks, size_t max_bytes,
+                               bool any_stale) {
+    std::string text = any_stale ? HA_PROMPT_LABEL_STALE : HA_PROMPT_LABEL_FRESH;
     bool any = false;
     char *best = nullptr;
     for (const auto &block : blocks) {
@@ -2053,6 +2051,7 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
 
     std::vector<std::string> symbols;
     std::vector<std::pair<std::string, std::string>> functions; /* trace name, label */
+    bool any_stale = false;
     for (size_t i = 0; i < cands.size(); ++i) {
         bool error = first_error;
         yyjson_doc *d = first;
@@ -2060,8 +2059,10 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
             d = ha_prompt_inspect(srv, project, cands[i], &error);
         }
         std::string trace_name;
+        bool block_stale = false;
         std::string block =
-            error ? std::string() : ha_prompt_symbol_block(d, cands[i], &trace_name);
+            error ? std::string() : ha_prompt_symbol_block(d, cands[i], &trace_name, &block_stale);
+        any_stale |= block_stale;
         yyjson_doc_free(d);
         if (!block.empty()) {
             symbols.push_back(block);
@@ -2089,7 +2090,7 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd,
     }
     free(project);
     blocks.insert(blocks.end(), symbols.begin(), symbols.end());
-    return blocks.empty() ? nullptr : ha_prompt_payload(blocks, HA_PROMPT_MAX_BYTES);
+    return blocks.empty() ? nullptr : ha_prompt_payload(blocks, HA_PROMPT_MAX_BYTES, any_stale);
 }
 
 #ifdef CBM_ENABLE_TEST_SEAMS
@@ -2105,10 +2106,10 @@ char *cbm_prompt_candidates_for_testing(const char *prompt) {
     return strdup(joined.c_str());
 }
 char *cbm_prompt_symbol_block_for_testing(const char *inspect_json, const char *token,
-                                          char **trace_name) {
+                                          char **trace_name, bool *stale) {
     yyjson_doc *doc = inspect_json ? yyjson_read(inspect_json, strlen(inspect_json), 0) : nullptr;
     std::string name;
-    std::string block = ha_prompt_symbol_block(doc, token ? token : "", &name);
+    std::string block = ha_prompt_symbol_block(doc, token ? token : "", &name, stale);
     yyjson_doc_free(doc);
     if (trace_name) {
         *trace_name = name.empty() ? nullptr : strdup(name.c_str());
@@ -2121,12 +2122,13 @@ char *cbm_prompt_chain_line_for_testing(const char *trace_json, const char *from
     yyjson_doc_free(doc);
     return line.empty() ? nullptr : strdup(line.c_str());
 }
-char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_t max_bytes) {
+char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_t max_bytes,
+                                     bool any_stale) {
     std::vector<std::string> v;
     for (int i = 0; i < count; ++i) {
         v.emplace_back(blocks[i]);
     }
-    return ha_prompt_payload(v, max_bytes);
+    return ha_prompt_payload(v, max_bytes, any_stale);
 }
 #endif
 

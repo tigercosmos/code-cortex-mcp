@@ -235,7 +235,7 @@ Query latency:
 | `inspect_symbol` (warm, 40 callers) | ~10 ms |
 | PreToolUse hook (`Grep`, `Bash` search, or `Read`) | 10–25 ms |
 | PostToolUse hook (`Edit`/`Write`) | ~10 ms |
-| SessionStart brief | ~130 ms |
+| SessionStart brief (stored at index time) | ~5 ms |
 
 Two mechanisms keep calls fast. A persistent worker process serves tool calls, so each call
 skips a process exec and a database open. A memo in `_config.db` records each database's

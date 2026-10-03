@@ -127,6 +127,10 @@ struct cbm_pipeline {
     /* ADR (project_summaries) captured before a full-reindex DB delete, so it
      * can be restored after the rebuild. NULL when no ADR existed. Issue #516. */
     char *saved_adr;
+    /* Session brief of the database an incremental run is about to rebuild,
+     * carried over when recomputing it would be too slow (see
+     * pipeline_refresh_session_brief). */
+    char *saved_brief;
 };
 
 /* ── Global pkgmap (one active pipeline at a time) ─────────────── */
@@ -404,6 +408,8 @@ void cbm_pipeline_free(cbm_pipeline_t *p) {
     p->file_errors_count = 0;
     p->file_errors_cap = 0;
     free(p->branch_qn);
+    free(p->saved_brief);
+    p->saved_brief = NULL;
     free(p->saved_adr); /* freed here too: error paths can exit before the
                          * restore in dump_and_persist_hashes runs. Issue #516. */
     p->saved_adr = NULL;
@@ -1328,6 +1334,9 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
         int hash_count = 0;
         cbm_store_get_file_hashes(check_store, p->project_name, &hashes, &hash_count);
         cbm_store_free_file_hashes(hashes, hash_count);
+        free(p->saved_brief);
+        p->saved_brief = NULL;
+        (void)cbm_store_session_brief_get(check_store, p->project_name, &p->saved_brief);
         cbm_store_close(check_store);
         if (stored_format != CBM_INDEX_FORMAT_VERSION) {
             cbm_log_info("pipeline.route", "path", "format_change_reindex", "stored_format",
@@ -1663,6 +1672,46 @@ static int run_extraction_phase(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     return rc;
 }
 
+/* Above this many nodes a session brief is not recomputed on an incremental
+ * run (its queries take seconds there); the previous one is carried over.
+ * The SessionStart hook uses the same bound for its live fallback. */
+#define PL_BRIEF_RECOMPUTE_MAX_NODES 200000
+
+/* Store the SessionStart brief inputs in the freshly written database, so the
+ * hook reads one row instead of running architecture queries per session.
+ * Full runs always recompute. Incremental runs keep a brief that survived
+ * (a no-op run leaves the file untouched), recompute on small graphs, and
+ * otherwise carry the previous brief over (counts as of the last full run).
+ * Best-effort: a failure leaves no brief, and the hook degrades. */
+static void pipeline_refresh_session_brief(cbm_pipeline_t *p, bool full) {
+    struct timespec t;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    char *db_path = resolve_db_path(p);
+    cbm_store_t *store = db_path ? cbm_store_open_path(db_path) : NULL;
+    free(db_path);
+    if (!store) {
+        return;
+    }
+    const char *how = "recomputed";
+    char *brief = NULL;
+    if (!full && cbm_store_session_brief_get(store, p->project_name, &brief) == CBM_STORE_OK) {
+        how = "kept";
+    } else if (!full && p->saved_brief &&
+               cbm_store_node_id_ceiling(store) >= PL_BRIEF_RECOMPUTE_MAX_NODES) {
+        how = "carried";
+        if (cbm_store_session_brief_put(store, p->project_name, p->saved_brief) != CBM_STORE_OK) {
+            how = "failed";
+        }
+    } else if (cbm_store_session_brief_compute(store, p->project_name, &brief) != CBM_STORE_OK ||
+               cbm_store_session_brief_put(store, p->project_name, brief) != CBM_STORE_OK) {
+        how = "failed";
+    }
+    free(brief);
+    cbm_store_close(store);
+    cbm_log_info("pass.timing", "pass", "session_brief", "action", how, "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(t)));
+}
+
 int cbm_pipeline_run(cbm_pipeline_t *p) {
     if (!p) {
         return CBM_NOT_FOUND;
@@ -1751,6 +1800,9 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     rc = try_incremental_or_delete_db(p, files, file_count);
     if (rc >= 0) {
         cbm_discover_free(files, file_count);
+        if (rc == 0 && !check_cancel(p)) {
+            pipeline_refresh_session_brief(p, false);
+        }
         return rc;
     }
     cbm_log_info("pipeline.route", "path", "full");
@@ -1818,6 +1870,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         goto cleanup;
     }
 
+    pipeline_refresh_session_brief(p, true);
     cbm_log_info("pipeline.done", "nodes", itoa_buf(cbm_gbuf_node_count(p->gbuf)), "edges",
                  itoa_buf(cbm_gbuf_edge_count(p->gbuf)), "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t0)));

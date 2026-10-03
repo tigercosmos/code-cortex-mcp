@@ -1813,6 +1813,40 @@ static bool coverage_kind_is_skip(const char *kind) {
            strcmp(kind, "not_indexed_dir") != 0 && strcmp(kind, "not_indexed_file") != 0;
 }
 
+char *cbm_mcp_session_brief_json(cbm_mcp_server_t *srv, const char *project, bool *resolved) {
+    if (resolved) {
+        *resolved = false;
+    }
+    if (!srv || !project) {
+        return NULL;
+    }
+    cbm_store_t *store = resolve_store(srv, project);
+    if (!store) {
+        return NULL;
+    }
+    cbm_project_t proj = {0};
+    if (cbm_store_get_project(store, project, &proj) != CBM_STORE_OK) {
+        return NULL;
+    }
+    cbm_project_free_fields(&proj);
+    if (resolved) {
+        *resolved = true;
+    }
+    char *json = NULL;
+    if (cbm_store_session_brief_get(store, project, &json) == CBM_STORE_OK) {
+        return json;
+    }
+    int64_t ceiling = cbm_store_node_id_ceiling(store);
+    if (ceiling < CBM_MCP_BRIEF_LIVE_MAX_NODES &&
+        cbm_store_session_brief_compute(store, project, &json) == CBM_STORE_OK) {
+        return json;
+    }
+    free(json);
+    char buf[CBM_SZ_128];
+    snprintf(buf, sizeof(buf), "{\"nodes\":%lld,\"approximate\":true}", (long long)ceiling);
+    return heap_strdup(buf);
+}
+
 char *cbm_mcp_coverage_note(cbm_mcp_server_t *srv, const char *project, const char *rel_path,
                             bool *resolved) {
     if (resolved) {

@@ -74,6 +74,7 @@ enum {
 
 #define XXH_INLINE_ALL
 #include "xxhash/xxhash.h"
+#include "yyjson/yyjson.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -7721,4 +7722,177 @@ int cbm_store_vector_search(cbm_store_t *s, const char *project, const char **ke
     *out = results;
     *out_count = count;
     return CBM_STORE_OK;
+}
+
+/* ── Session brief inputs ────────────────────────────────────────
+ * The SessionStart hook's architecture brief needs node/edge counts, the
+ * language and package rollups, and the most-called functions. On a
+ * multi-million-node graph those queries take seconds, far past the hook's
+ * budget, so the pipeline computes them once per index run and stores the
+ * JSON here; the hook reads one row. The table is created on first write, so
+ * databases written before it existed simply have no brief (a miss). */
+
+enum {
+    BRIEF_LANGUAGES = 4,
+    BRIEF_PACKAGES = 6,
+    BRIEF_CENTRAL = 8,
+    BRIEF_CENTRAL_SCAN = 120,
+    BRIEF_CENTRAL_MIN_DEGREE = 8,
+};
+
+int cbm_store_session_brief_put(cbm_store_t *s, const char *project, const char *json) {
+    if (!s || !s->db || !project || !json) {
+        return CBM_STORE_ERR;
+    }
+    if (exec_sql(s, "CREATE TABLE IF NOT EXISTS session_brief ("
+                    "  project TEXT PRIMARY KEY,"
+                    "  brief TEXT NOT NULL,"
+                    "  computed_at TEXT NOT NULL"
+                    ");") != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
+    char now[CBM_SZ_32];
+    iso_now(now, sizeof(now));
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db,
+                           "INSERT INTO session_brief (project, brief, computed_at) "
+                           "VALUES (?1, ?2, ?3) ON CONFLICT(project) DO UPDATE SET "
+                           "brief=excluded.brief, computed_at=excluded.computed_at",
+                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "session_brief_put");
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    bind_text(stmt, ST_COL_2, json);
+    bind_text(stmt, ST_COL_3, now);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE ? CBM_STORE_OK : CBM_STORE_ERR;
+}
+
+int cbm_store_session_brief_get(cbm_store_t *s, const char *project, char **json_out) {
+    *json_out = NULL;
+    if (!s || !s->db || !project) {
+        return CBM_STORE_NOT_FOUND;
+    }
+    sqlite3_stmt *stmt = NULL;
+    /* No table (an index written before briefs existed) is a miss, not an error. */
+    if (sqlite3_prepare_v2(s->db, "SELECT brief FROM session_brief WHERE project=?1", CBM_NOT_FOUND,
+                           &stmt, NULL) != SQLITE_OK) {
+        return CBM_STORE_NOT_FOUND;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    int rc = CBM_STORE_NOT_FOUND;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *text = (const char *)sqlite3_column_text(stmt, 0);
+        if (text && text[0]) {
+            *json_out = heap_strdup(text);
+            rc = *json_out ? CBM_STORE_OK : CBM_STORE_ERR;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int64_t cbm_store_node_id_ceiling(cbm_store_t *s) {
+    if (!s || !s->db) {
+        return 0;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, "SELECT max(id) FROM nodes", CBM_NOT_FOUND, &stmt, NULL) !=
+        SQLITE_OK) {
+        return 0;
+    }
+    int64_t n = sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : 0;
+    sqlite3_finalize(stmt);
+    return n;
+}
+
+int cbm_store_session_brief_compute(cbm_store_t *s, const char *project, char **json_out) {
+    *json_out = NULL;
+    if (!s || !s->db || !project) {
+        return CBM_STORE_ERR;
+    }
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) {
+        return CBM_STORE_ERR;
+    }
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_int(doc, root, "nodes", cbm_store_count_nodes(s, project));
+    yyjson_mut_obj_add_int(doc, root, "edges", cbm_store_count_edges(s, project));
+
+    static const char *aspects[] = {"languages", "packages"};
+    cbm_architecture_info_t arch;
+    int rc = cbm_store_get_architecture(s, project, NULL, aspects, 2, &arch);
+    if (rc != CBM_STORE_OK) {
+        cbm_store_architecture_free(&arch);
+        yyjson_mut_doc_free(doc);
+        return rc;
+    }
+    yyjson_mut_val *langs = yyjson_mut_arr(doc);
+    for (int i = 0; i < arch.language_count && i < BRIEF_LANGUAGES; i++) {
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, item, "language",
+                                  arch.languages[i].language ? arch.languages[i].language : "");
+        yyjson_mut_obj_add_int(doc, item, "file_count", arch.languages[i].file_count);
+        yyjson_mut_arr_append(langs, item);
+    }
+    yyjson_mut_obj_add_val(doc, root, "languages", langs);
+    yyjson_mut_val *pkgs = yyjson_mut_arr(doc);
+    for (int i = 0; i < arch.package_count && i < BRIEF_PACKAGES; i++) {
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, item, "name",
+                                  arch.packages[i].name ? arch.packages[i].name : "");
+        yyjson_mut_obj_add_int(doc, item, "node_count", arch.packages[i].node_count);
+        yyjson_mut_arr_append(pkgs, item);
+    }
+    yyjson_mut_obj_add_val(doc, root, "packages", pkgs);
+    cbm_store_architecture_free(&arch);
+
+    /* Most-called functions: the same query the hook used to run live. */
+    cbm_search_params_t params;
+    memset(&params, 0, sizeof(params));
+    params.project = project;
+    params.label = "Function";
+    params.relationship = "CALLS";
+    params.direction = "inbound";
+    params.min_degree = BRIEF_CENTRAL_MIN_DEGREE;
+    params.max_degree = -1;
+    params.limit = BRIEF_CENTRAL_SCAN;
+    cbm_search_output_t found;
+    memset(&found, 0, sizeof(found));
+    yyjson_mut_val *central = yyjson_mut_arr(doc);
+    if (cbm_store_search(s, &params, &found) == CBM_STORE_OK && found.count > 0) {
+        int order[BRIEF_CENTRAL_SCAN];
+        int n = found.count < BRIEF_CENTRAL_SCAN ? found.count : BRIEF_CENTRAL_SCAN;
+        for (int i = 0; i < n; i++) {
+            order[i] = i;
+        }
+        /* Stable by degree, so equal-degree ties keep search order. */
+        for (int i = 1; i < n; i++) {
+            int key = order[i];
+            int j = i - 1;
+            while (j >= 0 && found.results[order[j]].in_degree < found.results[key].in_degree) {
+                order[j + 1] = order[j];
+                j--;
+            }
+            order[j + 1] = key;
+        }
+        for (int i = 0; i < n && i < BRIEF_CENTRAL; i++) {
+            const cbm_search_result_t *r = &found.results[order[i]];
+            yyjson_mut_val *item = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, item, "name", r->node.name ? r->node.name : "");
+            yyjson_mut_obj_add_int(doc, item, "in_degree", r->in_degree);
+            yyjson_mut_obj_add_strcpy(doc, item, "file_path",
+                                      r->node.file_path ? r->node.file_path : "");
+            yyjson_mut_arr_append(central, item);
+        }
+    }
+    cbm_store_search_free(&found);
+    yyjson_mut_obj_add_val(doc, root, "central", central);
+
+    *json_out = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    return *json_out ? CBM_STORE_OK : CBM_STORE_ERR;
 }

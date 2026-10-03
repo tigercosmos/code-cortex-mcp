@@ -161,6 +161,15 @@ bool cbm_mcp_server_has_cached_store(cbm_mcp_server_t *srv);
  * With the scan off, a miss costs one failed open plus a memo lookup. */
 void cbm_mcp_server_set_scan_fallback(cbm_mcp_server_t *srv, bool enabled);
 
+/* SessionStart brief inputs for an indexed project, as JSON
+ * {nodes, edges, languages[], packages[], central[]}: the brief stored at index
+ * time, else a live computation when the graph is small (node-id ceiling below
+ * CBM_MCP_BRIEF_LIVE_MAX_NODES), else {"nodes":<ceiling>,"approximate":true}
+ * so a large index without a stored brief never pays the multi-second queries.
+ * *resolved is true when the project is indexed. Caller frees. */
+#define CBM_MCP_BRIEF_LIVE_MAX_NODES 200000
+char *cbm_mcp_session_brief_json(cbm_mcp_server_t *srv, const char *project, bool *resolved);
+
 /* Coverage note (#963) for one repo-relative file, read straight from the
  * project's index_coverage rows.
  *

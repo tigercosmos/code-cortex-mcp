@@ -2807,13 +2807,16 @@ TEST(cli_prompt_symbol_block_formats_graph_facts) {
         R"("callers":[{"name":"c1"},{"name":"c2"},{"name":"c3"}],"callers_total":7,)"
         R"("related_tests_total":2,"callees":[{"name":"leaf"}],"callees_total":1})";
     char *trace = nullptr;
-    char *block = cbm_prompt_symbol_block_for_testing(payload, "capacity_function_3", &trace);
+    bool stale = true;
+    char *block = cbm_prompt_symbol_block_for_testing(payload, "capacity_function_3", &trace, &stale);
     ASSERT_NOT_NULL(block);
     ASSERT_NOT_NULL(strstr(block, "- capacity_function_3: Function at src/cap.cpp:12-20"));
     ASSERT_NOT_NULL(strstr(block, "declared at include/cap.h:5"));
     ASSERT_NOT_NULL(strstr(block, "\n  int capacity_function_3(int x) {"));
     ASSERT_NOT_NULL(strstr(block, "callers 7 (+2 in tests): c1, c2, c3, +4 more"));
     ASSERT_NOT_NULL(strstr(block, "callees 1: leaf"));
+    ASSERT_FALSE(stale);
+    ASSERT_NULL(strstr(block, "stale"));
     ASSERT_NOT_NULL(trace);
     ASSERT_STR_EQ(trace, "p.src.cap.capacity_function_3");
     free(trace);
@@ -2822,7 +2825,7 @@ TEST(cli_prompt_symbol_block_formats_graph_facts) {
     /* A class is reported but never traced; a declaration-only symbol says so. */
     block = cbm_prompt_symbol_block_for_testing(
         R"({"symbol":{"label":"Declaration","file":"a.h","start_line":3,"end_line":3},"callers_total":0,"callees_total":0})",
-        "ns::Thing", &trace);
+        "ns::Thing", &trace, &stale);
     ASSERT_NOT_NULL(block);
     ASSERT_NOT_NULL(strstr(block, "declaration only"));
     ASSERT_NULL(trace);
@@ -2830,15 +2833,25 @@ TEST(cli_prompt_symbol_block_formats_graph_facts) {
 
     block = cbm_prompt_symbol_block_for_testing(
         R"({"status":"ambiguous","suggestions":[{"qualified_name":"a.run","label":"Function","file_path":"a.cpp"},{"qualified_name":"b.run","label":"Method","file_path":"b.cpp"}]})",
-        "run_task", &trace);
+        "run_task", &trace, nullptr);
     ASSERT_NOT_NULL(block);
     ASSERT_NOT_NULL(strstr(block, "2 matches: a.run (Function, a.cpp), b.run (Method, b.cpp)"));
     ASSERT_NULL(trace);
     free(block);
 
     ASSERT_NULL(cbm_prompt_symbol_block_for_testing(R"({"error":"symbol not found"})", "x_y",
-                                                    &trace));
-    ASSERT_NULL(cbm_prompt_symbol_block_for_testing("not json", "x_y", &trace));
+                                                    &trace, nullptr));
+    ASSERT_NULL(cbm_prompt_symbol_block_for_testing("not json", "x_y", &trace, nullptr));
+
+    /* A defining file modified after indexing is flagged per block. */
+    block = cbm_prompt_symbol_block_for_testing(
+        R"({"symbol":{"label":"Function","file":"s.cpp","start_line":1,"end_line":2},"index":{"file_modified_after_index":true},"callers_total":0,"callees_total":0})",
+        "stale_fn", &trace, &stale);
+    ASSERT_NOT_NULL(block);
+    ASSERT_TRUE(stale);
+    ASSERT_NOT_NULL(strstr(block, "stale: file modified after indexing, re-check"));
+    free(trace);
+    free(block);
     PASS();
 #else
     SKIP("requires CBM_TEST_SEAMS");
@@ -2859,14 +2872,21 @@ TEST(cli_prompt_chain_and_payload_budget) {
 
     /* Everything fits: label first, blocks in order, valid JSON. */
     const char *small[] = {"- one: Function at a.cpp:1-2\n  int one() {", "- two: Class at b.h:3-9"};
-    char *json = cbm_prompt_payload_for_testing(small, 2, 4000);
+    char *json = cbm_prompt_payload_for_testing(small, 2, 4000, false);
     ASSERT_NOT_NULL(json);
     ASSERT_NOT_NULL(strstr(json, "\"hookEventName\":\"UserPromptSubmit\""));
     ASSERT_NOT_NULL(strstr(json, "[code-cortex] graph facts for symbols in your request"));
+    ASSERT_NOT_NULL(strstr(json, "source files of these symbols unchanged since indexing"));
+    ASSERT_NULL(strstr(json, "re-check"));
     ASSERT_NOT_NULL(strstr(json, "- two: Class at b.h:3-9"));
     yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
     ASSERT_NOT_NULL(doc);
     yyjson_doc_free(doc);
+    free(json);
+    json = cbm_prompt_payload_for_testing(small, 2, 4000, true);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NOT_NULL(strstr(json, "entries marked stale have a file modified after indexing"));
+    ASSERT_NULL(strstr(json, "unchanged since indexing"));
     free(json);
 
     /* Over budget: whole lines are dropped, the JSON stays valid and bounded. */
@@ -2874,7 +2894,7 @@ TEST(cli_prompt_chain_and_payload_budget) {
                         std::string(1500, 'y');
     std::string big_b = "- big_b: Function at b.cpp:1-2\n  " + std::string(1500, 'z');
     const char *big[] = {big_a.c_str(), big_b.c_str()};
-    json = cbm_prompt_payload_for_testing(big, 2, 4000);
+    json = cbm_prompt_payload_for_testing(big, 2, 4000, false);
     ASSERT_NOT_NULL(json);
     ASSERT_TRUE(strlen(json) <= 4000);
     ASSERT_NOT_NULL(strstr(json, "yyyy"));
@@ -2884,15 +2904,41 @@ TEST(cli_prompt_chain_and_payload_budget) {
     ASSERT_NOT_NULL(doc);
     yyjson_doc_free(doc);
     free(json);
-    json = cbm_prompt_payload_for_testing(big, 2, 3000);
+    json = cbm_prompt_payload_for_testing(big, 2, 3000, false);
     ASSERT_NOT_NULL(json);
     ASSERT_TRUE(strlen(json) <= 3000);
     ASSERT_NOT_NULL(strstr(json, "xxxx"));
     ASSERT_NULL(strstr(json, "yyyy"));
     free(json);
     /* Not even the first line fits: nothing, never partial output. */
-    ASSERT_NULL(cbm_prompt_payload_for_testing(big, 2, 200));
-    ASSERT_NULL(cbm_prompt_payload_for_testing(big, 0, 4000));
+    ASSERT_NULL(cbm_prompt_payload_for_testing(big, 2, 200, false));
+    ASSERT_NULL(cbm_prompt_payload_for_testing(big, 0, 4000, false));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_session_brief_formats_stored_inputs) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char *text = cbm_session_brief_format_for_testing(
+        "proj",
+        R"({"nodes":120,"edges":340,"languages":[{"language":"C++","file_count":9}],)"
+        R"("packages":[{"name":"core","node_count":80}],)"
+        R"("central":[{"name":"hub_fn","in_degree":12,"file_path":"src/hub.cpp"}]})");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "indexed as \"proj\" (120 symbols, 340 edges; C++ 9 files)."));
+    ASSERT_NOT_NULL(strstr(text, "Largest modules: core (80)."));
+    ASSERT_NOT_NULL(strstr(text, "Most-called functions: hub_fn (12 callers, src/hub.cpp)."));
+    ASSERT_NOT_NULL(strstr(text, "inspect_symbol(<name>)"));
+    free(text);
+    text = cbm_session_brief_format_for_testing("big", R"({"nodes":2200000,"approximate":true})");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "indexed as \"big\" (about 2200000 symbols)"));
+    ASSERT_NULL(strstr(text, "Most-called"));
+    free(text);
+    ASSERT_NULL(cbm_session_brief_format_for_testing("x", "not json"));
+    ASSERT_NULL(cbm_session_brief_format_for_testing("x", nullptr));
     PASS();
 #else
     SKIP("requires CBM_TEST_SEAMS");
@@ -3789,6 +3835,7 @@ SUITE(cli) {
     RUN_TEST(cli_prompt_symbol_block_formats_graph_facts);
     RUN_TEST(cli_prompt_chain_and_payload_budget);
     RUN_TEST(cli_claude_prompt_hook_install_remove);
+    RUN_TEST(cli_session_brief_formats_stored_inputs);
     RUN_TEST(cli_source_context_preserves_interleaved_paths);
     RUN_TEST(cli_hook_augment_bash_pattern_extractor);
     RUN_TEST(cli_remove_claude_hooks);

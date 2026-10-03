@@ -692,6 +692,19 @@ int cbm_store_get_architecture(cbm_store_t *s, const char *project, const char *
                                cbm_architecture_info_t *out);
 void cbm_store_architecture_free(cbm_architecture_info_t *out);
 
+/* ── Session brief inputs ──────────────────────────────────────────
+ * JSON {nodes, edges, languages[], packages[], central[]} for the SessionStart
+ * architecture brief, computed once per index run (seconds on multi-million-
+ * node graphs) and read back by the hook with one row lookup. */
+int cbm_store_session_brief_compute(cbm_store_t *s, const char *project, char **json_out);
+int cbm_store_session_brief_put(cbm_store_t *s, const char *project, const char *json);
+/* CBM_STORE_OK with *json_out (caller frees), or CBM_STORE_NOT_FOUND when no
+ * brief is stored (including databases written before the table existed). */
+int cbm_store_session_brief_get(cbm_store_t *s, const char *project, char **json_out);
+/* max(nodes.id): an O(log n) upper bound on the node count, for size gates
+ * that must not pay a COUNT(*) over millions of rows. */
+int64_t cbm_store_node_id_ceiling(cbm_store_t *s);
+
 /* ── ADR (Architecture Decision Record) ────────────────────────── */
 
 #define CBM_ADR_MAX_LENGTH 8000
