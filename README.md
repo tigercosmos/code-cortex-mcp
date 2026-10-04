@@ -181,7 +181,7 @@ correctly; sessions run serially, one repetition):
 
 A parallel two-repetition run of the same build gave 0.626 / 0.668 and 0.719 / 0.658.
 Accuracy in the mcp arm was 100% under exact-match grading on both sets and both models;
-the shell arm lost two Fable answers to a sentence before a correct chain. Cost per
+the shell arm lost one Fable answer to a sentence before a correct chain. Cost per
 session was within 10% between arms. The agent called no MCP tool in any session: the
 gain comes from the UserPromptSubmit hook, which prints what a whole-word search for the
 named symbols returns (every match line, classified as definition, declaration, call or

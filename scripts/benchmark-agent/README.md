@@ -64,3 +64,21 @@ by task shape, with an exact sign test, plus accuracy, cost, turns and tool adop
 
 See "Complete-task performance" in the top-level README for the table and conditions.
 Raw rows from that run are not committed (`docs/benchmarks/` is gitignored).
+
+## Real-repository task sets (`real/`)
+
+The synthetic set above flatters any symbol-resolving hook, because every name is unique.
+`real/` holds the two sets the README numbers come from:
+
+- `tasks_real.json`: 32 tasks, 8 repositories in 7 languages × locate / callers / call
+  chain / impact. Each task records its pinned commit, the ground truth and the grep
+  `derivation` that re-derives it without the graph (`verify_tasks.py` re-checks them).
+- `tasks_prev.json`: 34 earlier audited C/C++ tasks, re-pinned by commit and re-verified
+  with their own `verify_cmd` (see `tasks_prev.README.md` for the grading rules).
+
+`run_real.py` and `analyze_real.py` are the runner and report for both files (paths inside
+the task files are the benchmark host's; adjust `repo_path`). `prun.sh` runs both sets for
+both models as parallel shards, about 9 minutes per repetition on a 32-core host; parallel
+runs can flatter the ratio by up to 0.1, so confirm a result serially before quoting it.
+`../hook_audit.py` is the offline inner loop: it pipes every task prompt through the hook
+and checks that the gold answer and the evidence are in its output, with no model call.

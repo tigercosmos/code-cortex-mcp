@@ -1,0 +1,774 @@
+[
+ {
+  "id": "redis_locate",
+  "repo_key": "redis",
+  "repo_path": "/home/anchi/realbench-20261003/repos/redis",
+  "language": "C",
+  "archetype": "locate",
+  "favours": "neutral",
+  "symbol": "rdbLoadObject",
+  "question": "In the Redis repository at /home/anchi/realbench-20261003/repos/redis (C; search the entire repository, but first-party code lives under src/; ignore deps/, modules/, tests/ and build output), find where the C function whose name is exactly `rdbLoadObject` is DEFINED \u2014 that is, the line where its implementation begins (the line carrying its return type and name, whose body follows), not a declaration/prototype in a header, a comment, a log string, or a call site.\n\nAnswer with exactly one line in the form <repo-relative-path>:<line>, for example src/foo.c:123. Output nothing else.",
+  "answer_kind": "path_and_line",
+  "ground_truth": [
+   "src/rdb.c:2898"
+  ],
+  "alternates": [],
+  "derivation": "rg -n '\\brdbLoadObject\\b' .",
+  "derivation_excluded": [],
+  "grading_notes": "rg -n '\\brdbLoadObject\\b' . gives 9 hits; only one definition: src/rdb.c:2898: robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) (opening brace on line 2899). Traps: src/rdb.h:165 prototype; src/rdb.h:138 and src/rdb.c:2284 comments; src/rdb.c:4955, src/cluster.c:299, src/redis-check-rdb.c:374 calls; src/rdb.c:4973 log string; tests/integration/corrupt-dump.tcl:396 comment. No other definition anywhere (deps/modules checked by whole-repo rg)."
+ },
+ {
+  "id": "redis_callers",
+  "repo_key": "redis",
+  "repo_path": "/home/anchi/realbench-20261003/repos/redis",
+  "language": "C",
+  "archetype": "callers",
+  "favours": "graph",
+  "symbol": "dbAdd",
+  "question": "Repository under test: /home/anchi/realbench-20261003/repos/redis (Redis, written in C).\n\nScope: first-party C sources under src/ only (.c and .h files). Exclude deps/ (vendored hiredis, jemalloc, lua, linenoise, hdr_histogram, fpconv, tre, xxhash), modules/ (vector-sets), tests/ (Tcl tests and test modules), utils/, tools/ and any build output.\n\nTarget: the function `dbAdd` (signature `kvobj *dbAdd(redisDb *db, robj *key, robj **valref)`), whose definition is in src/db.c.\n\nList every source file in that scope that contains at least one CALL to `dbAdd`.\n\nCount only real call sites of that exact function. Do NOT count:\n- declarations / prototypes of the function (e.g. in a header),\n- a file that only contains its definition and no call to it,\n- occurrences inside comments or string literals,\n- calls to other, different functions whose names merely start with or contain `dbAdd` (e.g. `dbAddByLink`, `dbAddInternal`, `dbAddRDBLoad`).\n\nOutput format: print one repository-relative file path per line (for example `src/db.c`), with no leading `./`, sorted with `LC_ALL=C sort`. No line numbers, no counts, no bullets, no explanation \u2014 the file paths and nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "src/debug.c",
+   "src/module.c",
+   "src/t_array.c",
+   "src/t_hash.c",
+   "src/t_list.c",
+   "src/t_set.c",
+   "src/t_stream.c",
+   "src/t_zset.c"
+  ],
+  "alternates": [],
+  "derivation": "rg -n '\\bdbAdd\\b' src",
+  "derivation_excluded": [
+   {
+    "path": "src/db.c",
+    "reason": "definition only (line 472: kvobj *dbAdd(redisDb *db, robj *key, robj **valref) {); other hits 113,127,526,2672,2718 are comments"
+   },
+   {
+    "path": "src/server.h",
+    "reason": "prototype only, line 4324: kvobj *dbAdd(redisDb *db, robj *key, robj **valref);"
+   },
+   {
+    "path": "src/bitops.c",
+    "reason": "comments only, lines 892 and 2114: * updated in lookupStringForBitCommand() by calling dbAdd(). */"
+   }
+  ],
+  "grading_notes": "Read every hit of rg -n '\\bdbAdd\\b' src. Calls: src/debug.c:843: dbAdd(c->db, key, &val); src/module.c:755: key->kv = dbAdd(key->db, key->key, &obj); src/t_array.c:53: dbAdd(c->db, key, &o); src/t_hash.c:4186: kv = dbAdd(c->db,c->argv[1],&o); (also 5054, 5117); src/t_list.c:1180: dbAdd(c->db, dstkey, &dstobj); (also 1586; 516,1189,1636 are comments); src/t_set.c:762: dbAdd(c->db, c->argv[2], &dstset); src/t_stream.c:3664: dbAdd(c->db, c->argv[2], &o); (2568 is a comment); src/t_zset.c:2045: zobj = dbAdd(c->db,key,&o);. Traps: dbAddByLink (called from t_string.c, hyperloglog.c, bitops.c etc.), dbAddInternal (cluster.c, db.c), dbAddRDBLoad (rdb.c) are different functions; db.c has only definition+comments; bitops.c only comments; tests/*.tcl comments out of scope."
+ },
+ {
+  "id": "redis_callchain",
+  "repo_key": "redis",
+  "repo_path": "/home/anchi/realbench-20261003/repos/redis",
+  "language": "C",
+  "archetype": "callchain",
+  "favours": "graph",
+  "symbol": "incrCommand -> dbAddInternal",
+  "question": "Working in the Redis C checkout at /home/anchi/realbench-20261003/repos/redis (scope: first-party C code under src/ only; exclude deps/, modules/, tests/, utils/ and build output), find the shortest chain of direct function calls that starts at the function `incrCommand` (the INCR command handler in src/t_string.c) and ends at the function `dbAddInternal` (defined in src/db.c).\n\nRules:\n- Every consecutive pair in the chain must be a DIRECT call: the body of the earlier function must contain a call to the next function.\n- Only functions that are defined somewhere inside src/ count as hops; macros, function pointers and command-table dispatch do not count.\n- \"Shortest\" means the fewest functions in the chain; there is exactly one chain of that minimum length.\n\nOutput ONLY the function names, one per line, in call order, starting with `incrCommand` on the first line and ending with `dbAddInternal` on the last line. No numbering, no arrows, no file paths, no commentary. Output nothing else.",
+  "answer_kind": "ordered_names",
+  "ground_truth": [
+   "incrCommand",
+   "incrDecrCommand",
+   "dbAddByLink",
+   "dbAddInternal"
+  ],
+  "alternates": [],
+  "derivation": "rg -n '\\bdbAddInternal\\b|\\bdbAddByLink\\b|\\bincrDecrCommand\\b' src",
+  "derivation_excluded": [],
+  "grading_notes": "Bodies read with sed -n. src/t_string.c:936-938: void incrCommand(client *c) { incrDecrCommand(c,1); } -- its only callee. src/t_string.c:896-934 incrDecrCommand calls lookupKeyWriteWithLink, checkType, getLongLongFromObjectOrReply, addReplyError, updateKeysizesHist, sdigits10, createStringObjectFromLongLongForValue, dbReplaceValueWithLink, dbAddByLink (line 927: dbAddByLink(c->db, c->argv[1], &new, &link);), addReplyLongLongFromStr, keyModified, notifyKeyspaceEvent. src/db.c:478-482 dbAddByLink: line 481: return dbAddInternal(db, key, valref, link, &keyMetaEmpty);. Minimality: incrCommand does not call dbAddInternal; incrDecrCommand does not call it directly. The complete set of direct callers of dbAddInternal (rg '\\bdbAddInternal\\b' .) is dbAdd (db.c:475), dbAddByLink (db.c:481), renameGenericCommand (db.c:2321), moveCommand (db.c:2417), copyCommand (db.c:2544), restoreCommand (cluster.c:339); of these only dbAddByLink is a callee of incrDecrCommand, so the 4-chain is unique. Traps: dbAdd (not called by incrDecrCommand), setKey/setKeyByLink (not called by incrDecrCommand)."
+ },
+ {
+  "id": "redis_impact",
+  "repo_key": "redis",
+  "repo_path": "/home/anchi/realbench-20261003/repos/redis",
+  "language": "C",
+  "archetype": "impact",
+  "favours": "graph",
+  "symbol": "getTimeoutFromObjectOrReply",
+  "question": "Repository: /home/anchi/realbench-20261003/repos/redis (Redis, C).\n\nI want to add a new REQUIRED parameter to the function `getTimeoutFromObjectOrReply` (currently `int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit)`). Which source files must I edit? Include the header file that declares it, the file that defines it, and every file that contains a call to it.\n\nScope: first-party C sources under src/ only (.c and .h files). Exclude deps/ (vendored hiredis, jemalloc, lua, linenoise, hdr_histogram, fpconv, tre, xxhash), modules/ (vector-sets), tests/ (Tcl tests and test modules), utils/, tools/ and any build output. Do not report documentation files, build files, or Tcl test scripts. Report a file only if it declares, defines, or calls `getTimeoutFromObjectOrReply` itself \u2014 do not report files merely because they call some other function that wraps it (for example a blocking-command helper).\n\nOutput format: print ONLY the repo-relative file paths (for example src/server.h), one path per line, sorted in byte order (LC_ALL=C sort). No bullets, no numbering, no backticks, no commentary, no blank lines. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "src/networking.c",
+   "src/replication.c",
+   "src/server.h",
+   "src/t_list.c",
+   "src/t_stream.c",
+   "src/t_zset.c",
+   "src/timeout.c"
+  ],
+  "alternates": [],
+  "derivation": "rg -n '\\bgetTimeoutFromObjectOrReply\\b' src",
+  "derivation_excluded": [],
+  "grading_notes": "Whole-repo rg -n '\\bgetTimeoutFromObjectOrReply\\b' . gives 11 hits, all in src/. Declaration: src/server.h:4475: int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit);. Definition: src/timeout.c:146: int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int unit) {. Calls: src/networking.c:4789: if (getTimeoutFromObjectOrReply(c,c->argv[2],&end, (CLIENT PAUSE); src/replication.c:4907 and 4937: if (getTimeoutFromObjectOrReply(c,c->argv[2],&timeout,UNIT_MILLISECONDS) (WAIT/WAITAOF); src/t_list.c:1312, 1413, 1421, 1751; src/t_stream.c:2822: if (getTimeoutFromObjectOrReply(c,c->argv[i],&timeout, (XREAD BLOCK); src/t_zset.c:4422. Traps: callers of the wrapping commands (e.g. blockingPopGenericCommand users) must not be added; no tests/ or modules/ C file calls it."
+ },
+ {
+  "id": "rocksdb_locate",
+  "repo_key": "rocksdb",
+  "repo_path": "/home/anchi/realbench-20261003/repos/rocksdb",
+  "language": "C++",
+  "archetype": "locate",
+  "favours": "neutral",
+  "symbol": "FileMetaData::UpdateBoundaries",
+  "question": "In the RocksDB repository at /home/anchi/realbench-20261003/repos/rocksdb (C++; search the entire repository, excluding only the vendored `third-party/` directory), find where the C++ member function `UpdateBoundaries` of the struct `FileMetaData` is DEFINED \u2014 that is, the line where its out-of-line implementation begins (the line carrying the return type and the qualified name `FileMetaData::UpdateBoundaries`, the one whose body follows), not its declaration inside the struct, a comment mentioning it, or a call site such as `meta.UpdateBoundaries(...)`.\n\nAnswer with exactly one line in the form <repo-relative-path>:<line>, for example db/foo.cc:123. Output nothing else.",
+  "answer_kind": "path_and_line",
+  "ground_truth": [
+   "db/version_edit.cc:65"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'UpdateBoundaries' --glob '!third-party/**' .",
+  "derivation_excluded": [],
+  "grading_notes": "rg -w UpdateBoundaries (excluding third-party) gives 19 hits in 9 files; exactly one definition: db/version_edit.cc:65: Status FileMetaData::UpdateBoundaries(const Slice& key, const Slice& value, (body follows at line 67 `ValueType value_type) {`). Traps: db/version_edit.h:382: `Status UpdateBoundaries(const Slice& key, const Slice& value,` is the in-class declaration (ends with `;` at 383); calls in db/builder.cc:312, db/compaction/compaction_outputs.cc:469, db/repair.cc:627, db/version_edit_test.cc:695..791; comments in db/blob/blob_constants.h:29, db/blob/db_blob_index_test.cc:570/631/634, db/version_set.cc:2792/2869, db/version_edit.h:385. No other class defines a method named UpdateBoundaries (word-boundary grep). Accept only db/version_edit.cc:65."
+ },
+ {
+  "id": "rocksdb_callers",
+  "repo_key": "rocksdb",
+  "repo_path": "/home/anchi/realbench-20261003/repos/rocksdb",
+  "language": "C++",
+  "archetype": "callers",
+  "favours": "graph",
+  "symbol": "StripTimestampFromUserKey",
+  "question": "Repository under test: /home/anchi/realbench-20261003/repos/rocksdb (RocksDB, C++).\n\nScope: all first-party source in the repository (C++ .cc/.h files anywhere, including tests, tools, db_stress_tool, utilities, and headers), EXCLUDING the vendored `third-party/` directory, the Java bindings directory `java/` (JNI code), and the `docs/` directory. There is no generated build directory in this checkout. Test files (*_test.cc, test utility headers) are in scope.\n\nTarget: the inline free function `ROCKSDB_NAMESPACE::StripTimestampFromUserKey(const Slice& user_key, size_t ts_sz)`, whose definition is in db/dbformat.h. There is no other function of this exact name in the repository.\n\nList every first-party source file (.cc or .h) in that scope that contains at least one CALL to `StripTimestampFromUserKey`.\n\nCount only real call sites of that exact function (a call whose arguments span several lines counts). Do NOT count:\n- the definition itself (db/dbformat.h only defines it and does not call it),\n- occurrences inside comments or string literals,\n- calls to other, different functions whose names merely contain `StripTimestampFromUserKey` or are similar (e.g. `ExtractUserKeyAndStripTimestamp`, `ExtractTimestampFromUserKey`).\n\nOutput format: print one repository-relative file path per line (for example `db/memtable.cc`), with no leading `./`, sorted with `LC_ALL=C sort`. No line numbers, no counts, no bullets, no explanation \u2014 the file paths and nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "db/compaction/compaction_job.cc",
+   "db/db_iter.cc",
+   "db/db_with_timestamp_test_util.h",
+   "db/memtable.cc",
+   "db_stress_tool/expected_state.cc",
+   "table/block_based/block_based_table_builder.cc",
+   "table/block_based/block_based_table_reader.cc",
+   "table/block_based/partitioned_filter_block_test.cc",
+   "table/multiget_context.h",
+   "util/comparator.cc",
+   "util/udt_util.cc",
+   "utilities/types_util.cc",
+   "utilities/write_batch_with_index/write_batch_with_index_internal.cc"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'StripTimestampFromUserKey' --glob '!third-party/**' --glob '!java/**' --glob '!docs/**' .",
+  "derivation_excluded": [
+   {
+    "path": "db/dbformat.h",
+    "reason": "definition only, line 342: inline Slice StripTimestampFromUserKey(const Slice& user_key, size_t ts_sz) {"
+   }
+  ],
+  "grading_notes": "56 raw hits in 14 files; every hit read. Only non-call is db/dbformat.h:342 (definition). No hits at all in third-party/, java/, docs/; no substring-only occurrences anywhere. Gold call excerpts: db/compaction/compaction_job.cc:1499: StripTimestampFromUserKey(*boundaries.start, ts_sz); db/db_iter.cc:518: StripTimestampFromUserKey(ikey_.user_key, timestamp_size_); db/db_with_timestamp_test_util.h:65: Slice lhs = a_has_ts ? StripTimestampFromUserKey(a, timestamp_size()) : a; db/memtable.cc:1167: Slice key_without_ts = StripTimestampFromUserKey(key, ts_sz_); db_stress_tool/expected_state.cc:523: StripTimestampFromUserKey(key_with_ts, FLAGS_user_timestamp_size); table/block_based/block_based_table_builder.cc:2036: persisted_end = StripTimestampFromUserKey(value, r->ts_sz); table/block_based/block_based_table_reader.cc:2726: Slice user_key_without_ts = StripTimestampFromUserKey(user_key, ts_sz); table/block_based/partitioned_filter_block_test.cc:261: builder->Add(StripTimestampFromUserKey(keys[i], ts_sz_)); table/multiget_context.h:141: sorted_keys_[iter]->ukey_without_ts = StripTimestampFromUserKey( (multi-line call); util/comparator.cc:292: Slice lhs = a_has_ts ? StripTimestampFromUserKey(a, ts_sz) : a; util/udt_util.cc:330: *new_key = StripTimestampFromUserKey(key, *record_ts_sz); utilities/types_util.cc:80: parsed_entry->user_key = StripTimestampFromUserKey(pikey.user_key, ts_sz); utilities/write_batch_with_index/write_batch_with_index_internal.cc:769: ret.key = StripTimestampFromUserKey(ret.key, ts_sz). Traps: db/dbformat.h (definition only); files using ExtractUserKeyAndStripTimestamp/ExtractTimestampFromUserKey only (e.g. db/version_set.cc, db/db_impl/compacted_db_impl_sync_and_async.h, table/block_based/block_based_table_reader_test.cc) must be rejected."
+ },
+ {
+  "id": "rocksdb_callchain",
+  "repo_key": "rocksdb",
+  "repo_path": "/home/anchi/realbench-20261003/repos/rocksdb",
+  "language": "C++",
+  "archetype": "callchain",
+  "favours": "graph",
+  "symbol": "Run -> BuildTable",
+  "question": "Working in the RocksDB C++ checkout at /home/anchi/realbench-20261003/repos/rocksdb (scope: first-party C++ source; exclude the vendored `third-party/` directory, the `java/` JNI bindings, and `docs/`), find the shortest chain of direct function calls that starts at the member function `Repairer::Run` (class `Repairer` in db/repair.cc) and ends at the free function `BuildTable` (declared in db/builder.h, defined in db/builder.cc).\n\nRules:\n- Every consecutive pair in the chain must be a DIRECT call: the body of the earlier function must contain a call to the next function.\n- Only functions that are defined somewhere inside this repository count as hops; calls through function pointers, callbacks, or virtual dispatch to unrelated classes do not count.\n- \"Shortest\" means the fewest functions in the chain; there is exactly one chain of that minimum length.\n\nOutput ONLY the bare function names (no class prefix, no parentheses), one per line, in call order, starting with `Run` on the first line and ending with `BuildTable` on the last line. No numbering, no arrows, no file paths, no commentary. Output nothing else.",
+  "answer_kind": "ordered_names",
+  "ground_truth": [
+   "Run",
+   "ConvertLogFilesToTables",
+   "ConvertLogToTable",
+   "BuildTable"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'Run|ConvertLogFilesToTables|ConvertLogToTable|BuildTable|WriteLevel0Table|WriteLevel0TableForRecovery' db/repair.cc db/builder.cc db/flush_job.cc db/db_impl/db_impl_open.cc",
+  "derivation_excluded": [],
+  "grading_notes": "Read bodies: db/repair.cc:197: Status Run() { (Repairer::Run, body to ~line 246) calls at db/repair.cc:229: ConvertLogFilesToTables(); db/repair.cc:340: void ConvertLogFilesToTables() { calls db/repair.cc:346: Status status = ConvertLogToTable(wal_dir, logs_[i]); db/repair.cc:356: Status ConvertLogToTable(const std::string& wal_dir, uint64_t log) { calls db/repair.cc:490: status = BuildTable( ; BuildTable defined db/builder.cc:74. Minimality: all direct callers of BuildTable (rg -w 'BuildTable\\s*\\(' excl. third-party): db/flush_job.cc:1047 (FlushJob::WriteLevel0Table), db/repair.cc:490 (Repairer::ConvertLogToTable), db/db_impl/db_impl_open.cc:2195 (DBImpl::WriteLevel0TableForRecovery). Run does not call BuildTable, ConvertLogToTable, WriteLevel0Table, or WriteLevel0TableForRecovery directly. For a 4-chain Run->X->Y->BuildTable, Y must be one of those three. ConvertLogToTable's only caller is ConvertLogFilesToTables (repair.cc:346). FlushJob::WriteLevel0Table's only caller is FlushJob::Run (flush_job.cc:297), which Repairer::Run does not call. WriteLevel0TableForRecovery is called only from DBImpl::MaybeWriteLevel0TableForRecovery (db_impl_open.cc:1713) and DBImpl::MaybeFlushFinalMemtableOrRestoreActiveLogFiles (db_impl_open.cc:1910), neither called by Repairer::Run (Run's callees: LockFile, LockFileName, FindFiles, ArchiveFile, DBImpl ctor, NewDB, VersionSet::Recover, ExtractMetaData, ConvertLogFilesToTables, AddTables, logging macros). So the unique 4-chain is Run -> ConvertLogFilesToTables -> ConvertLogToTable -> BuildTable. Trap: answers starting at RepairDB or passing through FlushJob::Run/WriteLevel0Table are wrong."
+ },
+ {
+  "id": "rocksdb_impact",
+  "repo_key": "rocksdb",
+  "repo_path": "/home/anchi/realbench-20261003/repos/rocksdb",
+  "language": "C++",
+  "archetype": "impact",
+  "favours": "graph",
+  "symbol": "ExtractUserKeyAndStripTimestamp",
+  "question": "Repository: /home/anchi/realbench-20261003/repos/rocksdb (RocksDB, C++).\n\nI want to add a new REQUIRED parameter to the inline free function `ExtractUserKeyAndStripTimestamp(const Slice& internal_key, size_t ts_sz)` (namespace ROCKSDB_NAMESPACE). Which source files must I edit? Include the file that declares/defines it and every file that contains a call to it (test files included).\n\nScope: all first-party source in the repository (C++ .cc/.h files anywhere, including tests, tools, db_stress_tool, utilities, and headers), EXCLUDING the vendored `third-party/` directory, the Java bindings directory `java/` (JNI code), and the `docs/` directory. There is no generated build directory in this checkout. Consider only C++ source and header files (.cc, .h). Do not report documentation files, build files, or HISTORY/markdown files. Report a file only if it defines or calls `ExtractUserKeyAndStripTimestamp` itself \u2014 do not report files merely because they call some other function that wraps it, and do not count similarly named functions such as `ExtractUserKey`, `StripTimestampFromUserKey`, or `ExtractTimestampFromUserKey`.\n\nOutput format: print ONLY the repo-relative file paths (no leading `./`), one path per line, sorted in byte order (LC_ALL=C sort). No bullets, no numbering, no backticks, no commentary, no blank lines. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "db/db_impl/compacted_db_impl_sync_and_async.h",
+   "db/dbformat.h",
+   "db/memtable.cc",
+   "db/version_set.cc",
+   "table/block_based/block_based_table_builder.cc",
+   "table/block_based/block_based_table_reader.cc",
+   "table/block_based/block_based_table_reader_test.cc"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'ExtractUserKeyAndStripTimestamp' --glob '!third-party/**' --glob '!java/**' --glob '!docs/**' .",
+  "derivation_excluded": [],
+  "grading_notes": "15 raw hits in 7 files, every hit read; no hits in third-party/, java/, docs/, and no substring-only occurrences anywhere. Definition (also its only declaration): db/dbformat.h:333: inline Slice ExtractUserKeyAndStripTimestamp(const Slice& internal_key,. Calls: db/db_impl/compacted_db_impl_sync_and_async.h:78: ExtractUserKeyAndStripTimestamp(f.smallest_key,; db/memtable.cc:575: Slice user_k_without_ts(ExtractUserKeyAndStripTimestamp(k, ts_sz_)); db/version_set.cc:1595: ExtractUserKeyAndStripTimestamp(target, ts_sz); table/block_based/block_based_table_builder.cc:2006: ExtractUserKeyAndStripTimestamp(entry_ikey, r->ts_sz),; table/block_based/block_based_table_reader.cc:2587: ExtractUserKeyAndStripTimestamp(internal_key, ts_sz); table/block_based/block_based_table_reader_test.cc:1217: return ExtractUserKeyAndStripTimestamp(internal_key, ts_sz); (inside test helper ScanBoundary). Traps: files calling only ExtractUserKey or StripTimestampFromUserKey (e.g. db/db_iter.cc, util/comparator.cc, table/multiget_context.h) must be rejected."
+ },
+ {
+  "id": "etcd_locate",
+  "repo_key": "etcd",
+  "repo_path": "/home/anchi/realbench-20261003/repos/etcd",
+  "language": "Go",
+  "archetype": "locate",
+  "favours": "neutral",
+  "symbol": "syncWatchers",
+  "question": "In the etcd repository at /home/anchi/realbench-20261003/repos/etcd (Go; search the entire repository, including all Go modules and test files; there is no vendor/ or third_party/ directory, and generated *.pb.go / *.pb.gw.go files are irrelevant), find where the Go method whose name is exactly `syncWatchers` is DEFINED \u2014 that is, the line where its implementation begins (the line starting with `func`, carrying the receiver and the name, whose body follows), not a call site, a comment that mentions it, a test, or a different function whose name merely contains `syncWatchers` (for example `syncWatchersLoop` or `TestSyncWatchers`).\n\nAnswer with exactly one line in the form <repo-relative-path>:<line>, for example server/foo/bar.go:123. Output nothing else.",
+  "answer_kind": "path_and_line",
+  "ground_truth": [
+   "server/storage/mvcc/watchable_store.go:347"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'syncWatchers' .",
+  "derivation_excluded": [],
+  "grading_notes": "rg -n -w syncWatchers . gives 15 hits in 3 files (watchable_store.go x8, watcher_test.go x2, watchable_store_test.go x5); exactly one is a definition: server/storage/mvcc/watchable_store.go:347: func (s *watchableStore) syncWatchers() int {. rg -n 'func .*syncWatchers' . also shows only the near-miss server/storage/mvcc/watchable_store.go:224: func (s *watchableStore) syncWatchersLoop() {. Traps to reject: :238 call (unsyncedWatchers = s.syncWatchers()), :342 doc comment, :224 syncWatchersLoop definition, :373/:490 comments, test calls watcher_test.go:411/461, watchable_store_test.go:317/526, TestSyncWatchers comment watchable_store_test.go:296."
+ },
+ {
+  "id": "etcd_callers",
+  "repo_key": "etcd",
+  "repo_path": "/home/anchi/realbench-20261003/repos/etcd",
+  "language": "Go",
+  "archetype": "callers",
+  "favours": "graph",
+  "symbol": "NewAuthBackend",
+  "question": "Repository under test: /home/anchi/realbench-20261003/repos/etcd (etcd, Go).\n\nScope: the whole repository (all Go modules: api/, client/, etcdctl/, etcdutl/, pkg/, server/, tests/, tools/, and the rest), INCLUDING *_test.go test files. There is no vendor/ or third_party/ directory in this checkout; exclude generated protobuf files (*.pb.go, *.pb.gw.go) \u2014 they are not relevant here.\n\nTarget: the package-level function `NewAuthBackend` of package `schema`, whose definition is in server/storage/schema/auth.go (`func NewAuthBackend(lg *zap.Logger, be backend.Backend) auth.AuthBackend`). It is the only function of that name in the repository; calls appear both unqualified (inside package schema) and qualified as `schema.NewAuthBackend(...)`.\n\nList every Go source file in that scope (test files included) that contains at least one CALL to `NewAuthBackend`.\n\nCount only real call sites of that exact function. Do NOT count:\n- the file that only contains its definition and no call to it,\n- occurrences inside comments or string literals,\n- the `AuthBackend` interface or other identifiers that merely contain `AuthBackend`, and files that only call a different function such as `auth.NewAuthStore` without also calling `NewAuthBackend`.\n\nOutput format: print one repository-relative file path per line (for example `server/etcdserver/server.go`), with no leading `./`, sorted with `LC_ALL=C sort`. No line numbers, no counts, no bullets, no explanation \u2014 the file paths and nothing else. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "server/etcdserver/api/etcdhttp/health_test.go",
+   "server/etcdserver/apply/auth_test.go",
+   "server/etcdserver/apply/uber_applier_test.go",
+   "server/etcdserver/server.go",
+   "server/etcdserver/server_test.go",
+   "server/storage/schema/auth_roles_test.go",
+   "server/storage/schema/auth_test.go",
+   "server/storage/schema/auth_users_test.go"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'NewAuthBackend' --glob '*.go' .",
+  "derivation_excluded": [
+   "server/storage/schema/auth.go: definition only, line 43: func NewAuthBackend(lg *zap.Logger, be backend.Backend) auth.AuthBackend {"
+  ],
+  "grading_notes": "rg -n -w NewAuthBackend --glob '*.go' . -> 28 hits in 9 files; same 28 hits with no glob and with case-insensitive substring search (no other spelling exists). Every hit read: all non-definition hits are call expressions. Gold excerpts: server/storage/schema/auth_users_test.go:103: abe := NewAuthBackend(lg, be) (also 116,190,203); server/storage/schema/auth_test.go:57: abe := NewAuthBackend(lg, be) (also 71,108,122); server/storage/schema/auth_roles_test.go:115: abe := NewAuthBackend(lg, be) (also 128,214,227); server/etcdserver/server.go:373: srv.authStore = auth.NewAuthStore(srv.Logger(), schema.NewAuthBackend(srv.Logger(), srv.be), ...) and :1101: s.authStore.Recover(schema.NewAuthBackend(lg, newbe)); server/etcdserver/apply/uber_applier_test.go:59: schema.NewAuthBackend(lg, be),; server/etcdserver/apply/auth_test.go:95: schema.NewAuthBackend(lg, be), and :1068; server/etcdserver/server_test.go:806 (also 1080,1152,1201): auth.NewAuthStore(lg, schema.NewAuthBackend(lg, be), nil, ...); server/etcdserver/api/etcdhttp/health_test.go:164 (also 206,260,305,346,381): auth.NewAuthStore(..., schema.NewAuthBackend(...), nil, 0). Excluded: server/storage/schema/auth.go:43 definition. Traps: server/auth/store.go (declares `type AuthBackend interface` and defines NewAuthStore, no NewAuthBackend call); server/auth/store_test.go calls NewAuthStore only (with newBackendMock / as.be), not NewAuthBackend."
+ },
+ {
+  "id": "etcd_callchain",
+  "repo_key": "etcd",
+  "repo_path": "/home/anchi/realbench-20261003/repos/etcd",
+  "language": "Go",
+  "archetype": "callchain",
+  "favours": "graph",
+  "symbol": "snapshotRestoreCommandFunc -> ToMemberDir",
+  "question": "Working in the Go checkout of etcd at /home/anchi/realbench-20261003/repos/etcd (scope: all first-party Go code in the repository; there is no vendor/ or third_party/ directory; ignore generated *.pb.go files and the Go standard library / external modules), find the shortest chain of direct function calls that starts at the function `snapshotRestoreCommandFunc` (lower-case `s`, defined in etcdutl/etcdutl/snapshot_command.go \u2014 the cobra Run handler of `etcdutl snapshot restore`) and ends at the function `ToMemberDir` (defined in server/storage/datadir/datadir.go).\n\nRules:\n- Every consecutive pair in the chain must be a DIRECT call: the body of the earlier function must contain a call to the next function (a package-qualified call such as `pkg.F(...)` counts).\n- Only functions and methods that are defined somewhere inside this repository count as hops; calls into the Go standard library or external modules (fmt, filepath, zap, cobra, ...) are not hops.\n- Names are case-sensitive: `snapshotRestoreCommandFunc` and `SnapshotRestoreCommandFunc` are two different functions, as are `ToWALDir` and `ToWalDir`.\n- \"Shortest\" means the fewest functions in the chain; there is exactly one chain of that minimum length.\n\nOutput ONLY the function names, one per line, in call order, starting with `snapshotRestoreCommandFunc` on the first line and ending with `ToMemberDir` on the last line. No numbering, no arrows, no package or receiver prefixes, no file paths, no commentary. Output nothing else.",
+  "answer_kind": "ordered_names",
+  "ground_truth": [
+   "snapshotRestoreCommandFunc",
+   "SnapshotRestoreCommandFunc",
+   "ToWALDir",
+   "ToMemberDir"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'snapshotRestoreCommandFunc|SnapshotRestoreCommandFunc|ToWALDir|ToMemberDir' .",
+  "derivation_excluded": [],
+  "grading_notes": "Bodies read with sed -n. etcdutl/etcdutl/snapshot_command.go:111-114: func snapshotRestoreCommandFunc(_ *cobra.Command, args []string) { SnapshotRestoreCommandFunc(restoreCluster, ..., args) } \u2014 its ONLY callee. etcdutl/etcdutl/snapshot_command.go:116-166 SnapshotRestoreCommandFunc: line 145: walDir = datadir.ToWALDir(dataDir); other first-party callees are cobrautl.ExitWithError (pkg/cobrautl/error.go:37, body = fmt.Fprintln + os.Exit), GetLogger (etcdutl/etcdutl/common.go:49, builds zap config), snapshot.NewV3 (etcdutl/snapshot/v3_snapshot.go:74, return &v3Manager{lg: lg}), and sp.Restore (interface Manager -> v3Manager.Restore etcdutl/snapshot/v3_snapshot.go:255, which builds paths with filepath.Join(dataDir, \"member\", ...) and never calls ToMemberDir/ToSnapDir/MemberDir directly). server/storage/datadir/datadir.go:43-45: func ToWALDir(dataDir string) string { return filepath.Join(ToMemberDir(dataDir), walDirSegment) }; :47 func ToMemberDir. Minimality: SnapshotRestoreCommandFunc does not call ToMemberDir directly (no 3-chain). Direct callers of ToMemberDir (rg -w ToMemberDir): ToSnapDir (datadir.go:31), ToWALDir (datadir.go:44), ServerConfig.MemberDir (server/config/config.go:300), and test datadir_test.go:31 / etcdutl common_test.go:63; of these SnapshotRestoreCommandFunc calls only ToWALDir, and A's only callee is SnapshotRestoreCommandFunc, so the 4-chain is unique. Traps: deprecated ToWalDir (datadir.go:39) wraps ToWALDir but is not on the path; capitalised SnapshotRestoreCommandFunc must not be dropped; the Restore path is longer."
+ },
+ {
+  "id": "etcd_impact",
+  "repo_key": "etcd",
+  "repo_path": "/home/anchi/realbench-20261003/repos/etcd",
+  "language": "Go",
+  "archetype": "impact",
+  "favours": "graph",
+  "symbol": "UnsafeCreateMetaBucket",
+  "question": "Repository: /home/anchi/realbench-20261003/repos/etcd (etcd, Go).\n\nI want to add a new REQUIRED parameter to the package-level function `UnsafeCreateMetaBucket` of package `schema` (`func UnsafeCreateMetaBucket(tx backend.UnsafeWriter)`). Which Go source files must I edit? Include the file that defines it and every file that contains a call to it (calls may be unqualified inside package schema or qualified as `schema.UnsafeCreateMetaBucket(...)`). It is a plain function, not an interface method, so no interface declarations are involved.\n\nScope: the whole repository (all Go modules: api/, client/, etcdctl/, etcdutl/, pkg/, server/, tests/, tools/, and the rest), INCLUDING *_test.go test files. There is no vendor/ or third_party/ directory in this checkout; exclude generated protobuf files (*.pb.go, *.pb.gw.go) \u2014 they are not relevant here. Consider only .go source files; do not report documentation, Markdown, build or CHANGELOG files. Report a file only if it defines or calls `UnsafeCreateMetaBucket` itself \u2014 do not report files merely because they call some other function that wraps it or that has a similar name (for example `CreateMetaBucket`, which does NOT call `UnsafeCreateMetaBucket`, or the backend method `UnsafeCreateBucket`).\n\nOutput format: print ONLY the repo-relative file paths (no leading `./`), one path per line, sorted in byte order (LC_ALL=C sort). No bullets, no numbering, no backticks, no commentary, no blank lines. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "server/etcdserver/cindex/cindex_test.go",
+   "server/storage/mvcc/kvstore.go",
+   "server/storage/mvcc/kvstore_bench_test.go",
+   "server/storage/schema/actions_test.go",
+   "server/storage/schema/changes_test.go",
+   "server/storage/schema/cindex.go",
+   "server/storage/schema/migration_test.go",
+   "server/storage/schema/schema_test.go"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'UnsafeCreateMetaBucket' --glob '*.go' .",
+  "derivation_excluded": [],
+  "grading_notes": "rg -n -w UnsafeCreateMetaBucket --glob '*.go' . -> 11 hits in 8 files (same with no glob). All read: server/storage/schema/cindex.go:25: func UnsafeCreateMetaBucket(tx backend.UnsafeWriter) { (definition; :24 is its doc comment); calls: server/storage/schema/migration_test.go:186: UnsafeCreateMetaBucket(tx); server/storage/schema/schema_test.go:339: UnsafeCreateMetaBucket(tx); server/storage/schema/actions_test.go:78 and :134: UnsafeCreateMetaBucket(tx); server/storage/schema/changes_test.go:47: UnsafeCreateMetaBucket(tx); server/storage/mvcc/kvstore.go:123: schema.UnsafeCreateMetaBucket(tx); server/storage/mvcc/kvstore_bench_test.go:86: schema.UnsafeCreateMetaBucket(tx); server/etcdserver/cindex/cindex_test.go:42 and :104: schema.UnsafeCreateMetaBucket(tx). No interface lists it. Traps: CreateMetaBucket (cindex.go:30, body calls tx.UnsafeCreateBucket(Meta) directly, not UnsafeCreateMetaBucket) and its callers server/etcdserver/bootstrap.go:242, bootstrap_test.go:279/292, server_test.go:428, schema/confstate_test.go:33/51 must NOT be reported; tx.UnsafeCreateBucket(...) calls are a different method."
+ },
+ {
+  "id": "django_locate",
+  "repo_key": "django",
+  "repo_path": "/home/anchi/realbench-20261003/repos/django",
+  "language": "Python",
+  "archetype": "locate",
+  "favours": "neutral",
+  "symbol": "get_text_list",
+  "question": "In the Django repository at /home/anchi/realbench-20261003/repos/django (Python; search the entire repository, but only first-party Python source under django/ and tests/ counts \u2014 ignore docs/, js_tests/, extras/, scripts/ and any vendored JavaScript), find where the Python function whose name is exactly `get_text_list` is DEFINED \u2014 that is, the line carrying `def get_text_list(`, the one whose body follows. The function is decorated; report the line with the `def` and the name, NOT the decorator line. Do not report an import, a call site, a doctest line, or a test method whose name merely contains `get_text_list` (such as `test_get_text_list`).\n\nAnswer with exactly one line in the form <repo-relative-path>:<line>, for example django/foo/bar.py:123. Output nothing else.",
+  "answer_kind": "path_and_line",
+  "ground_truth": [
+   "django/utils/text.py:282"
+  ],
+  "alternates": [],
+  "derivation": "rg -n 'def get_text_list\\b' .",
+  "derivation_excluded": [],
+  "grading_notes": "rg -n 'def get_text_list\\b' . -> single hit ./django/utils/text.py:282: def get_text_list(list_, last_word=gettext_lazy(\"or\")):. Line 281 is the decorator @keep_lazy_text (reject 281). rg -n -w get_text_list . gives 24 hits in 8 files: imports (django/db/models/base.py:64, django/template/base.py:66, django/forms/models.py:28, django/core/management/commands/makemessages.py:23, django/contrib/admin/models.py:9, django/contrib/admin/options.py:74), calls (base.py:1682, template/base.py:659, forms/models.py:933, makemessages.py:373, admin/models.py:144, admin/options.py:2821, tests/utils_tests/test_text.py:17-23), doctest lines django/utils/text.py:284-292. Trap: tests/utils_tests/test_text.py:16 def test_get_text_list (different name). No definition in docs/."
+ },
+ {
+  "id": "django_callers",
+  "repo_key": "django",
+  "repo_path": "/home/anchi/realbench-20261003/repos/django",
+  "language": "Python",
+  "archetype": "callers",
+  "favours": "graph",
+  "symbol": "make_hashable",
+  "question": "Repository under test: /home/anchi/realbench-20261003/repos/django (Django, Python).\n\nScope: the first-party Python code under django/ and tests/ only. Exclude docs/, js_tests/, extras/, scripts/, and the vendored JavaScript under django/contrib/admin/static/admin/js/vendor/ (no Python there anyway). Tests under tests/ ARE in scope.\n\nTarget: the module-level function `make_hashable`, defined in django/utils/hashable.py (there is no other function or method of that name in the repository).\n\nList every file in that scope that contains at least one CALL to `make_hashable` (a call expression `make_hashable(...)`, whether the name was imported directly or accessed as a module attribute).\n\nCount only real call sites of that exact function. Do NOT count:\n- django/utils/hashable.py itself (the defining file; its recursive self-references do not count),\n- files that only import it (`from django.utils.hashable import make_hashable`) without calling it,\n- occurrences inside comments, docstrings or string literals,\n- functions/methods with different names that merely contain `make_hashable` as a substring.\n\nOutput format: print one repository-relative file path per line (for example `django/utils/tree.py`), with no leading `./`, sorted with `LC_ALL=C sort`. No line numbers, no counts, no bullets, no explanation \u2014 the file paths and nothing else. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "django/contrib/admin/utils.py",
+   "django/core/exceptions.py",
+   "django/db/models/base.py",
+   "django/db/models/expressions.py",
+   "django/db/models/fields/reverse_related.py",
+   "django/db/models/lookups.py",
+   "django/db/models/query_utils.py",
+   "django/db/models/sql/compiler.py",
+   "django/forms/models.py",
+   "django/utils/tree.py",
+   "tests/utils_tests/test_hashable.py"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'make_hashable' django tests",
+  "derivation_excluded": [
+   {
+    "path": "django/utils/hashable.py",
+    "reason": "defining file (line 4: def make_hashable(value):); only other hits are recursive self-references at lines 13 and 23 (map(make_hashable, value)), excluded by the question"
+   }
+  ],
+  "grading_notes": "rg -n -w make_hashable . = 32 hits in 12 files, all under django/ and tests/; rg -n 'make_hashable' . with non-word matches = none extra. Every non-import hit is a call: django/contrib/admin/utils.py:444: flatchoices = make_hashable(field.flatchoices) (and 445); django/core/exceptions.py:242: make_hashable(self.params), / 246: return hash(make_hashable(self.error_dict)); django/db/models/base.py:1356: choices_dict = dict(make_hashable(field.flatchoices)) (and 1359); django/db/models/expressions.py:538: return make_hashable(value); django/db/models/fields/reverse_related.py:145: make_hashable(self.limit_choices_to), / 390: make_hashable(self.through_fields),; django/db/models/lookups.py:181: return hash(make_hashable(self.identity)); django/db/models/query_utils.py:222: value = make_hashable(value); django/db/models/sql/compiler.py:196: params_hash = make_hashable(params) (and 534); django/forms/models.py:862: else make_hashable(d); django/utils/tree.py:85: *make_hashable(self.children),; tests/utils_tests/test_hashable.py:20: self.assertEqual(make_hashable(value), expected) (also 29, 36). Each file also has an import line. Trap: django/utils/hashable.py (definition + recursion) must be rejected. Only one def make_hashable in the repo."
+ },
+ {
+  "id": "django_callchain",
+  "repo_key": "django",
+  "repo_path": "/home/anchi/realbench-20261003/repos/django",
+  "language": "Python",
+  "archetype": "callchain",
+  "favours": "graph",
+  "symbol": "unsign -> salted_hmac",
+  "question": "Working in the Django checkout at /home/anchi/realbench-20261003/repos/django (Python; scope: first-party code under django/ only \u2014 ignore tests/, docs/, js_tests/, extras/, scripts/), find the shortest chain of direct function calls that starts at the method `unsign` of class `Signer` in django/core/signing.py (NOT `TimestampSigner.unsign`) and ends at the function `salted_hmac` in django/utils/crypto.py.\n\nRules:\n- Every consecutive pair in the chain must be a DIRECT call: the body of the earlier function/method must contain a call to the next one (a `self.method(...)` call on the same class counts).\n- Only functions and methods defined inside this repository count as hops; calls into the Python standard library (hmac, hashlib, secrets, warnings, ...) are not hops.\n- \"Shortest\" means the fewest functions in the chain; there is exactly one chain of that minimum length.\n\nOutput ONLY the bare function/method names (no class prefix, no parentheses), one per line, in call order, starting with `unsign` on the first line and ending with `salted_hmac` on the last line. No numbering, no arrows, no file paths, no commentary. Output nothing else.",
+  "answer_kind": "ordered_names",
+  "ground_truth": [
+   "unsign",
+   "signature",
+   "base64_hmac",
+   "salted_hmac"
+  ],
+  "alternates": [],
+  "derivation": "sed -n '240,254p;103,115p' django/core/signing.py && sed -n '23,60p' django/utils/crypto.py",
+  "derivation_excluded": [],
+  "grading_notes": "Bodies read with sed -n: django/core/signing.py:247 def unsign(self, signed_value): ... 252: if constant_time_compare(sig, self.signature(value, key)): -> calls signature. django/core/signing.py:240 def signature(self, value, key=None): 242: return base64_hmac(self.salt + \"signer\", value, key, algorithm=self.algorithm). django/core/signing.py:103 def base64_hmac(salt, value, key, algorithm=None): 114: salted_hmac(salt, value, key, algorithm=algorithm).digest(). django/utils/crypto.py:23 def salted_hmac(key_salt, value, secret=None, *, algorithm=None):. Minimality: Signer.unsign's only repo callees are BadSignature (Exception subclass, no __init__), constant_time_compare and self.signature; it does not call base64_hmac or salted_hmac directly. constant_time_compare (crypto.py:81-83) calls only secrets.compare_digest and force_bytes, neither of which reaches salted_hmac. signature calls only base64_hmac. So no 2- or 3-function chain exists and the 4-chain is unique. rg -n -w 'salted_hmac' django: callers are signing.py:114 (base64_hmac), contrib/auth/base_user.py:144 (_get_session_auth_hash), contrib/auth/tokens.py:88 \u2014 neither reachable from Signer.unsign. Traps: TimestampSigner.unsign (signing.py:303) is a different method (reject chains starting via super().unsign); django/utils/inspect.py:143 def signature(obj) is an unrelated function with the same bare name."
+ },
+ {
+  "id": "django_impact",
+  "repo_key": "django",
+  "repo_path": "/home/anchi/realbench-20261003/repos/django",
+  "language": "Python",
+  "archetype": "impact",
+  "favours": "graph",
+  "symbol": "parse_header_parameters",
+  "question": "Repository: /home/anchi/realbench-20261003/repos/django (Django, Python).\n\nI want to add a new REQUIRED positional parameter to the function `parse_header_parameters` defined in django/utils/http.py. Which source files must I edit? Include the file that defines it and every file that contains a call to it (including test files).\n\nScope: the first-party Python code under django/ and tests/ only. Exclude docs/, js_tests/, extras/, scripts/, and the vendored JavaScript under django/contrib/admin/static/admin/js/vendor/ (no Python there anyway). Tests under tests/ ARE in scope. Do not report documentation files (docs/, release notes, .txt/.rst), build or config files. Report a file only if it defines or directly calls `parse_header_parameters` itself \u2014 do not report files merely because they import it without calling it, or because they call some other function or method that wraps it.\n\nOutput format: print ONLY the repo-relative file paths (no leading `./`), one path per line, sorted in byte order (LC_ALL=C sort). No bullets, no numbering, no backticks, no commentary, no blank lines. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "django/core/management/templates.py",
+   "django/http/multipartparser.py",
+   "django/http/request.py",
+   "django/utils/http.py",
+   "tests/utils_tests/test_http.py"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'parse_header_parameters' .",
+  "derivation_excluded": [
+   {
+    "path": "docs/releases/4.2.txt",
+    "reason": "documentation only, line 426: removed. Use ``django.utils.http.parse_header_parameters()`` instead."
+   }
+  ],
+  "grading_notes": "rg -n -w parse_header_parameters . = 17 hits in 6 files; no non-word-boundary extra matches. django/utils/http.py:361: def parse_header_parameters(line, max_length=MAX_HEADER_LENGTH): (definition). django/http/request.py:159: self.content_type, self.content_params = parse_header_parameters( (in _set_content_type_params) and 753: full_type, self.params = parse_header_parameters( (MediaType.__init__). django/http/multipartparser.py:86: _, opts = parse_header_parameters(content_type) and 732: value, params = parse_header_parameters(value_and_params.lstrip(\" \")). django/core/management/templates.py:333: _, params = parse_header_parameters(content_disposition). tests/utils_tests/test_http.py:544: self.assertEqual(parse_header_parameters(header), expected) (also 563, 581, 596, 614, 627). Each caller file also has an import line. Trap: docs/releases/4.2.txt mention is docs; files calling wrappers (e.g. HttpRequest._set_content_type_params users, MediaType users) must not be added."
+ },
+ {
+  "id": "rails_locate",
+  "repo_key": "rails",
+  "repo_path": "/home/anchi/realbench-20261003/repos/rails",
+  "language": "Ruby",
+  "archetype": "locate",
+  "favours": "neutral",
+  "symbol": "ActiveRecord::Relation#create_or_find_by",
+  "question": "In the Ruby on Rails repository at /home/anchi/realbench-20261003/repos/rails (Ruby; search the entire repository, all framework directories such as activerecord, activesupport, railties, including tests; ignore the vendored directories guides/assets/stylesrc/vendor and actionpack/test/controller/controller_fixtures/vendor), find where the Ruby method whose name is exactly `create_or_find_by` (no trailing `!`) is DEFINED - that is, the line carrying `def create_or_find_by(...)` whose body follows. Not the bang variant `create_or_find_by!`, not a `delegate` list entry, not an rdoc/comment mention, not a guide or CHANGELOG entry, and not a call site.\n\nAnswer with exactly one line in the form <repo-relative-path>:<line>, for example activerecord/lib/active_record/foo.rb:123. Output nothing else.",
+  "answer_kind": "path_and_line",
+  "ground_truth": [
+   "activerecord/lib/active_record/relation.rb:274"
+  ],
+  "alternates": [],
+  "derivation": "rg -n 'def (self\\.)?create_or_find_by\\(' .",
+  "derivation_excluded": [],
+  "grading_notes": "Derivation prints exactly one line: ./activerecord/lib/active_record/relation.rb:274:    def create_or_find_by(attributes, &block). `rg -n -w create_or_find_by .` gives 51 hits in 9 files: relation.rb:233 call inside find_or_create_by; relation.rb:294 def create_or_find_by!(attributes, &block) (bang variant, different method - trap); activestorage/app/models/active_storage/variant_with_record.rb:76 (call of create_or_find_by!); activerecord/lib/active_record/querying.rb:12 delegate list ':create_or_find_by, :create_or_find_by!,' (trap, not a def); activerecord/test/cases/relations_test.rb and create_or_find_by_outside_transaction_test.rb (calls); relation/delegation_test.rb:69 (symbol list); activerecord/CHANGELOG.md:709/711; guides/source/active_record_querying.md. No define_method/alias defines it elsewhere. Body verified via sed -n 274,289p: with_connection do |connection| ... transaction(requires_new: true) { record = create(attributes, &block) ... } rescue ActiveRecord::RecordNotUnique ... rewhere(attributes).take!."
+ },
+ {
+  "id": "rails_callers",
+  "repo_key": "rails",
+  "repo_path": "/home/anchi/realbench-20261003/repos/rails",
+  "language": "Ruby",
+  "archetype": "callers",
+  "favours": "graph",
+  "symbol": "ActiveRecord::ConnectionAdapters::ConnectionHandler#each_connection_pool",
+  "question": "Repository under test: /home/anchi/realbench-20261003/repos/rails (Ruby on Rails, Ruby).\n\nScope: all Ruby source files (*.rb) anywhere in the repository, across every framework directory (actioncable, actionmailbox, actionmailer, actionpack, actiontext, actionview, activejob, activemodel, activerecord, activestorage, activesupport, railties, tools, tasks), INCLUDING test files under */test/. Exclude documentation (guides/, *.md, CHANGELOG files), generator templates (*.tt), JavaScript/asset files, and the vendored directories guides/assets/stylesrc/vendor and actionpack/test/controller/controller_fixtures/vendor.\n\nTarget: the instance method `each_connection_pool(role = nil, &block)` of class `ActiveRecord::ConnectionAdapters::ConnectionHandler`, defined in activerecord/lib/active_record/connection_adapters/abstract/connection_handler.rb. It is the only method with this exact name in the repository, so any call expression invoking a method named exactly `each_connection_pool` counts (with or without an explicit receiver such as `connection_handler.`, `Base.connection_handler.`, `model.connection_handler.`; with or without parentheses; with or without a block; including chained calls like `.each_connection_pool.select(...)`).\n\nList every Ruby file in that scope that contains at least one CALL to `each_connection_pool`. The defining file is listed only if it also contains a call to the method (check).\n\nDo NOT count:\n- the `def` line itself,\n- occurrences inside comments or string literals,\n- methods with different names such as `connection_pool_list` or `connection_pools`,\n- documentation, guides, or CHANGELOG files.\n\nOutput format: print one repository-relative file path per line (for example `activerecord/lib/active_record.rb`), with no leading `./`, sorted with `LC_ALL=C sort`. No line numbers, no counts, no bullets, no explanation - the file paths and nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "activerecord/lib/active_record.rb",
+   "activerecord/lib/active_record/connection_adapters/abstract/connection_handler.rb",
+   "activerecord/lib/active_record/connection_adapters/abstract/connection_pool.rb",
+   "activerecord/lib/active_record/connection_handling.rb",
+   "activerecord/lib/active_record/query_cache.rb",
+   "activerecord/lib/active_record/test_databases.rb",
+   "activerecord/test/cases/migration_test.rb",
+   "activerecord/test/cases/test_case.rb",
+   "railties/lib/rails/commands/console/console_command.rb"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'each_connection_pool' .",
+  "derivation_excluded": [],
+  "grading_notes": "All 14 hit lines of the derivation (9 files) are in .rb files and every file contains a real call; nothing excluded. Gold items: railties/lib/rails/commands/console/console_command.rb:126: ActiveRecord::Base.connection_handler.each_connection_pool.select(&:query_cache_enabled).each(&:disable_query_cache!); activerecord/lib/active_record.rb:624: Base.connection_handler.each_connection_pool do |pool|; activerecord/lib/active_record/query_cache.rb:44: ActiveRecord::Base.connection_handler.each_connection_pool.reject(&:query_cache_enabled).each do |pool|; activerecord/lib/active_record/test_databases.rb:20: ActiveRecord::Base.connection_handler.each_connection_pool.each(&:discard!); activerecord/lib/active_record/connection_adapters/abstract/connection_handler.rb:104 def each_connection_pool(role = nil, &block) # :nodoc: plus calls at 158 each_connection_pool(role).any?(&:active_connection?), 163, 173, 177, 184; activerecord/lib/active_record/connection_adapters/abstract/connection_pool.rb:220: ActiveRecord::Base.connection_handler.each_connection_pool do |pool| (inside ExecutorHooks#complete); activerecord/lib/active_record/connection_handling.rb:285: connection_handler.each_connection_pool do |pool|; activerecord/test/cases/migration_test.rb:1201: model.connection_handler.each_connection_pool do |pool|; activerecord/test/cases/test_case.rb:48: (connection_pools || ActiveRecord::Base.connection_handler.each_connection_pool).each do |pool|. Only one def exists (rg -n 'def (self\\.)?each_connection_pool' .). Traps: connection_handler.rb is BOTH definition and caller (include it); connection_pool_list / connection_pools are different names; :nodoc: so absent from guides."
+ },
+ {
+  "id": "rails_callchain",
+  "repo_key": "rails",
+  "repo_path": "/home/anchi/realbench-20261003/repos/rails",
+  "language": "Ruby",
+  "archetype": "callchain",
+  "favours": "graph",
+  "symbol": "clear_reloadable_connections -> checkout_for_exclusive_access",
+  "question": "Working in the Ruby on Rails checkout at /home/anchi/realbench-20261003/repos/rails (Ruby; scope: all first-party Ruby code in the repository, excluding the vendored directories guides/assets/stylesrc/vendor and actionpack/test/controller/controller_fixtures/vendor), find the shortest chain of direct method calls that starts at the instance method `clear_reloadable_connections` (the non-bang one, taking `raise_on_acquisition_timeout = true`) of class `ActiveRecord::ConnectionAdapters::ConnectionPool`, defined in activerecord/lib/active_record/connection_adapters/abstract/connection_pool.rb, and ends at the private method `checkout_for_exclusive_access` of the same class.\n\nRules:\n- Every consecutive pair in the chain must be a DIRECT call: the body of the earlier method must contain a call to the next method (a call written inside a block literal in that body counts; a `yield` back into the caller's block does not count as calling anything).\n- Only methods that are defined somewhere inside this repository count as hops; calls to Ruby core/stdlib methods (e.g. `synchronize` from MonitorMixin, `each`, `loop`) are not hops.\n- \"Shortest\" means the fewest methods in the chain; there is exactly one chain of that minimum length.\n\nOutput ONLY the method names, one per line, in call order, starting with `clear_reloadable_connections` on the first line and ending with `checkout_for_exclusive_access` on the last line. No class prefixes, no numbering, no arrows, no file paths, no commentary.",
+  "answer_kind": "ordered_names",
+  "ground_truth": [
+   "clear_reloadable_connections",
+   "with_exclusively_acquired_all_connections",
+   "attempt_to_checkout_all_existing_connections",
+   "checkout_for_exclusive_access"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'checkout_for_exclusive_access|attempt_to_checkout_all_existing_connections|with_exclusively_acquired_all_connections' .",
+  "derivation_excluded": [],
+  "grading_notes": "All in activerecord/lib/active_record/connection_adapters/abstract/connection_pool.rb. 596: def clear_reloadable_connections(raise_on_acquisition_timeout = true) / 597: with_exclusively_acquired_all_connections(raise_on_acquisition_timeout) do. 1039: def with_exclusively_acquired_all_connections(raise_on_acquisition_timeout = true) / 1042: attempt_to_checkout_all_existing_connections(raise_on_acquisition_timeout) (inside @reaper_lock.synchronize / with_new_connections_blocked blocks). 1048: def attempt_to_checkout_all_existing_connections(raise_on_acquisition_timeout = true) / 1066: conn = checkout_for_exclusive_access(remaining_timeout). 1097: def checkout_for_exclusive_access(checkout_timeout). Minimality/uniqueness by predecessor argument: the derivation shows checkout_for_exclusive_access is called ONLY at 1066 (inside attempt_to_checkout_all_existing_connections; 1100 is a comment), attempt_to_checkout_all_existing_connections is called ONLY at 1042 (inside with_exclusively_acquired_all_connections), and with_exclusively_acquired_all_connections is called only at 520 (disconnect) and 597 (clear_reloadable_connections). So every chain into the target ends with_exclusively_acquired_all_connections -> attempt_to_checkout_all_existing_connections -> checkout_for_exclusive_access; A (body 596-610 calls with_exclusively_acquired_all_connections, synchronize, in_use?, steal!, checkin, disconnect!, requires_reloading?, delete_if, clear) calls neither of the last two directly, so no 2/3-chain exists and the 4-chain is the unique minimum. Traps: clear_reloadable_connections! (bang, line 620, and ConnectionHandler#clear_reloadable_connections! in connection_handler.rb:172) is a different method; checkout_for_exclusive_access calls checkout, not the reverse; with_new_connections_blocked is a callee of with_exclusively_acquired_all_connections but only yields."
+ },
+ {
+  "id": "rails_impact",
+  "repo_key": "rails",
+  "repo_path": "/home/anchi/realbench-20261003/repos/rails",
+  "language": "Ruby",
+  "archetype": "impact",
+  "favours": "graph",
+  "symbol": "ActionView::Template::Handlers#handler_for_extension",
+  "question": "Repository: /home/anchi/realbench-20261003/repos/rails (Ruby on Rails, Ruby).\n\nI want to add a new REQUIRED parameter to the method `handler_for_extension(extension)` defined in module `ActionView::Template::Handlers` in actionview/lib/action_view/template/handlers.rb (the module is extended into `ActionView::Template`, so the method is normally called as `Template.handler_for_extension(...)` or `ActionView::Template.handler_for_extension(...)`). It is the only method with this exact name in the repository. Which files must I edit? Include the file that defines it and every file that contains a call to it.\n\nScope: all Ruby source files (*.rb) anywhere in the repository, across every framework directory (actioncable, actionmailbox, actionmailer, actionpack, actiontext, actionview, activejob, activemodel, activerecord, activestorage, activesupport, railties, tools, tasks), INCLUDING test files under */test/. Exclude documentation (guides/, *.md, CHANGELOG files), generator templates (*.tt), JavaScript/asset files, and the vendored directories guides/assets/stylesrc/vendor and actionpack/test/controller/controller_fixtures/vendor.\n\nReport a file only if it defines or calls `handler_for_extension` itself - do not report files merely because they call some other method that wraps it (e.g. callers of `register_template_handler`, `DependencyTracker.find_dependencies`, or `TemplateRenderer#render`), and do not report files that only mention it in comments or documentation.\n\nOutput format: print ONLY the repo-relative file paths (no leading ./), one path per line, sorted in byte order (LC_ALL=C sort). No bullets, no numbering, no backticks, no commentary, no blank lines. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "actionview/lib/action_view/dependency_tracker.rb",
+   "actionview/lib/action_view/renderer/template_renderer.rb",
+   "actionview/lib/action_view/template/handlers.rb",
+   "actionview/lib/action_view/template_details.rb",
+   "actionview/test/abstract_unit.rb",
+   "actionview/test/template/dependency_tracker_test.rb",
+   "actionview/test/template/handlers_test.rb",
+   "railties/test/application/configuration_test.rb"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'handler_for_extension' .",
+  "derivation_excluded": [],
+  "grading_notes": "All 9 hits are in .rb files and each is the definition or a real call; nothing excluded. actionview/lib/action_view/template/handlers.rb:59: def handler_for_extension(extension) (module Handlers; extended into Template at template.rb:185 'extend Template::Handlers'); actionview/lib/action_view/dependency_tracker.rb:50: handler = Template.handler_for_extension(extension); actionview/lib/action_view/template_details.rb:63: Template.handler_for_extension(handler); actionview/lib/action_view/renderer/template_renderer.rb:36: handler = Template.handler_for_extension(options[:type] || \"erb\"); actionview/test/abstract_unit.rb:69: ActionView::Template.handler_for_extension(:erb), (render_erb helper); actionview/test/template/handlers_test.rb:19: ActionView::Template.handler_for_extension(:erb).class.name; actionview/test/template/dependency_tracker_test.rb:67: erb_handler = ActionView::Template.handler_for_extension(\"erb\") and :446 trackers[ActionView::Template.handler_for_extension(:bowtie)]; railties/test/application/configuration_test.rb:549: erb_handler = ActionView::Template.handler_for_extension(\"erb\") (real test code after the add_to_config heredoc that ends at 545). Only one def (rg -n 'def (self\\.)?handler_for_extension' .). Traps: register_template_handler / unregister_template_handler / Handlers.register in the same file are different methods; no guide/CHANGELOG mention."
+ },
+ {
+  "id": "TypeScript_locate",
+  "repo_key": "TypeScript",
+  "repo_path": "/home/anchi/realbench-20261003/repos/TypeScript",
+  "language": "TypeScript",
+  "archetype": "locate",
+  "favours": "neutral",
+  "symbol": "skipTrivia",
+  "question": "In the TypeScript repository at /home/anchi/realbench-20261003/repos/TypeScript (the TypeScript 7 native-port repo; its first-party TypeScript code lives under packages/). Scope: only TypeScript source files (*.ts) under packages/ (packages/typescript/src, packages/typescript/test, packages/typescript/scripts, packages/vscode-typescript/src, packages/vscode-typescript/test). Everything under tsc/ is OUT of scope (it is the Go compiler, tsc/testdata is test-fixture data and tsc/internal/bundled holds bundled lib .d.ts files), as are tools/, packages/typescript/vendor/, packages/typescript/lib/, and any node_modules/ directory.\n\nFind where the TypeScript function whose name is exactly `skipTrivia` is DEFINED -- that is, the line where its implementation begins (the line carrying the `function` keyword and the name `skipTrivia`, whose body follows), not an import, a parameter or variable that happens to be named `skipTrivia`, a comment, or a call site.\n\nAnswer with exactly one line in the form <repo-relative-path>:<line>, for example packages/typescript/src/foo.ts:123. Output nothing else.",
+  "answer_kind": "path_and_line",
+  "ground_truth": [
+   "packages/typescript/src/ast/scanner.ts:454"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'skipTrivia' packages -g '*.ts' -g '!**/vendor/**' -g '!**/node_modules/**'",
+  "derivation_excluded": [],
+  "grading_notes": "rg -n -w skipTrivia over packages/*.ts gives 15 hits in 2 files. Definition: packages/typescript/src/ast/scanner.ts:454: export function skipTrivia(text: string, pos: number, stopAfterLineBreak?: boolean, stopAtComments?: boolean, inJSDoc?: boolean): number {. Traps: scanner.ts:888 `skipTrivia: boolean,` is a PARAMETER of createScanner and scanner.ts:1544/1557/1592/1711/1749/1818/1847/1869/1909 are `if (skipTrivia) {` uses of that parameter; astnav.ts:19 is an import, astnav.ts:326 and :331 are calls, astnav.ts:592 is a /*skipTrivia*/ comment. `rg -n 'function skipTrivia\\b' .` over the whole repo returns only scanner.ts:454 (Go code uses SkipTrivia)."
+ },
+ {
+  "id": "TypeScript_callers",
+  "repo_key": "TypeScript",
+  "repo_path": "/home/anchi/realbench-20261003/repos/TypeScript",
+  "language": "TypeScript",
+  "archetype": "callers",
+  "favours": "graph",
+  "symbol": "isSupportedLanguageMode",
+  "question": "Repository under test: /home/anchi/realbench-20261003/repos/TypeScript (the TypeScript 7 native-port repo; the code in question is TypeScript).\n\nScope: only TypeScript source files (*.ts) under packages/ (packages/typescript/src, packages/typescript/test, packages/typescript/scripts, packages/vscode-typescript/src, packages/vscode-typescript/test). Everything under tsc/ is OUT of scope (it is the Go compiler, tsc/testdata is test-fixture data and tsc/internal/bundled holds bundled lib .d.ts files), as are tools/, packages/typescript/vendor/, packages/typescript/lib/, and any node_modules/ directory.\n\nTarget: the exported TypeScript function `isSupportedLanguageMode(doc: vscode.TextDocument): boolean`, whose definition is in packages/vscode-typescript/src/util.ts.\n\nList every source file in that scope that contains at least one CALL to `isSupportedLanguageMode`.\n\nCount only real call sites of that exact function. Do NOT count:\n- a file that only contains its definition and no call to it,\n- files that merely import it without calling it,\n- occurrences inside comments or string literals,\n- calls to other, different functions with similar names (e.g. `isJsConfigOrTsConfigFileName`).\n\nOutput format: print one repository-relative file path per line (for example `packages/vscode-typescript/src/util.ts`), with no leading `./`, sorted with `LC_ALL=C sort`. No line numbers, no counts, no bullets, no explanation -- the file paths and nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "packages/vscode-typescript/src/activeJsTsEditorTracker.ts",
+   "packages/vscode-typescript/src/managedFileContext.ts",
+   "packages/vscode-typescript/src/projectStatus.ts",
+   "packages/vscode-typescript/src/workspaceSymbolMiddleware.ts"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'isSupportedLanguageMode' packages -g '*.ts' -g '!**/vendor/**' -g '!**/node_modules/**'",
+  "derivation_excluded": [
+   {
+    "path": "packages/vscode-typescript/src/util.ts",
+    "reason": "definition only, line 32: export function isSupportedLanguageMode(doc: vscode.TextDocument): boolean {"
+   }
+  ],
+  "grading_notes": "9 hits in 5 files (grep -rnw --include='*.ts' over packages gives the same 9). Calls: packages/vscode-typescript/src/activeJsTsEditorTracker.ts:78: return isSupportedLanguageMode(editor.document) || isJsConfigOrTsConfigFileName(editor.document.fileName); (line 5 is the import). packages/vscode-typescript/src/managedFileContext.ts:40: return isSupportedLanguageMode(editor.document) (line 6 import). packages/vscode-typescript/src/projectStatus.ts:66: if (!doc || !isSupportedLanguageMode(doc)) { (line 5 import). packages/vscode-typescript/src/workspaceSymbolMiddleware.ts:9: return isSupportedLanguageMode(document) && supportedSchemes.has(document.uri.scheme); (line 4 import). util.ts:32 is the definition and util.ts has no call. No hits anywhere under tsc/ or tools/ (whole-repo rg -l confirms)."
+ },
+ {
+  "id": "TypeScript_callchain",
+  "repo_key": "TypeScript",
+  "repo_path": "/home/anchi/realbench-20261003/repos/TypeScript",
+  "language": "TypeScript",
+  "archetype": "callchain",
+  "favours": "graph",
+  "symbol": "getTokenAtPosition -> createScanner",
+  "question": "Working in the TypeScript repository at /home/anchi/realbench-20261003/repos/TypeScript (the TypeScript 7 native-port repo; the code in question is TypeScript). Scope: only TypeScript source files (*.ts) under packages/ (packages/typescript/src, packages/typescript/test, packages/typescript/scripts, packages/vscode-typescript/src, packages/vscode-typescript/test). Everything under tsc/ is OUT of scope (it is the Go compiler, tsc/testdata is test-fixture data and tsc/internal/bundled holds bundled lib .d.ts files), as are tools/, packages/typescript/vendor/, packages/typescript/lib/, and any node_modules/ directory.\n\nFind the shortest chain of direct function calls that starts at the exported function `getTokenAtPosition` defined in packages/typescript/src/ast/astnav.ts (not the API-client method of the same name) and ends at the exported function `createScanner` defined in packages/typescript/src/ast/scanner.ts.\n\nRules:\n- Every consecutive pair in the chain must be a DIRECT call: the body of the earlier function must contain a call to the next function.\n- Only functions that are defined in that scope count as hops; methods called on objects (e.g. scanner.scan()) and library functions are not hops.\n- \"Shortest\" means the fewest functions in the chain; there is exactly one chain of that minimum length.\n\nOutput ONLY the function names, one per line, in call order, starting with `getTokenAtPosition` on the first line and ending with `createScanner` on the last line. No numbering, no arrows, no file paths, no commentary. Output nothing else.",
+  "answer_kind": "ordered_names",
+  "ground_truth": [
+   "getTokenAtPosition",
+   "getTokenAtPositionImpl",
+   "getScannerForSourceFile",
+   "createScanner"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'getTokenAtPositionImpl|getScannerForSourceFile|createScanner' packages -g '*.ts' -g '!**/vendor/**' -g '!**/node_modules/**'",
+  "derivation_excluded": [],
+  "grading_notes": "Edges verified by reading bodies (sed -n 22,24p; 115,309p; 591,596p of astnav.ts). packages/typescript/src/ast/astnav.ts:23: return getTokenAtPositionImpl(sourceFile, position, ...) (getTokenAtPosition's whole body, lines 22-24). packages/typescript/src/ast/astnav.ts:269: const scanner = getScannerForSourceFile(sourceFile, state.left); (inside getTokenAtPositionImpl, lines 115-309, in its top-level while loop, not a nested closure). packages/typescript/src/ast/astnav.ts:592: const scanner = createScanner(/*skipTrivia*/ true, sourceFile.languageVariant, sourceFile.text); (inside getScannerForSourceFile, lines 591-596). createScanner defined at packages/typescript/src/ast/scanner.ts:887. Minimality/uniqueness: createScanner has exactly one call site in scope (astnav.ts:592, getScannerForSourceFile), and astnav.ts:18 is an import, so every chain must end ...getScannerForSourceFile -> createScanner. getTokenAtPosition's body calls only getTokenAtPositionImpl, which does not call createScanner directly, so no 2- or 3-function chain exists. getScannerForSourceFile is also called from findNextToken (astnav.ts:93) and findRightmostValidToken's closure (astnav.ts:512), but neither is called by getTokenAtPosition, so they would only produce longer chains. Traps: getTokenAtPosition also exists as an API method in packages/typescript/src/api/* (different symbol); getTouchingToken/getTouchingPropertyName also call getTokenAtPositionImpl but are not the start."
+ },
+ {
+  "id": "TypeScript_impact",
+  "repo_key": "TypeScript",
+  "repo_path": "/home/anchi/realbench-20261003/repos/TypeScript",
+  "language": "TypeScript",
+  "archetype": "impact",
+  "favours": "graph",
+  "symbol": "TelemetryReporter.sendTelemetryEvent",
+  "question": "Repository: /home/anchi/realbench-20261003/repos/TypeScript (the TypeScript 7 native-port repo; the code in question is TypeScript, in the VS Code extension under packages/vscode-typescript).\n\nI want to add a new REQUIRED parameter to the `sendTelemetryEvent` method of the `TelemetryReporter` interface declared in packages/vscode-typescript/src/telemetryReporting.ts (its overloads are declared in that interface and implemented by the inner function `sendTelemetryEvent` inside `createTelemetryReporter` in the same file). Which source files must I edit? Include the file that declares it, the file that defines/implements it, and every file that contains a call to `sendTelemetryEvent` on such a reporter.\n\nScope: only TypeScript source files (*.ts) under packages/ (packages/typescript/src, packages/typescript/test, packages/typescript/scripts, packages/vscode-typescript/src, packages/vscode-typescript/test). Everything under tsc/ is OUT of scope (it is the Go compiler, tsc/testdata is test-fixture data and tsc/internal/bundled holds bundled lib .d.ts files), as are tools/, packages/typescript/vendor/, packages/typescript/lib/, and any node_modules/ directory. Do not report documentation files, package.json, build files, or anything under tsc/. Report a file only if it declares, defines, or calls a method/function named exactly `sendTelemetryEvent` itself -- do not report files merely because they reference the `TelemetryReporter` type or call differently named methods such as `sendTelemetryEventUntyped` or `sendTelemetryErrorEvent`.\n\nOutput format: print ONLY the repo-relative file paths (e.g. packages/vscode-typescript/src/util.ts), one path per line, sorted in byte order (LC_ALL=C sort). No bullets, no numbering, no backticks, no commentary, no blank lines. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "packages/vscode-typescript/src/client.ts",
+   "packages/vscode-typescript/src/commands.ts",
+   "packages/vscode-typescript/src/session.ts",
+   "packages/vscode-typescript/src/telemetryReporting.ts"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'sendTelemetryEvent' packages -g '*.ts' -g '!**/vendor/**' -g '!**/node_modules/**'",
+  "derivation_excluded": [],
+  "grading_notes": "16 hits in 4 files (grep -rnw --include='*.ts' over packages gives the same 16). telemetryReporting.ts: lines 14-18 interface overload declarations, e.g. 14: sendTelemetryEvent(eventName: \"command.enableNativePreview\"): void; line 63: function sendTelemetryEvent(eventName: string, data?: ..., measurements?: ...): void { (implementation); 42/44 object-literal wiring; 60/65 are calls to the external @vscode/extension-telemetry reporter (vscReporter.sendTelemetryEvent), same file anyway; line 8 comment. Calls: packages/vscode-typescript/src/commands.ts:18: telemetryReporter.sendTelemetryEvent(\"command.enableNativePreview\"); and :23 (disableNativePreview). packages/vscode-typescript/src/client.ts:206: this.telemetryReporter.sendTelemetryEvent(\"languageServer.start\", {. packages/vscode-typescript/src/session.ts:235: this.telemetryReporter.sendTelemetryEvent(\"command.restartLanguageServer\"); and :275 (command.reportIssue). Traps: extension.ts only calls createTelemetryReporter (no sendTelemetryEvent) -> exclude; client.ts:299 sendTelemetryEventUntyped is a different name (client.ts is in anyway). Whole-repo rg -l finds no hits under tsc/ or tools/."
+ },
+ {
+  "id": "elasticsearch_locate",
+  "repo_key": "elasticsearch",
+  "repo_path": "/home/anchi/realbench-20261003/repos/elasticsearch",
+  "language": "Java",
+  "archetype": "locate",
+  "favours": "neutral",
+  "symbol": "isSystemDataStream",
+  "question": "In the Elasticsearch repository at /home/anchi/realbench-20261003/repos/elasticsearch (Java; search the entire repository: server/, modules/, x-pack/, libs/, plugins/, test/ and every other first-party directory; ignore any build/ or `generated` directories), find where the Java method whose name is exactly `isSystemDataStream` (an instance method taking a single `String name` parameter and returning `boolean`) is DEFINED \u2014 that is, the line of its method declaration that carries the return type and the method name, the one whose body follows. If there are Javadoc comments or annotations above it, answer the line with the method name, not the comment or annotation line. Do not answer a call site, a Mockito `when(...)` stub, a documentation mention, or a local variable/identifier that merely contains the name (such as `isSystemDataStreamName`, `isSystemIndexBackingDataStream`, or a boolean variable named `isSystemDataStream`).\n\nAnswer with exactly one line in the form <repo-relative-path>:<line>, for example server/src/main/java/org/elasticsearch/Foo.java:123. Output nothing else.",
+  "answer_kind": "path_and_line",
+  "ground_truth": [
+   "server/src/main/java/org/elasticsearch/indices/SystemIndices.java:338"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'isSystemDataStream' .",
+  "derivation_excluded": [],
+  "grading_notes": "rg -n -w 'isSystemDataStream' . gives 21 hits; exactly one is a method declaration: server/src/main/java/org/elasticsearch/indices/SystemIndices.java:338:     public boolean isSystemDataStream(String name) { (body: return systemDataStreamPredicate.test(name);). A definition-shaped regex rg -n '^\\s*(public|private|protected|static|final|\\s)*[\\w<>\\[\\],? .]+\\s+isSystemDataStream\\s*\\(' --glob '*.java' . returns only that line. Other hits are traps: calls in MetadataCreateDataStreamService.java:240, SystemIndexMetadataUpgradeService.java:159, DataStream.java:594, TransportUpdateDataStreamMappingsAction.java:142, TransportUpdateDataStreamSettingsAction.java:183; Mockito stub DataStreamTests.java:2726 when(systemIndices.isSystemDataStream(...)); docs/internal/SystemIndices.md:39 and :524 (docs); local boolean variables named isSystemDataStream in AutoCreateAction.java:269-277 and ExplainIndexDataStreamLifecycleTests.java:259-357 (incl. parameter declarations 'boolean isSystemDataStream' at 343/351 which are parameters, not methods); MetadataCreateDataStreamService.java:240 also declares variable isSystemDataStreamName. Line 337 above is the end of a Javadoc comment; line 338 is the correct answer."
+ },
+ {
+  "id": "elasticsearch_callers",
+  "repo_key": "elasticsearch",
+  "repo_path": "/home/anchi/realbench-20261003/repos/elasticsearch",
+  "language": "Java",
+  "archetype": "callers",
+  "favours": "graph",
+  "symbol": "SystemIndices.validateDataStreamAccess",
+  "question": "Repository under test: /home/anchi/realbench-20261003/repos/elasticsearch (Elasticsearch, Java).\n\nScope: all *.java files anywhere in the repository (server/, modules/, x-pack/, libs/, plugins/, qa/, test/ and every other first-party directory), including test sources (src/test, src/internalClusterTest, src/javaRestTest, test/framework, ...). Exclude any build/ output directories (none are checked in), generated source directories (any directory named `generated`, e.g. x-pack/plugin/esql/src/main/generated, x-pack/plugin/esql/compute/src/main/generated, modules/lang-painless/src/main/generated) and all non-Java files (docs/, *.md, *.asciidoc, *.yml, Gradle files).\n\nTarget: the instance method `validateDataStreamAccess(String dataStreamName, ThreadContext threadContext)` of class `SystemIndices`, defined in server/src/main/java/org/elasticsearch/indices/SystemIndices.java. It has no overloads and no other class in the repository declares a method with this name, so any call expression invoking a method named `validateDataStreamAccess` (on any receiver, e.g. `systemIndices.validateDataStreamAccess(...)`, `getSystemIndices().validateDataStreamAccess(...)`, `EmptySystemIndices.INSTANCE.validateDataStreamAccess(...)`, including calls inside lambdas) counts, as would a method reference `::validateDataStreamAccess`.\n\nList every file in that scope that contains at least one CALL to `validateDataStreamAccess`.\n\nCount only real call sites. Do NOT count:\n- a file that only contains the method's definition and no call to it,\n- occurrences inside comments, Javadoc, or string literals,\n- calls to other, different methods whose names merely contain `validateDataStreamAccess` or similar names (e.g. `isSystemDataStream`).\n\nOutput format: print one repository-relative file path per line (for example `server/src/main/java/org/elasticsearch/Foo.java`), with no leading `./`, sorted with `LC_ALL=C sort`. No line numbers, no counts, no bullets, no explanation \u2014 the file paths and nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "modules/data-streams/src/main/java/org/elasticsearch/datastreams/action/TransportCreateDataStreamAction.java",
+   "modules/data-streams/src/main/java/org/elasticsearch/datastreams/action/TransportDeleteDataStreamAction.java",
+   "modules/data-streams/src/main/java/org/elasticsearch/datastreams/action/TransportPromoteDataStreamAction.java",
+   "modules/data-streams/src/main/java/org/elasticsearch/datastreams/lifecycle/action/TransportDeleteDataStreamLifecycleAction.java",
+   "modules/data-streams/src/main/java/org/elasticsearch/datastreams/lifecycle/action/TransportPutDataStreamLifecycleAction.java",
+   "modules/data-streams/src/main/java/org/elasticsearch/datastreams/options/action/TransportDeleteDataStreamOptionsAction.java",
+   "modules/data-streams/src/main/java/org/elasticsearch/datastreams/options/action/TransportGetDataStreamOptionsAction.java",
+   "modules/data-streams/src/main/java/org/elasticsearch/datastreams/options/action/TransportPutDataStreamOptionsAction.java",
+   "modules/data-streams/src/test/java/org/elasticsearch/datastreams/action/TransportDeleteDataStreamActionTests.java",
+   "server/src/main/java/org/elasticsearch/action/admin/indices/create/AutoCreateAction.java",
+   "server/src/main/java/org/elasticsearch/cluster/metadata/MetadataMigrateToDataStreamService.java"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'validateDataStreamAccess' --glob '*.java' .",
+  "derivation_excluded": [
+   "server/src/main/java/org/elasticsearch/indices/SystemIndices.java: definition only, line 537: public SystemDataStreamDescriptor validateDataStreamAccess(String dataStreamName, ThreadContext threadContext) {"
+  ],
+  "grading_notes": "rg -n -w validateDataStreamAccess --glob '*.java' . prints 13 lines in 12 files; every line read. Only definition: SystemIndices.java:537 (no other class defines the name; EmptySystemIndices does not override it). Calls: TransportCreateDataStreamAction.java:67: final SystemDataStreamDescriptor systemDataStreamDescriptor = systemIndices.validateDataStreamAccess( ; TransportDeleteDataStreamAction.java:97: systemIndices.validateDataStreamAccess(name, threadPool.getThreadContext()); and :115: ds -> systemIndices.validateDataStreamAccess(ds, threadPool.getThreadContext()), ; TransportPromoteDataStreamAction.java:76: systemIndices.validateDataStreamAccess(request.getName(), threadPool.getThreadContext()); ; MetadataMigrateToDataStreamService.java:91: metadataCreateIndexService.getSystemIndices().validateDataStreamAccess(request.aliasName, threadContext); ; TransportDeleteDataStreamLifecycleAction.java:82 and TransportPutDataStreamLifecycleAction.java:83: systemIndices.validateDataStreamAccess(name, threadPool.getThreadContext()); ; TransportGetDataStreamOptionsAction.java:103, TransportPutDataStreamOptionsAction.java:82, TransportDeleteDataStreamOptionsAction.java:82: same call; TransportDeleteDataStreamActionTests.java:46: private final Consumer<String> validator = s -> EmptySystemIndices.INSTANCE.validateDataStreamAccess(s, threadContext); ; AutoCreateAction.java:265: final SystemDataStreamDescriptor dataStreamDescriptor = systemIndices.validateDataStreamAccess( . Non-Java hit docs/internal/SystemIndices.md:507 is out of scope (docs). No hits in generated directories. Traps: SystemIndices.java (definition only), docs/internal/SystemIndices.md."
+ },
+ {
+  "id": "elasticsearch_callchain",
+  "repo_key": "elasticsearch",
+  "repo_path": "/home/anchi/realbench-20261003/repos/elasticsearch",
+  "language": "Java",
+  "archetype": "callchain",
+  "favours": "graph",
+  "symbol": "reducedQueryPhase -> validateAndMaybeRewrite",
+  "question": "Working in the Elasticsearch Java checkout at /home/anchi/realbench-20261003/repos/elasticsearch (scope: the first-party Java sources under server/src/main/java; ignore tests, other modules, build/ and `generated` directories), find the shortest chain of direct method calls that starts at the static method `reducedQueryPhase` of class `SearchPhaseController` (server/src/main/java/org/elasticsearch/action/search/SearchPhaseController.java; it has a single overload) and ends at the static method `validateAndMaybeRewrite` of class `SortFieldValidation` (server/src/main/java/org/elasticsearch/search/sort/SortFieldValidation.java).\n\nRules:\n- Every consecutive pair in the chain must be a DIRECT call: the body of the earlier method must itself contain a call expression invoking the next method.\n- Only methods that are defined somewhere inside this repository count as hops; calls into the JDK or Lucene are not hops.\n- \"Shortest\" means the fewest methods in the chain; there is exactly one chain of that minimum length.\n\nOutput ONLY the bare method names (no class names, no parentheses), one per line, in call order, starting with `reducedQueryPhase` on the first line and ending with `validateAndMaybeRewrite` on the last line. No numbering, no arrows, no file paths, no commentary. Output nothing else.",
+  "answer_kind": "ordered_names",
+  "ground_truth": [
+   "reducedQueryPhase",
+   "sortDocs",
+   "mergeTopDocs",
+   "validateAndMaybeRewrite"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'validateAndMaybeRewrite|mergeTopDocs|sortDocs|reducedQueryPhase' --glob '*.java' server/src/main/java && sed -n 100,174p server/src/main/java/org/elasticsearch/action/search/SearchPhaseController.java && sed -n 374,511p server/src/main/java/org/elasticsearch/action/search/SearchPhaseController.java",
+  "derivation_excluded": [],
+  "grading_notes": "Hops (all in server/src/main/java/org/elasticsearch/action/search/SearchPhaseController.java unless noted): reducedQueryPhase (def :374) body calls sortDocs at :470 'sortedTopDocs = sortDocs(' ; sortDocs (def :100) body calls mergeTopDocs at :110 'final TopDocs mergedTopDocs = mergeTopDocs(topDocs, size, ignoreFrom ? 0 : from);' ; mergeTopDocs (def :145) calls SortFieldValidation.validateAndMaybeRewrite at :158 and :163 ; validateAndMaybeRewrite defined at server/src/main/java/org/elasticsearch/search/sort/SortFieldValidation.java:33 'public static Sort validateAndMaybeRewrite(Collection<? extends TopDocs> results, SortField[] firstSortFields) {'. Each name is defined exactly once in the repo (rg -w). Minimality: rg -n -w validateAndMaybeRewrite . shows only two calling methods: SearchPhaseController.mergeTopDocs (:158,:163) and the anonymous AggregatorReducer.get() inside InternalTopHits.getLeaderReducer (server/src/main/java/org/elasticsearch/search/aggregations/metrics/InternalTopHits.java:136). reducedQueryPhase (read whole body 374-511) does not call validateAndMaybeRewrite nor mergeTopDocs nor AggregatorReducer.get nor getLeaderReducer; its callees are queryResult, isNull, suggest, hasProfileResults, validateMergeSortValueFormats, from/size/sortValueFormats/getTimeRangeFilterFromMillis, computeIfAbsent, setShardIndex (CompletionSuggestion), hasConsumedTopDocs, consumeProfileResult, getSearchShardTarget, Suggest.reduce, filter, sortDocs, rankQueryPhaseResults, getTotalHits/getMaxScore and constructors; so no 3-chain exists. Callers of mergeTopDocs are sortDocs (:110), QueryPhaseResultConsumer.java:401 and SearchResponseMerger.java:213 \u2014 reducedQueryPhase calls neither of the latter's enclosing methods, so the 4-chain is unique. Traps: Suggest.reduce / InternalTopHits path (not reachable directly), setShardIndex (different method)."
+ },
+ {
+  "id": "elasticsearch_impact",
+  "repo_key": "elasticsearch",
+  "repo_path": "/home/anchi/realbench-20261003/repos/elasticsearch",
+  "language": "Java",
+  "archetype": "impact",
+  "favours": "graph",
+  "symbol": "MetadataCreateIndexService.validateIndexOrAliasName",
+  "question": "Repository: /home/anchi/realbench-20261003/repos/elasticsearch (Elasticsearch, Java).\n\nI want to add a new REQUIRED parameter to the public static method `validateIndexOrAliasName(String index, BiFunction<String, String, ? extends RuntimeException> exceptionCtor)` of class `MetadataCreateIndexService` (server/src/main/java/org/elasticsearch/cluster/metadata/MetadataCreateIndexService.java). It has no overloads and no other class declares a method with this name. Which source files must I edit? Include the file that defines it and every file that contains a call to it (qualified calls like `MetadataCreateIndexService.validateIndexOrAliasName(...)` as well as unqualified calls via a static import or from inside the class itself), including test files.\n\nScope: all *.java files anywhere in the repository (server/, modules/, x-pack/, libs/, plugins/, qa/, test/ and every other first-party directory), including test sources. Exclude any build/ output directories (none are checked in), generated source directories (any directory named `generated`, e.g. x-pack/plugin/esql/src/main/generated, x-pack/plugin/esql/compute/src/main/generated, modules/lang-painless/src/main/generated) and all non-Java files (docs/, *.md, *.asciidoc, *.yml, Gradle files). Report a file only if it defines or calls `validateIndexOrAliasName` itself \u2014 do not report files merely because they call some other method that wraps it (e.g. `validateIndexName`, `AliasValidator` methods, `IndexNameGenerator` methods), and do not report files in which the name appears only in comments or Javadoc (including `{@link ...}` references) or only in an import statement.\n\nOutput format: print ONLY the repo-relative file paths (no leading `./`), one path per line, sorted in byte order (LC_ALL=C sort). No bullets, no numbering, no backticks, no commentary, no blank lines. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "modules/ip-location/src/main/java/org/elasticsearch/ingest/geoip/direct/DatabaseConfiguration.java",
+   "server/src/main/java/org/elasticsearch/cluster/metadata/AliasValidator.java",
+   "server/src/main/java/org/elasticsearch/cluster/metadata/MetadataCreateDataStreamService.java",
+   "server/src/main/java/org/elasticsearch/cluster/metadata/MetadataCreateIndexService.java",
+   "server/src/main/java/org/elasticsearch/common/IndexNameGenerator.java",
+   "server/src/main/java/org/elasticsearch/ingest/IngestService.java",
+   "server/src/test/java/org/elasticsearch/common/IndexNameGeneratorTests.java",
+   "x-pack/plugin/core/src/main/java/org/elasticsearch/xpack/core/common/validation/SourceDestValidator.java",
+   "x-pack/plugin/enrich/src/main/java/org/elasticsearch/xpack/enrich/EnrichStore.java",
+   "x-pack/plugin/ent-search/src/main/java/org/elasticsearch/xpack/application/connector/action/ConnectorActionRequest.java",
+   "x-pack/plugin/ent-search/src/main/java/org/elasticsearch/xpack/application/connector/action/ListConnectorAction.java",
+   "x-pack/plugin/esql/src/main/java/org/elasticsearch/xpack/esql/datasources/dataset/PutDatasetAction.java",
+   "x-pack/plugin/esql/src/main/java/org/elasticsearch/xpack/esql/datasources/datasource/PutDataSourceAction.java",
+   "x-pack/plugin/esql/src/main/java/org/elasticsearch/xpack/esql/parser/IdentifierBuilder.java",
+   "x-pack/plugin/esql/src/main/java/org/elasticsearch/xpack/esql/view/PutViewAction.java"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'validateIndexOrAliasName' --glob '*.java' .",
+  "derivation_excluded": [
+   "x-pack/plugin/core/src/main/java/org/elasticsearch/xpack/core/ilm/LifecyclePolicy.java: Javadoc only, line 314: * {@link org.elasticsearch.cluster.metadata.MetadataCreateIndexService#validateIndexOrAliasName(String, BiFunction)}"
+  ],
+  "grading_notes": "rg -n -w validateIndexOrAliasName --glob '*.java' . prints 18 lines in 16 files; every line read. Definition: MetadataCreateIndexService.java:336: public static void validateIndexOrAliasName(String index, BiFunction<String, String, ? extends RuntimeException> exceptionCtor) { (also calls it unqualified at :278: validateIndexOrAliasName(index, InvalidIndexNameException::new);). Calls: IngestService.java:1011, MetadataCreateDataStreamService.java:271, AliasValidator.java:102, DatabaseConfiguration.java:171, IndexNameGeneratorTests.java:50, IndexNameGenerator.java:66, EnrichStore.java:69, ConnectorActionRequest.java:44, ListConnectorAction.java:106, PutDatasetAction.java:169, PutDataSourceAction.java:119, PutViewAction.java:73, IdentifierBuilder.java:337 (all 'MetadataCreateIndexService.validateIndexOrAliasName('); SourceDestValidator.java:45 static import + :375 unqualified call 'validateIndexOrAliasName(destIndex, InvalidIndexNameException::new);'. Excluded: LifecyclePolicy.java:314 Javadoc {@link} only. No non-Java hits, none in generated dirs. Gold = 15 files. Traps: LifecyclePolicy.java (javadoc), files that only call wrappers like MetadataCreateIndexService.validateIndexName."
+ },
+ {
+  "id": "neovim_locate",
+  "repo_key": "neovim",
+  "repo_path": "/home/anchi/realbench-20261003/repos/neovim",
+  "language": "C",
+  "archetype": "locate",
+  "favours": "neutral",
+  "symbol": "mark_adjust",
+  "question": "In the Neovim repository at /home/anchi/realbench-20261003/repos/neovim (C, with Lua; search the entire repository but ignore vendored code under deps/, cmake.deps/, src/cjson/, src/klib/, src/mpack/, src/xdiff/, src/xxd/ and src/tee/), find where the C function whose name is exactly `mark_adjust` is DEFINED \u2014 that is, the line where its implementation (the line carrying its return type and name, the one whose body follows) begins, not a declaration, a comment mentioning it, a call site, or a differently named function that merely contains `mark_adjust` in its name (such as `mark_adjust_buf`, `mark_adjust_nofold`, `diff_mark_adjust`, `qf_mark_adjust` or `extmark_adjust`).\n\nAnswer with exactly one line in the form <repo-relative-path>:<line>, for example src/nvim/foo.c:123. Output nothing else.",
+  "answer_kind": "path_and_line",
+  "ground_truth": [
+   "src/nvim/mark.c:1200"
+  ],
+  "alternates": [],
+  "derivation": "rg -n '^\\w.*\\bmark_adjust\\(' src test runtime",
+  "derivation_excluded": [],
+  "grading_notes": "rg -n '^[a-zA-Z].*\\bmark_adjust\\(' src -> single hit src/nvim/mark.c:1200: void mark_adjust(linenr_T line1, linenr_T line2, linenr_T amount, linenr_T amount_after, (body at 1201-1204 calls mark_adjust_buf(curbuf, ...)). Traps: comment examples src/nvim/mark.c:1197-1199 ('// Example: Delete lines 34 and 35: mark_adjust(34, 35, MAXLNUM, -2);'), mark.c:1206 comment, mark_adjust_nofold at mark.c:1211, mark_adjust_buf at mark.c:1217, diff_mark_adjust at diff.c:298, qf_mark_adjust at quickfix.c:3700, extmark_adjust at extmark.c:532, many doc comments in change.c ('after mark_adjust()'). No hand-written prototype in any .h (prototypes are generated). ~36 raw word-boundary hits in src/test/runtime."
+ },
+ {
+  "id": "neovim_callers",
+  "repo_key": "neovim",
+  "repo_path": "/home/anchi/realbench-20261003/repos/neovim",
+  "language": "C",
+  "archetype": "callers",
+  "favours": "graph",
+  "symbol": "get_real_state",
+  "question": "Repository under test: /home/anchi/realbench-20261003/repos/neovim (Neovim, written in C with Lua).\n\nScope: first-party code only \u2014 the C sources under src/nvim/ (all subdirectories, .c and .h files) plus the test suite under test/ (including Lua unit tests in test/unit that call C functions through the FFI `lib.` object) and runtime/. Exclude vendored and third-party code: deps/, cmake.deps/, src/cjson/, src/klib/, src/mpack/, src/xdiff/, src/xxd/, src/tee/, and any build/ or generated directory (e.g. *.generated.h headers, which are not in the checkout).\n\nTarget: the C function `get_real_state` (signature `int get_real_state(void)`), whose definition is in src/nvim/state.c.\n\nList every file in that scope that contains at least one CALL to `get_real_state`.\n\nCount only real call sites of that exact function (a call passed as a macro argument still counts). Do NOT count:\n- declarations / prototypes of the function,\n- a file that only contains its definition and no call to it,\n- occurrences inside comments or string literals (for example struct-field or enum comments that mention `get_real_state()`),\n- calls to other, different functions whose names merely contain `get_real_state` or look similar (e.g. `get_state`).\n\nOutput format: print one repository-relative file path per line (for example `src/nvim/state.c`), with no leading `./`, sorted with `LC_ALL=C sort`. No line numbers, no counts, no bullets, no explanation \u2014 the file paths and nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "src/nvim/autocmd.c",
+   "src/nvim/drawscreen.c",
+   "src/nvim/input.c",
+   "src/nvim/input_cmdatom.c",
+   "src/nvim/menu.c",
+   "src/nvim/normal.c",
+   "src/nvim/os/input.c",
+   "src/nvim/window.c"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'get_real_state' src/nvim test runtime",
+  "derivation_excluded": [
+   {
+    "path": "src/nvim/state_defs.h",
+    "reason": "comments only, lines 22/23/27: '///< Visual mode - use get_real_state()' etc. in the State enum"
+   },
+   {
+    "path": "src/nvim/buffer_defs.h",
+    "reason": "comment only, line 1320: 'int w_stl_state;  // get_real_state() when last redrawn'"
+   },
+   {
+    "path": "src/nvim/state.c",
+    "reason": "definition only, line 163: int get_real_state(void)"
+   }
+  ],
+  "grading_notes": "Every hit read. Calls: src/nvim/menu.c:1478: } else if (get_real_state() & MODE_VISUAL) {; src/nvim/window.c:5306: win_fix_cursor(get_real_state() & (MODE_NORMAL|MODE_CMDLINE|MODE_TERMINAL)); src/nvim/window.c:6861: if (!(get_real_state() & (...))) {; src/nvim/drawscreen.c:833: int state = get_real_state(); src/nvim/drawscreen.c:2847: if (get_real_state() & MODE_VISUAL) {; src/nvim/input.c:2264: int local_State = get_real_state(); src/nvim/input.c:2316 and 2753 (calls); src/nvim/os/input.c:113: if ((mapped_ctrl_c | curbuf->b_mapped_ctrl_c) & get_real_state()) {; src/nvim/os/input.c:133 (call); src/nvim/input_cmdatom.c:882: if (get_real_state() == MODE_OP_PENDING && *op != NUL) {; src/nvim/normal.c:1106: LANGMAP_ADJUST(s->c, get_real_state() != MODE_SELECT); (call as macro argument); src/nvim/autocmd.c:1413: return has_event((get_real_state() == MODE_NORMAL_BUSY ? ...)); src/nvim/autocmd.c:1421: int state = get_real_state();. No hits in test/ or runtime/. Traps: comment-only hits in state_defs.h and buffer_defs.h; definition-only state.c; note input.c vs os/input.c are distinct files."
+ },
+ {
+  "id": "neovim_callchain",
+  "repo_key": "neovim",
+  "repo_path": "/home/anchi/realbench-20261003/repos/neovim",
+  "language": "C",
+  "archetype": "callchain",
+  "favours": "graph",
+  "symbol": "do_autochdir -> get_v_event",
+  "question": "Working in the Neovim C checkout at /home/anchi/realbench-20261003/repos/neovim (scope: the first-party C sources under src/nvim/; ignore vendored code in deps/, cmake.deps/, src/cjson/, src/klib/, src/mpack/, src/xdiff/, src/xxd/, src/tee/ and any generated headers), find the shortest chain of direct function calls that starts at the C function `do_autochdir` (defined in src/nvim/buffer.c) and ends at the C function `get_v_event` (defined in src/nvim/eval.c).\n\nRules:\n- Every consecutive pair in the chain must be a DIRECT call: the body of the earlier function must contain a call to the next function.\n- Only functions that are defined somewhere inside src/nvim/ count as hops; preprocessor macros (such as FOR_ALL_BUFFERS) and external library functions are not hops.\n- \"Shortest\" means the fewest functions in the chain; there is exactly one chain of that minimum length.\n\nOutput ONLY the function names, one per line, in call order, starting with `do_autochdir` on the first line and ending with `get_v_event` on the last line. No numbering, no arrows, no file paths, no commentary. Output nothing else.",
+  "answer_kind": "ordered_names",
+  "ground_truth": [
+   "do_autochdir",
+   "vim_chdirfile",
+   "do_autocmd_dirchanged",
+   "get_v_event"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'get_v_event' src/nvim",
+  "derivation_excluded": [],
+  "grading_notes": "Bodies read with sed -n. src/nvim/buffer.c:1890 do_autochdir body (1891-1900) calls only vim_chdirfile (line 1895: && vim_chdirfile(curbuf->b_ffname, kCdCauseAuto) == OK) and shorten_fnames (1897). src/nvim/file_search.c:1901 vim_chdirfile body calls xstrlcpy, path_tail_with_sep, os_dirname, path_equal, do_autocmd_dirchanged (1918 and 1926: do_autocmd_dirchanged(dir, kCdScopeWindow, cause, true)), os_chdir. src/nvim/file_search.c:1832 do_autocmd_dirchanged calls get_v_event at 1847: dict_T *dict = get_v_event(&save_v_event); get_v_event defined once at src/nvim/eval.c:146. Minimality: the complete set of functions directly calling get_v_event (from rg -w get_v_event src/nvim, enclosing functions): terminal_close, command_line_enter, do_autocmd_cmdlinechanged, set_info_event, do_autocmd_dirchanged, deferred_event, do_autocmd_uienter, may_trigger_win_scrolled_resized, may_trigger_modechanged, do_record, do_autocmd_textyankpost, put_do_autocmd, do_autocmd_completedone, trigger_complete_changed_event. do_autochdir does not call get_v_event (no 2-chain); its callees vim_chdirfile and shorten_fnames (fileio.c:2395, calls os_dirname, shorten_buf_fname, mf_fullname, status_redraw_all) do not call it (no 3-chain); the only callee of either that is in the direct-caller set is do_autocmd_dirchanged (via vim_chdirfile), so the 4-chain is unique. Trap: apply_autocmds / restore_v_event are siblings, not the target."
+ },
+ {
+  "id": "neovim_impact",
+  "repo_key": "neovim",
+  "repo_path": "/home/anchi/realbench-20261003/repos/neovim",
+  "language": "C",
+  "archetype": "impact",
+  "favours": "graph",
+  "symbol": "vim_tempname",
+  "question": "Repository: /home/anchi/realbench-20261003/repos/neovim (Neovim, C with Lua).\n\nI want to add a new REQUIRED parameter to the C function `vim_tempname` (currently `char *vim_tempname(void)`, defined in src/nvim/fileio.c). Which files must I edit? Include the file that defines it, any checked-in file that declares it, and every file that contains a call to it \u2014 including test files (Lua unit tests under test/unit call C functions through the FFI, e.g. `lib.some_function(...)`, and such a call counts).\n\nScope: first-party code only \u2014 the C sources under src/nvim/ (all subdirectories, .c and .h files) plus the test suite under test/ (including Lua unit tests in test/unit that call C functions through the FFI `lib.` object) and runtime/. Exclude vendored and third-party code: deps/, cmake.deps/, src/cjson/, src/klib/, src/mpack/, src/xdiff/, src/xxd/, src/tee/, and any build/ or generated directory (e.g. *.generated.h headers, which are not in the checkout). Do not report documentation files or build files. Report a file only if it declares, defines, or calls `vim_tempname` itself \u2014 do not report files merely because they call some other function that wraps it (such as the Vimscript builtin `tempname()`).\n\nOutput format: print ONLY the repo-relative file paths (for example src/nvim/fileio.c), one path per line, sorted in byte order (LC_ALL=C sort). No bullets, no numbering, no backticks, no commentary, no blank lines. Output nothing else.",
+  "answer_kind": "set_of_paths",
+  "ground_truth": [
+   "src/nvim/bufwrite.c",
+   "src/nvim/diff.c",
+   "src/nvim/eval/fs.c",
+   "src/nvim/ex_cmds.c",
+   "src/nvim/fileio.c",
+   "src/nvim/memline.c",
+   "src/nvim/os/shell.c",
+   "src/nvim/quickfix.c",
+   "src/nvim/spellfile.c",
+   "test/unit/tempfile_spec.lua"
+  ],
+  "alternates": [],
+  "derivation": "rg -n -w 'vim_tempname' src/nvim test runtime",
+  "derivation_excluded": [],
+  "grading_notes": "All 22 hits read. Definition: src/nvim/fileio.c:3594: char *vim_tempname(void) (fileio.c also calls it at 2082: char *tmpname = vim_tempname();). Calls: src/nvim/eval/fs.c:1704: rettv->vval.v_string = vim_tempname(); (in f_tempname); src/nvim/diff.c:923-925 and 1326/1328 (e.g. char *tmp_orig = vim_tempname();); src/nvim/memline.c:494: char *fname = vim_tempname(); src/nvim/ex_cmds.c:1318-1319: (itmp = vim_tempname()) == NULL; src/nvim/os/shell.c:171 and 778; src/nvim/spellfile.c:5488: int_wordlist = vim_tempname(); src/nvim/bufwrite.c:1274: wfname = vim_tempname(); src/nvim/quickfix.c:4708: name = vim_tempname(); test/unit/tempfile_spec.lua:45: return t.ffi.string(lib.vim_tempname()) (lib = cimport('./src/nvim/os/os.h', './src/nvim/fileio.h')). No checked-in header declares it (prototype lives in generated fileio.h.generated.h, not in checkout). Traps: f_tempname/tempname() wrappers, test functional specs using tempname() (vimscript) do not reference vim_tempname; no hits in runtime/."
+ }
+]
