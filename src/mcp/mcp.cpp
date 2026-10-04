@@ -1814,7 +1814,7 @@ static bool coverage_kind_is_skip(const char *kind) {
 }
 
 char *cbm_mcp_symbol_nodes(cbm_mcp_server_t *srv, const char *project, const char *name,
-                           bool *resolved) {
+                           bool *resolved, bool prefix) {
     if (resolved) {
         *resolved = false;
     }
@@ -1834,7 +1834,11 @@ char *cbm_mcp_symbol_nodes(cbm_mcp_server_t *srv, const char *project, const cha
     }
     cbm_node_t *nodes = NULL;
     int count = 0;
-    cbm_store_find_nodes_by_name(store, project, name, &nodes, &count);
+    if (prefix) {
+        cbm_store_find_nodes_by_name_prefix(store, project, name, 40, &nodes, &count);
+    } else {
+        cbm_store_find_nodes_by_name(store, project, name, &nodes, &count);
+    }
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);

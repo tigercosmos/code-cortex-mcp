@@ -383,6 +383,12 @@ char *cbm_prompt_display_for_testing(const char *qn, const char *file);
 char *cbm_prompt_evidence_for_testing(const char *root, const char *facts_json,
                                       const char *const *files, int count, int level);
 char *cbm_prompt_chain_for_testing(const char *root, const char *trace_json);
+/* Locate block for facts_json, exact-name nodes and similarly named nodes
+ * ({"nodes":[...]} each, QNs under project "p"). */
+char *cbm_prompt_locate_for_testing(const char *root, const char *facts_json,
+                                    const char *nodes_json, const char *similar_json, int level);
+/* The files the scan reads under root (git's view: .gitignore applied), '\n'-joined. */
+char *cbm_prompt_text_files_for_testing(const char *root);
 char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_t max_bytes,
                                      const char *label);
 bool cbm_session_covers_for_testing(const char *session_id, const char *name, const char *record);

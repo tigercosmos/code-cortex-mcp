@@ -1706,6 +1706,59 @@ int cbm_store_find_nodes_by_name(cbm_store_t *s, const char *project, const char
                               project, name, out, count);
 }
 
+int cbm_store_find_nodes_by_name_prefix(cbm_store_t *s, const char *project, const char *prefix,
+                                        int limit, cbm_node_t **out, int *count) {
+    *out = NULL;
+    *count = 0;
+    if (!s || !s->db || !project || !prefix || !prefix[0] || limit <= 0) {
+        return CBM_STORE_ERR;
+    }
+    /* A range on the (project, name) index: names that start with the prefix
+     * and are longer than it. */
+    size_t plen = strlen(prefix);
+    char *hi = (char *)malloc(plen + 2);
+    if (!hi) {
+        return CBM_STORE_ERR;
+    }
+    memcpy(hi, prefix, plen);
+    hi[plen] = (char)0xff;
+    hi[plen + 1] = '\0';
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db,
+                           "SELECT id, project, label, name, qualified_name, file_path, "
+                           "start_line, end_line, properties FROM nodes "
+                           "WHERE project = ?1 AND name > ?2 AND name < ?3 LIMIT ?4;",
+                           CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK) {
+        store_set_error_sqlite(s, "find_nodes_by_name_prefix");
+        free(hi);
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    bind_text(stmt, ST_COL_2, prefix);
+    sqlite3_bind_text(stmt, ST_COL_3, hi, (int)(plen + 1), SQLITE_TRANSIENT);
+    free(hi);
+    sqlite3_bind_int(stmt, 4, limit);
+    int cap = ST_INIT_CAP_16;
+    int n = 0;
+    cbm_node_t *arr = (cbm_node_t *)malloc(cap * sizeof(cbm_node_t));
+    while (arr && sqlite3_step(stmt) == SQLITE_ROW) {
+        if (n >= cap) {
+            cap *= ST_GROWTH;
+            arr = (__typeof__(arr))safe_realloc(arr, cap * sizeof(cbm_node_t));
+        }
+        scan_node(stmt, &arr[n]);
+        n++;
+    }
+    sqlite3_finalize(stmt);
+    if (n == 0) {
+        free(arr);
+        arr = NULL;
+    }
+    *out = arr;
+    *count = n;
+    return CBM_STORE_OK;
+}
+
 int cbm_store_find_nodes(cbm_store_t *s, const char *project, cbm_node_t **out, int *count) {
     if (!s) {
         *out = NULL;

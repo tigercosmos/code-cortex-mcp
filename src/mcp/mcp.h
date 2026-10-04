@@ -174,10 +174,11 @@ char *cbm_mcp_session_brief_json(cbm_mcp_server_t *srv, const char *project, boo
  * {"root":<project root>,"nodes":[{qualified_name,name,label,file,start_line,
  * end_line}...],"total":N} (at most 1000 nodes listed). The hook disambiguates
  * these itself (qualifier, file hint, definition over declaration) before it
- * asks inspect_symbol about one exact qualified name. *resolved is true when
- * the project is indexed. Caller frees. */
+ * asks inspect_symbol about one exact qualified name. With prefix, the nodes
+ * whose name starts with `name` and is longer (at most 40): similarly named
+ * symbols. *resolved is true when the project is indexed. Caller frees. */
 char *cbm_mcp_symbol_nodes(cbm_mcp_server_t *srv, const char *project, const char *name,
-                           bool *resolved);
+                           bool *resolved, bool prefix = false);
 
 /* The project's indexed files (repo-relative) and root path, for a bounded
  * whole-word text scan. Returns the file count, or -1 when the project is not

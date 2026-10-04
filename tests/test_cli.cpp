@@ -2981,38 +2981,52 @@ TEST(cli_prompt_evidence_block_reads_matches_from_disk) {
     char *block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 0);
     ASSERT_NOT_NULL(block);
     ASSERT_NOT_NULL(strstr(block, "- target_fn (Function)"));
-    ASSERT_NOT_NULL(strstr(block, "  definition:\n    def.c:3: int target_fn(void) {  (node starts "
-                                  "at line 1)"));
-    ASSERT_NOT_NULL(strstr(block, "  declarations:\n    api.h:1: int target_fn(void);"));
-    ASSERT_NOT_NULL(strstr(block, "  calls (graph-resolved), 1 files:\n    a.c:1: void a(void) { "
-                                  "target_fn(); }"));
-    ASSERT_NOT_NULL(strstr(block, "other whole-word matches (not resolved as calls), 4 files:"));
-    ASSERT_NOT_NULL(strstr(block, "    b_test.c:2: target_fn();"));
+    ASSERT_NOT_NULL(strstr(block, "  definition: def.c:3: int target_fn(void) {"));
+    ASSERT_NOT_NULL(strstr(block, "  declaration: api.h:1: int target_fn(void);"));
+    ASSERT_NOT_NULL(strstr(block, "  every whole-word match (7 lines):"));
+    ASSERT_NOT_NULL(strstr(block, "    a.c:1: void a(void) { target_fn(); }  [call]"));
+    ASSERT_NOT_NULL(strstr(block, "    b_test.c:2: target_fn();  [call (text only, not resolved "
+                                  "by the graph)]"));
     ASSERT_NOT_NULL(strstr(block, "    comment.c:1: // target_fn is old  [comment]"));
     ASSERT_NOT_NULL(strstr(block, "    str.c:1: const char *s = \"target_fn\";  [string]"));
-    ASSERT_NOT_NULL(strstr(block, "    doc.md:1: See target_fn for details."));
+    ASSERT_NOT_NULL(strstr(block, "    def.c:3: int target_fn(void) {  [definition]"));
+    ASSERT_NOT_NULL(strstr(block, "    doc.md:1: See target_fn for details.  [reference]"));
     ASSERT_NULL(strstr(block, "near.c")); /* target_fn_extra is not a whole-word match */
+    ASSERT_NOT_NULL(strstr(block, "  non-call references (name not followed by \"(\"): 1:\n"
+                                  "    doc.md:1: See target_fn for details."));
+    ASSERT_NOT_NULL(strstr(block, "  aliases: none found (checked import-as, assignment, #define, "
+                                  "using, module import)"));
     ASSERT_NOT_NULL(strstr(block, "no whole-word `target_fn` on disk now (stale, re-check): "
                                   "lib/gone.c"));
-    ASSERT_NOT_NULL(strstr(block, "totals: 7 whole-word matches in 7 files across the 9 source "
-                                  "files (scan complete)"));
+    ASSERT_NOT_NULL(strstr(block, "  files containing `target_fn` (7):\n    a.c  calls=1 other=0\n"
+                                  "    api.h  calls=0 other=1\n    b_test.c  calls=1 other=0\n"));
+    ASSERT_NOT_NULL(strstr(block, "  scanned 9 text files (all extensions, the files git would "
+                                  "track; skipped: 0 binary, 0 over 2 MB; vendored dirs: none "
+                                  "skipped); 7 files contain the whole word; by extension: .c 5, "
+                                  ".h 1, .md 1"));
+    ASSERT_NULL(strstr(block, "more in this file"));
     ASSERT_NULL(strstr(block, "verified now"));
     free(block);
 
-    /* Collapsed: grouped under directories, other matches by name only. */
-    block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 4);
+    /* Too much to list: one summary per file, the table stays complete. */
+    block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 1);
     ASSERT_NOT_NULL(block);
-    ASSERT_NOT_NULL(strstr(block, "    ./\n      b_test.c (1 matches)"));
+    ASSERT_NOT_NULL(strstr(block, "    b_test.c: 1 matches (1 calls) lines 2"));
+    ASSERT_NOT_NULL(strstr(block, "    comment.c: 1 matches (1 comments) lines 1"));
+    ASSERT_NOT_NULL(strstr(block, "    b_test.c  calls=1 other=0"));
+    free(block);
+    block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 2);
+    ASSERT_NOT_NULL(strstr(block, "per-line listing dropped to fit the context budget"));
+    ASSERT_NOT_NULL(strstr(block, "    str.c  calls=0 other=1"));
     free(block);
 
     /* The name is not near the indexed start: a stale mark, not a claim. */
     const char *stale = R"({"display":"target_fn","bare":"target_fn","label":"Function",)"
-                        R"("defs":[["a.c",1]],"decls":[["doc.md",5]]})";
+                        R"("defs":[["doc.md",5]]})";
     block = cbm_prompt_evidence_for_testing(root, stale, names, 0, 0);
     ASSERT_NOT_NULL(block);
-    ASSERT_NOT_NULL(strstr(block, "    a.c:1: void a(void) { target_fn(); }"));
-    ASSERT_NOT_NULL(strstr(block, "doc.md:5:   [stale: `target_fn` not found near the indexed "
-                                  "start, re-check]"));
+    ASSERT_NOT_NULL(strstr(block, "definition: doc.md:5:   [stale: name not found near the indexed "
+                                  "start]"));
     free(block);
 
     /* Not in the graph: the text listing alone, labelled. */
@@ -3021,8 +3035,137 @@ TEST(cli_prompt_evidence_block_reads_matches_from_disk) {
     ASSERT_NOT_NULL(block);
     ASSERT_NOT_NULL(strstr(block, "- target_fn (not in the code graph; whole-word matches:)"));
     ASSERT_NOT_NULL(strstr(block, "    def.c:3: int target_fn(void) {"));
-    ASSERT_NULL(strstr(block, "calls (graph-resolved)"));
     free(block);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* Aliases a name-only grep would miss, and module imports of the defining
+ * file that are then used qualified. */
+TEST(cli_prompt_aliases_and_module_imports) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-alias-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    char sub[512];
+    snprintf(sub, sizeof(sub), "%s/pkg", root);
+    ASSERT_EQ(mkdir(sub, 0755), 0);
+    const char *names[] = {"pkg/mod.py", "a.py", "b.py", "c.h", "d.cpp", "e.py"};
+    const char *bodies[] = {"def target_fn(x):\n    return x\n",
+                            "from pkg.mod import target_fn as tf\nprint(tf(1))\n",
+                            "from pkg import mod\nmod.target_fn(2)\n",
+                            "#define TF target_fn\n",
+                            "auto f = &target_fn;\nusing G = target_fn;\n",
+                            "import pkg.mod as m\nprint(1)\n"};
+    for (int i = 0; i < 6; ++i) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, names[i]);
+        write_test_file(path, bodies[i]);
+    }
+    const char *facts = R"({"display":"target_fn","bare":"target_fn","label":"Function",)"
+                        R"("defs":[["pkg/mod.py",1]]})";
+    char *block = cbm_prompt_evidence_for_testing(root, facts, names, 6, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "    a.py:1: from pkg.mod import target_fn as tf  [import-as]"));
+    ASSERT_NOT_NULL(strstr(block, "    c.h:1: #define TF target_fn  [#define]"));
+    ASSERT_NOT_NULL(strstr(block, "    d.cpp:1: auto f = &target_fn;  [assignment]"));
+    ASSERT_NOT_NULL(strstr(block, "    d.cpp:2: using G = target_fn;  [using]"));
+    ASSERT_NOT_NULL(strstr(block, "    b.py:2: mod.target_fn(2)  [module import at line 1, used "
+                                  "as mod.target_fn]"));
+    ASSERT_NULL(strstr(block, "e.py")); /* imported as m, never used as m.target_fn */
+    free(block);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* Locate: the definition in context, every exact-name node, the counts, and
+ * names that share the stem. */
+TEST(cli_prompt_locate_block) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-locate-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    const char *names[] = {"def.c", "api.h", "other.c", "near.c"};
+    const char *bodies[] = {"// one\n// two\nint\ntarget_fn(int a,\n          int b)\n{\n  "
+                            "return a;\n}\n",
+                            "int target_fn(int a, int b);\n", "static int target_fn(void) {}\n",
+                            "int target_fn_nocheck(void) {}\n"};
+    for (int i = 0; i < 4; ++i) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, names[i]);
+        write_test_file(path, bodies[i]);
+    }
+    const char *facts = R"({"display":"target_fn","bare":"target_fn","label":"Function",)"
+                        R"("defs":[["def.c",3]],"decls":[["api.h",1]]})";
+    const char *nodes =
+        R"({"nodes":[{"qualified_name":"p.def.target_fn","name":"target_fn","label":"Function","file":"def.c","start_line":3},)"
+        R"({"qualified_name":"p.api.target_fn","name":"target_fn","label":"Declaration","file":"api.h","start_line":1},)"
+        R"({"qualified_name":"p.other.target_fn","name":"target_fn","label":"Function","file":"other.c","start_line":1}]})";
+    const char *similar =
+        R"({"nodes":[{"qualified_name":"p.near.target_fn_nocheck","name":"target_fn_nocheck","label":"Function","file":"near.c","start_line":1}]})";
+    char *block = cbm_prompt_locate_for_testing(root, facts, nodes, similar, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "  definition:\n    def.c-2- // two\n    def.c-3- int\n"
+                                  "    def.c:4: target_fn(int a,\n    def.c-5- int b)\n"
+                                  "    def.c-6- {\n    def.c-7- return a;"));
+    ASSERT_NOT_NULL(strstr(block, "  other exact-name definitions:\n    other.c:1: static int "
+                                  "target_fn(void) {}  (target_fn, Function)"));
+    ASSERT_NOT_NULL(strstr(block, "  declarations / prototypes:\n    api.h:1: int target_fn(int a, "
+                                  "int b);"));
+    ASSERT_NOT_NULL(strstr(block, "  exact-name definitions: 2; declarations: 1"));
+    ASSERT_NOT_NULL(strstr(block, "  similar names defined: `target_fn_nocheck` at near.c:1"));
+    free(block);
+    block = cbm_prompt_locate_for_testing(root, facts, nodes, "{\"nodes\":[]}", 1);
+    ASSERT_NOT_NULL(strstr(block, "  definition:\n    def.c:4: target_fn(int a,\n  other"));
+    ASSERT_NOT_NULL(strstr(block, "  similar names defined: none"));
+    free(block);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* The scan reads every file git would track: .gitignore applied at every
+ * level (negations included), .git skipped, any extension. */
+TEST(cli_prompt_text_files_follow_gitignore) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-gitfiles-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    for (const char *d : {"src", "build", "sub", ".git"}) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, d);
+        ASSERT_EQ(mkdir(path, 0755), 0);
+    }
+    const char *files[][2] = {{".gitignore", "build/\n*.log\n"},
+                              {"src/a.c", "int a;\n"},
+                              {"build/x.c", "int x;\n"},
+                              {"x.log", "log\n"},
+                              {"sub/.gitignore", "!keep.log\n*.tmp\n"},
+                              {"sub/keep.log", "keep\n"},
+                              {"sub/y.tmp", "tmp\n"},
+                              {".git/config", "[core]\n"}};
+    for (const auto &f : files) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, f[0]);
+        write_test_file(path, f[1]);
+    }
+    char *list = cbm_prompt_text_files_for_testing(root);
+    ASSERT_NOT_NULL(list);
+#ifndef _WIN32
+    ASSERT_STR_EQ(list, ".gitignore\nsrc/a.c\nsub/.gitignore\nsub/keep.log");
+#endif
+    free(list);
     test_rmdir_r(root);
     PASS();
 #else
@@ -4042,6 +4185,9 @@ SUITE(cli) {
     RUN_TEST(cli_prompt_targets_follow_the_request);
     RUN_TEST(cli_prompt_resolution_disambiguates_or_refuses);
     RUN_TEST(cli_prompt_evidence_block_reads_matches_from_disk);
+    RUN_TEST(cli_prompt_aliases_and_module_imports);
+    RUN_TEST(cli_prompt_locate_block);
+    RUN_TEST(cli_prompt_text_files_follow_gitignore);
     RUN_TEST(cli_prompt_chain_block_has_call_sites);
     RUN_TEST(cli_prompt_payload_and_session_dedupe);
     RUN_TEST(cli_source_context_preserves_interleaved_paths);

@@ -70,9 +70,12 @@ a PreToolUse hook on searches adds what grep cannot show for an exact symbol (de
 declaration, caller and test counts with call-site lines, callers from other languages), and
 a PostToolUse hook on edits reports the blast radius of the file you just changed, and a
 UserPromptSubmit hook resolves the code identifiers your prompt names and prints what a
-`grep -rnw` for them would show, read from disk at prompt time: the definition and declaration
-lines, every whole-word match grouped into graph-resolved calls and other mentions, and, for
-call chains, each hop's call-site line. All hooks are
+`grep -rnw` for them over every file git would track would show, read from disk at prompt time.
+For callers and impact questions: every match line classified (call, comment, string, import,
+reference), non-call references, aliases, and a complete per-file table. For a definition
+lookup: the definition in context, every other definition and declaration of the name, and
+similarly named definitions. For call chains: each hop's call site and the breadth-first facts
+behind "shortest". All hooks are
 non-blocking and bounded (300 ms for searches, 1.5 s after edits and per prompt, 3 s at session
 start).
 

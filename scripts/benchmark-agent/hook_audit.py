@@ -80,6 +80,46 @@ PREV_SYMBOLS = {
     "main_codecortex_textcfg": "",
 }
 OUT_OF_SCOPE_KINDS = {"set_of_names", "exact_string"}
+TABLE_RE = re.compile(r"^\s{4}(\S+)  calls=(\d+) other=(\d+)$")
+SUMMARY_RE = re.compile(r"^\s{4}(\S+): \d+ matches \(")
+
+
+def grep_files(repo, name):
+    """Files a plain `grep -rlw NAME` over git-tracked text files returns."""
+    try:
+        out = subprocess.run(["git", "-C", repo, "grep", "-lwI", "-F", "-e", name],
+                             capture_output=True, text=True, timeout=60).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    return set(line for line in out.splitlines() if line)
+
+
+def residual(task, text, repo):
+    """Checks derived from the searches agents still ran after the block."""
+    kind = task["answer_kind"]
+    r = {}
+    r["no_more_k"] = not re.search(r"\(\+\d+( more)?\)|more in this file", text)
+    if kind == "set_of_paths":
+        names = asked_names(task)
+        table = set()
+        for line in text.splitlines():
+            m = TABLE_RE.match(line)
+            if m:
+                table.add(m.group(1))
+        want = set()
+        for n in names:
+            g = grep_files(repo, n)
+            if g is not None:
+                want |= g
+        r["table_eq_grep"] = bool(table) and table == want
+        r["table_missing"] = sorted(want - table)[:10]
+        r["table_extra"] = sorted(table - want)[:10]
+        r["alias_line"] = "aliases:" in text
+    elif kind == "path_and_line":
+        r["exact_count_line"] = "exact-name definitions:" in text
+    elif kind in ("ordered_names", "ordered_list"):
+        r["shortest_line"] = "shortest:" in text
+    return r
 
 
 def bare(name):
@@ -169,6 +209,11 @@ def sections(text):
             section = "mention"
         for m in MATCH_LINE_RE.finditer(line):
             out["evidence"].add(m.group(1))
+        for rx in (TABLE_RE, SUMMARY_RE):
+            mm = rx.match(line)
+            if mm:
+                out["evidence"].add(mm.group(1))
+                out[section].add(mm.group(1))
         found = set(PATH_RE.findall(line))
         key = "mention" if "also mention" in low else section
         out[key].update(found)
@@ -256,12 +301,14 @@ def main():
         question = t["question"].replace(t["repo_path"], repo)
         ms, nbytes, text = run_hook(args.bin, env, repo, PREAMBLE + question)
         g = grade(t, text)
+        g["residual"] = residual(t, text, repo) if g["scored"] else {}
         rows.append({"id": t["id"], "kind": t["answer_kind"], "ms": round(ms, 1), "bytes": nbytes,
                      **g, "text": text})
         if args.show:
             print(f"===== {t['id']} ({ms:.0f} ms, {nbytes} B)\n{text}\n")
 
-    print(f"{'task':30} {'ms':>7} {'bytes':>6}  {'answer':24} {'evid':5} stale leak noise")
+    print(f"{'task':30} {'ms':>7} {'bytes':>6}  {'answer':24} {'evid':5} {'resid':6} stale leak "
+          "noise")
     for r in rows:
         if not r["scored"]:
             res = "out of scope"
@@ -270,8 +317,12 @@ def main():
         else:
             res = "OK" if r["ok"] else "miss"
         ev = "-" if not r["scored"] else ("yes" if r["evidence"] else "NO")
-        print(f"{r['id']:30} {r['ms']:7.1f} {r['bytes']:6}  {res:24} {ev:5} {r['stale']:5} "
-              f"{r['leaks']:4} {','.join(r['noise'])[:50]}")
+        rs = r.get("residual", {})
+        checks = [v for k, v in rs.items() if isinstance(v, bool)]
+        resid = "-" if not checks else ("ok" if all(checks) else
+                                        ",".join(k for k, v in rs.items() if v is False)[:6])
+        print(f"{r['id']:30} {r['ms']:7.1f} {r['bytes']:6}  {res:24} {ev:5} {resid:6} "
+              f"{r['stale']:5} {r['leaks']:4} {','.join(r['noise'])[:50]}")
     times = sorted(r["ms"] for r in rows)
     p95 = times[min(len(times) - 1, int(round(0.95 * (len(times) - 1))))] if times else 0
     by = {}
@@ -285,6 +336,14 @@ def main():
               f"evidence complete {sum(r['evidence'] for r in rs_s)}/{len(rs_s)}"
               + (f"  ({len(rs) - len(rs_s)} out of scope)" if len(rs) != len(rs_s) else ""))
     scored = [r for r in rows if r["scored"]]
+    for key in ("table_eq_grep", "no_more_k", "alias_line", "exact_count_line", "shortest_line"):
+        vals = [r["residual"][key] for r in scored if key in r.get("residual", {})]
+        if vals:
+            print(f"residual {key:17} {sum(vals)}/{len(vals)}")
+    for r in scored:
+        rs = r.get("residual", {})
+        if rs.get("table_eq_grep") is False:
+            print(f"  {r['id']}: table missing {rs.get('table_missing')} extra {rs.get('table_extra')}")
     print(f"evidence complete {sum(r['evidence'] for r in scored)}/{len(scored)}, "
           f"noise blocks {sum(len(r['noise']) for r in rows)}, stale marks "
           f"{sum(r['stale'] for r in rows)}, leaked internal names {sum(r['leaks'] for r in rows)}")
