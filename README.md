@@ -164,29 +164,41 @@ Agent-level comparison on 2026-10-03: a fresh Claude Code session per task, the 
 the only prompt, and the agent free to use any tool. Results differ sharply between
 real repositories and a synthetic corpus, so read both.
 
-**Real repositories** (final build; mcp / shell wall time, geometric mean over pairs both
-arms answered correctly):
+**Real repositories** (mcp / shell wall time, geometric mean over pairs both arms answered
+correctly; sessions run serially, one repetition):
 
 | Task set | Opus 5.5 | Fable 5.1 |
 |---|---:|---:|
-| 32 tasks in 7 languages (redis, rocksdb, etcd, django, rails, TypeScript, elasticsearch, neovim), 2 reps | 0.846 (p = 0.03) | 0.877 (p = 0.24) |
-| 34 earlier audited C/C++ tasks (jansson, lz4, elfuse, PcapPlusPlus, cgal, opencv, this repo), 1 rep | 0.763 (p = 0.12) | 0.654 (p = 0.0002) |
+| 32 tasks in 7 languages (redis, rocksdb, etcd, django, rails, TypeScript, elasticsearch, neovim) | **0.652** (29/32 faster, p < 0.0001) | **0.664** (24/30, p = 0.001) |
+| 34 earlier audited C/C++ tasks (jansson, lz4, elfuse, PcapPlusPlus, cgal, opencv, this repo) | **0.729** (24/34, p = 0.02) | **0.604** (33/34, p < 0.0001) |
 
 | Archetype (7-language set) | Opus 5.5 | Fable 5.1 |
 |---|---:|---:|
-| Call chain | 0.724 | 0.730 |
-| Locate a definition | 0.775 | 0.769 |
-| Callers (file set) | 0.992 | 1.024 |
-| Impact of a signature change | 0.922 | 0.964 |
+| Call chain | 0.682 | 0.511 |
+| Locate a definition | 0.694 | 0.651 |
+| Callers (file set) | 0.647 | 0.905 |
+| Impact of a signature change | 0.590 | 0.620 |
 
-Call chains are consistently 27-56% faster. Questions a single grep answers gain little:
-the prompt hook already prints that grep's output, but the agent re-runs the search in
-most sessions (it answered without any tool in 27 of 64 Opus sessions and 8 of 64 Fable
-sessions). When it does answer from the block, a session takes 4.9 s against 7.2 s for a
-one-grep session. Accuracy is equal in both arms; every strict miss was a correct chain
-with a sentence in front. With the first version of the hook the same tasks measured
-1.05 (Opus) and 0.95 (Fable): the gains above came from resolving only the asked symbol,
-printing complete match lines, fixing duplicate Ruby method nodes and false stale marks.
+A parallel two-repetition run of the same build gave 0.626 / 0.668 and 0.719 / 0.658.
+Accuracy in the mcp arm was 100% under exact-match grading on both sets and both models;
+the shell arm lost two Fable answers to a sentence before a correct chain. Cost per
+session was within 10% between arms. The agent called no MCP tool in any session: the
+gain comes from the UserPromptSubmit hook, which prints what a whole-word search for the
+named symbols returns (every match line, classified as definition, declaration, call or
+mention, with a per-file table, alias check, near-name definitions and, for call chains,
+each hop's call site and breadth-first evidence that the chain is the shortest). With
+that in the prompt the agent answered without any tool in 25 of 32 Opus sessions and 17 of
+31 Fable sessions; mean model turns fell from 2.5 to 1.25 (Opus) and 1.45 (Fable).
+
+How it got here matters for what to expect. The first version of the hook measured 1.05
+(Opus) and 0.95 (Fable) on these same tasks, slower than shell, while scoring 0.56 on the
+synthetic set below. Each later round removed one concrete reason the agent re-searched:
+unrelated identifiers resolved, three callers listed where the task needed the file set,
+duplicate Ruby method nodes, false stale marks, hidden "+k more" lines, no statement of
+scan scope, and an installed skill description that told the agent to default to shell
+search. Tasks outside this shape (edits, long sessions, prompts that name no symbol) are
+not measured. On C++ template-heavy code (cgal) the graph resolves few calls and the
+agent still verifies.
 
 The tables below are the **synthetic C++ corpora**, where every symbol is unique and
 resolves exactly; they show the ceiling of the approach, not what to expect on your code. The `mcp` arm has the product
