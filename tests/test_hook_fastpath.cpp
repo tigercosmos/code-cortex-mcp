@@ -12,6 +12,7 @@
 #include "test_helpers.h" /* th_mktempdir / th_rmtree */
 #include <mcp/mcp.h>
 #include <store/store.h>
+#include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -217,6 +218,106 @@ TEST(hook_coverage_note_reports_partial_skipped_and_clean) {
     PASS();
 }
 
+/* SessionStart brief inputs: a stored brief is read back as-is (one row, no
+ * architecture queries); with none stored, a small graph is computed live and
+ * a large one (node-id ceiling >= CBM_MCP_BRIEF_LIVE_MAX_NODES) gets only an
+ * approximate size, so a missing brief never costs the multi-second queries. */
+static bool hf_seed_brief_db(const hf_env_t *e, const char *project, long long extra_id) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s.db", e->dir, project);
+    cbm_store_t *st = cbm_store_open_path(path);
+    if (!st) {
+        return false;
+    }
+    bool ok = cbm_store_upsert_project(st, project, "/src/brief") == CBM_STORE_OK;
+    cbm_store_close(st);
+    sqlite3 *db = nullptr;
+    if (!ok || sqlite3_open(path, &db) != SQLITE_OK) {
+        sqlite3_close(db);
+        return false;
+    }
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO nodes(project,label,name,qualified_name,file_path) VALUES"
+             "('%s','Function','alpha_fn','%s.a.alpha_fn','a.cpp'),"
+             "('%s','Function','beta_fn','%s.b.beta_fn','b.py');",
+             project, project, project, project);
+    ok = sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (ok && extra_id > 0) {
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO nodes(id,project,label,name,qualified_name) VALUES"
+                 "(%lld,'%s','Function','far_fn','%s.far_fn');",
+                 extra_id, project, project);
+        ok = sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+    }
+    sqlite3_close(db);
+    return ok;
+}
+
+TEST(hook_session_brief_reads_stored_inputs_and_bounds_misses) {
+    hf_env_t env;
+    if (!hf_env_open(&env, "cbm-hook-brief")) {
+        PASS();
+    }
+    ASSERT_TRUE(hf_seed_brief_db(&env, "smallproj", 0));
+    ASSERT_TRUE(hf_seed_brief_db(&env, "bigproj", CBM_MCP_BRIEF_LIVE_MAX_NODES + 5));
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_mcp_server_set_scan_fallback(srv, false);
+
+    /* Small, nothing stored: computed live with exact counts. */
+    bool resolved = false;
+    char *json = cbm_mcp_session_brief_json(srv, "smallproj", &resolved);
+    ASSERT_TRUE(resolved);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NOT_NULL(strstr(json, "\"nodes\":2"));
+    ASSERT_NOT_NULL(strstr(json, "\"languages\""));
+    ASSERT_NULL(strstr(json, "approximate"));
+    free(json);
+
+    /* Large, nothing stored: approximate size only. */
+    resolved = false;
+    json = cbm_mcp_session_brief_json(srv, "bigproj", &resolved);
+    ASSERT_TRUE(resolved);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NOT_NULL(strstr(json, "\"approximate\":true"));
+    free(json);
+    cbm_mcp_server_free(srv);
+
+    /* Stored: returned verbatim for any size, no live computation. */
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/bigproj.db", env.dir);
+    cbm_store_t *st = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(st);
+    char *missing = nullptr;
+    ASSERT_EQ(cbm_store_session_brief_get(st, "bigproj", &missing), CBM_STORE_NOT_FOUND);
+    ASSERT_NULL(missing);
+    ASSERT_TRUE(cbm_store_node_id_ceiling(st) >= CBM_MCP_BRIEF_LIVE_MAX_NODES);
+    const char *stored = "{\"nodes\":2200000,\"edges\":4100000,\"central\":[{\"name\":\"stored_marker\","
+                         "\"in_degree\":9,\"file_path\":\"x.cpp\"}]}";
+    ASSERT_EQ(cbm_store_session_brief_put(st, "bigproj", stored), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_session_brief_put(st, "bigproj", stored), CBM_STORE_OK); /* upsert */
+    cbm_store_close(st);
+
+    srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_mcp_server_set_scan_fallback(srv, false);
+    json = cbm_mcp_session_brief_json(srv, "bigproj", &resolved);
+    ASSERT_NOT_NULL(json);
+    ASSERT_STR_EQ(json, stored);
+    free(json);
+
+    /* Unindexed project: not resolved, so the hook climbs. */
+    resolved = true;
+    ASSERT_NULL(cbm_mcp_session_brief_json(srv, "no-such-project", &resolved));
+    ASSERT_FALSE(resolved);
+    ASSERT_NULL(cbm_mcp_session_brief_json(NULL, "bigproj", NULL));
+    cbm_mcp_server_free(srv);
+    hf_env_close(&env);
+    PASS();
+}
+
 /* The hook's Read path uses the note under a scan-free policy: an unindexed
  * tree must come back not-resolved (so the walk-up ends) without the cache-dir
  * walk that used to eat the whole 300ms deadline. */
@@ -249,4 +350,5 @@ void suite_hook_fastpath(void) {
     RUN_TEST(hook_scan_fallback_defaults_on_and_toggles_back);
     RUN_TEST(hook_coverage_note_reports_partial_skipped_and_clean);
     RUN_TEST(hook_coverage_note_on_unindexed_tree_is_a_scan_free_miss);
+    RUN_TEST(hook_session_brief_reads_stored_inputs_and_bounds_misses);
 }

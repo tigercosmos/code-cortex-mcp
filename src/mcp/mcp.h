@@ -161,6 +161,33 @@ bool cbm_mcp_server_has_cached_store(cbm_mcp_server_t *srv);
  * With the scan off, a miss costs one failed open plus a memo lookup. */
 void cbm_mcp_server_set_scan_fallback(cbm_mcp_server_t *srv, bool enabled);
 
+/* SessionStart brief inputs for an indexed project, as JSON
+ * {nodes, edges, languages[], packages[], central[]}: the brief stored at index
+ * time, else a live computation when the graph is small (node-id ceiling below
+ * CBM_MCP_BRIEF_LIVE_MAX_NODES), else {"nodes":<ceiling>,"approximate":true}
+ * so a large index without a stored brief never pays the multi-second queries.
+ * *resolved is true when the project is indexed. Caller frees. */
+#define CBM_MCP_BRIEF_LIVE_MAX_NODES 200000
+char *cbm_mcp_session_brief_json(cbm_mcp_server_t *srv, const char *project, bool *resolved);
+
+/* Every node named exactly `name` in an indexed project, as JSON
+ * {"root":<project root>,"nodes":[{qualified_name,name,label,file,start_line,
+ * end_line}...],"total":N} (at most 1000 nodes listed). The hook disambiguates
+ * these itself (qualifier, file hint, definition over declaration) before it
+ * asks inspect_symbol about one exact qualified name. With prefix, the nodes
+ * whose name starts with `name` and is longer (at most 40): similarly named
+ * symbols. *resolved is true when the project is indexed. Caller frees. */
+char *cbm_mcp_symbol_nodes(cbm_mcp_server_t *srv, const char *project, const char *name,
+                           bool *resolved, bool prefix = false);
+
+/* The project's indexed files (repo-relative) and root path, for a bounded
+ * whole-word text scan. Returns the file count, or -1 when the project is not
+ * indexed. *files_out is a malloc'd array of malloc'd strings; free with
+ * cbm_mcp_free_project_files. */
+int cbm_mcp_project_files(cbm_mcp_server_t *srv, const char *project, char **root_out,
+                          char ***files_out);
+void cbm_mcp_free_project_files(char *root, char **files, int count);
+
 /* Coverage note (#963) for one repo-relative file, read straight from the
  * project's index_coverage rows.
  *

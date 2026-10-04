@@ -89,14 +89,19 @@ test filters, stale indexes, or partial parsing can hide a path.
 
 ## Task-performance boundary
 
-The controlled 2026-09-10 run measured full agent tasks, not isolated graph calls. It included
-MCP startup, initialization, tool discovery, retrieval, topology checks, and model execution.
+The 2026-10-03 run measured full Claude Code sessions, not isolated graph calls: a fresh
+session per task, the task as the only prompt, the agent free to use any tool, and the timer
+around the whole process (startup, hooks, MCP connection, every model turn).
 
-Code Cortex was 57.9% faster than shell tools on 22 source-correct matched pairs. It was 37.4%
-faster than pinned upstream on 14 source-correct matched pairs. Two candidate answers failed the
-exact-output contract and were excluded without retries or estimated times.
+On real repositories the installed product measured 0.65 (Opus 5.5) and 0.66 (Fable 5.1) of
+the shell-only time over 32 tasks in seven languages, and 0.73 and 0.60 over 34 C/C++ tasks, with
+the agent answering from the prompt block without a tool in most sessions. On the
+synthetic C++ task set, where every symbol resolves exactly, Opus 5.5 finished in 0.557 of the shell-only time
+(48 pairs) and Fable 5.1 in 0.622 (38 exact-match pairs). The agent called no MCP tool; the time
+came from the UserPromptSubmit hook that puts verified definition locations and call chains into
+the context before the first turn, and from a SessionStart brief that is stored at index time so
+it costs the same on a 2.2M-node index as on a 200-node one.
 
 The benchmark covers warm synthetic C++ indexes, exact lookups, and fixed three-hop chains at
 10,000, 1 million, and 100 million lines. It does not cover edits, cold indexing, every language,
-or every task shape. Upstream has no 100-million-line task time because both setup attempts failed
-within sealed memory budgets.
+or every task shape.

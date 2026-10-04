@@ -1,0 +1,290 @@
+[
+  {
+    "archetype": "one-shot",
+    "expected": "part_0000/unit_000009.cpp:601",
+    "id": "10k-lookup-1",
+    "lines": 10000,
+    "question": "Find the defining signature of capacity_function_192. Return exactly one repository-relative path:line and no other text.",
+    "scale": "10k",
+    "symbol": "capacity_function_192"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0000/unit_000005.cpp:751",
+    "id": "10k-lookup-2",
+    "lines": 10000,
+    "question": "Find the defining signature of capacity_function_115. Return exactly one repository-relative path:line and no other text.",
+    "scale": "10k",
+    "symbol": "capacity_function_115"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0000/unit_000000.cpp:151",
+    "id": "10k-lookup-3",
+    "lines": 10000,
+    "question": "Find the defining signature of capacity_function_3. Return exactly one repository-relative path:line and no other text.",
+    "scale": "10k",
+    "symbol": "capacity_function_3"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0000/unit_000004.cpp:851",
+    "id": "10k-lookup-4",
+    "lines": 10000,
+    "question": "Find the defining signature of capacity_function_97. Return exactly one repository-relative path:line and no other text.",
+    "scale": "10k",
+    "symbol": "capacity_function_97"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_159",
+      "capacity_function_158",
+      "capacity_function_157",
+      "capacity_function_156"
+    ],
+    "from_symbol": "capacity_function_159",
+    "id": "10k-chain-1",
+    "lines": 10000,
+    "question": "Find the shortest direct-call chain from capacity_function_159 to capacity_function_156, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "10k",
+    "symbol": "capacity_function_156"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_58",
+      "capacity_function_57",
+      "capacity_function_56",
+      "capacity_function_55"
+    ],
+    "from_symbol": "capacity_function_58",
+    "id": "10k-chain-2",
+    "lines": 10000,
+    "question": "Find the shortest direct-call chain from capacity_function_58 to capacity_function_55, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "10k",
+    "symbol": "capacity_function_55"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_77",
+      "capacity_function_76",
+      "capacity_function_75",
+      "capacity_function_74"
+    ],
+    "from_symbol": "capacity_function_77",
+    "id": "10k-chain-3",
+    "lines": 10000,
+    "question": "Find the shortest direct-call chain from capacity_function_77 to capacity_function_74, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "10k",
+    "symbol": "capacity_function_74"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_176",
+      "capacity_function_175",
+      "capacity_function_174",
+      "capacity_function_173"
+    ],
+    "from_symbol": "capacity_function_176",
+    "id": "10k-chain-4",
+    "lines": 10000,
+    "question": "Find the shortest direct-call chain from capacity_function_176 to capacity_function_173, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "10k",
+    "symbol": "capacity_function_173"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0000/unit_000750.cpp:601",
+    "id": "1m-lookup-1",
+    "lines": 1000000,
+    "question": "Find the defining signature of capacity_function_15012. Return exactly one repository-relative path:line and no other text.",
+    "scale": "1m",
+    "symbol": "capacity_function_15012"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0000/unit_000310.cpp:351",
+    "id": "1m-lookup-2",
+    "lines": 1000000,
+    "question": "Find the defining signature of capacity_function_6207. Return exactly one repository-relative path:line and no other text.",
+    "scale": "1m",
+    "symbol": "capacity_function_6207"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0000/unit_000049.cpp:351",
+    "id": "1m-lookup-3",
+    "lines": 1000000,
+    "question": "Find the defining signature of capacity_function_987. Return exactly one repository-relative path:line and no other text.",
+    "scale": "1m",
+    "symbol": "capacity_function_987"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0000/unit_000039.cpp:801",
+    "id": "1m-lookup-4",
+    "lines": 1000000,
+    "question": "Find the defining signature of capacity_function_796. Return exactly one repository-relative path:line and no other text.",
+    "scale": "1m",
+    "symbol": "capacity_function_796"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_3279",
+      "capacity_function_3278",
+      "capacity_function_3277",
+      "capacity_function_3276"
+    ],
+    "from_symbol": "capacity_function_3279",
+    "id": "1m-chain-1",
+    "lines": 1000000,
+    "question": "Find the shortest direct-call chain from capacity_function_3279 to capacity_function_3276, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "1m",
+    "symbol": "capacity_function_3276"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_3138",
+      "capacity_function_3137",
+      "capacity_function_3136",
+      "capacity_function_3135"
+    ],
+    "from_symbol": "capacity_function_3138",
+    "id": "1m-chain-2",
+    "lines": 1000000,
+    "question": "Find the shortest direct-call chain from capacity_function_3138 to capacity_function_3135, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "1m",
+    "symbol": "capacity_function_3135"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_17317",
+      "capacity_function_17316",
+      "capacity_function_17315",
+      "capacity_function_17314"
+    ],
+    "from_symbol": "capacity_function_17317",
+    "id": "1m-chain-3",
+    "lines": 1000000,
+    "question": "Find the shortest direct-call chain from capacity_function_17317 to capacity_function_17314, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "1m",
+    "symbol": "capacity_function_17314"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_14716",
+      "capacity_function_14715",
+      "capacity_function_14714",
+      "capacity_function_14713"
+    ],
+    "from_symbol": "capacity_function_14716",
+    "id": "1m-chain-4",
+    "lines": 1000000,
+    "question": "Find the shortest direct-call chain from capacity_function_14716 to capacity_function_14713, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "1m",
+    "symbol": "capacity_function_14713"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0044/unit_044858.cpp:401",
+    "id": "100m-lookup-1",
+    "lines": 100000000,
+    "question": "Find the defining signature of capacity_function_897168. Return exactly one repository-relative path:line and no other text.",
+    "scale": "100m",
+    "symbol": "capacity_function_897168"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0029/unit_029979.cpp:101",
+    "id": "100m-lookup-2",
+    "lines": 100000000,
+    "question": "Find the defining signature of capacity_function_599582. Return exactly one repository-relative path:line and no other text.",
+    "scale": "100m",
+    "symbol": "capacity_function_599582"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0072/unit_072229.cpp:351",
+    "id": "100m-lookup-3",
+    "lines": 100000000,
+    "question": "Find the defining signature of capacity_function_1444587. Return exactly one repository-relative path:line and no other text.",
+    "scale": "100m",
+    "symbol": "capacity_function_1444587"
+  },
+  {
+    "archetype": "one-shot",
+    "expected": "part_0010/unit_010681.cpp:101",
+    "id": "100m-lookup-4",
+    "lines": 100000000,
+    "question": "Find the defining signature of capacity_function_213622. Return exactly one repository-relative path:line and no other text.",
+    "scale": "100m",
+    "symbol": "capacity_function_213622"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_38519",
+      "capacity_function_38518",
+      "capacity_function_38517",
+      "capacity_function_38516"
+    ],
+    "from_symbol": "capacity_function_38519",
+    "id": "100m-chain-1",
+    "lines": 100000000,
+    "question": "Find the shortest direct-call chain from capacity_function_38519 to capacity_function_38516, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "100m",
+    "symbol": "capacity_function_38516"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_1666338",
+      "capacity_function_1666337",
+      "capacity_function_1666336",
+      "capacity_function_1666335"
+    ],
+    "from_symbol": "capacity_function_1666338",
+    "id": "100m-chain-2",
+    "lines": 100000000,
+    "question": "Find the shortest direct-call chain from capacity_function_1666338 to capacity_function_1666335, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "100m",
+    "symbol": "capacity_function_1666335"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_1753457",
+      "capacity_function_1753456",
+      "capacity_function_1753455",
+      "capacity_function_1753454"
+    ],
+    "from_symbol": "capacity_function_1753457",
+    "id": "100m-chain-3",
+    "lines": 100000000,
+    "question": "Find the shortest direct-call chain from capacity_function_1753457 to capacity_function_1753454, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "100m",
+    "symbol": "capacity_function_1753454"
+  },
+  {
+    "archetype": "multi-step",
+    "expected": [
+      "capacity_function_1532376",
+      "capacity_function_1532375",
+      "capacity_function_1532374",
+      "capacity_function_1532373"
+    ],
+    "from_symbol": "capacity_function_1532376",
+    "id": "100m-chain-4",
+    "lines": 100000000,
+    "question": "Find the shortest direct-call chain from capacity_function_1532376 to capacity_function_1532373, including both endpoints. Return exactly one bare function name per line in call order and no other text.",
+    "scale": "100m",
+    "symbol": "capacity_function_1532373"
+  }
+]

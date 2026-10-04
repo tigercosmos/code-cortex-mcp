@@ -60,3 +60,5 @@ soak-results/
 /pr.md
 
 /docs/benchmarks/
+
+__pycache__/

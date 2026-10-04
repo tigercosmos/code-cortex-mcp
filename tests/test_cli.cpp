@@ -14,6 +14,8 @@
 #include "test_helpers.h"
 #include <cli/cli.h>
 #include <foundation/yaml.h>
+#include <yyjson/yyjson.h>
+#include <string>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -2742,40 +2744,612 @@ TEST(cli_task_context_preserves_source_and_budget) {
 #endif
 }
 
-TEST(cli_request_chain_requires_explicit_read_only_endpoints) {
+/* UserPromptSubmit candidates: code-looking identifiers only, in order,
+ * deduplicated, at most six; prose words never reach the database. */
+TEST(cli_prompt_candidates_select_code_identifiers) {
 #ifdef CBM_ENABLE_TEST_SEAMS
-    const char *positive[] = {
-        "Show the call chain from `Entry` to `Target`.",
-        "Read only; do not edit. Trace the call chain from `Entry` to `Target`.",
-        "FIND THE CALL CHAIN FROM `Entry` TO `Target`."
+    struct {
+        const char *prompt;
+        const char *expected; /* NULL: no candidates */
+    } cases[] = {
+        {"Find the defining signature of capacity_function_3. Return exactly one path.",
+         "capacity_function_3"},
+        {"Find the shortest direct-call chain from a_function to d_function, including both.",
+         "a_function\nd_function"},
+        {"Why does parseNextLayer call HTTPServer and Layer::parse here?",
+         "parseNextLayer\nHTTPServer\nLayer::parse"},
+        {"How does sha256 relate to Widget.render and Widget.render again?",
+         "sha256\nWidget.render"},
+        {"Explain `update` and `target()` but not update or target.", "update\ntarget"},
+        {"Please explain what this Function does and Where the README lives.", NULL},
+        {"Fix the bug in the parser so that every test passes.", NULL},
+        {"Look at src/cli/hook_augment.cpp and mail me@example_corp.com", NULL},
+        {"Short ids: a_b, x1, `foo`.", NULL},
+        {"Here is a log:\n```cpp\nint fenced_symbol_one() { return inner_call(); }\n```\nNow "
+         "check outer_symbol.",
+         "outer_symbol"},
+        {"```\nonly_in_fence\n```", NULL},
+        {"one_a two_b three_c four_d five_e six_f seven_g eight_h",
+         "one_a\ntwo_b\nthree_c\nfour_d\nfive_e\nsix_f"},
+        {"Unterminated `span_symbol and more_text", "span_symbol\nmore_text"},
     };
-    for (const char *request : positive) {
-        char *result = cbm_request_chain_for_testing(request);
-        ASSERT_NOT_NULL(result);
-        ASSERT_STR_EQ(result, "Entry -> Target");
-        free(result);
+    for (const auto &c : cases) {
+        char *got = cbm_prompt_candidates_for_testing(c.prompt);
+        if (!c.expected) {
+            if (got) {
+                printf("  unexpected candidates for \"%s\": %s\n", c.prompt, got);
+            }
+            ASSERT_NULL(got);
+            continue;
+        }
+        ASSERT_NOT_NULL(got);
+        if (strcmp(got, c.expected) != 0) {
+            printf("  prompt \"%s\": got \"%s\"\n", c.prompt, got);
+        }
+        ASSERT_STR_EQ(got, c.expected);
+        free(got);
     }
-    const char *negative[] = {
-        "Do NOT show the call chain from `Entry` to `Target`.",
-        "Show the call chain from `Entry` to `Target` and modify it.",
-        "Show the call chain from `Entry` to `Target`. Find the call chain from `Other` to `Target`.",
-        "```Show the call chain from `Entry` to `Target`.```",
-        "Show the call chain from `Entry|Other` to `Target`.",
-        "Show the call chain from Entry to Target.",
-        "Show the call chain from `Entry` to",
-        "Show the call chain from `Entry` t",
-        "Show the call chain from `Entry`",
-        "Show the call chain from",
-        "Who calls `Entry`?"
-    };
-    for (const char *request : negative) {
-        ASSERT_NULL(cbm_request_chain_for_testing(request));
-    }
-    ASSERT_NULL(cbm_request_chain_for_testing(nullptr));
+    ASSERT_NULL(cbm_prompt_candidates_for_testing(nullptr));
+    ASSERT_NULL(cbm_prompt_candidates_for_testing(""));
     PASS();
 #else
     SKIP("requires CBM_TEST_SEAMS");
 #endif
+}
+
+/* Targets: when anything is backticked, only backticked identifiers count;
+ * examples and exclusions never do; owners qualify their member; paths are
+ * hints; rules paragraphs add no new targets. */
+TEST(cli_prompt_targets_follow_the_request) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    struct {
+        const char *prompt;
+        const char *expected;
+    } cases[] = {
+        {"Find the shortest chain of direct function calls that starts at the method `unsign` "
+         "of class `Signer` in django/core/signing.py (NOT `TimestampSigner.unsign`) and ends at "
+         "the function `salted_hmac` in django/utils/crypto.py.\n\nRules:\n- a `self.method(...)` "
+         "call counts.\n\nOutput ONLY names, starting with `unsign` and ending with `salted_hmac`.",
+         "intent=callers,chain\nSigner.unsign|Signer|django/core/signing.py\n"
+         "salted_hmac||django/utils/crypto.py"},
+        {"Repository under test: the repo.\n\nTarget: the function `dbAdd` (signature "
+         "`kvobj *dbAdd(redisDb *db)`), whose definition is in src/db.c.\n\nList every file that "
+         "contains a CALL to `dbAdd`.\n\nCount only real call sites. Do NOT count:\n- "
+         "declarations,\n- calls to different functions (e.g. `dbAddByLink`, `dbAddInternal`).\n",
+         "intent=callers\ndbAdd||src/db.c"},
+        {"find the shortest chain from `snapshotRestoreCommandFunc` to `ToMemberDir`.\n\nRules:\n"
+         "- Names are case-sensitive: `snapshotRestoreCommandFunc` and "
+         "`SnapshotRestoreCommandFunc` are two different functions, as are `ToWALDir` and "
+         "`ToWalDir`.",
+         "intent=-,chain\nsnapshotRestoreCommandFunc||\nToMemberDir||"},
+        {"find where the C++ member function `UpdateBoundaries` of the struct `FileMetaData` is "
+         "DEFINED, not a call site such as `meta.UpdateBoundaries(...)`.",
+         "intent=-\nFileMetaData.UpdateBoundaries|FileMetaData|"},
+        {"Find where the Go method `syncWatchers` is DEFINED (the line starting with `func`), "
+         "not a different function such as `syncWatchersLoop`; ignore `generated` dirs.",
+         "intent=-\nsyncWatchers||"},
+        {"I want to add a parameter to `handler_for_extension(extension)` defined in module "
+         "`ActionView::Template::Handlers` (the module is extended into `ActionView::Template`, "
+         "so it is called as `Template.handler_for_extension(...)`). Which files must I edit?",
+         "intent=callers\nActionView::Template::Handlers.handler_for_extension|"
+         "ActionView::Template::Handlers|"},
+        {"Change the `sendTelemetryEvent` method of the `TelemetryReporter` interface "
+         "(implemented by the inner function `sendTelemetryEvent` inside "
+         "`createTelemetryReporter`).",
+         "intent=callers\nTelemetryReporter.sendTelemetryEvent|TelemetryReporter|"},
+        {"Why does parseNextLayer call HTTPServer in src/net/server.cc?",
+         "intent=callers\nparseNextLayer||\nHTTPServer||"},
+        /* A file or branch name quoted in an earlier paragraph is not the
+         * subject; template arguments are not part of the name. */
+        {"Only sources under `lib/` and `.c` files; out of scope (`build/`, `NEWS`).\n\nList "
+         "every file with a CALL to `LZ4_decompress_safe`.",
+         "intent=callers\nLZ4_decompress_safe||"},
+        {"Repository: CGAL (branch `main`).\n\nTarget function: `CGAL::sdf_values` in "
+         "Surface_mesh_segmentation/include/CGAL/mesh_segmentation.h.",
+         "intent=-\nCGAL::sdf_values|CGAL|Surface_mesh_segmentation/include/CGAL/"
+         "mesh_segmentation.h"},
+        {"the helper `pcpp::internal::CryptoDataReader<T>::fromPEMFile` reaches "
+         "`pcpp::Base64::decodeToByteArray`; show the chain.",
+         "intent=-,chain\npcpp::internal::CryptoDataReader::fromPEMFile|"
+         "pcpp::internal::CryptoDataReader|\npcpp::Base64::decodeToByteArray|pcpp::Base64|"},
+    };
+    for (const auto &c : cases) {
+        char *got = cbm_prompt_targets_for_testing(c.prompt);
+        ASSERT_NOT_NULL(got);
+        if (strcmp(got, c.expected) != 0) {
+            printf("  prompt \"%.60s...\":\n  got      \"%s\"\n  expected \"%s\"\n", c.prompt, got,
+                   c.expected);
+        }
+        ASSERT_STR_EQ(got, c.expected);
+        free(got);
+    }
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* Resolution: qualifier, then file hint, then definition over declaration;
+ * anything still ambiguous stays ambiguous. */
+TEST(cli_prompt_resolution_disambiguates_or_refuses) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *signers =
+        R"({"nodes":[{"qualified_name":"p.django.core.signing.TimestampSigner.unsign","name":"unsign","label":"Method","file":"django/core/signing.py","start_line":303},)"
+        R"({"qualified_name":"p.django.core.signing.Signer.unsign","name":"unsign","label":"Method","file":"django/core/signing.py","start_line":247}]})";
+    char *got = cbm_prompt_resolve_for_testing(signers, "the method `unsign` of class `Signer`");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "p.django.core.signing.Signer.unsign");
+    free(got);
+    got = cbm_prompt_resolve_for_testing(signers, "the method `unsign`");
+    ASSERT_NOT_NULL(got);
+    ASSERT_NOT_NULL(strchr(got, '\n')); /* both remain: ambiguous */
+    free(got);
+
+    const char *two_langs =
+        R"({"nodes":[{"qualified_name":"p.tsc.internal.astnav.getTokenAtPosition","name":"getTokenAtPosition","label":"Function","file":"tsc/internal/astnav/tokens.go","start_line":37},)"
+        R"({"qualified_name":"p.packages.ts.src.ast.astnav.getTokenAtPosition","name":"getTokenAtPosition","label":"Function","file":"packages/ts/src/ast/astnav.ts","start_line":22}]})";
+    got = cbm_prompt_resolve_for_testing(
+        two_langs, "starts at `getTokenAtPosition` defined in packages/ts/src/ast/astnav.ts");
+    ASSERT_STR_EQ(got, "p.packages.ts.src.ast.astnav.getTokenAtPosition");
+    free(got);
+
+    const char *decl_def =
+        R"({"nodes":[{"qualified_name":"p.src.server.h.dbAdd","name":"dbAdd","label":"Declaration","file":"src/server.h","start_line":4324},)"
+        R"({"qualified_name":"p.src.db.dbAdd","name":"dbAdd","label":"Function","file":"src/db.c","start_line":472}]})";
+    got = cbm_prompt_resolve_for_testing(decl_def, "callers of `dbAdd`");
+    ASSERT_STR_EQ(got, "p.src.server.h.dbAdd\np.src.db.dbAdd"); /* one family */
+    free(got);
+
+    /* Overloads plus namespace declarations are one target: pcpp::fnvHash is
+     * declared inside namespace pcpp in PacketUtils.h and defined (two
+     * overloads, no namespace in the QN) in PacketUtils.cpp. */
+    const char *fnv =
+        R"({"nodes":[{"qualified_name":"p.P.header.PacketUtils.__decl_8266_44_11.pcpp.fnvHash","name":"fnvHash","label":"Declaration","file":"P/header/PacketUtils.h","start_line":44},)"
+        R"({"qualified_name":"p.P.src.PacketUtils.fnvHash","name":"fnvHash","label":"OverloadSet","file":"P/src/PacketUtils.cpp","start_line":0},)"
+        R"({"qualified_name":"p.P.src.PacketUtils.fnvHash@overload_4022","name":"fnvHash","label":"Function","file":"P/src/PacketUtils.cpp","start_line":117},)"
+        R"({"qualified_name":"p.P.src.PacketUtils.fnvHash@overload_4292","name":"fnvHash","label":"Function","file":"P/src/PacketUtils.cpp","start_line":131},)"
+        R"({"qualified_name":"p.Other.src.Hash.fnvHash","name":"fnvHash","label":"Method","file":"Other/src/Hash.cpp","start_line":9}]})";
+    got = cbm_prompt_resolve_for_testing(fnv, "callers of `pcpp::fnvHash`");
+    ASSERT_STR_EQ(got, "p.P.header.PacketUtils.__decl_8266_44_11.pcpp.fnvHash\n"
+                       "p.P.src.PacketUtils.fnvHash@overload_4022\n"
+                       "p.P.src.PacketUtils.fnvHash@overload_4292");
+    free(got);
+
+    /* A qualifier naming a different owner rejects: no `Cloning::dst` here. */
+    const char *dst =
+        R"({"nodes":[{"qualified_name":"p.t.ocl.__decl_1_2_3.opencv_test.ocl.dst","name":"dst","label":"Declaration","file":"t/ocl.cpp","start_line":5},)"
+        R"({"qualified_name":"p.m.impl.Cloning.dst","name":"dst","label":"Method","file":"m/impl.cpp","start_line":98}]})";
+    got = cbm_prompt_resolve_for_testing(dst, "ends at `Cloning::dst`");
+    ASSERT_STR_EQ(got, "p.m.impl.Cloning.dst");
+    free(got);
+    ASSERT_NULL(cbm_prompt_resolve_for_testing(dst, "ends at `Painting::dst`"));
+
+    /* An owner-less free function: the namespace shows in its path. */
+    const char *centroid =
+        R"({"nodes":[{"qualified_name":"p.Kernel_23.include.CGAL.Kernel.g2.centroid","name":"centroid","label":"Function","file":"Kernel_23/include/CGAL/Kernel/g2.h","start_line":168},)"
+        R"({"qualified_name":"p.Polygon_mesh_processing.include.CGAL.Polygon_mesh_processing.measure.centroid","name":"centroid","label":"Function","file":"Polygon_mesh_processing/include/CGAL/Polygon_mesh_processing/measure.h","start_line":867}]})";
+    got = cbm_prompt_resolve_for_testing(
+        centroid, "where is `CGAL::Polygon_mesh_processing::centroid` defined");
+    ASSERT_STR_EQ(
+        got, "p.Polygon_mesh_processing.include.CGAL.Polygon_mesh_processing.measure.centroid");
+    free(got);
+
+    /* A method reported twice at one location (older Ruby indexes): one. */
+    const char *ruby =
+        R"({"nodes":[{"qualified_name":"p.lib.rel.ActiveRecord.Relation.create_or_find_by","name":"create_or_find_by","label":"Method","file":"lib/rel.rb","start_line":274},)"
+        R"({"qualified_name":"p.lib.rel.create_or_find_by","name":"create_or_find_by","label":"Function","file":"lib/rel.rb","start_line":274}]})";
+    got = cbm_prompt_resolve_for_testing(ruby, "where is `create_or_find_by` defined");
+    ASSERT_STR_EQ(got, "p.lib.rel.ActiveRecord.Relation.create_or_find_by");
+    free(got);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* The evidence block prints what `grep -rnw` would, read from disk now and
+ * grouped by what the graph says about each line. */
+TEST(cli_prompt_evidence_block_reads_matches_from_disk) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-evidence-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    char sub[512];
+    snprintf(sub, sizeof(sub), "%s/lib", root);
+    ASSERT_EQ(mkdir(sub, 0755), 0);
+    const char *names[] = {"def.c", "api.h",     "a.c",    "b_test.c",  "doc.md",
+                           "str.c", "comment.c", "near.c", "lib/gone.c"};
+    const char *bodies[] = {
+        "template <class T,\n          class U>\nint target_fn(void) {\n  return 1;\n}\n",
+        "int target_fn(void);\n",
+        "void a(void) { target_fn(); }\n",
+        "void t(void) {\n  target_fn();\n}\n",
+        "See target_fn for details.\n",
+        "const char *s = \"target_fn\";\n",
+        "// target_fn is old\n",
+        "int target_fn_extra = 1;\n",
+        "void g(void) {}\n"};
+    for (int i = 0; i < 9; ++i) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, names[i]);
+        write_test_file(path, bodies[i]);
+    }
+    const char *facts = R"({"display":"target_fn","bare":"target_fn","label":"Function",)"
+                        R"("defs":[["def.c",1]],"decls":[["api.h",1]],"calls":[["a.c",1]],)"
+                        R"("caller_files":["a.c","lib/gone.c"]})";
+    char *block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "- target_fn (Function)"));
+    ASSERT_NOT_NULL(strstr(block, "  definition: def.c:3: int target_fn(void) {"));
+    ASSERT_NOT_NULL(strstr(block, "  declaration: api.h:1: int target_fn(void);"));
+    ASSERT_NOT_NULL(strstr(block, "  every whole-word match (7 lines):"));
+    ASSERT_NOT_NULL(strstr(block, "    a.c:1: void a(void) { target_fn(); }  [call]"));
+    ASSERT_NOT_NULL(strstr(block, "    b_test.c:2: target_fn();  [call (text only, not resolved "
+                                  "by the graph)]"));
+    ASSERT_NOT_NULL(strstr(block, "    comment.c:1: // target_fn is old  [comment]"));
+    ASSERT_NOT_NULL(strstr(block, "    str.c:1: const char *s = \"target_fn\";  [string]"));
+    ASSERT_NOT_NULL(strstr(block, "    def.c:3: int target_fn(void) {  [definition]"));
+    ASSERT_NOT_NULL(strstr(block, "    doc.md:1: See target_fn for details.  [reference]"));
+    ASSERT_NULL(strstr(block, "near.c")); /* target_fn_extra is not a whole-word match */
+    ASSERT_NOT_NULL(strstr(block, "  non-call references (name not followed by \"(\"): 1:\n"
+                                  "    doc.md:1: See target_fn for details."));
+    ASSERT_NOT_NULL(strstr(block, "  aliases: none found (checked import-as, assignment, #define, "
+                                  "using, module import)"));
+    ASSERT_NOT_NULL(strstr(block, "no whole-word `target_fn` on disk now (stale, re-check): "
+                                  "lib/gone.c"));
+    ASSERT_NOT_NULL(strstr(block, "  files containing `target_fn` (7):\n    a.c  calls=1 other=0\n"
+                                  "    api.h  calls=0 other=1\n    b_test.c  calls=1 other=0\n"));
+    ASSERT_NOT_NULL(strstr(block, "  scanned 9 text files (all extensions, the files git would "
+                                  "track; skipped: 0 binary, 0 over 2 MB; vendored dirs: none "
+                                  "skipped); 7 files contain the whole word; by extension: .c 5, "
+                                  ".h 1, .md 1"));
+    ASSERT_NULL(strstr(block, "more in this file"));
+    ASSERT_NULL(strstr(block, "verified now"));
+    free(block);
+
+    /* Too much to list: one summary per file, the table stays complete. */
+    block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 1);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "    b_test.c: 1 matches (1 calls) lines 2"));
+    ASSERT_NOT_NULL(strstr(block, "    comment.c: 1 matches (1 comments) lines 1"));
+    ASSERT_NOT_NULL(strstr(block, "    b_test.c  calls=1 other=0"));
+    free(block);
+    block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 2);
+    ASSERT_NOT_NULL(strstr(block, "per-line listing dropped to fit the context budget"));
+    ASSERT_NOT_NULL(strstr(block, "    str.c  calls=0 other=1"));
+    free(block);
+
+    /* The name is not near the indexed start: a stale mark, not a claim. */
+    const char *stale = R"({"display":"target_fn","bare":"target_fn","label":"Function",)"
+                        R"("defs":[["doc.md",5]]})";
+    block = cbm_prompt_evidence_for_testing(root, stale, names, 0, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "definition: doc.md:5:   [stale: name not found near the indexed "
+                                  "start]"));
+    free(block);
+
+    /* Not in the graph: the text listing alone, labelled. */
+    const char *absent = R"({"display":"seq_pass_fn","bare":"target_fn","in_graph":false})";
+    block = cbm_prompt_evidence_for_testing(root, absent, names, 9, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "- target_fn (not in the code graph; whole-word matches:)"));
+    ASSERT_NOT_NULL(strstr(block, "    def.c:3: int target_fn(void) {"));
+    free(block);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* Aliases a name-only grep would miss, and module imports of the defining
+ * file that are then used qualified. */
+TEST(cli_prompt_aliases_and_module_imports) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-alias-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    char sub[512];
+    snprintf(sub, sizeof(sub), "%s/pkg", root);
+    ASSERT_EQ(mkdir(sub, 0755), 0);
+    const char *names[] = {"pkg/mod.py", "a.py", "b.py", "c.h", "d.cpp", "e.py"};
+    const char *bodies[] = {"def target_fn(x):\n    return x\n",
+                            "from pkg.mod import target_fn as tf\nprint(tf(1))\n",
+                            "from pkg import mod\nmod.target_fn(2)\n",
+                            "#define TF target_fn\n",
+                            "auto f = &target_fn;\nusing G = target_fn;\n",
+                            "import pkg.mod as m\nprint(1)\n"};
+    for (int i = 0; i < 6; ++i) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, names[i]);
+        write_test_file(path, bodies[i]);
+    }
+    const char *facts = R"({"display":"target_fn","bare":"target_fn","label":"Function",)"
+                        R"("defs":[["pkg/mod.py",1]]})";
+    char *block = cbm_prompt_evidence_for_testing(root, facts, names, 6, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "    a.py:1: from pkg.mod import target_fn as tf  [import-as]"));
+    ASSERT_NOT_NULL(strstr(block, "    c.h:1: #define TF target_fn  [#define]"));
+    ASSERT_NOT_NULL(strstr(block, "    d.cpp:1: auto f = &target_fn;  [assignment]"));
+    ASSERT_NOT_NULL(strstr(block, "    d.cpp:2: using G = target_fn;  [using]"));
+    ASSERT_NOT_NULL(strstr(block, "    b.py:2: mod.target_fn(2)  [module import at line 1, used "
+                                  "as mod.target_fn]"));
+    ASSERT_NULL(strstr(block, "e.py")); /* imported as m, never used as m.target_fn */
+    free(block);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* Locate: the definition in context, every exact-name node, the counts, and
+ * names that share the stem. */
+TEST(cli_prompt_locate_block) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-locate-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    const char *names[] = {"def.c", "api.h", "other.c", "near.c"};
+    const char *bodies[] = {"// one\n// two\nint\ntarget_fn(int a,\n          int b)\n{\n  "
+                            "return a;\n}\n",
+                            "int target_fn(int a, int b);\n", "static int target_fn(void) {}\n",
+                            "int target_fn_nocheck(void) {}\n"};
+    for (int i = 0; i < 4; ++i) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, names[i]);
+        write_test_file(path, bodies[i]);
+    }
+    const char *facts = R"({"display":"target_fn","bare":"target_fn","label":"Function",)"
+                        R"("defs":[["def.c",3]],"decls":[["api.h",1]]})";
+    const char *nodes =
+        R"({"nodes":[{"qualified_name":"p.def.target_fn","name":"target_fn","label":"Function","file":"def.c","start_line":3},)"
+        R"({"qualified_name":"p.api.target_fn","name":"target_fn","label":"Declaration","file":"api.h","start_line":1},)"
+        R"({"qualified_name":"p.other.target_fn","name":"target_fn","label":"Function","file":"other.c","start_line":1}]})";
+    const char *similar =
+        R"({"nodes":[{"qualified_name":"p.near.target_fn_nocheck","name":"target_fn_nocheck","label":"Function","file":"near.c","start_line":1}]})";
+    char *block = cbm_prompt_locate_for_testing(root, facts, nodes, similar, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "  definition:\n    def.c-2- // two\n    def.c-3- int\n"
+                                  "    def.c:4: target_fn(int a,\n    def.c-5- int b)\n"
+                                  "    def.c-6- {\n    def.c-7- return a;"));
+    ASSERT_NOT_NULL(strstr(block, "  other exact-name definitions:\n    other.c:1: static int "
+                                  "target_fn(void) {}  (target_fn, Function)"));
+    ASSERT_NOT_NULL(strstr(block, "  declarations / prototypes:\n    api.h:1: int target_fn(int a, "
+                                  "int b);"));
+    ASSERT_NOT_NULL(strstr(block, "  exact-name definitions: 2; declarations: 1"));
+    ASSERT_NOT_NULL(strstr(block, "  similar names defined: `target_fn_nocheck` at near.c:1"));
+    free(block);
+    block = cbm_prompt_locate_for_testing(root, facts, nodes, "{\"nodes\":[]}", 1);
+    ASSERT_NOT_NULL(strstr(block, "  definition:\n    def.c:4: target_fn(int a,\n  other"));
+    ASSERT_NOT_NULL(strstr(block, "  similar names defined: none"));
+    free(block);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* The scan reads every file git would track: .gitignore applied at every
+ * level (negations included), .git skipped, any extension. */
+TEST(cli_prompt_text_files_follow_gitignore) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-gitfiles-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    for (const char *d : {"src", "build", "sub", ".git"}) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, d);
+        ASSERT_EQ(mkdir(path, 0755), 0);
+    }
+    const char *files[][2] = {{".gitignore", "build/\n*.log\n"},
+                              {"src/a.c", "int a;\n"},
+                              {"build/x.c", "int x;\n"},
+                              {"x.log", "log\n"},
+                              {"sub/.gitignore", "!keep.log\n*.tmp\n"},
+                              {"sub/keep.log", "keep\n"},
+                              {"sub/y.tmp", "tmp\n"},
+                              {".git/config", "[core]\n"}};
+    for (const auto &f : files) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", root, f[0]);
+        write_test_file(path, f[1]);
+    }
+    char *list = cbm_prompt_text_files_for_testing(root);
+    ASSERT_NOT_NULL(list);
+#ifndef _WIN32
+    ASSERT_STR_EQ(list, ".gitignore\nsrc/a.c\nsub/.gitignore\nsub/keep.log");
+#endif
+    free(list);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* Chains print each hop's call site as it reads on disk now; synthetic
+ * declaration scopes and overload tags never reach the output. */
+TEST(cli_prompt_chain_block_has_call_sites) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/cli-chain-XXXXXX");
+    if (!cbm_mkdtemp(root))
+        FAIL("cbm_mkdtemp failed");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/x.c", root);
+    write_test_file(path, "void c_fn(void) {}\nvoid b_fn(void) {\n  c_fn();\n}\n"
+                          "void a_fn(void) {\n  int k = 0;\n  b_fn();\n}\n");
+    const char *trace =
+        R"({"path_found":true,"path":[)"
+        R"({"name":"a_fn","qualified_name":"p.x.a_fn","file":"x.c","start_line":5,"end_line":8},)"
+        R"({"name":"b_fn","qualified_name":"p.x.b_fn@overload_7","file":"x.c","start_line":2,"end_line":4},)"
+        R"({"name":"c_fn","qualified_name":"p.x.__decl_9_1_1.c_fn","file":"x.c","start_line":1,"end_line":1}],)"
+        R"("caller_edges":[{"to_step":1,"line":7},{"to_step":2,"line":99}]})";
+    char *block = cbm_prompt_chain_for_testing(root, trace);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "- call chain a_fn -> c_fn (2 hops): a_fn (x.c:5) -> b_fn "
+                                  "(x.c:2) -> c_fn (x.c:1)"));
+    ASSERT_NOT_NULL(strstr(block, "\n    a_fn -> b_fn: x.c:7: b_fn();"));
+    /* The recorded line 99 does not name c_fn: found in b_fn's body. */
+    ASSERT_NOT_NULL(strstr(block, "\n    b_fn -> c_fn: x.c:3: c_fn();"));
+    ASSERT_NULL(strstr(block, "__decl"));
+    ASSERT_NULL(strstr(block, "@overload"));
+    free(block);
+    ASSERT_NULL(cbm_prompt_chain_for_testing(root, R"({"path_found":false,"path":[]})"));
+
+    char *disp = cbm_prompt_display_for_testing(
+        "p.Common++.header.GeneralUtils.__decl_2b5f_106_17.pcpp.Base64.decodeToByteArray",
+        "Common++/header/GeneralUtils.h");
+    ASSERT_STR_EQ(disp, "pcpp.Base64.decodeToByteArray");
+    free(disp);
+    disp = cbm_prompt_display_for_testing("p.lib.lz4.__decl_e4df_208_16.LZ4_decompress_safe",
+                                          "lib/lz4.h");
+    ASSERT_STR_EQ(disp, "LZ4_decompress_safe");
+    free(disp);
+    test_rmdir_r(root);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_prompt_payload_and_session_dedupe) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *label = "[code-cortex] Read from disk at prompt time:";
+    const char *small[] = {"- one (Function)\n  definition:\n    a.c:1: int one() {"};
+    char *json = cbm_prompt_payload_for_testing(small, 1, 9000, label);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NOT_NULL(strstr(json, "Read from disk at prompt time:\\n- one (Function)"));
+    free(json);
+    std::string big = "- big (Function)";
+    for (int i = 0; i < 200; ++i) {
+        big += "\n    some/long/path/file" + std::to_string(i) + ".c:1: call();";
+    }
+    const char *blocks[] = {big.c_str()};
+    json = cbm_prompt_payload_for_testing(blocks, 1, 9000, label);
+    ASSERT_NOT_NULL(json);
+    ASSERT_TRUE(strlen(json) <= 9000);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_doc_free(doc);
+    free(json);
+    ASSERT_NULL(cbm_prompt_payload_for_testing(blocks, 1, 100, label));
+
+    /* The prompt block records the names it covered; a later search in the
+     * same session for one of them is deduplicated. */
+    const char *made = th_mktempdir("cli-session");
+    ASSERT_NOT_NULL(made);
+    std::string cache = made;
+    const char *saved = getenv("CBM_CACHE_DIR");
+    std::string saved_s = saved ? saved : "";
+    cbm_setenv("CBM_CACHE_DIR", cache.c_str(), 1);
+    ASSERT_FALSE(cbm_session_covers_for_testing("sess-1", "dbAdd", nullptr));
+    ASSERT_TRUE(cbm_session_covers_for_testing("sess-1", "dbAdd", "dbAdd"));
+    ASSERT_FALSE(cbm_session_covers_for_testing("sess-1", "dbAddInternal", nullptr));
+    ASSERT_FALSE(cbm_session_covers_for_testing("sess-2", "dbAdd", nullptr));
+    ASSERT_FALSE(cbm_session_covers_for_testing("../evil", "dbAdd", nullptr));
+    ASSERT_FALSE(cbm_session_covers_for_testing(nullptr, "dbAdd", nullptr));
+    if (saved) {
+        cbm_setenv("CBM_CACHE_DIR", saved_s.c_str(), 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    th_rmtree(cache.c_str());
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_session_brief_formats_stored_inputs) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char *text = cbm_session_brief_format_for_testing(
+        "proj",
+        R"({"nodes":120,"edges":340,"languages":[{"language":"C++","file_count":9}],)"
+        R"("packages":[{"name":"core","node_count":80}],)"
+        R"("central":[{"name":"hub_fn","in_degree":12,"file_path":"src/hub.cpp"}]})");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "indexed as \"proj\" (120 symbols, 340 edges; C++ 9 files)."));
+    ASSERT_NOT_NULL(strstr(text, "Largest modules: core (80)."));
+    ASSERT_NOT_NULL(strstr(text, "Most-called functions: hub_fn (12 callers, src/hub.cpp)."));
+    ASSERT_NOT_NULL(strstr(text, "inspect_symbol(<name>)"));
+    free(text);
+    text = cbm_session_brief_format_for_testing("big", R"({"nodes":2200000,"approximate":true})");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "indexed as \"big\" (about 2200000 symbols)"));
+    ASSERT_NULL(strstr(text, "Most-called"));
+    free(text);
+    ASSERT_NULL(cbm_session_brief_format_for_testing("x", "not json"));
+    ASSERT_NULL(cbm_session_brief_format_for_testing("x", nullptr));
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+/* The UserPromptSubmit hook has no matcher, so ownership is the shim command:
+ * install adds exactly one entry, re-install replaces it, and uninstall
+ * removes it while a user's own UserPromptSubmit hook survives both. */
+TEST(cli_claude_prompt_hook_install_remove) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-prompt-hook-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char settingspath[512];
+    snprintf(settingspath, sizeof(settingspath), "%s/settings.json", tmpdir);
+    write_test_file(settingspath,
+                    "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\","
+                    "\"command\":\"echo user-own-hook\"}]}]}}");
+
+    ASSERT_EQ(cbm_upsert_claude_prompt_hooks(settingspath), 0);
+    ASSERT_EQ(cbm_upsert_claude_prompt_hooks(settingspath), 0);
+    const char *data = read_test_file(settingspath);
+    ASSERT_NOT_NULL(data);
+    yyjson_doc *doc = yyjson_read(data, strlen(data), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *arr =
+        yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(doc), "hooks"), "UserPromptSubmit");
+    ASSERT_NOT_NULL(arr);
+    ASSERT_EQ((int)yyjson_arr_size(arr), 2);
+    int ours = 0;
+    size_t i, n;
+    yyjson_val *entry;
+    yyjson_arr_foreach(arr, i, n, entry) {
+        yyjson_val *h = yyjson_arr_get(yyjson_obj_get(entry, "hooks"), 0);
+        const char *cmd = yyjson_get_str(yyjson_obj_get(h, "command"));
+        if (cmd && strstr(cmd, "cbm-code-discovery-gate")) {
+            ours++;
+            ASSERT_NULL(yyjson_obj_get(entry, "matcher"));
+            ASSERT_TRUE(yyjson_get_int(yyjson_obj_get(h, "timeout")) > 0);
+        }
+    }
+    yyjson_doc_free(doc);
+    ASSERT_EQ(ours, 1);
+
+    /* The other Claude hooks do not touch the prompt entry. */
+    ASSERT_EQ(cbm_upsert_claude_hooks(settingspath), 0);
+    ASSERT_EQ(cbm_remove_claude_hooks(settingspath), 0);
+    data = read_test_file(settingspath);
+    ASSERT_NOT_NULL(strstr(data, "UserPromptSubmit"));
+    ASSERT_NOT_NULL(strstr(data, "cbm-code-discovery-gate"));
+
+    ASSERT_EQ(cbm_remove_claude_prompt_hooks(settingspath), 0);
+    data = read_test_file(settingspath);
+    ASSERT_NULL(strstr(data, "cbm-code-discovery-gate"));
+    ASSERT_NOT_NULL(strstr(data, "user-own-hook"));
+    /* A second remove only finds the user's entry, which it must leave. */
+    ASSERT_EQ(cbm_remove_claude_prompt_hooks(settingspath), 0);
+    data = read_test_file(settingspath);
+    ASSERT_NOT_NULL(strstr(data, "user-own-hook"));
+
+    test_rmdir_r(tmpdir);
+    PASS();
 }
 
 TEST(cli_definition_context_prioritizes_qualified_matches) {
@@ -3605,7 +4179,17 @@ SUITE(cli) {
     RUN_TEST(cli_task_context_preserves_source_and_budget);
     RUN_TEST(cli_request_context_selects_only_unambiguous_symbols);
     RUN_TEST(cli_definition_context_prioritizes_qualified_matches);
-    RUN_TEST(cli_request_chain_requires_explicit_read_only_endpoints);
+    RUN_TEST(cli_prompt_candidates_select_code_identifiers);
+    RUN_TEST(cli_claude_prompt_hook_install_remove);
+    RUN_TEST(cli_session_brief_formats_stored_inputs);
+    RUN_TEST(cli_prompt_targets_follow_the_request);
+    RUN_TEST(cli_prompt_resolution_disambiguates_or_refuses);
+    RUN_TEST(cli_prompt_evidence_block_reads_matches_from_disk);
+    RUN_TEST(cli_prompt_aliases_and_module_imports);
+    RUN_TEST(cli_prompt_locate_block);
+    RUN_TEST(cli_prompt_text_files_follow_gitignore);
+    RUN_TEST(cli_prompt_chain_block_has_call_sites);
+    RUN_TEST(cli_prompt_payload_and_session_dedupe);
     RUN_TEST(cli_source_context_preserves_interleaved_paths);
     RUN_TEST(cli_hook_augment_bash_pattern_extractor);
     RUN_TEST(cli_remove_claude_hooks);

@@ -1,9 +1,8 @@
 # Historical MCP vs Explorer test plan (v8: 66 languages)
 
 > **Historical plan:** This document preserves the v8 66-language corpus and Claude Code
-> workflow. The product now recognizes 155 languages. Use the
-> [v743 verification guide](benchmarks/2026-09-09-uncontended-timing-01/scale-task-context-21/upstream-comparison-v743/README.md)
-> for current source-correct timing comparisons.
+> workflow. The product now recognizes 155 languages. For the current agent-level timing
+> comparison see `scripts/benchmark-agent/README.md`.
 
 ## Purpose
 

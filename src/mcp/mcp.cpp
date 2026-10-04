@@ -1813,6 +1813,134 @@ static bool coverage_kind_is_skip(const char *kind) {
            strcmp(kind, "not_indexed_dir") != 0 && strcmp(kind, "not_indexed_file") != 0;
 }
 
+char *cbm_mcp_symbol_nodes(cbm_mcp_server_t *srv, const char *project, const char *name,
+                           bool *resolved, bool prefix) {
+    if (resolved) {
+        *resolved = false;
+    }
+    if (!srv || !project || !name || !name[0]) {
+        return NULL;
+    }
+    cbm_store_t *store = resolve_store(srv, project);
+    if (!store) {
+        return NULL;
+    }
+    cbm_project_t proj = {0};
+    if (cbm_store_get_project(store, project, &proj) != CBM_STORE_OK) {
+        return NULL;
+    }
+    if (resolved) {
+        *resolved = true;
+    }
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    if (prefix) {
+        cbm_store_find_nodes_by_name_prefix(store, project, name, 40, &nodes, &count);
+    } else {
+        cbm_store_find_nodes_by_name(store, project, name, &nodes, &count);
+    }
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_strcpy(doc, root, "root", proj.root_path ? proj.root_path : "");
+    cbm_project_free_fields(&proj);
+    yyjson_mut_val *arr = yyjson_mut_arr(doc);
+    enum { SYMBOL_NODES_MAX = 1000 };
+    for (int i = 0; i < count && i < SYMBOL_NODES_MAX; i++) {
+        yyjson_mut_val *item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, item, "qualified_name",
+                                  nodes[i].qualified_name ? nodes[i].qualified_name : "");
+        yyjson_mut_obj_add_strcpy(doc, item, "name", nodes[i].name ? nodes[i].name : "");
+        yyjson_mut_obj_add_strcpy(doc, item, "label", nodes[i].label ? nodes[i].label : "");
+        yyjson_mut_obj_add_strcpy(doc, item, "file", nodes[i].file_path ? nodes[i].file_path : "");
+        yyjson_mut_obj_add_int(doc, item, "start_line", nodes[i].start_line);
+        yyjson_mut_obj_add_int(doc, item, "end_line", nodes[i].end_line);
+        yyjson_mut_arr_append(arr, item);
+    }
+    yyjson_mut_obj_add_val(doc, root, "nodes", arr);
+    yyjson_mut_obj_add_int(doc, root, "total", count);
+    cbm_store_free_nodes(nodes, count);
+    char *json = yyjson_mut_write(doc, 0, NULL);
+    yyjson_mut_doc_free(doc);
+    return json;
+}
+
+int cbm_mcp_project_files(cbm_mcp_server_t *srv, const char *project, char **root_out,
+                          char ***files_out) {
+    *root_out = NULL;
+    *files_out = NULL;
+    if (!srv || !project) {
+        return -1;
+    }
+    cbm_store_t *store = resolve_store(srv, project);
+    if (!store) {
+        return -1;
+    }
+    cbm_project_t proj = {0};
+    if (cbm_store_get_project(store, project, &proj) != CBM_STORE_OK) {
+        return -1;
+    }
+    *root_out = heap_strdup(proj.root_path ? proj.root_path : "");
+    cbm_project_free_fields(&proj);
+    cbm_file_hash_t *hashes = NULL;
+    int count = 0;
+    if (cbm_store_get_file_hashes(store, project, &hashes, &count) != CBM_STORE_OK) {
+        count = 0;
+    }
+    char **files = count > 0 ? (char **)calloc((size_t)count, sizeof(char *)) : NULL;
+    int n = 0;
+    for (int i = 0; files && i < count; i++) {
+        if (hashes[i].rel_path) {
+            files[n++] = heap_strdup(hashes[i].rel_path);
+        }
+    }
+    cbm_store_free_file_hashes(hashes, count);
+    *files_out = files;
+    return n;
+}
+
+void cbm_mcp_free_project_files(char *root, char **files, int count) {
+    for (int i = 0; files && i < count; i++) {
+        free(files[i]);
+    }
+    free(files);
+    free(root);
+}
+
+char *cbm_mcp_session_brief_json(cbm_mcp_server_t *srv, const char *project, bool *resolved) {
+    if (resolved) {
+        *resolved = false;
+    }
+    if (!srv || !project) {
+        return NULL;
+    }
+    cbm_store_t *store = resolve_store(srv, project);
+    if (!store) {
+        return NULL;
+    }
+    cbm_project_t proj = {0};
+    if (cbm_store_get_project(store, project, &proj) != CBM_STORE_OK) {
+        return NULL;
+    }
+    cbm_project_free_fields(&proj);
+    if (resolved) {
+        *resolved = true;
+    }
+    char *json = NULL;
+    if (cbm_store_session_brief_get(store, project, &json) == CBM_STORE_OK) {
+        return json;
+    }
+    int64_t ceiling = cbm_store_node_id_ceiling(store);
+    if (ceiling < CBM_MCP_BRIEF_LIVE_MAX_NODES &&
+        cbm_store_session_brief_compute(store, project, &json) == CBM_STORE_OK) {
+        return json;
+    }
+    free(json);
+    char buf[CBM_SZ_128];
+    snprintf(buf, sizeof(buf), "{\"nodes\":%lld,\"approximate\":true}", (long long)ceiling);
+    return heap_strdup(buf);
+}
+
 char *cbm_mcp_coverage_note(cbm_mcp_server_t *srv, const char *project, const char *rel_path,
                             bool *resolved) {
     if (resolved) {

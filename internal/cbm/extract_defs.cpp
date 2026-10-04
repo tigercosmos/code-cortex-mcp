@@ -6520,6 +6520,34 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const char 
 }
 
 // Push nested class children from a class body container onto the walk stack.
+/* A Ruby `def` that is a direct member of a class or module body: the
+ * methods extract_class_methods emits (it iterates find_class_body's
+ * children). */
+static bool ruby_is_class_body_method(TSNode node) {
+    TSNode parent = ts_node_parent(node);
+    if (ts_node_is_null(parent)) {
+        return false;
+    }
+    const char *pk = ts_node_type(parent);
+    if (strcmp(pk, "class") == 0 || strcmp(pk, "module") == 0) {
+        return true;
+    }
+    if (strcmp(pk, "body_statement") != 0) {
+        return false;
+    }
+    TSNode owner = ts_node_parent(parent);
+    if (ts_node_is_null(owner)) {
+        return false;
+    }
+    const char *ok = ts_node_type(owner);
+    if (strcmp(ok, "class") != 0 && strcmp(ok, "module") != 0) {
+        return false;
+    }
+    /* Only when find_class_body would return this very body. */
+    TSNode body = ts_node_child_by_field_name(owner, TS_FIELD("body"));
+    return !ts_node_is_null(body) && ts_node_eq(body, parent);
+}
+
 static void push_class_body_children(TSNode node, const CBMLangSpec *spec, walk_defs_frame_t *stack,
                                      int *top, const char *new_enclosing,
                                      const CBMExtractCtx *ctx) {
@@ -6944,6 +6972,19 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
             for (int i = (int)nsc - SKIP_CHAR; i >= 0 && top < CBM_WALK_DEFS_STACK_CAP; i--) {
                 stack[top++] = (walk_defs_frame_t){ts_node_child(node, (uint32_t)i), new_enclosing};
             }
+            continue;
+        }
+
+        /* Ruby: a class/module body is a `body_statement`, which
+         * push_class_body_children does not recognise, so the body is walked
+         * like top-level code. Its direct `def`s were already emitted as
+         * Methods by extract_class_methods; emitting them again as Functions
+         * gave every Ruby method a second node with a truncated
+         * (file-level) qualified name, and every lookup two matches. Methods
+         * nested deeper (`class << self`, blocks) are not class-body children
+         * and still take the function path below. */
+        if (ctx->language == CBM_LANG_RUBY && frame.enclosing_class_qn &&
+            cbm_kind_in_set(node, spec->function_node_types) && ruby_is_class_body_method(node)) {
             continue;
         }
 
