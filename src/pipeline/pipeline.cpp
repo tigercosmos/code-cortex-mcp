@@ -35,6 +35,7 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6, P
 #include "foundation/compat_thread.h"
 #include "foundation/profile.h"
 #include "foundation/mem.h"
+#include "foundation/sha256.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -43,6 +44,8 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6, P
 #include "foundation/cbm_atomic.h"
 #include <sys/stat.h>
 #include <time.h>
+
+static constexpr size_t PL_SOURCE_DIGEST_STRIDE = CBM_SHA256_HEX_LEN + 1;
 
 static inline void *intptr_to_ptr(intptr_t v) {
     void *p;
@@ -1459,8 +1462,8 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
          * cbm_store_upsert_file_hash path autocommits, i.e. file_count fsyncs
          * (~89k on the kernel); cbm_store_upsert_file_hash_batch wraps the same
          * cached INSERT ... ON CONFLICT upsert in a single begin/commit. Same
-         * (project, rel_path, sha256="", mtime_ns, size) tuples, same replace
-         * semantics — only the transaction boundary changes. */
+         * (project, rel_path, extracted-source sha256, mtime_ns, size) tuples,
+         * same replace semantics — only the transaction boundary changes. */
         CBM_PROF_START(t_fh);
         if (cbm_store_upsert_file_hash_batch(hash_store, versions, file_count) != CBM_STORE_OK) {
             cbm_log_error("pipeline.err", "phase", "persist_file_hashes", "project",
@@ -1735,6 +1738,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
      * step would otherwise jump past ctx's init below. */
     cbm_pipeline_ctx_t ctx;
     std::vector<cbm_file_hash_t> file_versions;
+    std::vector<char> file_digests;
 
     /* C/C++ #define Macro nodes (#375) dominate extraction on macro-dense repos
      * (≈49% of nodes on the Linux kernel), so gate them to full mode — moderate
@@ -1811,6 +1815,12 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
      * must remain visible to the next incremental run, even if extraction
      * happens to read a newer version of a file. */
     file_versions.resize((size_t)file_count);
+    if (file_count > 0 && (size_t)file_count <= SIZE_MAX / PL_SOURCE_DIGEST_STRIDE) {
+        file_digests.assign((size_t)file_count * PL_SOURCE_DIGEST_STRIDE, '\0');
+    } else if (file_count > 0) {
+        cbm_log_error("pipeline.err", "phase", "source_digest_alloc", "reason",
+                      "size_overflow");
+    }
     for (int i = 0; i < file_count; i++) {
         auto &version = file_versions[(size_t)i];
         version.project = p->project_name;
@@ -1846,6 +1856,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         .cancelled = &p->cancelled,
         .pipeline = p, /* so passes can record per-file skips (Track B) */
         .mode = (int)p->mode,
+        .source_sha256 = file_digests.empty() ? nullptr : file_digests.data(),
         .path_aliases = path_aliases,
         .cc_index = cc_index,
         .excluded_dirs = p->excluded_dirs,
@@ -1855,6 +1866,14 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     rc = run_extraction_phase(p, &ctx, files, file_count);
     if (rc != 0) {
         goto cleanup;
+    }
+    for (int i = 0; i < file_count; ++i) {
+        char *digest = file_digests.empty()
+                           ? nullptr
+                           : file_digests.data() + (size_t)i * PL_SOURCE_DIGEST_STRIDE;
+        if (digest && digest[0] != '\0') {
+            file_versions[(size_t)i].sha256 = digest;
+        }
     }
 
 #ifdef CBM_ENABLE_TEST_SEAMS

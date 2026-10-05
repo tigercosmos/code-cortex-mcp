@@ -1,9 +1,10 @@
 /*
  * compat_regex.h — Portable regular expression API.
  *
- * Backed by std::regex on all platforms (see compat_regex.cpp). Patterns are
- * POSIX Extended Regular Expressions. Uses our own types so callers never
- * include <regex> / <regex.h> directly.
+ * Backed by the system POSIX regex engine where available and a guarded
+ * std::regex fallback on Windows (see compat_regex.cpp). Patterns are POSIX
+ * Extended Regular Expressions. Uses our own types so callers never include
+ * <regex> / <regex.h> directly.
  */
 #ifndef CBM_COMPAT_REGEX_H
 #define CBM_COMPAT_REGEX_H
@@ -30,7 +31,8 @@ extern "C" {
 /* ── Types ────────────────────────────────────────────────────── */
 
 /* Opaque regex handle — sized to hold the platform's regex_t. */
-typedef struct {
+typedef union {
+    max_align_t alignment;
     /* CBM_SZ_256 bytes should be large enough for any platform's regex_t.
      * POSIX regex_t is typically 48-CBM_SZ_64 bytes; TRE is ~80 bytes. */
     char opaque[CBM_SZ_256];

@@ -6,6 +6,7 @@
  * cache-dir scan (one sqlite open per database, hundreds of them, per missed
  * guess) and index_status (a git subprocess plus full-graph counts) just to
  * read one file's coverage row. These tests pin the replacements. */
+#include "../src/cli/cli.h"
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h"
 #include "test_framework.h"
@@ -15,6 +16,11 @@
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern bool cbm_prompt_freshness_for_testing(const char *inspect_json);
+extern char *cbm_prompt_label_for_testing(bool scanned);
+#endif
 
 /* Point CBM_CACHE_DIR at a fresh temp dir for one test; restores on close. */
 typedef struct {
@@ -318,6 +324,25 @@ TEST(hook_session_brief_reads_stored_inputs_and_bounds_misses) {
     PASS();
 }
 
+TEST(hook_session_brief_describes_bounded_evidence) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *inputs[] = {
+        R"({"nodes":120,"edges":340,"languages":[{"language":"C++","file_count":9}]})",
+        R"({"nodes":2200000,"approximate":true})",
+    };
+    for (const char *input : inputs) {
+        char *text = cbm_session_brief_format_for_testing("proj", input);
+        ASSERT_NOT_NULL(text);
+        ASSERT_NOT_NULL(strstr(text, "bounded evidence, not a completeness guarantee"));
+        ASSERT_NOT_NULL(strstr(text, "independent verification could change the answer"));
+        ASSERT_NULL(strstr(text, "already contains the whole-word matches"));
+        ASSERT_NULL(strstr(text, "same name again returns the same lines"));
+        free(text);
+    }
+#endif
+    PASS();
+}
+
 /* The hook's Read path uses the note under a scan-free policy: an unindexed
  * tree must come back not-resolved (so the walk-up ends) without the cache-dir
  * walk that used to eat the whole 300ms deadline. */
@@ -345,10 +370,419 @@ TEST(hook_coverage_note_on_unindexed_tree_is_a_scan_free_miss) {
     PASS();
 }
 
+/* Structural prompt evidence fails closed when the index reports a changed
+ * source family or when an older index has no freshness metadata. */
+TEST(hook_prompt_freshness_requires_explicit_current_index) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    ASSERT_TRUE(
+        cbm_prompt_freshness_for_testing(R"({"index":{"file_modified_after_index":false}})"));
+    ASSERT_FALSE(
+        cbm_prompt_freshness_for_testing(R"({"index":{"file_modified_after_index":true}})"));
+    ASSERT_FALSE(cbm_prompt_freshness_for_testing(R"({"index":{}})"));
+    ASSERT_FALSE(cbm_prompt_freshness_for_testing(R"({})"));
+    ASSERT_FALSE(cbm_prompt_freshness_for_testing(nullptr));
+    ASSERT_NULL(cbm_hook_symbol_brief_for_testing(
+        R"({"symbol":{"label":"Function","file":"old.cpp","start_line":4,"end_line":8},"index":{"file_modified_after_index":true},"callers_total":9})",
+        "old_fn"));
+    ASSERT_NULL(cbm_hook_symbol_brief_for_testing(
+        R"({"symbol":{"label":"Function","file":"unknown.cpp","start_line":4,"end_line":8},"callers_total":9})",
+        "unknown_fn"));
+    char *brief = cbm_hook_symbol_brief_for_testing(
+        R"({"symbol":{"label":"Function","file":"fresh.cpp","start_line":4,"end_line":8},"index":{"file_modified_after_index":false},"callers_total":0,"caller_files":[]})",
+        "fresh_fn");
+    ASSERT_NOT_NULL(brief);
+    free(brief);
+#endif
+    PASS();
+}
+
+/* A trace edge's callee name must still appear outside recognized comments
+ * and strings. These lexical checks are corroboration, not proof of a call. */
+TEST(hook_prompt_chain_suppresses_stale_source_edges) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *made = th_mktempdir("cbm-hook-chain");
+    if (!made) {
+        PASS();
+    }
+    char *root = strdup(made);
+    ASSERT_NOT_NULL(root);
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/chain.cpp", root);
+    const char *trace =
+        R"({"path_found":true,"path":[)"
+        R"({"name":"start_fn","qualified_name":"p.chain.start_fn","file":"chain.cpp","start_line":1,"end_line":3},)"
+        R"({"name":"target_fn","qualified_name":"p.chain.target_fn","file":"chain.cpp","start_line":4,"end_line":4}],)"
+        R"("caller_edges":[{"to_step":1,"line":2}]})";
+
+    FILE *fp = fopen(path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("void start_fn() {\n  target_fn();\n}\nvoid target_fn() {}\n", fp);
+    fclose(fp);
+    char *block = cbm_prompt_chain_for_testing(root, trace);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "not a current shortest-path claim"));
+    ASSERT_NULL(strstr(block, "shortest: the chain"));
+    free(block);
+
+    fp = fopen(path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("void start_fn() {\n  // target_fn();\n}\nvoid target_fn() {}\n", fp);
+    fclose(fp);
+    ASSERT_NULL(cbm_prompt_chain_for_testing(root, trace));
+
+    fp = fopen(path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("void start_fn() {\n  log(\"target_fn()\");\n}\nvoid target_fn() {}\n", fp);
+    fclose(fp);
+    ASSERT_NULL(cbm_prompt_chain_for_testing(root, trace));
+
+    fp = fopen(path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("void start_fn() {\n  log('target_fn()');\n}\nvoid target_fn() {}\n", fp);
+    fclose(fp);
+    ASSERT_NULL(cbm_prompt_chain_for_testing(root, trace));
+
+    fp = fopen(path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("void start_fn() {\n  int x = 0; /* target_fn(); */\n}\nvoid target_fn() {}\n", fp);
+    fclose(fp);
+    ASSERT_NULL(cbm_prompt_chain_for_testing(root, trace));
+
+    fp = fopen(path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("void start_fn() {\n  /* stale edge\n  target_fn(); */\n}\nvoid target_fn() {}\n", fp);
+    fclose(fp);
+    ASSERT_NULL(cbm_prompt_chain_for_testing(root, trace));
+
+    ASSERT_EQ(cbm_unlink(path), 0);
+
+    char py_path[1024];
+    snprintf(py_path, sizeof(py_path), "%s/chain.py", root);
+    const char *py_trace =
+        R"({"path_found":true,"path":[)"
+        R"({"name":"start_fn","qualified_name":"p.chain.start_fn","file":"chain.py","start_line":1,"end_line":4},)"
+        R"({"name":"target_fn","qualified_name":"p.chain.target_fn","file":"chain.py","start_line":5,"end_line":6}],)"
+        R"("caller_edges":[{"to_step":1,"line":3}]})";
+    fp = fopen(py_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs(
+        "def start_fn():\n  value = 1  # target_fn()\n  return value\n\ndef target_fn():\n  pass\n",
+        fp);
+    fclose(fp);
+    ASSERT_NULL(cbm_prompt_chain_for_testing(root, py_trace));
+
+    fp = fopen(py_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs(
+        "def start_fn():\n  \"\"\"stale edge\n  target_fn()\n  \"\"\"\ndef target_fn():\n  pass\n",
+        fp);
+    fclose(fp);
+    ASSERT_NULL(cbm_prompt_chain_for_testing(root, py_trace));
+    ASSERT_EQ(cbm_unlink(py_path), 0);
+    ASSERT_EQ(cbm_rmdir(root), 0);
+    free(root);
+#endif
+    PASS();
+}
+
+TEST(hook_prompt_chain_uses_bare_path_and_preserves_qualified_identities) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *made = th_mktempdir("cbm-hook-chain-names");
+    if (!made) {
+        PASS();
+    }
+    char *root = strdup(made);
+    ASSERT_NOT_NULL(root);
+    char django_path[1024];
+    char core_path[1024];
+    char utils_path[1024];
+    char signing_path[1024];
+    char crypto_path[1024];
+    char duplicate_path[1024];
+    snprintf(django_path, sizeof(django_path), "%s/django", root);
+    snprintf(core_path, sizeof(core_path), "%s/django/core", root);
+    snprintf(utils_path, sizeof(utils_path), "%s/django/utils", root);
+    snprintf(signing_path, sizeof(signing_path), "%s/django/core/signing.py", root);
+    snprintf(crypto_path, sizeof(crypto_path), "%s/django/utils/crypto.py", root);
+    snprintf(duplicate_path, sizeof(duplicate_path), "%s/duplicate.py", root);
+    ASSERT_TRUE(cbm_mkdir_p(core_path, 0755));
+    ASSERT_TRUE(cbm_mkdir_p(utils_path, 0755));
+
+    FILE *fp = fopen(signing_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("from django.utils.crypto import salted_hmac\n"
+          "def base64_hmac():\n"
+          "    return salted_hmac()\n"
+          "\n"
+          "class Signer:\n"
+          "    def signature(self):\n"
+          "        return base64_hmac()\n"
+          "    def sign(self):\n"
+          "        return self.signature()\n",
+          fp);
+    fclose(fp);
+    fp = fopen(crypto_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("def salted_hmac():\n    return 1\n", fp);
+    fclose(fp);
+
+    const char *django_trace =
+        R"({"path_found":true,"path":[)"
+        R"({"name":"sign","qualified_name":"p.django.core.signing.Signer.sign","file":"django/core/signing.py","start_line":8,"end_line":9},)"
+        R"({"name":"signature","qualified_name":"p.django.core.signing.Signer.signature","file":"django/core/signing.py","start_line":6,"end_line":7},)"
+        R"({"name":"base64_hmac","qualified_name":"p.django.core.signing.base64_hmac","file":"django/core/signing.py","start_line":2,"end_line":3},)"
+        R"({"name":"salted_hmac","qualified_name":"p.django.utils.crypto.salted_hmac","file":"django/utils/crypto.py","start_line":1,"end_line":2}],)"
+        R"("caller_edges":[{"to_step":1,"line":9},{"to_step":2,"line":7},{"to_step":3,"line":3}]})";
+    char *block = cbm_prompt_chain_for_testing(root, django_trace);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(
+        block, "- call chain sign -> salted_hmac (3 hops): sign (django/core/signing.py:8) -> "
+               "signature (django/core/signing.py:6) -> base64_hmac "
+               "(django/core/signing.py:2) -> salted_hmac (django/utils/crypto.py:1)"));
+    ASSERT_NOT_NULL(strstr(block,
+                           "  qualified identities: Signer.sign (django/core/signing.py:8) -> "
+                           "Signer.signature (django/core/signing.py:6) -> base64_hmac "
+                           "(django/core/signing.py:2) -> salted_hmac (django/utils/crypto.py:1)"));
+    ASSERT_NOT_NULL(strstr(block, "\n    sign -> signature: django/core/signing.py:9:"));
+    ASSERT_NOT_NULL(strstr(block, "\n    signature -> base64_hmac: django/core/signing.py:7:"));
+    ASSERT_NULL(strstr(block, "\n    Signer.sign -> Signer.signature:"));
+
+    /* The payload keeps newline-delimited prefixes. Derive the exact rendered
+     * size of the primary line, then prove that exact fit survives while the
+     * next line is dropped; one byte less cannot retain even the primary. */
+    const char *first_newline = strchr(block, '\n');
+    ASSERT_NOT_NULL(first_newline);
+    size_t primary_len = (size_t)(first_newline - block);
+    char *primary = (char *)malloc(primary_len + 1);
+    ASSERT_NOT_NULL(primary);
+    memcpy(primary, block, primary_len);
+    primary[primary_len] = '\0';
+    const char *label = "[code-cortex] bounded evidence:";
+    const char *primary_blocks[] = {primary};
+    char *primary_json = cbm_prompt_payload_for_testing(primary_blocks, 1, 9000, label);
+    ASSERT_NOT_NULL(primary_json);
+    size_t primary_cap = strlen(primary_json);
+    free(primary_json);
+    const char *full_blocks[] = {block};
+    char *capped = cbm_prompt_payload_for_testing(full_blocks, 1, primary_cap, label);
+    ASSERT_NOT_NULL(capped);
+    ASSERT_TRUE(strlen(capped) <= primary_cap);
+    ASSERT_NOT_NULL(strstr(capped, "call chain sign -> salted_hmac"));
+    ASSERT_NOT_NULL(strstr(capped, "django/core/signing.py:8"));
+    ASSERT_NOT_NULL(strstr(capped, "django/utils/crypto.py:1"));
+    ASSERT_NULL(strstr(capped, "qualified identities"));
+    free(capped);
+    ASSERT_NULL(cbm_prompt_payload_for_testing(full_blocks, 1, primary_cap - 1, label));
+    free(primary);
+    free(block);
+
+    /* Repeated bare endpoint names stay positional and unambiguous through
+     * the complete cleaned identity line. */
+    fp = fopen(duplicate_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("class A:\n"
+          "    def run(self):\n"
+          "        return bridge()\n"
+          "\n"
+          "def bridge():\n"
+          "    return B().run()\n"
+          "\n"
+          "class B:\n"
+          "    def run(self):\n"
+          "        return 0\n",
+          fp);
+    fclose(fp);
+    const char *duplicate_trace =
+        R"({"path_found":true,"path":[)"
+        R"({"name":"run","qualified_name":"p.duplicate.A.run","file":"duplicate.py","start_line":2,"end_line":3},)"
+        R"({"name":"bridge","qualified_name":"p.duplicate.bridge","file":"duplicate.py","start_line":5,"end_line":6},)"
+        R"({"name":"run","qualified_name":"p.duplicate.B.run","file":"duplicate.py","start_line":9,"end_line":10}],)"
+        R"("caller_edges":[{"to_step":1,"line":3},{"to_step":2,"line":6}]})";
+    block = cbm_prompt_chain_for_testing(root, duplicate_trace);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "- call chain run -> run (2 hops): run (duplicate.py:2) -> "
+                                  "bridge (duplicate.py:5) -> run (duplicate.py:9)"));
+    ASSERT_NOT_NULL(strstr(block, "  qualified identities: A.run (duplicate.py:2) -> bridge "
+                                  "(duplicate.py:5) -> B.run (duplicate.py:9)"));
+    free(block);
+
+    ASSERT_EQ(cbm_unlink(signing_path), 0);
+    ASSERT_EQ(cbm_unlink(crypto_path), 0);
+    ASSERT_EQ(cbm_unlink(duplicate_path), 0);
+    ASSERT_EQ(cbm_rmdir(core_path), 0);
+    ASSERT_EQ(cbm_rmdir(utils_path), 0);
+    ASSERT_EQ(cbm_rmdir(django_path), 0);
+    ASSERT_EQ(cbm_rmdir(root), 0);
+    free(root);
+#endif
+    PASS();
+}
+
+TEST(hook_prompt_context_preserves_explicit_verification_requests) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    for (int mode = 0; mode < 2; ++mode) {
+        char *label = cbm_prompt_label_for_testing(mode != 0);
+        ASSERT_NOT_NULL(label);
+        ASSERT_NOT_NULL(strstr(label, "Follow explicit user requests"));
+        ASSERT_NOT_NULL(strstr(label, "independent verification or specific tools"));
+        ASSERT_NOT_NULL(strstr(label, "requested output format"));
+        ASSERT_NOT_NULL(strstr(label, "requests for no commentary"));
+        ASSERT_NOT_NULL(strstr(label, "do not prove the current target binding"));
+        ASSERT_NOT_NULL(strstr(label, "may have changed since submission"));
+        ASSERT_NULL(strstr(label, "search only for what is not shown"));
+        ASSERT_NULL(strstr(label, "returns these same lines"));
+        free(label);
+    }
+#endif
+    PASS();
+}
+
+TEST(hook_prompt_caller_evidence_keeps_lexical_and_binding_uncertainty) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    const char *made = th_mktempdir("cbm-hook-caller-evidence");
+    if (!made) {
+        PASS();
+    }
+    char *root = strdup(made);
+    ASSERT_NOT_NULL(root);
+    char lexical[1024], formatted[1024], import_use[1024], multiline[1024], shapes[1024];
+    char namespaces[1024], capped[1024];
+    snprintf(lexical, sizeof(lexical), "%s/lexical.h", root);
+    snprintf(formatted, sizeof(formatted), "%s/formatted.py", root);
+    snprintf(import_use, sizeof(import_use), "%s/import_use.py", root);
+    snprintf(multiline, sizeof(multiline), "%s/multiline.js", root);
+    snprintf(shapes, sizeof(shapes), "%s/shapes.cpp", root);
+    snprintf(namespaces, sizeof(namespaces), "%s/namespaces.cpp", root);
+    snprintf(capped, sizeof(capped), "%s/capped.cpp", root);
+
+    FILE *fp = fopen(lexical, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("/*\n"
+          " * probe_fn();\n"
+          " */\n"
+          "const char *s = \"probe_fn()\";\n"
+          "void use() { const char *t = \"probe_fn()\"; probe_fn(); }\n"
+          "int probe_fn(int);\n",
+          fp);
+    fclose(fp);
+    fp = fopen(formatted, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("note = f\"\"\"\nprobe_fn()\n\"\"\"\n"
+          "escaped = \"\134probe_fn\"\n"
+          "probe_fn()\n",
+          fp);
+    fclose(fp);
+    fp = fopen(import_use, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("from module import probe_fn; probe_fn()\n", fp);
+    fclose(fp);
+    fp = fopen(multiline, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("const note = `first line\nprobe_fn()\n`;\nprobe_fn();\n", fp);
+    fclose(fp);
+    const char *lex_files[] = {"lexical.h", "formatted.py", "import_use.py", "multiline.js"};
+    const char *lex_facts =
+        R"({"display":"probe_fn","bare":"probe_fn","label":"Function",)"
+        R"("decls":[["lexical.h",6]],"calls":[["lexical.h",4]]})";
+    char *block = cbm_prompt_evidence_for_testing(root, lex_facts, lex_files, 4, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "lexical.h:2: * probe_fn();  [comment occurrence]"));
+    ASSERT_NOT_NULL(strstr(block,
+                           "lexical.h:4: const char *s = \"probe_fn()\";  [string occurrence]"));
+    ASSERT_NOT_NULL(strstr(block, "lexical.h:5: void use() { const char *t = \"probe_fn()\"; "
+                                  "probe_fn(); }  [unresolved call shape; string occurrence]"));
+    ASSERT_NOT_NULL(strstr(block, "formatted.py:2: probe_fn()  [string occurrence]"));
+    ASSERT_NOT_NULL(strstr(block,
+                           "formatted.py:4: escaped = \"\\probe_fn\"  [string occurrence]"));
+    ASSERT_NOT_NULL(strstr(block, "formatted.py:5: probe_fn()  [unresolved call shape]"));
+    ASSERT_NOT_NULL(strstr(block, "import_use.py:1: from module import probe_fn; probe_fn()  "
+                                  "[unresolved call shape; import]"));
+    ASSERT_NOT_NULL(strstr(block, "multiline.js:2: probe_fn()  [string occurrence]"));
+    ASSERT_NOT_NULL(strstr(block, "multiline.js:4: probe_fn();  [unresolved call shape]"));
+    ASSERT_NULL(strstr(block, "[indexed edge candidate; binding not re-resolved]"));
+    ASSERT_NULL(strstr(block, " calls="));
+    free(block);
+
+    fp = fopen(shapes, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("std::vector<double> shape_fn(4);\n"
+          "auto value = shape_fn<T>(mesh);\n",
+          fp);
+    fclose(fp);
+    const char *shape_files[] = {"shapes.cpp"};
+    block = cbm_prompt_evidence_for_testing(
+        root, R"({"display":"shape_fn","bare":"shape_fn","label":"Function"})", shape_files,
+        1, 0);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "shapes.cpp:1: std::vector<double> shape_fn(4);  [unresolved "
+                                  "call shape]"));
+    ASSERT_NOT_NULL(strstr(block, "shapes.cpp:2: auto value = shape_fn<T>(mesh);  [unresolved "
+                                  "call shape]"));
+    ASSERT_NOT_NULL(strstr(block, "unresolved_call_shapes=2"));
+    free(block);
+
+    fp = fopen(namespaces, "wb");
+    ASSERT_NOT_NULL(fp);
+    fputs("namespace cv { int borderInterpolate(int); }\n"
+          "namespace cvtest {\n"
+          "static int borderInterpolate(int x) { return x; }\n"
+          "int local() { return borderInterpolate(1); }\n"
+          "int target() { return cv::borderInterpolate(1); }\n"
+          "}\n",
+          fp);
+    fclose(fp);
+    const char *namespace_files[] = {"namespaces.cpp"};
+    block = cbm_prompt_evidence_for_testing(
+        root,
+        R"({"display":"cv::borderInterpolate","bare":"borderInterpolate","label":"Function","decls":[["namespaces.cpp",1]],"calls":[["namespaces.cpp",4]]})",
+        namespace_files, 1, 2);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "namespaces.cpp:4: int local() { return borderInterpolate(1); }  "
+                                  "[indexed edge candidate; binding not re-resolved]"));
+    ASSERT_NOT_NULL(strstr(block, "namespaces.cpp:5: int target() { return "
+                                  "cv::borderInterpolate(1); }  [unresolved call shape]"));
+    ASSERT_NOT_NULL(strstr(block, "indexed_edge_candidates=1 unresolved_call_shapes=2"));
+    ASSERT_NOT_NULL(strstr(block, "do not prove the current target binding"));
+    free(block);
+
+    fp = fopen(capped, "wb");
+    ASSERT_NOT_NULL(fp);
+    for (int i = 0; i < 201; ++i) {
+        fprintf(fp, "void cap_%d() { cap_probe(); }\n", i);
+    }
+    fclose(fp);
+    const char *cap_files[] = {"capped.cpp"};
+    block = cbm_prompt_evidence_for_testing(
+        root, R"({"display":"cap_probe","bare":"cap_probe","label":"Function"})", cap_files,
+        1, 2);
+    ASSERT_NOT_NULL(block);
+    ASSERT_NOT_NULL(strstr(block, "per-file match cap reached in 1 file(s)"));
+    ASSERT_NOT_NULL(strstr(block, "occurrence counts and line lists are lower bounds"));
+    free(block);
+
+    ASSERT_EQ(cbm_unlink(lexical), 0);
+    ASSERT_EQ(cbm_unlink(formatted), 0);
+    ASSERT_EQ(cbm_unlink(import_use), 0);
+    ASSERT_EQ(cbm_unlink(multiline), 0);
+    ASSERT_EQ(cbm_unlink(shapes), 0);
+    ASSERT_EQ(cbm_unlink(namespaces), 0);
+    ASSERT_EQ(cbm_unlink(capped), 0);
+    ASSERT_EQ(cbm_rmdir(root), 0);
+    free(root);
+#endif
+    PASS();
+}
+
 void suite_hook_fastpath(void) {
     RUN_TEST(hook_scan_fallback_off_resolves_from_the_memo_only);
     RUN_TEST(hook_scan_fallback_defaults_on_and_toggles_back);
     RUN_TEST(hook_coverage_note_reports_partial_skipped_and_clean);
     RUN_TEST(hook_coverage_note_on_unindexed_tree_is_a_scan_free_miss);
     RUN_TEST(hook_session_brief_reads_stored_inputs_and_bounds_misses);
+    RUN_TEST(hook_session_brief_describes_bounded_evidence);
+    RUN_TEST(hook_prompt_freshness_requires_explicit_current_index);
+    RUN_TEST(hook_prompt_chain_suppresses_stale_source_edges);
+    RUN_TEST(hook_prompt_chain_uses_bare_path_and_preserves_qualified_identities);
+    RUN_TEST(hook_prompt_context_preserves_explicit_verification_requests);
+    RUN_TEST(hook_prompt_caller_evidence_keeps_lexical_and_binding_uncertainty);
 }

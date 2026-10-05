@@ -11,6 +11,7 @@
 #include "sqlite3.h" /* vendored/sqlite3 — raw nodes_fts MATCH probes */
 #include <stdint.h>
 #include <stdio.h>
+#include <string>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -93,6 +94,32 @@ TEST(store_search_by_name_pattern) {
     ASSERT_EQ(rc, CBM_STORE_OK);
     ASSERT_EQ(out.count, 1);
     ASSERT_STR_EQ(out.results[0].node.name, "SubmitOrder");
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* A generated qualified name can be hundreds of kilobytes long.  The former
+ * std::regex implementation recursively processed `.*` and overflowed the
+ * process stack while searching an Elasticsearch index. */
+TEST(store_search_name_pattern_long_qualified_name) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    std::string qualified_name(200000, 'a');
+    cbm_node_t node = {.project = "test",
+                       .label = "Declaration",
+                       .name = "",
+                       .qualified_name = qualified_name.c_str(),
+                       .file_path = "generated.java"};
+    ASSERT_TRUE(cbm_store_upsert_node(s, &node) > 0);
+
+    cbm_search_params_t params = {
+        .project = "test", .name_pattern = ".*", .min_degree = -1, .max_degree = -1,
+        .limit = 1};
+    cbm_search_output_t out = {};
+    ASSERT_EQ(cbm_store_search(s, &params, &out), CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
     cbm_store_search_free(&out);
 
     cbm_store_close(s);
@@ -1610,6 +1637,7 @@ TEST(store_fts_rebuild_reindexes_added_nodes_without_duplicates) {
 SUITE(store_search) {
     RUN_TEST(store_search_by_label);
     RUN_TEST(store_search_by_name_pattern);
+    RUN_TEST(store_search_name_pattern_long_qualified_name);
     RUN_TEST(store_search_by_file_pattern);
     RUN_TEST(store_search_file_pattern_substring_issue200);
     RUN_TEST(store_search_pagination);

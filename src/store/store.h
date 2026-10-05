@@ -460,6 +460,13 @@ int cbm_store_upsert_file_hash(cbm_store_t *s, const char *project, const char *
 int cbm_store_get_file_hashes(cbm_store_t *s, const char *project, cbm_file_hash_t **out,
                               int *count);
 
+/* Read one persisted file identity without allocating the project-wide hash
+ * table. `sha256_out` must have room for at least 65 bytes. Returns
+ * CBM_STORE_NOT_FOUND when the exact (project, rel_path) row is absent. */
+int cbm_store_get_file_hash(cbm_store_t *s, const char *project, const char *rel_path,
+                            char *sha256_out, size_t sha256_out_size, int64_t *mtime_ns,
+                            int64_t *size);
+
 int cbm_store_delete_file_hash(cbm_store_t *s, const char *project, const char *rel_path);
 
 int cbm_store_delete_file_hashes(cbm_store_t *s, const char *project);

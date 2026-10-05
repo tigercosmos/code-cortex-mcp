@@ -87,6 +87,7 @@ enum { PP_CSHARP_M_PREFIX_LEN = 2 };
 #include "foundation/profile.h"
 #include "foundation/compat_regex.h"
 #include "foundation/limits.h"
+#include "foundation/sha256.h"
 #include "cbm.h"
 #include "simhash/minhash.h"
 #include "semantic/ast_profile.h"
@@ -707,6 +708,7 @@ typedef struct {
     std::atomic<int> next_worker_id;
 
     CBMFileResult **result_cache;
+    char *source_sha256; /* file_count contiguous 65-byte digest buffers */
     cbm::ResultStore *result_store;
     std::atomic<int64_t> *shared_ids;
     std::atomic<int> *cancelled;
@@ -927,6 +929,11 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
             source, source_len, fi->language, ec->project_name, fi->rel_path, CBM_EXTRACT_BUDGET,
             cbm_cc_index_defines(ec->cc_index, fi->rel_path),
             cbm_cc_index_includes(ec->cc_index, fi->rel_path), &extract_options);
+
+        if (result && ec->source_sha256) {
+            cbm_sha256_hex(source, (size_t)source_len,
+                           ec->source_sha256 + (size_t)file_idx * (CBM_SHA256_HEX_LEN + 1));
+        }
 
         uint64_t file_elapsed_ms = (extract_now_ns() - file_t0) / PP_USEC_PER_MS;
 
@@ -1192,6 +1199,7 @@ int cbm_parallel_extract_ex(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
         .workers = workers,
         .max_workers = worker_count,
         .result_cache = result_cache,
+        .source_sha256 = ctx->source_sha256,
         .result_store = static_cast<cbm::ResultStore *>(ctx->result_store),
         .shared_ids = shared_ids,
         .cancelled = ctx->cancelled,

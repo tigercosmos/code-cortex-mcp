@@ -141,6 +141,7 @@ struct cbm_store {
     sqlite3_stmt *stmt_delete_project;
 
     sqlite3_stmt *stmt_upsert_file_hash;
+    sqlite3_stmt *stmt_get_file_hash;
     sqlite3_stmt *stmt_get_file_hashes;
     sqlite3_stmt *stmt_delete_file_hash;
     sqlite3_stmt *stmt_delete_file_hashes;
@@ -1196,6 +1197,7 @@ void cbm_store_close(cbm_store_t *s) {
     finalize_stmt(&s->stmt_delete_project);
 
     finalize_stmt(&s->stmt_upsert_file_hash);
+    finalize_stmt(&s->stmt_get_file_hash);
     finalize_stmt(&s->stmt_get_file_hashes);
     finalize_stmt(&s->stmt_delete_file_hash);
     finalize_stmt(&s->stmt_delete_file_hashes);
@@ -2256,6 +2258,43 @@ int cbm_store_get_file_hashes(cbm_store_t *s, const char *project, cbm_file_hash
 
     *out = arr;
     *count = n;
+    return CBM_STORE_OK;
+}
+
+int cbm_store_get_file_hash(cbm_store_t *s, const char *project, const char *rel_path,
+                            char *sha256_out, size_t sha256_out_size, int64_t *mtime_ns,
+                            int64_t *size) {
+    if (!s || !project || !rel_path || !sha256_out || sha256_out_size == 0 || !mtime_ns ||
+        !size) {
+        return CBM_STORE_ERR;
+    }
+    sha256_out[0] = '\0';
+    *mtime_ns = 0;
+    *size = 0;
+    sqlite3_stmt *stmt = prepare_cached(
+        s, &s->stmt_get_file_hash,
+        "SELECT sha256, mtime_ns, size FROM file_hashes WHERE project = ?1 AND rel_path = ?2;");
+    if (!stmt) {
+        return CBM_STORE_ERR;
+    }
+    bind_text(stmt, SKIP_ONE, project);
+    bind_text(stmt, ST_COL_2, rel_path);
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE) {
+        return CBM_STORE_NOT_FOUND;
+    }
+    if (rc != SQLITE_ROW) {
+        store_set_error_sqlite(s, "get_file_hash");
+        return CBM_STORE_ERR;
+    }
+    const char *sha = (const char *)sqlite3_column_text(stmt, 0);
+    if (!sha || strlen(sha) + 1 > sha256_out_size) {
+        store_set_error(s, "get_file_hash: sha256 output buffer too small");
+        return CBM_STORE_ERR;
+    }
+    snprintf(sha256_out, sha256_out_size, "%s", sha);
+    *mtime_ns = sqlite3_column_int64(stmt, SKIP_ONE);
+    *size = sqlite3_column_int64(stmt, ST_COL_2);
     return CBM_STORE_OK;
 }
 

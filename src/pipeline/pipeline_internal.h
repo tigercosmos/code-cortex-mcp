@@ -98,6 +98,10 @@ typedef struct {
      * Indexed by file position in the files[] array. Owned by pipeline.c. */
     CBMFileResult **result_cache;
     void *result_store; // Optional run-local cbm::ResultStore; cache holds owned summaries.
+    /* Optional caller-owned array of file_count SHA-256 hex buffers (65 bytes
+     * each). Extraction writes the digest of the exact bytes it parsed before
+     * freeing or spilling those bytes. */
+    char *source_sha256;
 
     /* Build-tool path aliases (tsconfig/jsconfig today; webpack/vite-style
      * configs are an easy follow-on). NULL when no usable configs were found.

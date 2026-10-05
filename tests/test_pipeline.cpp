@@ -14,6 +14,7 @@
 #include "foundation/subprocess.h"
 #include "foundation/constants.h"
 #include "foundation/log.h" // cbm_log_set_sink — incremental-route observation
+#include "foundation/sha256.h"
 #include "mcp/mcp.h"
 #include "git/git_context.h"
 #include <yyjson/yyjson.h> // properties-JSON validity (oversized-props regression)
@@ -118,13 +119,14 @@ TEST(pipeline_cpp_pointer_members_match_in_memory_and_store) {
         "struct Packet { RawPacket *m_RawPacket;\n"
         "RawPacket *getPacket() { return m_RawPacket; }\n"
         "void grow(); void explicitGrow(); void typedGrow(); void getterGrow(); void shadow(MBufRawPacket *m_RawPacket); }; }\n"), 0);
-    ASSERT_EQ(th_write_file((repo + "/src/Packet.cpp").c_str(),
+    const char *packet_source =
         "#include \"Packet.h\"\nnamespace pcpp {\n"
         "void Packet::grow() { m_RawPacket->reallocateData(1); }\n"
         "void Packet::explicitGrow() { this->m_RawPacket->reallocateData(1); }\n"
         "void Packet::typedGrow() { RawPacket *receiver = m_RawPacket; receiver->reallocateData(1); }\n"
         "void Packet::getterGrow() { getPacket()->reallocateData(1); }\n"
-        "void Packet::shadow(MBufRawPacket *m_RawPacket) { m_RawPacket->reallocateData(1); } }\n"), 0);
+        "void Packet::shadow(MBufRawPacket *m_RawPacket) { m_RawPacket->reallocateData(1); } }\n";
+    ASSERT_EQ(th_write_file((repo + "/src/Packet.cpp").c_str(), packet_source), 0);
     ASSERT_EQ(th_write_file((repo + "/header/Distractor.h").c_str(),
         "#pragma once\nnamespace unrelated { struct RawPacket { void reallocateData(int); }; }\n"), 0);
     ASSERT_EQ(th_write_file((repo + "/src/Distractor.cpp").c_str(),
@@ -166,6 +168,19 @@ TEST(pipeline_cpp_pointer_members_match_in_memory_and_store) {
             ASSERT_EQ(strncmp(strategy, "lsp_", 4), 0);
             ++count;
         }
+        sqlite3_finalize(stmt);
+        ASSERT_EQ(sqlite3_prepare_v2(
+                      db,
+                      "SELECT sha256 FROM file_hashes WHERE rel_path='src/Packet.cpp'",
+                      -1, &stmt, nullptr),
+                  SQLITE_OK);
+        ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
+        const char *source_sha = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
+        ASSERT_NOT_NULL(source_sha);
+        ASSERT_EQ(strlen(source_sha), (size_t)CBM_SHA256_HEX_LEN);
+        char expected_sha[CBM_SHA256_HEX_LEN + 1];
+        cbm_sha256_hex(packet_source, strlen(packet_source), expected_sha);
+        ASSERT_STR_EQ(source_sha, expected_sha);
         sqlite3_finalize(stmt);
         sqlite3_close(db);
         ASSERT_EQ(count, 5);
@@ -6280,6 +6295,13 @@ TEST(incremental_full_then_noop) {
     ASSERT_NOT_NULL(s);
     int nodes_before = cbm_store_count_nodes(s, project);
     ASSERT_GT(nodes_before, 0);
+    char full_sha[CBM_SHA256_HEX_LEN + 1];
+    int64_t full_mtime = 0;
+    int64_t full_size = 0;
+    ASSERT_EQ(cbm_store_get_file_hash(s, project, "main.go", full_sha, sizeof(full_sha),
+                                      &full_mtime, &full_size),
+              CBM_STORE_OK);
+    ASSERT_EQ(strlen(full_sha), (size_t)CBM_SHA256_HEX_LEN);
     cbm_store_close(s);
 
     /* Second: incremental — nothing changed → should be no-op */
@@ -6293,6 +6315,15 @@ TEST(incremental_full_then_noop) {
     int nodes_after = cbm_store_count_nodes(s, project);
     /* Node count should be same (no duplicates, no loss) */
     ASSERT_EQ(nodes_after, nodes_before);
+    char noop_sha[CBM_SHA256_HEX_LEN + 1];
+    int64_t noop_mtime = 0;
+    int64_t noop_size = 0;
+    ASSERT_EQ(cbm_store_get_file_hash(s, project, "main.go", noop_sha, sizeof(noop_sha),
+                                      &noop_mtime, &noop_size),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(noop_sha, full_sha);
+    ASSERT_EQ(noop_mtime, full_mtime);
+    ASSERT_EQ(noop_size, full_size);
     cbm_store_close(s);
     free(project);
 
@@ -6384,14 +6415,37 @@ TEST(incremental_detects_changed_file) {
     char *project = strdup(cbm_pipeline_project_name(p));
     cbm_pipeline_free(p);
 
+    cbm_store_t *before_store = cbm_store_open_path(g_incr_dbpath);
+    ASSERT_NOT_NULL(before_store);
+    char old_sha[CBM_SHA256_HEX_LEN + 1];
+    int64_t old_mtime = 0;
+    int64_t old_size = 0;
+    ASSERT_EQ(cbm_store_get_file_hash(before_store, project, "helper.go", old_sha,
+                                      sizeof(old_sha), &old_mtime, &old_size),
+              CBM_STORE_OK);
+    char main_sha[CBM_SHA256_HEX_LEN + 1];
+    int64_t main_mtime = 0;
+    int64_t main_size = 0;
+    ASSERT_EQ(cbm_store_get_file_hash(before_store, project, "main.go", main_sha,
+                                      sizeof(main_sha), &main_mtime, &main_size),
+              CBM_STORE_OK);
+    const char *malformed_sha =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    ASSERT_EQ(strlen(malformed_sha), (size_t)CBM_SHA256_HEX_LEN + 1);
+    ASSERT_EQ(cbm_store_upsert_file_hash(before_store, project, "main.go", malformed_sha,
+                                         main_mtime, main_size),
+              CBM_STORE_OK);
+    cbm_store_close(before_store);
+
     /* Modify helper.go — add a new function */
     char path[512];
     snprintf(path, sizeof(path), "%s/helper.go", g_incr_tmpdir);
     FILE *f = fopen(path, "w");
     ASSERT_NOT_NULL(f);
-    fprintf(f, "package main\n\n"
-               "func Helper() string {\n\treturn \"hello\"\n}\n\n"
-               "func NewFunc() int {\n\treturn 42\n}\n");
+    const char *changed_source = "package main\n\n"
+                                 "func Helper() string {\n\treturn \"hello\"\n}\n\n"
+                                 "func NewFunc() int {\n\treturn 42\n}\n";
+    fputs(changed_source, f);
     fclose(f);
 
     /* Second: incremental — should detect change and re-index */
@@ -6404,6 +6458,21 @@ TEST(incremental_detects_changed_file) {
     ASSERT_NOT_NULL(s);
     int nodes_after = cbm_store_count_nodes(s, project);
     ASSERT_GT(nodes_after, 0);
+    char changed_sha[CBM_SHA256_HEX_LEN + 1];
+    char expected_sha[CBM_SHA256_HEX_LEN + 1];
+    int64_t changed_mtime = 0;
+    int64_t changed_size = 0;
+    cbm_sha256_hex(changed_source, strlen(changed_source), expected_sha);
+    ASSERT_EQ(cbm_store_get_file_hash(s, project, "helper.go", changed_sha, sizeof(changed_sha),
+                                      &changed_mtime, &changed_size),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(changed_sha, expected_sha);
+    ASSERT_TRUE(strcmp(changed_sha, old_sha) != 0);
+    char preserved_main_sha[CBM_SHA256_HEX_LEN + 1];
+    ASSERT_EQ(cbm_store_get_file_hash(s, project, "main.go", preserved_main_sha,
+                                      sizeof(preserved_main_sha), &main_mtime, &main_size),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(preserved_main_sha, "");
     cbm_store_close(s);
     cbm_pipeline_free(p);
     free(project);

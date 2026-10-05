@@ -1213,6 +1213,12 @@ static size_t ha_arr_size(yyjson_val *obj, const char *key) {
  * graph's answer for it is trustworthy. */
 static char *ha_format_symbol_brief(yyjson_doc *d, const char *token) {
     yyjson_val *r = yyjson_doc_get_root(d);
+    yyjson_val *index = yyjson_obj_get(r, "index");
+    yyjson_val *stale = index ? yyjson_obj_get(index, "file_modified_after_index") : nullptr;
+    if (!yyjson_is_bool(stale) || yyjson_is_true(stale)) {
+        yyjson_doc_free(d);
+        return nullptr;
+    }
     char *text = (char *)malloc(HA_TEXT_SZ);
     if (!text) {
         yyjson_doc_free(d);
@@ -1320,11 +1326,6 @@ static char *ha_format_symbol_brief(yyjson_doc *d, const char *token) {
         HA_APPEND(text, HA_TEXT_SZ, off, ". %d caller(s) from %s (e.g. %s)", cross,
                   ha_obj_str(c0, "language") ? ha_obj_str(c0, "language") : "another language",
                   ha_obj_str(c0, "file") ? ha_obj_str(c0, "file") : "?");
-    }
-    yyjson_val *index = yyjson_obj_get(r, "index");
-    yyjson_val *stale = index ? yyjson_obj_get(index, "file_modified_after_index") : NULL;
-    if (stale && yyjson_is_true(stale)) {
-        HA_APPEND(text, HA_TEXT_SZ, off, ". NOTE: the defining file changed after indexing");
     }
     if (ha_obj_str(r, "coverage_note")) {
         HA_APPEND(text, HA_TEXT_SZ, off,
@@ -1461,11 +1462,10 @@ static char *ha_format_session_brief(const char *project, const char *json) {
               "callers with call-site lines, the tests that cover a symbol and callers from other "
               "languages; trace_path for multi-hop call chains; detect_changes for the blast "
               "radius of your edits. Plain grep is fine for free text. A [code-cortex] block "
-              "attached to your prompt already contains the whole-word matches for the symbols "
-              "you named, read from disk when the prompt was submitted; searching for the same "
-              "name again returns the same lines. The project argument is optional inside this "
-              "repository. Graph answers for partially parsed files are lower bounds (results "
-              "say so).");
+              "attached to a prompt is bounded evidence, not a completeness guarantee. Inspect "
+              "current source or use the user's requested tools whenever independent verification "
+              "could change the answer. The project argument is optional inside this repository. "
+              "Graph answers for partially parsed files are lower bounds (results say so).");
     return text;
 }
 
@@ -2304,6 +2304,8 @@ struct ha_file_lines {
 struct ha_reader {
     std::string root;
     std::vector<std::pair<std::string, ha_file_lines>> cache;
+    /* Optional source evidence fails closed before the hook's hard timer. */
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
 };
 
 static bool ha_safe_rel(const std::string &rel) {
@@ -2715,8 +2717,12 @@ static std::vector<ha_node> ha_parse_nodes(yyjson_doc *d, const std::string &pro
  * (which a directory-only walk computes), so a warm prompt does not re-match
  * every file against the ignore rules. Parallel scan, bounded by a deadline. */
 struct ha_match {
-    int line;
+    int line = 0;
     std::string text;
+    int code_occurrences = 0;
+    int call_shapes = 0;
+    int comment_occurrences = 0;
+    int string_occurrences = 0;
 };
 
 struct ha_scan_result {
@@ -2726,6 +2732,7 @@ struct ha_scan_result {
     size_t not_indexed = 0; /* scanned files the index does not hold */
     size_t skipped_binary = 0;
     size_t skipped_large = 0;
+    size_t hit_limited_files = 0;
     bool complete = false;
     long elapsed_ms = 0;
 };
@@ -2946,6 +2953,7 @@ static void ha_scan_matches(const std::string &root, const std::vector<std::stri
     std::atomic<size_t> read{0};
     std::atomic<size_t> binary{0};
     std::atomic<size_t> large{0};
+    std::atomic<size_t> hit_limited{0};
     std::atomic<bool> timed_out{false};
     std::mutex mu;
     auto worker = [&]() {
@@ -2956,7 +2964,7 @@ static void ha_scan_matches(const std::string &root, const std::vector<std::stri
             if (i >= files.size()) {
                 break;
             }
-            if ((i & 15) == 0 && std::chrono::steady_clock::now() >= deadline) {
+            if (timed_out.load() || std::chrono::steady_clock::now() >= deadline) {
                 timed_out = true;
                 break;
             }
@@ -2977,42 +2985,199 @@ static void ha_scan_matches(const std::string &root, const std::vector<std::stri
                 continue;
             }
             std::string_view hay(buf.data(), n);
+            size_t last_whole_hit = std::string_view::npos;
+            size_t raw_hits = 0;
+            for (size_t p = hay.find(name); p != std::string_view::npos;
+                 p = hay.find(name, p + 1)) {
+                if ((raw_hits++ & 255) == 0 && std::chrono::steady_clock::now() >= deadline) {
+                    timed_out = true;
+                    break;
+                }
+                bool left = p == 0 || !ha_ident_char((unsigned char)hay[p - 1]);
+                size_t end = p + name.size();
+                bool right = end >= hay.size() || !ha_ident_char((unsigned char)hay[end]);
+                if (left && right) {
+                    last_whole_hit = p;
+                }
+            }
+            if (timed_out.load()) {
+                break;
+            }
+            if (last_whole_hit == std::string_view::npos) {
+                continue;
+            }
             std::vector<ha_match> hits;
             int line_no = 0;
             size_t line_start = 0;
-            size_t scanned_to = 0;
-            for (size_t pos = hay.find(name); pos != std::string_view::npos;
-                 pos = hay.find(name, pos + 1)) {
+            size_t slash = files[i].rfind('/');
+            size_t dot = files[i].rfind('.');
+            std::string ext =
+                dot == std::string::npos || (slash != std::string::npos && dot < slash)
+                    ? std::string()
+                    : files[i].substr(dot);
+            bool hash_comment =
+                ha_word_in(ext, {".py", ".rb", ".sh", ".bash", ".cmake", ".yml", ".yaml",
+                                 ".toml", ".pl", ".r", ".txt", ".tcl", ".pyi", ".mk",
+                                 ".conf", ".cfg", ".ini"});
+            bool dash_comment = ha_word_in(ext, {".sql", ".lua", ".hs"});
+            bool block_comment = false;
+            bool line_comment = false;
+            char quote = '\0';
+            bool triple = false;
+            bool escaped = false;
+            size_t next_deadline_check = 0;
+            auto call_shape = [&](size_t pos) {
+                size_t k = pos + name.size();
+                while (k < hay.size() && (hay[k] == ' ' || hay[k] == '\t')) {
+                    ++k;
+                }
+                if (k < hay.size() && hay[k] == '(') {
+                    return true;
+                }
+                if (k >= hay.size() || hay[k] != '<') {
+                    return false;
+                }
+                int depth = 0;
+                const size_t limit = std::min(hay.size(), k + (size_t)512);
+                for (; k < limit && hay[k] != '\n'; ++k) {
+                    if (hay[k] == '<') {
+                        if (++depth > 16) {
+                            return false;
+                        }
+                    } else if (hay[k] == '>' && --depth == 0) {
+                        ++k;
+                        while (k < hay.size() && (hay[k] == ' ' || hay[k] == '\t')) {
+                            ++k;
+                        }
+                        return k < hay.size() && hay[k] == '(';
+                    }
+                }
+                return false;
+            };
+            auto match_at = [&](size_t pos) {
+                if (pos + name.size() > hay.size() || hay.compare(pos, name.size(), name) != 0) {
+                    return false;
+                }
                 bool left = pos == 0 || !ha_ident_char((unsigned char)hay[pos - 1]);
                 size_t end = pos + name.size();
                 bool right = end >= hay.size() || !ha_ident_char((unsigned char)hay[end]);
-                if (!left || !right) {
-                    continue;
-                }
-                while (scanned_to < pos) {
-                    size_t nl = hay.find('\n', scanned_to);
-                    if (nl == std::string_view::npos || nl >= pos) {
-                        scanned_to = pos;
+                return left && right;
+            };
+            bool limited = false;
+            for (size_t pos = 0; pos <= last_whole_hit && pos < hay.size();) {
+                if (pos >= next_deadline_check) {
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        timed_out = true;
                         break;
                     }
-                    line_no++;
-                    line_start = nl + 1;
-                    scanned_to = nl + 1;
+                    next_deadline_check = pos + 4096;
                 }
-                int this_line = line_no + 1;
-                if (!hits.empty() && hits.back().line == this_line) {
+                if (hay[pos] == '\n') {
+                    line_no++;
+                    line_start = pos + 1;
+                    line_comment = false;
+                    /* Carry quote state conservatively: template/raw strings
+                     * may span lines, and a false call is worse than an
+                     * unresolved occurrence in malformed source. */
+                    escaped = false;
+                    ++pos;
                     continue;
                 }
-                size_t eol = hay.find('\n', line_start);
-                std::string text(hay.substr(
-                    line_start, (eol == std::string_view::npos ? hay.size() : eol) - line_start));
-                if (!text.empty() && text.back() == '\r') {
-                    text.pop_back();
+                bool occurrence = match_at(pos);
+                if (occurrence) {
+                    int this_line = line_no + 1;
+                    if (hits.empty() || hits.back().line != this_line) {
+                        if (hits.size() >= HA_SCAN_MAX_HITS_PER_FILE) {
+                            limited = true;
+                            break;
+                        }
+                        size_t eol = hay.find('\n', line_start);
+                        std::string text(hay.substr(
+                            line_start,
+                            (eol == std::string_view::npos ? hay.size() : eol) - line_start));
+                        if (!text.empty() && text.back() == '\r') {
+                            text.pop_back();
+                        }
+                        ha_match m;
+                        m.line = this_line;
+                        m.text = std::move(text);
+                        hits.push_back(std::move(m));
+                    }
+                    ha_match &m = hits.back();
+                    if (block_comment || line_comment) {
+                        m.comment_occurrences++;
+                    } else if (quote) {
+                        m.string_occurrences++;
+                    } else {
+                        m.code_occurrences++;
+                        m.call_shapes += call_shape(pos);
+                    }
+                    pos += name.size();
+                    if (quote && !triple) {
+                        /* An escape protects only the next byte. Skipping an
+                         * identifier must not carry it to the closing quote. */
+                        escaped = false;
+                    }
+                    continue;
                 }
-                hits.push_back({this_line, text});
-                if (hits.size() >= HA_SCAN_MAX_HITS_PER_FILE) {
-                    break;
+                if (block_comment) {
+                    if (pos + 1 < hay.size() && hay[pos] == '*' && hay[pos + 1] == '/') {
+                        block_comment = false;
+                        pos += 2;
+                    } else {
+                        ++pos;
+                    }
+                    continue;
                 }
+                if (line_comment) {
+                    ++pos;
+                    continue;
+                }
+                if (quote) {
+                    if (triple && pos + 2 < hay.size() && hay[pos] == quote &&
+                        hay[pos + 1] == quote && hay[pos + 2] == quote) {
+                        quote = '\0';
+                        triple = false;
+                        escaped = false;
+                        pos += 3;
+                    } else if (!triple && !escaped && hay[pos] == quote) {
+                        quote = '\0';
+                        ++pos;
+                    } else {
+                        bool was_escape = escaped;
+                        escaped = !was_escape && hay[pos] == '\\';
+                        if (was_escape) {
+                            escaped = false;
+                        }
+                        ++pos;
+                    }
+                    continue;
+                }
+                if (pos + 1 < hay.size() && hay[pos] == '/' && hay[pos + 1] == '*') {
+                    block_comment = true;
+                    pos += 2;
+                    continue;
+                }
+                if ((pos + 1 < hay.size() && hay[pos] == '/' && hay[pos + 1] == '/') ||
+                    (dash_comment && pos + 1 < hay.size() && hay[pos] == '-' &&
+                     hay[pos + 1] == '-') ||
+                    (hash_comment && hay[pos] == '#')) {
+                    line_comment = true;
+                    pos += (hay[pos] == '#') ? 1 : 2;
+                    continue;
+                }
+                if (hay[pos] == '"' || hay[pos] == '\'' || hay[pos] == '`') {
+                    quote = hay[pos];
+                    triple = pos + 2 < hay.size() && hay[pos + 1] == quote &&
+                             hay[pos + 2] == quote;
+                    escaped = false;
+                    pos += triple ? 3 : 1;
+                    continue;
+                }
+                ++pos;
+            }
+            if (limited) {
+                hit_limited++;
             }
             if (!hits.empty()) {
                 local.emplace_back(files[i], std::move(hits));
@@ -3043,59 +3208,117 @@ static void ha_scan_matches(const std::string &root, const std::vector<std::stri
     out->files_total = files.size();
     out->skipped_binary = binary;
     out->skipped_large = large;
+    out->hit_limited_files = hit_limited;
     out->complete = !timed_out;
     out->elapsed_ms = (long)std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::steady_clock::now() - t0)
                           .count();
 }
 
-/* Cheap, certain classification of a match line that is not a resolved
- * call: a comment, a string literal, an import/include. "" when unsure. */
-static std::string ha_match_tag(const std::string &file, const std::string &text,
-                                const std::string &name) {
+static bool ha_match_is_import(const std::string &text) {
     size_t a = text.find_first_not_of(" \t");
     std::string t = a == std::string::npos ? std::string() : text.substr(a);
+    return t.rfind("#include", 0) == 0 || t.rfind("import ", 0) == 0 ||
+           t.rfind("from ", 0) == 0 || t.rfind("require", 0) == 0 ||
+           t.rfind("using ", 0) == 0;
+}
+
+/* A graph call site must still name the callee outside recognized comments
+ * and quoted text in the current file. State is carried from the start so a
+ * multiline block comment or Python/Ruby triple-quoted string cannot preserve
+ * a stale edge. This is deliberately conservative, not a language parser. */
+static bool ha_current_call_evidence(ha_reader *rd, const std::string &file, int target_line,
+                                     const std::string &name) {
+    const ha_file_lines &fl = ha_read_file(rd, file);
+    if (!fl.ok || target_line < 1 || (size_t)target_line > fl.lines.size()) {
+        return false;
+    }
+    /* find_in_body invokes this per candidate line.  Avoid reconstructing
+     * lexical state when the line cannot possibly corroborate the edge. */
+    const std::string &target = fl.lines[(size_t)target_line - 1];
+    bool has_name = false;
+    for (size_t p = target.find(name); p != std::string::npos; p = target.find(name, p + 1)) {
+        bool left = p == 0 || !ha_ident_char((unsigned char)target[p - 1]);
+        size_t end = p + name.size();
+        bool right = end >= target.size() || !ha_ident_char((unsigned char)target[end]);
+        if (left && right) {
+            has_name = true;
+            break;
+        }
+    }
+    if (!has_name || std::chrono::steady_clock::now() >= rd->deadline) {
+        return false;
+    }
     std::string ext =
         file.substr(file.rfind('.') == std::string::npos ? file.size() : file.rfind('.') + 1);
     bool hash_comment =
         ha_word_in(ext, {"py", "rb", "sh", "bash", "cmake", "yml", "yaml", "toml", "pl", "r", "txt",
                          "tcl", "pyi", "mk", "conf", "cfg", "ini", "dockerfile"});
-    if (t.rfind("//", 0) == 0 || t.rfind("/*", 0) == 0 || t.rfind("* ", 0) == 0 || t == "*" ||
-        t.rfind("--", 0) == 0 || (hash_comment && t.rfind("#", 0) == 0)) {
-        return "comment";
-    }
-    if (t.rfind("#include", 0) == 0 || t.rfind("import ", 0) == 0 || t.rfind("from ", 0) == 0 ||
-        t.rfind("require", 0) == 0 || t.rfind("using ", 0) == 0) {
-        return "import";
-    }
-    /* The first whole-word occurrence: inside "..." or after //? */
-    size_t pos = std::string::npos;
-    for (size_t p = text.find(name); p != std::string::npos; p = text.find(name, p + 1)) {
-        bool left = p == 0 || !ha_ident_char((unsigned char)text[p - 1]);
-        size_t e = p + name.size();
-        bool right = e >= text.size() || !ha_ident_char((unsigned char)text[e]);
-        if (left && right) {
-            pos = p;
-            break;
+    bool dash_comment = ha_word_in(ext, {"sql", "lua", "hs"});
+    bool block_comment = false;
+    char quote = '\0';
+    bool triple = false;
+    for (int line_no = 1; line_no <= target_line; ++line_no) {
+        if (std::chrono::steady_clock::now() >= rd->deadline) {
+            return false;
+        }
+        const std::string &line = fl.lines[(size_t)line_no - 1];
+        for (size_t k = 0; k < line.size();) {
+            if ((k & 1023) == 0 && std::chrono::steady_clock::now() >= rd->deadline) {
+                return false;
+            }
+            if (block_comment) {
+                size_t end = line.find("*/", k);
+                if (end == std::string::npos) {
+                    break;
+                }
+                block_comment = false;
+                k = end + 2;
+                continue;
+            }
+            if (quote) {
+                if (triple && k + 2 < line.size() && line[k] == quote && line[k + 1] == quote &&
+                    line[k + 2] == quote) {
+                    quote = '\0';
+                    triple = false;
+                    k += 3;
+                } else if (!triple && line[k] == '\\' && k + 1 < line.size()) {
+                    k += 2;
+                } else if (!triple && line[k] == quote) {
+                    quote = '\0';
+                    ++k;
+                } else {
+                    ++k;
+                }
+                continue;
+            }
+            if (line.compare(k, 2, "//") == 0 || (hash_comment && line[k] == '#') ||
+                (dash_comment && line.compare(k, 2, "--") == 0)) {
+                break;
+            }
+            if (line.compare(k, 2, "/*") == 0) {
+                block_comment = true;
+                k += 2;
+                continue;
+            }
+            if (line[k] == '"' || line[k] == '\'' || line[k] == '`') {
+                quote = line[k];
+                triple = k + 2 < line.size() && line[k + 1] == quote && line[k + 2] == quote;
+                k += triple ? 3 : 1;
+                continue;
+            }
+            if (line_no == target_line && line.compare(k, name.size(), name) == 0) {
+                bool left = k == 0 || !ha_ident_char((unsigned char)line[k - 1]);
+                size_t end = k + name.size();
+                bool right = end >= line.size() || !ha_ident_char((unsigned char)line[end]);
+                if (left && right) {
+                    return true;
+                }
+            }
+            ++k;
         }
     }
-    if (pos == std::string::npos) {
-        return {};
-    }
-    bool in_str = false;
-    for (size_t k = 0; k < pos; ++k) {
-        if (text[k] == '\\') {
-            k++;
-            continue;
-        }
-        if (text[k] == '"') {
-            in_str = !in_str;
-        }
-        if (!in_str && text.compare(k, 2, "//") == 0) {
-            return "comment";
-        }
-    }
-    return in_str ? "string" : std::string();
+    return false;
 }
 
 /* ── Evidence blocks ──────────────────────────────────────────────────── */
@@ -3114,15 +3337,13 @@ struct ha_symbol_facts {
     std::vector<ha_loc> decls;
     std::vector<std::pair<std::string, int>> call_lines; /* graph-resolved call sites */
     std::vector<std::string> caller_files;               /* graph rollup */
-    std::vector<std::string> caller_names;               /* direct callers, by name */
-    int callers_total = 0;
-    int callees_total = 0;
+    int callers_total = 0; /* distinct indexed callers with a current lexical occurrence */
     bool in_graph = true;
 };
 
 static bool ha_is_call_line(const ha_symbol_facts &f, const std::string &file, int line) {
     for (const auto &c : f.call_lines) {
-        if (c.first == file && line >= c.second - 2 && line <= c.second + 2) {
+        if (c.first == file && line == c.second) {
             return true;
         }
     }
@@ -3138,52 +3359,75 @@ static bool ha_is_loc(const std::vector<ha_loc> &locs, const std::string &file, 
     return false;
 }
 
-/* Is some whole-word occurrence of name on this line followed by "(" ? */
-static bool ha_line_calls(const std::string &text, const std::string &name) {
-    for (size_t p = text.find(name); p != std::string::npos; p = text.find(name, p + 1)) {
-        bool left = p == 0 || !ha_ident_char((unsigned char)text[p - 1]);
-        size_t e = p + name.size();
-        if (!left || (e < text.size() && ha_ident_char((unsigned char)text[e]))) {
-            continue;
-        }
-        while (e < text.size() && (text[e] == ' ' || text[e] == '\t')) {
-            e++;
-        }
-        if (e < text.size() && text[e] == '(') {
-            return true;
-        }
+struct ha_classification {
+    int definitions = 0;
+    int declarations = 0;
+    int indexed_edge_candidates = 0;
+    int unresolved_call_shapes = 0;
+    int comments = 0;
+    int strings = 0;
+    int imports = 0;
+    int references = 0;
+    std::string label;
+};
+
+static void ha_add_class_label(std::string &out, const char *name, int count) {
+    if (!count) {
+        return;
     }
-    return false;
+    out += out.empty() ? "" : "; ";
+    out += name;
+    if (count > 1) {
+        out += " x" + std::to_string(count);
+    }
 }
 
-/* What a match line is, from the graph first and the text second:
- * definition, declaration, call (graph-resolved), comment, string, import,
- * call (text only: `name(` the graph did not resolve), reference (no `(`:
- * a function value, address-of, macro argument, doc mention). */
-static std::string ha_classify(const ha_symbol_facts &f, const std::string &file,
-                               const ha_match &m) {
-    if (ha_is_loc(f.defs, file, m.line)) {
-        return "definition";
+/* This is occurrence classification, not call binding. Definitions and
+ * declarations consume one call-shaped occurrence on their source line; a
+ * second occurrence on that same line remains visible as a candidate. */
+static ha_classification ha_classify(const ha_symbol_facts &f, const std::string &file,
+                                     const ha_match &m) {
+    ha_classification c;
+    int code = m.code_occurrences;
+    int shapes = m.call_shapes;
+    if (ha_is_loc(f.defs, file, m.line) && code > 0) {
+        c.definitions = 1;
+        --code;
+        if (shapes > 0) {
+            --shapes;
+        }
+    } else if (ha_is_loc(f.decls, file, m.line) && code > 0) {
+        c.declarations = 1;
+        --code;
+        if (shapes > 0) {
+            --shapes;
+        }
     }
-    if (ha_is_loc(f.decls, file, m.line)) {
-        return "declaration";
+    if (code > 0 && ha_match_is_import(m.text)) {
+        /* Keep executable call shapes on a compact import-and-use line. */
+        c.imports = std::max(0, code - shapes);
+        code -= c.imports;
     }
-    if (ha_is_call_line(f, file, m.line) && ha_line_calls(m.text, f.bare)) {
-        return "call";
+    if (shapes > 0 && ha_is_call_line(f, file, m.line)) {
+        c.indexed_edge_candidates = 1;
+        --shapes;
+        --code;
     }
-    std::string tag = ha_match_tag(file, m.text, f.bare);
-    if (!tag.empty()) {
-        return tag;
-    }
-    if (ha_is_call_line(f, file, m.line)) {
-        return "call";
-    }
-    return ha_line_calls(m.text, f.bare) ? "call (text only, not resolved by the graph)"
-                                         : "reference";
-}
-
-static bool ha_tag_is_call(const std::string &t) {
-    return t.rfind("call", 0) == 0;
+    c.unresolved_call_shapes = std::max(0, shapes);
+    code -= c.unresolved_call_shapes;
+    c.references = std::max(0, code);
+    c.comments = m.comment_occurrences;
+    c.strings = m.string_occurrences;
+    ha_add_class_label(c.label, "definition", c.definitions);
+    ha_add_class_label(c.label, "declaration", c.declarations);
+    ha_add_class_label(c.label, "indexed edge candidate; binding not re-resolved",
+                       c.indexed_edge_candidates);
+    ha_add_class_label(c.label, "unresolved call shape", c.unresolved_call_shapes);
+    ha_add_class_label(c.label, "reference", c.references);
+    ha_add_class_label(c.label, "import", c.imports);
+    ha_add_class_label(c.label, "comment occurrence", c.comments);
+    ha_add_class_label(c.label, "string occurrence", c.strings);
+    return c;
 }
 
 static std::string ha_ext_of(const std::string &file) {
@@ -3377,7 +3621,7 @@ static std::vector<ha_alias_hit> ha_find_module_imports(
 
 /* Callers/usages/impact block. level 0: every match line (when there are at
  * most HA_PROMPT_ALL_LINES); 1: one summary line per file; 2: no per-file
- * listing (the table at the end still names every file). */
+ * listing (the bounded table at the end still names every matched file). */
 static std::string ha_callers_block(ha_reader *rd, const ha_symbol_facts &f,
                                     const ha_scan_result &scan,
                                     const std::vector<ha_alias_hit> &aliases, int level) {
@@ -3386,9 +3630,10 @@ static std::string ha_callers_block(ha_reader *rd, const ha_symbol_facts &f,
         out = "- " + f.bare + " (not in the code graph; whole-word matches:)";
     } else {
         out = "- " + f.display + " (" + f.label;
-        if (f.callers_total || f.callees_total) {
-            out += "; graph: " + std::to_string(f.callers_total) + " callers, " +
-                   std::to_string(f.callees_total) + " callees";
+        if (f.callers_total) {
+            out += "; " + std::to_string(f.callers_total) +
+                   " indexed graph caller candidate(s) with a current executable-name "
+                   "occurrence; binding not re-resolved";
         }
         out += ")";
     }
@@ -3406,8 +3651,10 @@ static std::string ha_callers_block(ha_reader *rd, const ha_symbol_facts &f,
     size_t total = 0;
     struct row {
         std::string file;
-        std::vector<std::pair<const ha_match *, std::string>> lines;
-        int calls = 0;
+        std::vector<std::pair<const ha_match *, ha_classification>> lines;
+        int indexed_edge_candidates = 0;
+        int unresolved_call_shapes = 0;
+        int other_occurrences = 0;
     };
     std::vector<row> rows;
     std::vector<std::pair<std::string, int>> ext_counts;
@@ -3415,9 +3662,12 @@ static std::string ha_callers_block(ha_reader *rd, const ha_symbol_facts &f,
         row r;
         r.file = fm.first;
         for (const auto &m : fm.second) {
-            std::string tag = ha_classify(f, fm.first, m);
-            r.calls += ha_tag_is_call(tag);
-            r.lines.emplace_back(&m, tag);
+            ha_classification c = ha_classify(f, fm.first, m);
+            r.indexed_edge_candidates += c.indexed_edge_candidates;
+            r.unresolved_call_shapes += c.unresolved_call_shapes;
+            r.other_occurrences += c.definitions + c.declarations + c.comments + c.strings +
+                                   c.imports + c.references;
+            r.lines.emplace_back(&m, std::move(c));
             total++;
         }
         std::string ext = ha_ext_of(fm.first);
@@ -3431,27 +3681,44 @@ static std::string ha_callers_block(ha_reader *rd, const ha_symbol_facts &f,
         rows.push_back(std::move(r));
     }
     /* Every match line, or per-file summaries. */
+    bool occurrence_counts_partial = !scan.complete || scan.hit_limited_files != 0;
     if (level == 0 && total <= HA_PROMPT_ALL_LINES) {
-        out += "\n  every whole-word match (" + std::to_string(total) + " lines):";
+        out += (occurrence_counts_partial ? "\n  retained whole-word matches (at least "
+                                          : "\n  every whole-word match (");
+        out += std::to_string(total) + " lines):";
         for (const auto &r : rows) {
             for (const auto &l : r.lines) {
                 out += "\n    " + r.file + ":" + std::to_string(l.first->line) + ": " +
-                       ha_src(l.first->text) + "  [" + l.second + "]";
+                       ha_src(l.first->text) + "  [" + l.second.label + "]";
             }
         }
     } else if (level <= 1) {
-        out += "\n  matches per file (" + std::to_string(total) + " lines; listed by line number):";
+        out += (occurrence_counts_partial ? "\n  retained matches per file (at least "
+                                          : "\n  matches per file (");
+        out += std::to_string(total) + " lines; listed by line number):";
         for (const auto &r : rows) {
             std::vector<std::pair<std::string, int>> kinds;
             for (const auto &l : r.lines) {
-                std::string k = ha_tag_is_call(l.second) ? "calls" : l.second + "s";
-                auto it = std::find_if(kinds.begin(), kinds.end(),
-                                       [&](const auto &x) { return x.first == k; });
-                if (it == kinds.end()) {
-                    kinds.emplace_back(k, 1);
-                } else {
-                    it->second++;
-                }
+                auto add = [&](const char *kind, int count) {
+                    if (!count) {
+                        return;
+                    }
+                    auto it = std::find_if(kinds.begin(), kinds.end(),
+                                           [&](const auto &x) { return x.first == kind; });
+                    if (it == kinds.end()) {
+                        kinds.emplace_back(kind, count);
+                    } else {
+                        it->second += count;
+                    }
+                };
+                add("indexed edge candidates", l.second.indexed_edge_candidates);
+                add("unresolved call shapes", l.second.unresolved_call_shapes);
+                add("definitions", l.second.definitions);
+                add("declarations", l.second.declarations);
+                add("comments", l.second.comments);
+                add("strings", l.second.strings);
+                add("imports", l.second.imports);
+                add("references", l.second.references);
             }
             std::string kinds_s;
             for (const auto &k : kinds) {
@@ -3466,15 +3733,39 @@ static std::string ha_callers_block(ha_reader *rd, const ha_symbol_facts &f,
         }
     } else {
         out += "\n  (per-line listing dropped to fit the context budget; the file table below is "
-               "complete)";
+               "bounded)";
+    }
+    if (level > 0) {
+        size_t ambiguous = 0;
+        size_t shown = 0;
+        std::string excerpts;
+        for (const auto &r : rows) {
+            for (const auto &l : r.lines) {
+                if (!l.second.indexed_edge_candidates && !l.second.unresolved_call_shapes) {
+                    continue;
+                }
+                ambiguous++;
+                if (shown++ < 12) {
+                    excerpts += "\n    " + r.file + ":" + std::to_string(l.first->line) + ": " +
+                                ha_src(l.first->text) + "  [" + l.second.label + "]";
+                }
+            }
+        }
+        if (ambiguous) {
+            out += "\n  ambiguous executable source excerpts (binding not re-resolved):" + excerpts;
+            if (ambiguous > 12) {
+                out += "\n    and " + std::to_string(ambiguous - 12) +
+                       " more ambiguous line(s) omitted to fit the context budget";
+            }
+        }
     }
     /* Non-call references. */
     std::string refs;
     size_t nrefs = 0;
     for (const auto &r : rows) {
         for (const auto &l : r.lines) {
-            if (l.second == "reference") {
-                nrefs++;
+            if (l.second.references) {
+                nrefs += (size_t)l.second.references;
                 if (level == 0) {
                     refs += "\n    " + r.file + ":" + std::to_string(l.first->line) + ": " +
                             ha_src(l.first->text);
@@ -3507,26 +3798,13 @@ static std::string ha_callers_block(ha_reader *rd, const ha_symbol_facts &f,
                    "  [" + a.kind + "]";
         }
     }
-    /* Graph callers whose file no longer holds the name. */
-    std::string missing;
-    for (const auto &cf : f.caller_files) {
-        bool seen = false;
-        for (const auto &fm : scan.files) {
-            seen |= fm.first == cf;
-        }
-        if (!seen && scan.complete) {
-            missing += (missing.empty() ? "" : ", ") + cf;
-        }
-    }
-    if (!missing.empty()) {
-        out += "\n  graph-resolved callers with no whole-word `" + f.bare +
-               "` on disk now (stale, re-check): " + missing;
-    }
-    /* The complete file table. */
+    /* Bounded evidence table. Candidate counts are not target-binding claims. */
     out += "\n  files containing `" + f.bare + "` (" + std::to_string(rows.size()) + "):";
     for (const auto &r : rows) {
-        out += "\n    " + r.file + "  calls=" + std::to_string(r.calls) +
-               " other=" + std::to_string((int)r.lines.size() - r.calls);
+        out += "\n    " + r.file +
+               "  indexed_edge_candidates=" + std::to_string(r.indexed_edge_candidates) +
+               " unresolved_call_shapes=" + std::to_string(r.unresolved_call_shapes) +
+               " other_occurrences=" + std::to_string(r.other_occurrences);
     }
     /* Totals. */
     std::sort(ext_counts.begin(), ext_counts.end(), [](const auto &a, const auto &b) {
@@ -3544,13 +3822,21 @@ static std::string ha_callers_block(ha_reader *rd, const ha_symbol_facts &f,
     if (scan.not_indexed) {
         out += "; " + std::to_string(scan.not_indexed) + " of them are not in the index";
     }
-    out += "); " + std::to_string(rows.size()) + " files contain the whole word" +
+    out += "); " + std::string(scan.complete ? "" : "at least ") +
+           std::to_string(rows.size()) + " files contain the whole word" +
            (by_ext.empty() ? std::string() : "; by extension: " + by_ext);
     if (!scan.complete) {
         out += "\n  (scan stopped at its time budget after " + std::to_string(scan.elapsed_ms) +
                " ms: " + std::to_string(scan.files_read) + " of " +
                std::to_string(scan.files_total) + " files read; the lists above are partial)";
     }
+    if (scan.hit_limited_files) {
+        out += "\n  (per-file match cap reached in " + std::to_string(scan.hit_limited_files) +
+               " file(s); their occurrence counts and line lists are lower bounds)";
+    }
+    out += "\n  classification note: executable call shapes and indexed edge candidates do not "
+           "prove the current target binding; inspect the shown source or retrieve more context "
+           "when binding matters.";
     return out;
 }
 
@@ -3682,17 +3968,18 @@ static char *ha_prompt_payload(const std::vector<std::string> &blocks, size_t ma
     return best;
 }
 
-static yyjson_doc *ha_prompt_inspect(cbm_mcp_server_t *srv, const char *project,
-                                     const std::string &qn, bool *is_error) {
+static yyjson_doc *ha_prompt_inspect_limit(cbm_mcp_server_t *srv, const char *project,
+                                           const std::string &qn, int callers_limit, int max_bytes,
+                                           bool *is_error) {
     yyjson_mut_doc *ad = yyjson_mut_doc_new(nullptr);
     yyjson_mut_val *args = yyjson_mut_obj(ad);
     yyjson_mut_doc_set_root(ad, args);
     yyjson_mut_obj_add_str(ad, args, "project", project);
     yyjson_mut_obj_add_strncpy(ad, args, "symbol", qn.data(), qn.size());
     yyjson_mut_obj_add_int(ad, args, "source_lines", 0);
-    yyjson_mut_obj_add_int(ad, args, "callers_limit", 2000);
+    yyjson_mut_obj_add_int(ad, args, "callers_limit", callers_limit);
     yyjson_mut_obj_add_int(ad, args, "callees_limit", 0);
-    yyjson_mut_obj_add_int(ad, args, "max_bytes", 2000000);
+    yyjson_mut_obj_add_int(ad, args, "max_bytes", max_bytes);
     char *encoded = yyjson_mut_write(ad, 0, nullptr);
     yyjson_mut_doc_free(ad);
     *is_error = false;
@@ -3701,11 +3988,40 @@ static yyjson_doc *ha_prompt_inspect(cbm_mcp_server_t *srv, const char *project,
     return d;
 }
 
+static yyjson_doc *ha_prompt_inspect(cbm_mcp_server_t *srv, const char *project,
+                                     const std::string &qn, bool *is_error) {
+    /* The current-source scan below is the complete caller inventory.  Keep
+     * graph corroboration bounded so a high-degree symbol cannot consume the
+     * entire 1.5 s prompt deadline or return megabytes we do not emit. */
+    return ha_prompt_inspect_limit(srv, project, qn, 256, 256000, is_error);
+}
+
+static bool ha_prompt_inspect_is_fresh(yyjson_doc *d, bool error) {
+    yyjson_val *r = d && !error ? yyjson_doc_get_root(d) : nullptr;
+    yyjson_val *index = r ? yyjson_obj_get(r, "index") : nullptr;
+    yyjson_val *stale = index ? yyjson_obj_get(index, "file_modified_after_index") : nullptr;
+    return yyjson_is_bool(stale) && !yyjson_is_true(stale);
+}
+
+/* A structural answer is safe only while every source family it relies on is
+ * no newer than the index.  This deliberately fails closed: an old database
+ * without freshness metadata, a missing symbol, or a query error suppresses
+ * the graph relationship instead of presenting it as current source truth. */
+static bool ha_prompt_symbol_is_fresh(cbm_mcp_server_t *srv, const char *project,
+                                      const std::string &qn) {
+    bool error = false;
+    yyjson_doc *d = ha_prompt_inspect_limit(srv, project, qn, 0, 8000, &error);
+    bool fresh = ha_prompt_inspect_is_fresh(d, error);
+    yyjson_doc_free(d);
+    return fresh;
+}
+
 /* Graph facts for one resolved family: every definition and declaration
  * location (the line where the name actually is), the union of the graph's
  * call sites and caller files across overloads. */
 static ha_symbol_facts ha_collect_facts(cbm_mcp_server_t *srv, const std::string &project,
-                                        const std::vector<ha_node> &family, ha_reader *rd) {
+                                        const std::vector<ha_node> &family, ha_reader *rd,
+                                        bool include_relationships = true) {
     ha_symbol_facts f;
     f.bare = family.front().name.empty() ? family.front().display : family.front().name;
     std::vector<const ha_node *> defs, decls;
@@ -3740,45 +4056,53 @@ static ha_symbol_facts ha_collect_facts(cbm_mcp_server_t *srv, const std::string
     }
     /* Inspect each definition (each overload carries its own callers). */
     std::vector<const ha_node *> probe = defs.empty() ? decls : defs;
+    std::vector<std::string> caller_keys;
     int probed = 0;
+    const int max_probes = include_relationships ? 4 : 0;
     for (const auto *n : probe) {
-        if (probed++ >= 4) {
+        if (probed++ >= max_probes) {
             break;
         }
         bool error = false;
         yyjson_doc *d = ha_prompt_inspect(srv, project.c_str(), n->qn, &error);
         yyjson_val *r = d && !error ? yyjson_doc_get_root(d) : nullptr;
-        if (r && yyjson_obj_get(r, "symbol")) {
-            f.callers_total +=
-                ha_obj_int(r, "callers_total") + ha_obj_int(r, "related_tests_total");
-            f.callees_total += ha_obj_int(r, "callees_total");
+        bool structural_fresh = ha_prompt_inspect_is_fresh(d, error);
+        if (r && yyjson_obj_get(r, "symbol") && structural_fresh) {
             size_t idx;
             size_t maxn;
             yyjson_val *v;
             for (const char *key : {"callers", "related_tests"}) {
                 yyjson_arr_foreach(yyjson_obj_get(r, key), idx, maxn, v) {
                     const char *file = ha_obj_str(v, "file");
-                    const char *cname = ha_obj_str(v, "name");
-                    if (cname && std::find(f.caller_names.begin(), f.caller_names.end(), cname) ==
-                                     f.caller_names.end()) {
-                        f.caller_names.emplace_back(cname);
-                    }
                     if (!file) {
                         continue;
                     }
+                    bool caller_current = false;
                     size_t li;
                     size_t lm;
                     yyjson_val *lv;
                     yyjson_arr_foreach(yyjson_obj_get(v, "call_lines"), li, lm, lv) {
-                        f.call_lines.emplace_back(file, (int)yyjson_get_int(lv));
+                        int line = (int)yyjson_get_int(lv);
+                        if (ha_current_call_evidence(rd, file, line, f.bare)) {
+                            f.call_lines.emplace_back(file, line);
+                            caller_current = true;
+                        }
                     }
-                }
-            }
-            yyjson_arr_foreach(yyjson_obj_get(r, "caller_files"), idx, maxn, v) {
-                const char *file = ha_obj_str(v, "file");
-                if (file && std::find(f.caller_files.begin(), f.caller_files.end(), file) ==
-                                f.caller_files.end()) {
-                    f.caller_files.emplace_back(file);
+                    if (!caller_current) {
+                        continue;
+                    }
+                    const char *cqn = ha_obj_str(v, "qualified_name");
+                    std::string caller_key =
+                        cqn ? cqn
+                            : std::string(file) + ":" + std::to_string(ha_obj_int(v, "start_line"));
+                    if (std::find(caller_keys.begin(), caller_keys.end(), caller_key) ==
+                        caller_keys.end()) {
+                        caller_keys.push_back(caller_key);
+                    }
+                    if (std::find(f.caller_files.begin(), f.caller_files.end(), file) ==
+                        f.caller_files.end()) {
+                        f.caller_files.emplace_back(file);
+                    }
                 }
             }
             yyjson_arr_foreach(yyjson_obj_get(r, "declared_in"), idx, maxn, v) {
@@ -3790,42 +4114,18 @@ static ha_symbol_facts ha_collect_facts(cbm_mcp_server_t *srv, const std::string
         }
         yyjson_doc_free(d);
     }
+    f.callers_total = (int)caller_keys.size();
     std::sort(f.caller_files.begin(), f.caller_files.end());
     return f;
 }
 
 /* ── Chains ───────────────────────────────────────────────────────────
- * The chain, each hop's caller signature and call-site line (with one line
- * of context either side, level 0), and the facts behind "shortest": the
- * breadth-first frontier from the start, the target's direct callers, and
- * whether the target's name appears by text in an earlier hop's body. */
-static yyjson_doc *ha_trace_outbound(cbm_mcp_server_t *srv, const char *project,
-                                     const std::string &qn, int depth) {
-    if (!srv || depth < 1) {
-        return nullptr;
-    }
-    yyjson_mut_doc *ad = yyjson_mut_doc_new(nullptr);
-    yyjson_mut_val *args = yyjson_mut_obj(ad);
-    yyjson_mut_doc_set_root(ad, args);
-    yyjson_mut_obj_add_str(ad, args, "project", project);
-    yyjson_mut_obj_add_strncpy(ad, args, "function_name", qn.data(), qn.size());
-    yyjson_mut_obj_add_str(ad, args, "direction", "outbound");
-    yyjson_mut_obj_add_int(ad, args, "depth", depth);
-    yyjson_mut_obj_add_int(ad, args, "max_bytes", 400000);
-    char *encoded = yyjson_mut_write(ad, 0, nullptr);
-    yyjson_mut_doc_free(ad);
-    bool error = false;
-    yyjson_doc *d = encoded ? ha_call(srv, "trace_path", encoded, &error) : nullptr;
-    free(encoded);
-    if (error) {
-        yyjson_doc_free(d);
-        return nullptr;
-    }
-    return d;
-}
+ * A graph path is emitted only when every source family is still fresh and
+ * every recorded hop is present in the current caller body. */
 
 static std::string ha_chain_block(cbm_mcp_server_t *srv, yyjson_doc *d, const std::string &project,
-                                  ha_reader *rd, int level) {
+                                  ha_reader *rd, int level,
+                                  std::vector<std::pair<std::string, bool>> *freshness = nullptr) {
     yyjson_val *r = d ? yyjson_doc_get_root(d) : nullptr;
     if (!r || !yyjson_is_true(yyjson_obj_get(r, "path_found"))) {
         return {};
@@ -3851,13 +4151,29 @@ static std::string ha_chain_block(cbm_mcp_server_t *srv, yyjson_doc *d, const st
     }
     const size_t H = n - 1;
     std::vector<int> name_at(n, 0);
-    std::string out = "- call chain " + hops.front().display + " -> " + hops.back().display + " (" +
-                      std::to_string(H) + " hop" + (H == 1 ? "" : "s") + "): ";
+    auto symbol_fresh = [&](const ha_node &node) {
+        if (!srv) {
+            return true;
+        }
+        if (freshness) {
+            for (const auto &entry : *freshness) {
+                if (entry.first == node.file) {
+                    return entry.second;
+                }
+            }
+        }
+        bool fresh = ha_prompt_symbol_is_fresh(srv, project.c_str(), node.qn);
+        if (freshness) {
+            freshness->emplace_back(node.file, fresh);
+        }
+        return fresh;
+    };
     for (size_t k = 0; k < n; ++k) {
         name_at[k] = ha_name_line(rd, hops[k].file, hops[k].start_line, hops[k].name,
                                   ha_node_window(hops[k]));
-        out += (k ? " -> " : "") + hops[k].display + " (" + hops[k].file + ":" +
-               std::to_string(name_at[k] ? name_at[k] : hops[k].start_line) + ")";
+        if (!name_at[k] || !symbol_fresh(hops[k])) {
+            return {}; /* stale location or source family: no structural claim */
+        }
     }
     std::vector<int> edge_lines(n, 0);
     yyjson_arr_foreach(yyjson_obj_get(r, "caller_edges"), idx, maxn, hop) {
@@ -3877,29 +4193,50 @@ static std::string ha_chain_block(cbm_mcp_server_t *srv, yyjson_doc *d, const st
         auto [from, to] = body_range(a);
         const ha_file_lines &fl = ha_read_file(rd, a.file);
         for (int L = from + 1; fl.ok && L <= to && (size_t)L <= fl.lines.size(); ++L) {
-            if (ha_line_has_ident(fl.lines[(size_t)L - 1], callee)) {
+            if (std::chrono::steady_clock::now() >= rd->deadline) {
+                return 0;
+            }
+            if (ha_current_call_evidence(rd, a.file, L, callee)) {
                 return L;
             }
         }
         return 0;
     };
+    std::vector<int> current_edges(n, 0);
     for (size_t k = 1; k < n; ++k) {
         const ha_node &a = hops[k - 1];
         const ha_node &b = hops[k];
         int at = 0;
-        if (edge_lines[k] > 0 &&
-            ha_line_has_ident(ha_line_text(rd, a.file, edge_lines[k]), b.name)) {
+        if (edge_lines[k] > 0 && ha_current_call_evidence(rd, a.file, edge_lines[k], b.name)) {
             at = edge_lines[k];
         }
         if (!at) {
             at = find_in_body(a, b.name);
         }
-        out += "\n    " + a.display + " -> " + b.display + ": ";
         if (!at) {
-            out += "no line naming `" + b.name + "` found in " + a.display +
-                   "'s body on disk (stale or indirect call, re-check)";
-            continue;
+            return {}; /* an indexed hop is absent from the current caller body */
         }
+        current_edges[k] = at;
+    }
+    auto primary = [](const ha_node &h) -> const std::string & {
+        return h.name.empty() ? h.display : h.name;
+    };
+    std::string out = "- call chain " + primary(hops.front()) + " -> " + primary(hops.back()) +
+                      " (" + std::to_string(H) + " hop" + (H == 1 ? "" : "s") + "): ";
+    for (size_t k = 0; k < n; ++k) {
+        out += (k ? " -> " : "") + primary(hops[k]) + " (" + hops[k].file + ":" +
+               std::to_string(name_at[k]) + ")";
+    }
+    out += "\n  qualified identities: ";
+    for (size_t k = 0; k < n; ++k) {
+        out += (k ? " -> " : "") + hops[k].display + " (" + hops[k].file + ":" +
+               std::to_string(name_at[k]) + ")";
+    }
+    for (size_t k = 1; k < n; ++k) {
+        const ha_node &a = hops[k - 1];
+        const ha_node &b = hops[k];
+        int at = current_edges[k];
+        out += "\n    " + primary(a) + " -> " + primary(b) + ": ";
         out += a.file + ":" + std::to_string(at) + ": " + ha_src(ha_line_text(rd, a.file, at));
         if (level == 0) {
             int sig = name_at[k - 1] ? name_at[k - 1] : a.start_line;
@@ -3913,87 +4250,11 @@ static std::string ha_chain_block(cbm_mcp_server_t *srv, yyjson_doc *d, const st
             }
         }
     }
-    /* Shortest: the breadth-first frontier from the start. */
-    const ha_node &first = hops.front();
     const ha_node &last = hops.back();
-    std::string shortest = "\n  shortest: the chain above was found breadth-first over CALLS "
-                           "edges, so no path of length 1";
-    if (H > 2) {
-        shortest += " to " + std::to_string(H - 1);
-    }
-    shortest += " exists in the graph";
-    if (H == 1) {
-        shortest = "\n  shortest: " + first.display + " calls " + last.display + " directly";
-    }
-    out += shortest +
-           (yyjson_is_true(yyjson_obj_get(r, "traversal_truncated"))
-                ? " (search bounded by its work limit)"
-                : "") +
-           ".";
-    yyjson_doc *bfs =
-        H > 1 ? ha_trace_outbound(srv, project.c_str(), first.qn, std::min<int>((int)H - 1, 3))
-              : nullptr;
-    if (bfs) {
-        std::vector<std::string> depth1;
-        std::vector<size_t> per_depth(4, 0);
-        bool target_early = false;
-        yyjson_val *callees = yyjson_obj_get(yyjson_doc_get_root(bfs), "callees");
-        yyjson_arr_foreach(callees, idx, maxn, hop) {
-            int h = ha_obj_int(hop, "hop");
-            if (h < 1 || h > 3) {
-                continue;
-            }
-            per_depth[(size_t)h]++;
-            const char *nm = ha_obj_str(hop, "name");
-            if (h == 1 && nm && std::find(depth1.begin(), depth1.end(), nm) == depth1.end()) {
-                depth1.push_back(nm);
-            }
-            const char *q = ha_obj_str(hop, "qualified_name");
-            target_early |= q && last.qn == q;
-        }
-        std::string d1;
-        for (size_t k = 0; k < depth1.size() && k < 20; ++k) {
-            d1 += (k ? ", " : "") + depth1[k];
-        }
-        if (depth1.size() > 20) {
-            d1 += ", and " + std::to_string(depth1.size() - 20) + " others";
-        }
-        out += "\n  breadth-first from " + first.display + ": depth 1 = [" + d1 + "]";
-        for (size_t dd = 2; dd < per_depth.size() && dd < H; ++dd) {
-            out += "; depth " + std::to_string(dd) + " reached " + std::to_string(per_depth[dd]) +
-                   " functions";
-        }
-        out += "; " + last.display + " first reached at depth " + std::to_string(H) +
-               (target_early ? " (NOTE: the graph also reaches it earlier, re-check)" : "");
-        yyjson_doc_free(bfs);
-    }
-    /* Direct callers of the target. */
-    if (srv) {
-        bool error = false;
-        yyjson_doc *ins = ha_prompt_inspect(srv, project.c_str(), last.qn, &error);
-        yyjson_val *ir = ins && !error ? yyjson_doc_get_root(ins) : nullptr;
-        if (ir) {
-            std::vector<std::string> names;
-            for (const char *key : {"callers", "related_tests"}) {
-                yyjson_arr_foreach(yyjson_obj_get(ir, key), idx, maxn, hop) {
-                    const char *nm = ha_obj_str(hop, "name");
-                    if (nm && std::find(names.begin(), names.end(), nm) == names.end()) {
-                        names.push_back(nm);
-                    }
-                }
-            }
-            std::string list;
-            for (size_t k = 0; k < names.size() && k < 30; ++k) {
-                list += (k ? ", " : "") + names[k];
-            }
-            if (names.size() > 30) {
-                list += ", and " + std::to_string(names.size() - 30) + " others";
-            }
-            out += "\n  direct callers of " + last.display + " (" + std::to_string(names.size()) +
-                   "): " + (list.empty() ? std::string("none in the graph") : list);
-        }
-        yyjson_doc_free(ins);
-    }
+    out += "\n  Each indexed hop's callee name appears outside recognized comments and "
+           "quoted text in current source; this lexical check is not proof of a call. Other "
+           "files may have changed "
+           "since indexing, so this is not a current shortest-path claim.";
     /* Text check: does the target's name appear in an earlier hop's body? */
     std::string absent, present;
     for (size_t k = 0; k + 1 < H; ++k) {
@@ -4037,9 +4298,10 @@ static std::string ha_prompt_trace(cbm_mcp_server_t *srv, const char *project,
     free(encoded);
     std::string block;
     if (!error) {
-        block = ha_chain_block(srv, d, project, rd, 0);
+        std::vector<std::pair<std::string, bool>> freshness;
+        block = ha_chain_block(srv, d, project, rd, 0, &freshness);
         if (block.size() > budget) {
-            block = ha_chain_block(srv, d, project, rd, 1);
+            block = ha_chain_block(srv, d, project, rd, 1, &freshness);
         }
     }
     yyjson_doc_free(d);
@@ -4116,6 +4378,23 @@ static bool ha_generic_name(const std::string &n) {
             "connect", "flush",   "index",  "count",   "length",   "self"});
 }
 
+static std::string ha_prompt_evidence_label(bool scanned, const std::string &names, size_t files) {
+    std::string label =
+        scanned ? "[code-cortex] Read from disk at prompt time (equivalent to `grep -rnw " + names +
+                      "` over the " + std::to_string(files) +
+                      " text files git would track, plus indexed call-edge candidates from the "
+                      "code graph). The files were read when this prompt was submitted. "
+                : "[code-cortex] Read from disk at prompt time (each line below re-read from its "
+                  "file, plus indexed call-edge candidates from the code graph). The files were "
+                  "read when this prompt was submitted. ";
+    label += "Evidence is bounded; lexical call shapes and indexed edges do not prove the current "
+             "target binding. Use the excerpts when sufficient, and retrieve missing evidence. "
+             "Follow explicit user requests for independent verification or specific tools. "
+             "Follow the user's requested output format, including requests for no commentary. "
+             "Re-check files that may have changed since submission:";
+    return label;
+}
+
 /* Resolve the targets against the first indexed project at or above cwd.
  * *indexed reports whether such a project exists (so the caller can choose
  * the unindexed fallback); *covered gets the names the block covers.
@@ -4156,6 +4435,7 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd, const ha_
     const bool callers_mode = req.callers_intent && !chain_mode;
     std::string root;
     ha_reader rd;
+    rd.deadline = start + std::chrono::milliseconds(HA_DEADLINE_PROMPT_MS - 50);
 
     /* Resolve every target first: generic or very common names lose to a
      * qualified or rarer target. */
@@ -4179,6 +4459,21 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd, const ha_
         res.push_back({&t, ha_disambiguate(nodes, t, req.paths), nodes, total});
     }
     rd.root = root.empty() ? std::string(dir) : root;
+    /* Node coordinates are only hints until the indexed name is confirmed in
+     * current source.  Drop stale families before ambiguity, definition, or
+     * path logic can turn them into an authoritative-looking claim. */
+    auto keep_current_nodes = [&](std::vector<ha_node> &nodes) {
+        nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+                                   [&](const ha_node &n) {
+                                       return !ha_name_line(&rd, n.file, n.start_line, n.name,
+                                                            ha_node_window(n));
+                                   }),
+                    nodes.end());
+    };
+    for (auto &r : res) {
+        keep_current_nodes(r.nodes);
+        keep_current_nodes(r.all);
+    }
     auto weak = [](const resolved_t &r) {
         bool qualified = r.t->strong_qualifier || !ha_checkable_qualifier(*r.t).empty();
         return !qualified && (ha_generic_name(r.t->bare) || r.total >= HA_PROMPT_COMMON_NODES);
@@ -4271,7 +4566,7 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd, const ha_
             f.bare = t.bare;
             f.display = t.name;
         } else {
-            f = ha_collect_facts(srv, proj, r.nodes, &rd);
+            f = ha_collect_facts(srv, proj, r.nodes, &rd, !chain_mode);
         }
         names.push_back(f.bare);
         if (chain_mode) {
@@ -4371,25 +4666,16 @@ static char *ha_prompt_context(cbm_mcp_server_t *srv, const char *cwd, const ha_
             joined += (joined.empty() ? "" : " ") + n;
         }
     }
-    std::string label =
-        scanned_any
-            ? "[code-cortex] Read from disk at prompt time (equivalent to `grep -rnw " + joined +
-                  "` over the " + std::to_string(scanned_files) +
-                  " text files git would track, plus call resolution from the code graph). The "
-                  "files were read when this prompt was submitted, so running that search again "
-                  "returns these same lines; answer from them, and search only for what is not "
-                  "shown:"
-            : std::string(
-                  "[code-cortex] Read from disk at prompt time (each line below re-read "
-                  "from its file, plus call resolution from the code graph). The files were "
-                  "read when this prompt was submitted, so reading them again returns "
-                  "these same lines; answer from them, and search only for what is not "
-                  "shown:");
+    std::string label = ha_prompt_evidence_label(scanned_any, joined, scanned_files);
     *covered = names;
     return ha_prompt_payload(blocks, HA_PROMPT_MAX_BYTES, label);
 }
 
 #ifdef CBM_ENABLE_TEST_SEAMS
+char *cbm_prompt_label_for_testing(bool scanned) {
+    return strdup(ha_prompt_evidence_label(scanned, "target_fn", 1).c_str());
+}
+
 char *cbm_prompt_candidates_for_testing(const char *prompt) {
     std::vector<std::string> cands = ha_prompt_candidates(prompt);
     if (cands.empty()) {
@@ -4532,6 +4818,12 @@ char *cbm_prompt_chain_for_testing(const char *root, const char *trace_json) {
     std::string block = ha_chain_block(nullptr, doc, "p", &rd, 0);
     yyjson_doc_free(doc);
     return block.empty() ? nullptr : strdup(block.c_str());
+}
+bool cbm_prompt_freshness_for_testing(const char *inspect_json) {
+    yyjson_doc *doc = inspect_json ? yyjson_read(inspect_json, strlen(inspect_json), 0) : nullptr;
+    bool fresh = ha_prompt_inspect_is_fresh(doc, false);
+    yyjson_doc_free(doc);
+    return fresh;
 }
 char *cbm_prompt_payload_for_testing(const char *const *blocks, int count, size_t max_bytes,
                                      const char *label) {

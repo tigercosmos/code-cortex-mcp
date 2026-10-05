@@ -513,6 +513,28 @@ TEST(store_file_hash_crud) {
     ASSERT_EQ(hashes[0].size, 512);
     cbm_store_free_file_hashes(hashes, count);
 
+    char one_sha[65];
+    int64_t one_mtime = 0;
+    int64_t one_size = 0;
+    ASSERT_EQ(cbm_store_get_file_hash(s, "test", "main.go", one_sha, sizeof(one_sha),
+                                      &one_mtime, &one_size),
+              CBM_STORE_OK);
+    ASSERT_STR_EQ(one_sha, "abc123");
+    ASSERT_EQ(one_mtime, 1000000);
+    ASSERT_EQ(one_size, 512);
+    ASSERT_EQ(cbm_store_get_file_hash(s, "test", "missing.go", one_sha, sizeof(one_sha),
+                                      &one_mtime, &one_size),
+              CBM_STORE_NOT_FOUND);
+    ASSERT_EQ(cbm_store_get_file_hash(NULL, "test", "main.go", one_sha, sizeof(one_sha),
+                                      &one_mtime, &one_size),
+              CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_get_file_hash(s, NULL, "main.go", one_sha, sizeof(one_sha), &one_mtime,
+                                      &one_size),
+              CBM_STORE_ERR);
+    ASSERT_EQ(cbm_store_get_file_hash(s, "test", NULL, one_sha, sizeof(one_sha), &one_mtime,
+                                      &one_size),
+              CBM_STORE_ERR);
+
     /* Update */
     rc = cbm_store_upsert_file_hash(s, "test", "main.go", "def456", 2000000, 1024);
     ASSERT_EQ(rc, CBM_STORE_OK);

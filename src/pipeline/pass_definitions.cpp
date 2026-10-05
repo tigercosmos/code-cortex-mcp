@@ -24,6 +24,7 @@ enum { PD_JSON_FIELD_OVERHEAD = 6 };
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/limits.h"
+#include "foundation/sha256.h"
 #include "cbm.h"
 #include "simhash/minhash.h"
 #include "semantic/ast_profile.h"
@@ -644,6 +645,10 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             source, source_len, lang, ctx->project_name, rel, CBM_EXTRACT_BUDGET,
             cbm_cc_index_defines(ctx->cc_index, rel), cbm_cc_index_includes(ctx->cc_index, rel),
             &extract_options);
+        if (result && ctx->source_sha256) {
+            cbm_sha256_hex(source, (size_t)source_len,
+                           ctx->source_sha256 + (size_t)i * (CBM_SHA256_HEX_LEN + 1));
+        }
         free(source);
 
         if (!result) {

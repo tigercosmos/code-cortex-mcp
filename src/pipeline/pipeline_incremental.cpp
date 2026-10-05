@@ -25,15 +25,19 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24, INCR_WAL_BUF = 1
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"
+#include "foundation/sha256.h"
 #include "foundation/str_util.h" // cbm_json_escape, cbm_json_props_checked
 
 #include <errno.h>
+#include <cctype>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include "foundation/cbm_atomic.h"
 #include <stdint.h>
 #include <vector>
+
+static constexpr size_t INCR_SOURCE_DIGEST_STRIDE = CBM_SHA256_HEX_LEN + 1;
 
 #ifdef CBM_ENABLE_TEST_SEAMS
 static thread_local void (*after_classify_callback)(void *);
@@ -86,6 +90,7 @@ static int64_t stat_mtime_ns(const struct stat *st) {
 struct classified_version {
     int64_t mtime_ns = 0;
     int64_t size = -1; /* A failed stat must force another parse. */
+    char sha256[CBM_SHA256_HEX_LEN + 1] = {0};
 };
 
 /* Classify discovered files against stored hashes using mtime+size.
@@ -128,6 +133,13 @@ static bool *classify_files(cbm_file_info_t *files, int file_count, cbm_file_has
             changed[i] = true;
             n_changed++;
         } else {
+            bool valid_sha = h->sha256 && strlen(h->sha256) == CBM_SHA256_HEX_LEN;
+            for (size_t j = 0; valid_sha && j < CBM_SHA256_HEX_LEN; ++j) {
+                valid_sha = isxdigit((unsigned char)h->sha256[j]) != 0;
+            }
+            if (valid_sha) {
+                snprintf(versions[i].sha256, sizeof(versions[i].sha256), "%s", h->sha256);
+            }
             n_unchanged++;
         }
     }
@@ -474,7 +486,7 @@ static void persist_hashes(cbm_store_t *store, const char *project, cbm_file_inf
      * different from this row so the next run discovers it. Re-statting here
      * would incorrectly acknowledge source that was never parsed. */
     for (int i = 0; i < file_count; i++) {
-        int rc = cbm_store_upsert_file_hash(store, project, files[i].rel_path, "",
+        int rc = cbm_store_upsert_file_hash(store, project, files[i].rel_path, versions[i].sha256,
                                             versions[i].mtime_ns, versions[i].size);
         if (rc != CBM_STORE_OK) {
             cbm_log_warn("incremental.persist_hash_failed", "scope", "current", "rel_path",
@@ -771,10 +783,20 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     cbm_file_info_t *changed_files =
         (n_changed > 0) ? (cbm_file_info_t *)malloc((size_t)n_changed * sizeof(cbm_file_info_t))
                         : NULL;
+    std::vector<classified_version *> changed_versions((size_t)n_changed);
+    std::vector<char> changed_digests;
+    if (n_changed > 0 && (size_t)n_changed <= SIZE_MAX / INCR_SOURCE_DIGEST_STRIDE) {
+        changed_digests.assign((size_t)n_changed * INCR_SOURCE_DIGEST_STRIDE, '\0');
+    } else if (n_changed > 0) {
+        cbm_log_error("incremental.err", "phase", "source_digest_alloc", "reason",
+                      "size_overflow");
+    }
     int ci = 0;
     for (int i = 0; i < file_count; i++) {
         if (is_changed[i]) {
-            changed_files[ci++] = files[i];
+            changed_files[ci] = files[i];
+            changed_versions[(size_t)ci] = &versions[(size_t)i];
+            ci++;
         }
     }
     free(is_changed);
@@ -867,6 +889,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         .cancelled = cbm_pipeline_cancelled_ptr(p),
         .pipeline = p, /* so passes can record per-file skips (Track B) */
         .mode = cbm_pipeline_get_mode(p),
+        .source_sha256 = changed_digests.empty() ? nullptr : changed_digests.data(),
         .path_aliases = path_aliases,
         .cc_index = cc_index,
         .excluded_dirs = excluded_dirs,
@@ -895,6 +918,15 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     }
 
     run_extract_resolve(&ctx, changed_files, ci);
+    for (int i = 0; i < ci; ++i) {
+        const char *digest = changed_digests.empty()
+                                 ? nullptr
+                                 : changed_digests.data() +
+                                       (size_t)i * INCR_SOURCE_DIGEST_STRIDE;
+        if (changed_versions[(size_t)i] && digest && digest[0] != '\0') {
+            memcpy(changed_versions[(size_t)i]->sha256, digest, INCR_SOURCE_DIGEST_STRIDE);
+        }
+    }
     cbm_pipeline_pass_k8s(&ctx, changed_files, ci);
     run_postpasses(&ctx, changed_files, ci, project);
 

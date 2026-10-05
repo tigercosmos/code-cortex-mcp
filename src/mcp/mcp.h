@@ -63,6 +63,12 @@ bool cbm_mcp_tool_result_valid(const char *json, bool *is_error);
 /* Typed nonerror contention response; never a successful completed index. */
 bool cbm_mcp_result_is_index_busy(const char *json);
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Override trace_path hash budgets for deterministic boundary tests. Passing
+ * zero for either byte cap restores that cap's production default. */
+void cbm_mcp_test_set_trace_hash_limits(size_t per_file_bytes, size_t per_request_bytes);
+#endif
+
 /* Return true when notifications/cancelled params target the active request. */
 bool cbm_mcp_cancel_request_matches(const char *params_json, int64_t active_id,
                                     const char *active_id_str);

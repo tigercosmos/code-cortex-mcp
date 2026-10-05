@@ -6,6 +6,7 @@
 #include "../src/foundation/compat.h"
 #include "../src/foundation/compat_fs.h" /* cbm_unlink / cbm_rmdir */
 #include "../src/foundation/log.h"     /* cbm_log_set_sink — routing capture */
+#include "../src/foundation/sha256.h"
 #include "test_framework.h"
 #include "test_helpers.h" /* th_write_file / th_rmtree / th_mktempdir */
 #include <mcp/mcp.h>
@@ -19,8 +20,9 @@
 #include <initializer_list>
 #include <string.h>
 #include <stdlib.h>
-#ifndef _WIN32
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -1424,6 +1426,16 @@ TEST(parse_file_uri_invalid) {
  * Writes a source file to tmp_dir/project/main.go.
  * Caller must free the server with cbm_mcp_server_free and
  * unlink the source file + rmdir manually. */
+static int64_t snippet_mtime_ns(const struct stat *st) {
+#ifdef __APPLE__
+    return (int64_t)st->st_mtimespec.tv_sec * 1000000000LL + st->st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    return (int64_t)st->st_mtime * 1000000000LL;
+#else
+    return (int64_t)st->st_mtim.tv_sec * 1000000000LL + st->st_mtim.tv_nsec;
+#endif
+}
+
 static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     /* Create temp dir */
     snprintf(tmp_dir, tmp_sz, "/tmp/cbm_snippet_test_XXXXXX");
@@ -1440,19 +1452,20 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     FILE *fp = fopen(src_path, "w");
     if (!fp)
         return NULL;
-    fprintf(fp, "package main\n"
-                "\n"
-                "func HandleRequest() error {\n"
-                "\treturn nil\n"
-                "}\n"
-                "\n"
-                "func ProcessOrder(id int) {\n"
-                "\t// process\n"
-                "}\n"
-                "\n"
-                "func Run() {\n"
-                "\t// server\n"
-                "}\n");
+    const char *sample_source = "package main\n"
+                                "\n"
+                                "func HandleRequest() error {\n"
+                                "\treturn nil\n"
+                                "}\n"
+                                "\n"
+                                "func ProcessOrder(id int) {\n"
+                                "\t// process\n"
+                                "}\n"
+                                "\n"
+                                "func Run() {\n"
+                                "\t// server\n"
+                                "}\n";
+    fputs(sample_source, fp);
     fclose(fp);
 
     /* Create server with in-memory store */
@@ -1469,6 +1482,13 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     const char *proj_name = "test-project";
     cbm_mcp_server_set_project(srv, proj_name);
     cbm_store_upsert_project(st, proj_name, proj_dir);
+    struct stat source_stat = {};
+    char source_sha[CBM_SHA256_HEX_LEN + 1];
+    cbm_sha256_hex(sample_source, strlen(sample_source), source_sha);
+    if (stat(src_path, &source_stat) == 0) {
+        cbm_store_upsert_file_hash(st, proj_name, "main.go", source_sha,
+                                   snippet_mtime_ns(&source_stat), source_stat.st_size);
+    }
 
     /* Create nodes */
     cbm_node_t n_hr = {0};
@@ -3858,7 +3878,8 @@ TEST(tool_trace_between_preserves_identity_and_filters) {
             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
             "\"function_name\":\"Destination\",\"from_function\":\"Entry\","
             "\"direction\":\"inbound\",\"depth\":%d,\"min_confidence\":%.2f,"
-            "\"include_tests\":%s,\"source_context\":1,\"max_bytes\":%d}}}",
+            "\"include_tests\":%s,\"freshness_mode\":\"index_only\","
+            "\"source_context\":1,\"max_bytes\":%d}}}",
             depth, confidence, tests ? "true" : "false", budget);
         char *response = cbm_mcp_server_handle(srv, request);
         char *text = extract_text_content(response);
@@ -3913,6 +3934,9 @@ TEST(tool_trace_between_rejects_ambiguous_and_invalid_entries) {
         "\"from_function\":\"HandleRequest\",\"direction\":\"inbound\",\"edge_types\":[\"HTTP_CALLS\"]",
         "\"from_function\":\"HandleRequest\",\"direction\":\"inbound\",\"max_work\":0",
         "\"from_function\":\"HandleRequest\",\"direction\":\"inbound\",\"max_work\":100001",
+        "\"from_function\":\"HandleRequest\",\"direction\":\"inbound\",\"freshness_mode\":\"loose\"",
+        "\"from_function\":\"HandleRequest\",\"direction\":\"inbound\",\"freshness_mode\":7",
+        "\"freshness_mode\":\"index_only\"",
         "\"max_work\":100"
     };
     for (const char *args : cases) {
@@ -3930,6 +3954,342 @@ TEST(tool_trace_between_rejects_ambiguous_and_invalid_entries) {
     cleanup_snippet_dir(tmp);
     PASS();
 }
+
+static char *strict_direct_trace(cbm_mcp_server_t *srv, const char *target,
+                                 const char *freshness_mode, bool with_source) {
+    char request[1024];
+    snprintf(request, sizeof(request),
+             "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
+             "\"function_name\":\"%s\",\"from_function\":\"HandleRequest\","
+             "\"direction\":\"inbound\",\"freshness_mode\":\"%s\"%s}}}",
+             target, freshness_mode, with_source ? ",\"source_lines\":2" : "");
+    char *response = cbm_mcp_server_handle(srv, request);
+    char *inner = extract_text_content(response);
+    free(response);
+    return inner;
+}
+
+TEST(tool_trace_direct_strict_hashes_current_path_and_withholds_source) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    char off_path[512];
+    snprintf(off_path, sizeof(off_path), "%s/project/unrelated.go", tmp);
+    ASSERT_EQ(th_write_file(off_path, "package main\nfunc NewShortcut() {}\n"), 0);
+    char *inner = strict_direct_trace(srv, "ProcessOrder", "strict", true);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"path_found\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"all_path_files_match\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"current_source_relationship_supported\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"current_shortest_path_validated\":false"));
+    ASSERT_NOT_NULL(strstr(inner, "\"source_withheld\":true"));
+    ASSERT_NULL(strstr(inner, "\"source\":"));
+    ASSERT_NULL(strstr(inner, "\"definitions\":"));
+    free(inner);
+    cbm_unlink(off_path);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_trace_direct_strict_rejects_restored_metadata_content_change) {
+#ifdef _WIN32
+    SKIP_PLATFORM("exact nanosecond timestamp restoration uses POSIX utimensat");
+#else
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    cbm_node_t *handle = NULL;
+    int handle_count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(store, "test-project", "HandleRequest", &handle,
+                                           &handle_count),
+              CBM_STORE_OK);
+    cbm_node_t bridge = {.project = "test-project", .label = "Function", .name = "StaleBridge",
+                         .qualified_name = "test-project.StaleBridge", .file_path = "main.go",
+                         .start_line = 3, .end_line = 5};
+    cbm_node_t target = {.project = "test-project", .label = "Function", .name = "StrictTarget",
+                         .qualified_name = "test-project.StrictTarget", .file_path = "main.go",
+                         .start_line = 7, .end_line = 9};
+    int64_t bridge_id = cbm_store_upsert_node(store, &bridge);
+    int64_t target_id = cbm_store_upsert_node(store, &target);
+    cbm_edge_t first = {.project = "test-project", .source_id = handle[0].id,
+                        .target_id = bridge_id, .type = "CALLS"};
+    cbm_edge_t second = {.project = "test-project", .source_id = bridge_id,
+                         .target_id = target_id, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(store, &first), 0);
+    ASSERT_GT(cbm_store_insert_edge(store, &second), 0);
+    cbm_store_free_nodes(handle, handle_count);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/project/main.go", tmp);
+    struct stat before = {};
+    ASSERT_EQ(stat(path, &before), 0);
+    FILE *fp = fopen(path, "r+");
+    ASSERT_NOT_NULL(fp);
+    char data[512];
+    size_t used = fread(data, 1, sizeof(data) - 1, fp);
+    data[used] = '\0';
+    char *word = strstr(data, "// process");
+    ASSERT_NOT_NULL(word);
+    memcpy(word, "// changed", strlen("// changed")); /* same byte count */
+    rewind(fp);
+    ASSERT_EQ(fwrite(data, 1, used, fp), used);
+    ASSERT_EQ(fclose(fp), 0);
+    struct timespec times[2] = {};
+#ifdef __APPLE__
+    times[0] = before.st_atimespec;
+    times[1] = before.st_mtimespec;
+#else
+    times[0] = before.st_atim;
+    times[1] = before.st_mtim;
+#endif
+    ASSERT_EQ(utimensat(AT_FDCWD, path, times, 0), 0);
+    struct stat restored = {};
+    ASSERT_EQ(stat(path, &restored), 0);
+    ASSERT_EQ(restored.st_size, before.st_size);
+    ASSERT_EQ(snippet_mtime_ns(&restored), snippet_mtime_ns(&before));
+
+    char *inner = strict_direct_trace(srv, "StrictTarget", "strict", false);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"indexed_path_suppressed\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "content_hash_mismatch"));
+    ASSERT_NULL(strstr(inner, "\"path\":"));
+    ASSERT_NULL(strstr(inner, "\"caller_edges\":"));
+    ASSERT_NULL(strstr(inner, "\"source\":"));
+    ASSERT_NULL(strstr(inner, "\"definitions\":"));
+    ASSERT_NULL(strstr(inner, "StaleBridge"));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+#endif
+}
+
+TEST(tool_trace_direct_unknown_deleted_outside_and_index_only) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/project/main.go", tmp);
+    struct stat st = {};
+    ASSERT_EQ(stat(path, &st), 0);
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "",
+                                         snippet_mtime_ns(&st), st.st_size),
+              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_delete_file_hash(store, "test-project", "main.go"), CBM_STORE_OK);
+    char *inner = strict_direct_trace(srv, "ProcessOrder", "strict", false);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "no_index_metadata"));
+    free(inner);
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "",
+                                         snippet_mtime_ns(&st), st.st_size),
+              CBM_STORE_OK);
+    inner = strict_direct_trace(srv, "ProcessOrder", "strict", false);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "invalid_index_hash_or_metadata"));
+    ASSERT_NOT_NULL(strstr(inner, "\"indexed_path_suppressed\":true"));
+    free(inner);
+
+    inner = strict_direct_trace(srv, "ProcessOrder", "index_only", true);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"historical_index_only\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"path_found\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"current_shortest_path_validated\":false"));
+    ASSERT_NOT_NULL(strstr(inner, "\"source_range_basis\":\"indexed_range\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"current_definition_extent_validated\":false"));
+    free(inner);
+
+    const char *valid_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", valid_sha,
+                                         snippet_mtime_ns(&st), st.st_size),
+              CBM_STORE_OK);
+    ASSERT_EQ(cbm_unlink(path), 0);
+    inner = strict_direct_trace(srv, "ProcessOrder", "strict", false);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"state\":\"stale\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"reason\":\"deleted\""));
+    free(inner);
+
+    cbm_node_t outside = {.project = "test-project", .label = "Function", .name = "Outside",
+                          .qualified_name = "test-project.Outside", .file_path = "../outside.go",
+                          .start_line = 1, .end_line = 2};
+    cbm_node_t *handle = NULL;
+    int handle_count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(store, "test-project", "HandleRequest", &handle,
+                                           &handle_count),
+              CBM_STORE_OK);
+    int64_t outside_id = cbm_store_upsert_node(store, &outside);
+    cbm_edge_t edge = {.project = "test-project", .source_id = handle[0].id,
+                       .target_id = outside_id, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(store, &edge), 0);
+    cbm_store_free_nodes(handle, handle_count);
+    char *response = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":92,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
+             "\"function_name\":\"Outside\",\"from_function\":\"HandleRequest\","
+             "\"direction\":\"inbound\"}}}");
+    inner = extract_text_content(response);
+    free(response);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "outside_root"));
+    ASSERT_NOT_NULL(strstr(inner, "\"indexed_path_suppressed\":true"));
+    free(inner);
+    ASSERT_EQ(cbm_store_upsert_project(store, "test-project", ""), CBM_STORE_OK);
+    inner = strict_direct_trace(srv, "ProcessOrder", "strict", false);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "project_root_unavailable"));
+    ASSERT_NOT_NULL(strstr(inner, "\"indexed_path_suppressed\":true"));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_trace_direct_strict_rejects_metadata_and_file_budget) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    char main_path[512];
+    snprintf(main_path, sizeof(main_path), "%s/project/main.go", tmp);
+    struct stat main_st = {};
+    ASSERT_EQ(stat(main_path, &main_st), 0);
+    char main_sha[CBM_SHA256_HEX_LEN + 1];
+    int64_t ignored_mtime = 0;
+    int64_t ignored_size = 0;
+    ASSERT_EQ(cbm_store_get_file_hash(store, "test-project", "main.go", main_sha,
+                                      sizeof(main_sha), &ignored_mtime, &ignored_size),
+              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", main_sha,
+                                         snippet_mtime_ns(&main_st) + 1, main_st.st_size),
+              CBM_STORE_OK);
+    char *inner = strict_direct_trace(srv, "ProcessOrder", "strict", true);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "metadata_mismatch"));
+    ASSERT_NOT_NULL(strstr(inner, "\"indexed_path_suppressed\":true"));
+    ASSERT_NULL(strstr(inner, "\"path\":"));
+    ASSERT_NULL(strstr(inner, "\"caller_edges\":"));
+    ASSERT_NULL(strstr(inner, "\"source\":"));
+    ASSERT_NULL(strstr(inner, "\"definitions\":"));
+    free(inner);
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", main_sha,
+                                         snippet_mtime_ns(&main_st), main_st.st_size + 1),
+              CBM_STORE_OK);
+    inner = strict_direct_trace(srv, "ProcessOrder", "strict", false);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "metadata_mismatch"));
+    ASSERT_NOT_NULL(strstr(inner, "\"indexed_path_suppressed\":true"));
+    free(inner);
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", main_sha,
+                                         snippet_mtime_ns(&main_st), main_st.st_size),
+              CBM_STORE_OK);
+
+    const size_t large_size = (size_t)2 * 1024 * 1024 + 1;
+    char *large = (char *)malloc(large_size);
+    ASSERT_NOT_NULL(large);
+    memset(large, 'x', large_size);
+    char large_path[512];
+    snprintf(large_path, sizeof(large_path), "%s/project/large.go", tmp);
+    FILE *fp = fopen(large_path, "wb");
+    ASSERT_NOT_NULL(fp);
+    ASSERT_EQ(fwrite(large, 1, large_size, fp), large_size);
+    ASSERT_EQ(fclose(fp), 0);
+    char large_sha[CBM_SHA256_HEX_LEN + 1];
+    cbm_sha256_hex(large, large_size, large_sha);
+    free(large);
+    struct stat large_st = {};
+    ASSERT_EQ(stat(large_path, &large_st), 0);
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "large.go", large_sha,
+                                         snippet_mtime_ns(&large_st), large_st.st_size),
+              CBM_STORE_OK);
+    cbm_node_t *handle = NULL;
+    int handle_count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(store, "test-project", "HandleRequest", &handle,
+                                           &handle_count),
+              CBM_STORE_OK);
+    cbm_node_t large_node = {.project = "test-project",
+                             .label = "Function",
+                             .name = "LargeTarget",
+                             .qualified_name = "test-project.LargeTarget",
+                             .file_path = "large.go",
+                             .start_line = 1,
+                             .end_line = 1};
+    int64_t large_id = cbm_store_upsert_node(store, &large_node);
+    cbm_edge_t edge = {.project = "test-project", .source_id = handle[0].id,
+                       .target_id = large_id, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(store, &edge), 0);
+    cbm_store_free_nodes(handle, handle_count);
+    inner = strict_direct_trace(srv, "LargeTarget", "strict", false);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "hash_budget_exhausted"));
+    ASSERT_NOT_NULL(strstr(inner, "\"indexed_path_suppressed\":true"));
+    ASSERT_NULL(strstr(inner, "\"path\":"));
+    ASSERT_NULL(strstr(inner, "\"caller_edges\":"));
+    free(inner);
+    cbm_unlink(large_path);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+TEST(tool_trace_direct_strict_rejects_aggregate_hash_budget) {
+    struct LimitGuard {
+        ~LimitGuard() { cbm_mcp_test_set_trace_hash_limits(0, 0); }
+    } guard;
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    char second_path[512];
+    snprintf(second_path, sizeof(second_path), "%s/project/second.go", tmp);
+    const char *second_source = "package main\nfunc AggregateTarget() {}\n";
+    ASSERT_EQ(th_write_file(second_path, second_source), 0);
+    struct stat first_st = {};
+    struct stat second_st = {};
+    char first_path[512];
+    snprintf(first_path, sizeof(first_path), "%s/project/main.go", tmp);
+    ASSERT_EQ(stat(first_path, &first_st), 0);
+    ASSERT_EQ(stat(second_path, &second_st), 0);
+    char second_sha[CBM_SHA256_HEX_LEN + 1];
+    cbm_sha256_hex(second_source, strlen(second_source), second_sha);
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "second.go", second_sha,
+                                         snippet_mtime_ns(&second_st), second_st.st_size),
+              CBM_STORE_OK);
+    cbm_node_t *handle = NULL;
+    int handle_count = 0;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(store, "test-project", "HandleRequest", &handle,
+                                           &handle_count),
+              CBM_STORE_OK);
+    cbm_node_t target = {.project = "test-project",
+                         .label = "Function",
+                         .name = "AggregateTarget",
+                         .qualified_name = "test-project.AggregateTarget",
+                         .file_path = "second.go",
+                         .start_line = 2,
+                         .end_line = 2};
+    int64_t target_id = cbm_store_upsert_node(store, &target);
+    cbm_edge_t edge = {.project = "test-project", .source_id = handle[0].id,
+                       .target_id = target_id, .type = "CALLS"};
+    ASSERT_GT(cbm_store_insert_edge(store, &edge), 0);
+    cbm_store_free_nodes(handle, handle_count);
+    cbm_mcp_test_set_trace_hash_limits((size_t)4 * 1024 * 1024,
+                                       (size_t)first_st.st_size + (size_t)second_st.st_size - 1);
+    char *inner = strict_direct_trace(srv, "AggregateTarget", "strict", false);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "hash_budget_exhausted"));
+    ASSERT_NOT_NULL(strstr(inner, "\"indexed_path_suppressed\":true"));
+    ASSERT_NULL(strstr(inner, "\"path\":"));
+    ASSERT_NULL(strstr(inner, "\"caller_edges\":"));
+    free(inner);
+    cbm_unlink(second_path);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+#endif
 
 TEST(tool_trace_path_current_source_and_budget) {
     char tmp[256];
@@ -4088,7 +4448,8 @@ TEST(tool_trace_test_nodes_do_not_spend_result_budget) {
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{"
             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
             "\"function_name\":\"BudgetTarget\",\"from_function\":\"BudgetStart\","
-            "\"direction\":\"inbound\",\"depth\":3,\"include_tests\":%s}}}",
+            "\"direction\":\"inbound\",\"depth\":3,\"include_tests\":%s,"
+            "\"freshness_mode\":\"index_only\"}}}",
             include_tests ? "true" : "false");
         char *response = cbm_mcp_server_handle(srv, request);
         ASSERT_NOT_NULL(response);
@@ -4108,7 +4469,8 @@ TEST(tool_trace_test_nodes_do_not_spend_result_budget) {
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{"
             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
             "\"function_name\":\"BudgetTarget\",\"from_function\":\"BudgetStart\","
-            "\"direction\":\"inbound\",\"depth\":3,\"max_work\":%d}}}", max_work);
+            "\"direction\":\"inbound\",\"depth\":3,\"max_work\":%d,"
+            "\"freshness_mode\":\"index_only\"}}}", max_work);
         char *response = cbm_mcp_server_handle(srv, request);
         ASSERT_NOT_NULL(response);
         char *text = extract_text_content(response);
@@ -5850,6 +6212,13 @@ SUITE(mcp) {
     RUN_TEST(tool_trace_path_current_source_and_budget);
     RUN_TEST(tool_trace_between_preserves_identity_and_filters);
     RUN_TEST(tool_trace_between_rejects_ambiguous_and_invalid_entries);
+    RUN_TEST(tool_trace_direct_strict_hashes_current_path_and_withholds_source);
+    RUN_TEST(tool_trace_direct_strict_rejects_restored_metadata_content_change);
+    RUN_TEST(tool_trace_direct_unknown_deleted_outside_and_index_only);
+    RUN_TEST(tool_trace_direct_strict_rejects_metadata_and_file_budget);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(tool_trace_direct_strict_rejects_aggregate_hash_budget);
+#endif
     RUN_TEST(tool_trace_path_carries_location_and_call_site);
     RUN_TEST(tool_trace_path_test_filter_is_case_insensitive);
     RUN_TEST(tool_trace_test_nodes_do_not_spend_result_budget);

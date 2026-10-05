@@ -31,6 +31,9 @@ enum {
     MCP_BFS_LIMIT_MAX = 5000,       /* hard ceiling for the limit param (context-bomb guard) */
     MCP_PATH_WORK_DEFAULT = 10000,  /* CALLS edges examined by targeted from_function search */
     MCP_PATH_WORK_MAX = 100000,     /* hard ceiling independent of repository size */
+    MCP_PATH_HASH_FILE_MAX = 2 * 1024 * 1024,
+    MCP_PATH_HASH_REQUEST_MAX = 32 * 1024 * 1024,
+    MCP_PATH_HASH_TIMEOUT_MS = 200,
     MCP_DEFAULT_IMPACT_LIMIT = 200, /* detect_changes per-symbol rows; rollup stays complete */
     MCP_SNIPPET_MAX_LINES = 500,    /* get_code_snippet line cap (whole-file Module guard) */
     MCP_N_DEFAULTS_2 = 2,
@@ -78,6 +81,7 @@ enum {
 #include "foundation/compat_fs.h"
 #include "foundation/compat_thread.h"
 #include "foundation/log.h"
+#include "foundation/sha256.h"
 #include "foundation/limits.h"
 #include "mcp/index_supervisor.h"
 #include "mcp/store_meta.h"
@@ -86,6 +90,18 @@ enum {
 #include "foundation/dump_verify.h"
 #include "foundation/compat_regex.h"
 #include "pipeline/artifact.h"
+
+static size_t trace_hash_file_max = MCP_PATH_HASH_FILE_MAX;
+static size_t trace_hash_request_max = MCP_PATH_HASH_REQUEST_MAX;
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+void cbm_mcp_test_set_trace_hash_limits(size_t per_file_bytes, size_t per_request_bytes) {
+    trace_hash_file_max =
+        per_file_bytes ? per_file_bytes : (size_t)MCP_PATH_HASH_FILE_MAX;
+    trace_hash_request_max =
+        per_request_bytes ? per_request_bytes : (size_t)MCP_PATH_HASH_REQUEST_MAX;
+}
+#endif
 
 #ifdef _WIN32
 #include <direct.h>
@@ -533,6 +549,11 @@ static const tool_def_t TOOLS[] = {
      "entry point to function_name. Uses a bounded forward search from the entry point, resolves "
      "endpoints by identity, and respects depth, confidence and test filters. This is not an "
      "exhaustive path search.\"},"
+     "\"freshness_mode\":{\"type\":\"string\",\"enum\":[\"strict\",\"index_only\"],"
+     "\"default\":\"strict\",\"description\":\"For from_function paths, strict withholds an "
+     "indexed chain unless every selected path file matches its indexed SHA-256 and metadata. "
+     "index_only explicitly returns historical indexed relationships without a current-source "
+     "or current-shortest-path claim.\"},"
      "\"max_work\":{\"type\":\"integer\",\"default\":10000,\"minimum\":1,\"maximum\":100000,"
      "\"description\":\"Maximum CALLS edges examined by a from_function path search. The reply "
      "reports the actual work and whether this bound truncated the search.\"},"
@@ -5276,18 +5297,270 @@ static void trace_path_steps_free(std::vector<trace_path_step_t> *steps) {
     steps->clear();
 }
 
+bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
+
+struct trace_file_freshness_t {
+    std::string file;
+    const char *state;
+    const char *reason;
+};
+
+struct trace_hash_budget_t {
+    size_t bytes = 0;
+    struct timespec started = {};
+};
+
+static int64_t trace_stat_mtime_ns(const struct stat *st) {
+#ifdef __APPLE__
+    return ((int64_t)st->st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+           (int64_t)st->st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    return (int64_t)st->st_mtime * (int64_t)CBM_NSEC_PER_SEC;
+#else
+    return ((int64_t)st->st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+           (int64_t)st->st_mtim.tv_nsec;
+#endif
+}
+
+static bool trace_sha256_valid(const char *sha) {
+    if (!sha || strlen(sha) != CBM_SHA256_HEX_LEN) {
+        return false;
+    }
+    for (size_t i = 0; i < CBM_SHA256_HEX_LEN; ++i) {
+        if (!isxdigit((unsigned char)sha[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool trace_relative_file_safe(const char *file) {
+    if (!file || !file[0] || file[0] == '/' || file[0] == '\\' ||
+        (isalpha((unsigned char)file[0]) && file[1] == ':')) {
+        return false;
+    }
+    const char *part = file;
+    for (const char *p = file;; ++p) {
+        if (*p == '/' || *p == '\\' || *p == '\0') {
+            if ((size_t)(p - part) == 2 && part[0] == '.' && part[1] == '.') {
+                return false;
+            }
+            if (*p == '\0') {
+                break;
+            }
+            part = p + 1;
+        }
+    }
+    return true;
+}
+
+static bool trace_hash_time_exhausted(const trace_hash_budget_t *budget) {
+    struct timespec now;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &now);
+    int64_t elapsed = (int64_t)(now.tv_sec - budget->started.tv_sec) * 1000LL +
+                      (int64_t)(now.tv_nsec - budget->started.tv_nsec) / 1000000LL;
+    return elapsed > MCP_PATH_HASH_TIMEOUT_MS;
+}
+
+struct trace_fd_stat_t {
+    int64_t mtime_ns = 0;
+    int64_t size = -1;
+    bool regular = false;
+#ifndef _WIN32
+    dev_t dev = 0;
+    ino_t ino = 0;
+#endif
+};
+
+static bool trace_fstat(FILE *fp, trace_fd_stat_t *out) {
+#ifdef _WIN32
+    struct _stat64 st = {};
+    if (_fstat64(cbm_fileno(fp), &st) != 0) {
+        return false;
+    }
+    out->mtime_ns = (int64_t)st.st_mtime * (int64_t)CBM_NSEC_PER_SEC;
+    out->size = st.st_size;
+    out->regular = (st.st_mode & _S_IFMT) == _S_IFREG;
+#else
+    struct stat st = {};
+    if (fstat(cbm_fileno(fp), &st) != 0) {
+        return false;
+    }
+    out->mtime_ns = trace_stat_mtime_ns(&st);
+    out->size = st.st_size;
+    out->regular = S_ISREG(st.st_mode);
+    out->dev = st.st_dev;
+    out->ino = st.st_ino;
+#endif
+    return true;
+}
+
+static bool trace_fd_same_file(const trace_fd_stat_t &before, const trace_fd_stat_t &after) {
+    if (before.mtime_ns != after.mtime_ns || before.size != after.size || !after.regular) {
+        return false;
+    }
+#ifndef _WIN32
+    return before.dev == after.dev && before.ino == after.ino;
+#else
+    return true;
+#endif
+}
+
+static trace_file_freshness_t trace_check_path_file(cbm_store_t *store, const char *project,
+                                                     const char *project_root, const char *file,
+                                                     trace_hash_budget_t *budget) {
+    trace_file_freshness_t out = {file ? file : "", "unknown", "no_file_path"};
+    if (!trace_relative_file_safe(file)) {
+        out.reason = file && file[0] ? "outside_root" : "no_file_path";
+        return out;
+    }
+    if (!project_root || !project_root[0]) {
+        out.reason = "project_root_unavailable";
+        return out;
+    }
+    char stored_sha[CBM_SHA256_HEX_LEN + 1];
+    int64_t stored_mtime = 0;
+    int64_t stored_size = 0;
+    int store_rc = cbm_store_get_file_hash(store, project, file, stored_sha, sizeof(stored_sha),
+                                           &stored_mtime, &stored_size);
+    if (store_rc == CBM_STORE_NOT_FOUND) {
+        out.reason = "no_index_metadata";
+        return out;
+    }
+    if (store_rc != CBM_STORE_OK) {
+        out.reason = "store_error";
+        return out;
+    }
+    if (!trace_sha256_valid(stored_sha) || stored_size < 0 || stored_mtime <= 0) {
+        out.reason = "invalid_index_hash_or_metadata";
+        return out;
+    }
+
+    std::string abs = std::string(project_root) + "/" + file;
+    struct stat before = {};
+    if (stat(abs.c_str(), &before) != 0) {
+        if (errno == ENOENT || errno == ENOTDIR) {
+            out.state = "stale";
+            out.reason = "deleted";
+        } else {
+            out.reason = "stat_failed";
+        }
+        return out;
+    }
+    if (!cbm_path_within_root(project_root, abs.c_str())) {
+        out.reason = "outside_root";
+        return out;
+    }
+    if (!S_ISREG(before.st_mode)) {
+        out.reason = "unsupported_file";
+        return out;
+    }
+    if ((uint64_t)stored_size > trace_hash_file_max ||
+        budget->bytes + (size_t)stored_size > trace_hash_request_max ||
+        trace_hash_time_exhausted(budget)) {
+        out.reason = "hash_budget_exhausted";
+        return out;
+    }
+
+    FILE *fp = cbm_fopen(abs.c_str(), "rb");
+    if (!fp) {
+        out.reason = "open_failed";
+        return out;
+    }
+    trace_fd_stat_t opened = {};
+    if (!trace_fstat(fp, &opened)) {
+        fclose(fp);
+        out.reason = "fstat_failed";
+        return out;
+    }
+    if (!opened.regular) {
+        fclose(fp);
+        out.reason = "unsupported_file";
+        return out;
+    }
+#ifndef _WIN32
+    if (opened.dev != before.st_dev || opened.ino != before.st_ino) {
+        fclose(fp);
+        out.reason = "file_replaced_before_hash";
+        return out;
+    }
+#endif
+    if (opened.mtime_ns != stored_mtime || opened.size != stored_size) {
+        fclose(fp);
+        out.state = "stale";
+        out.reason = "metadata_mismatch";
+        return out;
+    }
+    cbm_sha256_ctx hash;
+    cbm_sha256_init(&hash);
+    unsigned char chunk[CBM_SZ_64K];
+    size_t read_total = 0;
+    bool timed_out = false;
+    size_t n = 0;
+    while ((n = fread(chunk, 1, sizeof(chunk), fp)) > 0) {
+        read_total += n;
+        budget->bytes += n;
+        cbm_sha256_update(&hash, chunk, n);
+        if (read_total > (size_t)stored_size || budget->bytes > trace_hash_request_max ||
+            trace_hash_time_exhausted(budget)) {
+            timed_out = true;
+            break;
+        }
+    }
+    bool read_failed = ferror(fp) != 0;
+    trace_fd_stat_t finished = {};
+    bool finish_stat_ok = trace_fstat(fp, &finished);
+    fclose(fp);
+    if (timed_out) {
+        out.reason = "hash_budget_exhausted";
+        return out;
+    }
+    if (read_failed) {
+        out.reason = "read_failed";
+        return out;
+    }
+    if (!finish_stat_ok || !trace_fd_same_file(opened, finished) ||
+        read_total != (size_t)stored_size) {
+        out.reason = "file_changed_during_hash";
+        return out;
+    }
+    uint8_t digest[CBM_SHA256_DIGEST_LEN];
+    cbm_sha256_final(&hash, digest);
+    char current_sha[CBM_SHA256_HEX_LEN + 1];
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        current_sha[i * 2] = hex[digest[i] >> 4];
+        current_sha[i * 2 + 1] = hex[digest[i] & 0x0f];
+    }
+    current_sha[CBM_SHA256_HEX_LEN] = '\0';
+    for (size_t i = 0; i < CBM_SHA256_HEX_LEN; ++i) {
+        if (current_sha[i] != (char)tolower((unsigned char)stored_sha[i])) {
+            out.state = "stale";
+            out.reason = "content_hash_mismatch";
+            return out;
+        }
+    }
+    out.state = "match";
+    out.reason = "sha256_and_metadata_match";
+    return out;
+}
+
 static int trace_direct_path_to_json(cbm_store_t *store, const char *project, const char *entry,
                                      const cbm_node_t *targets, int target_count, int depth,
                                      int max_work, double min_confidence, bool include_tests,
-                                     bool risk_labels, yyjson_mut_doc *doc, yyjson_mut_val *root) {
+                                     bool risk_labels, const char *freshness_mode,
+                                     yyjson_mut_doc *doc, yyjson_mut_val *root) {
+    bool index_only = freshness_mode && strcmp(freshness_mode, "index_only") == 0;
     yyjson_mut_obj_add_strcpy(doc, root, "from_function", entry);
+    yyjson_mut_obj_add_strcpy(doc, root, "freshness_mode", index_only ? "index_only" : "strict");
+    yyjson_mut_obj_add_bool(doc, root, "current_shortest_path_validated", false);
     yyjson_mut_obj_add_strcpy(doc, root, "traversal_strategy", "targeted_forward_bfs");
     yyjson_mut_obj_add_int(doc, root, "traversal_work_limit", max_work);
     yyjson_mut_obj_add_strcpy(
         doc, root, "path_note",
         "One shortest observed path in a bounded forward search of indexed CALLS edges. "
-        "No path does not prove disconnection; depth, work, coverage and filters limit this "
-        "result.");
+        "This is not a current-shortest-path claim: off-path edits are not checked. No path does "
+        "not prove disconnection; depth, work, coverage and filters limit this result.");
 
     cbm_node_t *sources = nullptr;
     int source_count = 0;
@@ -5417,9 +5690,84 @@ static int trace_direct_path_to_json(cbm_store_t *store, const char *project, co
         }
     }
 
+    std::vector<int> selected_steps;
+    if (finish >= 0) {
+        for (int step = finish; step >= 0; step = steps[step].parent) {
+            selected_steps.push_back(step);
+        }
+        std::reverse(selected_steps.begin(), selected_steps.end());
+    }
+
     yyjson_mut_obj_add_int(doc, root, "traversal_examined_edges", examined_edges);
     yyjson_mut_obj_add_int(doc, root, "traversal_visited_nodes", (int)steps.size());
     yyjson_mut_obj_add_bool(doc, root, "traversal_truncated", truncated);
+
+    if (finish >= 0 && !index_only) {
+        std::string project_root;
+        cbm_project_t proj = {};
+        if (cbm_store_get_project(store, project, &proj) == CBM_STORE_OK && proj.root_path) {
+            project_root = proj.root_path;
+        }
+        cbm_project_free_fields(&proj);
+
+        std::vector<std::string> files;
+        std::unordered_map<std::string, bool> seen_files;
+        for (int selected_step : selected_steps) {
+            const char *file = steps[selected_step].node.file_path;
+            std::string key = file ? file : "";
+            if (seen_files.emplace(key, true).second) {
+                files.push_back(std::move(key));
+            }
+        }
+        trace_hash_budget_t budget;
+        cbm_clock_gettime(CLOCK_MONOTONIC, &budget.started);
+        std::vector<trace_file_freshness_t> checks;
+        bool all_match = true;
+        for (const auto &file : files) {
+            checks.push_back(trace_check_path_file(store, project,
+                                                   project_root.empty() ? nullptr
+                                                                        : project_root.c_str(),
+                                                   file.c_str(), &budget));
+            all_match = all_match && strcmp(checks.back().state, "match") == 0;
+        }
+        yyjson_mut_val *freshness = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, freshness, "mode", "strict");
+        yyjson_mut_obj_add_strcpy(doc, freshness, "basis", "sha256_mtime_ns_size");
+        yyjson_mut_obj_add_int(doc, freshness, "files_checked", (int)checks.size());
+        yyjson_mut_obj_add_uint(doc, freshness, "bytes_hashed", budget.bytes);
+        yyjson_mut_obj_add_bool(doc, freshness, "all_path_files_match", all_match);
+        yyjson_mut_val *file_results = yyjson_mut_arr(doc);
+        for (const auto &check : checks) {
+            yyjson_mut_val *item = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, item, "file", check.file.c_str());
+            yyjson_mut_obj_add_strcpy(doc, item, "state", check.state);
+            yyjson_mut_obj_add_strcpy(doc, item, "reason", check.reason);
+            yyjson_mut_arr_add_val(file_results, item);
+        }
+        yyjson_mut_obj_add_val(doc, freshness, "files", file_results);
+        yyjson_mut_obj_add_val(doc, root, "index_freshness", freshness);
+        if (!all_match) {
+            yyjson_mut_obj_add_bool(doc, root, "indexed_path_found", true);
+            yyjson_mut_obj_add_bool(doc, root, "indexed_path_suppressed", true);
+            yyjson_mut_obj_add_bool(doc, root, "path_returned", false);
+            yyjson_mut_obj_add_bool(doc, root, "current_source_relationship_supported", false);
+            yyjson_mut_obj_add_strcpy(
+                doc, root, "error",
+                "Indexed call path withheld because path-file freshness is stale or unknown. "
+                "Re-index the project or explicitly request freshness_mode=index_only for "
+                "historical graph evidence.");
+            trace_path_steps_free(&steps);
+            return CBM_STORE_OK;
+        }
+        yyjson_mut_obj_add_bool(doc, root, "path_files_match_index_snapshot", true);
+        yyjson_mut_obj_add_bool(doc, root, "current_source_relationship_supported", true);
+    } else if (index_only) {
+        yyjson_mut_obj_add_bool(doc, root, "historical_index_only", true);
+        yyjson_mut_obj_add_bool(doc, root, "current_source_relationship_supported", false);
+    } else if (finish < 0) {
+        yyjson_mut_obj_add_bool(doc, root, "current_source_relationship_supported", false);
+    }
+
     yyjson_mut_obj_add_bool(doc, root, "path_found", finish >= 0);
     yyjson_mut_val *path = yyjson_mut_arr(doc);
     yyjson_mut_val *edges = yyjson_mut_arr(doc);
@@ -5427,11 +5775,6 @@ static int trace_direct_path_to_json(cbm_store_t *store, const char *project, co
     yyjson_mut_obj_add_val(doc, root, "caller_edges", edges);
 
     if (finish >= 0) {
-        std::vector<int> selected_steps;
-        for (int step = finish; step >= 0; step = steps[step].parent) {
-            selected_steps.push_back(step);
-        }
-        std::reverse(selected_steps.begin(), selected_steps.end());
         for (size_t i = 0; i < selected_steps.size(); ++i) {
             const trace_path_step_t &step = steps[selected_steps[i]];
             const cbm_node_t &node = step.node;
@@ -5623,7 +5966,17 @@ static char *handle_trace_call_path_impl(cbm_mcp_server_t *srv, const char *args
     int edge_type_count = 0;
     yyjson_doc *et_doc_keep = resolve_trace_edge_types(args, mode, edge_types, &edge_type_count);
     char *entry = cbm_mcp_get_string_arg(args, "from_function");
+    char *freshness_mode = cbm_mcp_get_string_arg(args, "freshness_mode");
     int max_work = cbm_mcp_get_int_arg(args, "max_work", MCP_PATH_WORK_DEFAULT);
+    if (!entry) {
+        yyjson_mut_obj_add_bool(doc, root, "historical_index_only", true);
+        yyjson_mut_obj_add_bool(doc, root, "current_source_relationship_supported", false);
+        yyjson_mut_obj_add_bool(doc, root, "current_shortest_path_validated", false);
+        yyjson_mut_obj_add_strcpy(
+            doc, root, "relationship_note",
+            "Broad traversal returns indexed relationships only; it does not validate a current "
+            "source path or a current shortest path.");
+    }
 
     /* Run BFS for each requested direction.
      * IMPORTANT: yyjson_mut_obj_add_str borrows pointers — we must keep
@@ -5658,7 +6011,7 @@ static char *handle_trace_call_path_impl(cbm_mcp_server_t *srv, const char *args
         if (entry) {
             (void)trace_direct_path_to_json(store, project, entry, nodes, node_count, depth,
                                             max_work, min_confidence, include_tests, risk_labels,
-                                            doc, root);
+                                            freshness_mode, doc, root);
         } else {
             if (bfs_union_same_name(store, nodes, node_count, "inbound", edge_types,
                                     edge_type_count, depth, include_tests,
@@ -5675,7 +6028,11 @@ static char *handle_trace_call_path_impl(cbm_mcp_server_t *srv, const char *args
         }
     }
 
-    if (cbm_mcp_get_int_arg(args, "source_lines", 0) > 0) {
+    bool path_suppressed = yyjson_mut_obj_get(root, "indexed_path_suppressed") != nullptr;
+    bool direct_index_only = entry && freshness_mode && strcmp(freshness_mode, "index_only") == 0;
+    bool direct_strict = entry && !direct_index_only;
+    if (!path_suppressed && (!entry || direct_index_only) &&
+        cbm_mcp_get_int_arg(args, "source_lines", 0) > 0) {
         yyjson_mut_val *origins = yyjson_mut_arr(doc);
         for (int i = 0; i < node_count; i++) {
             yyjson_mut_val *origin = yyjson_mut_obj(doc);
@@ -5688,7 +6045,18 @@ static char *handle_trace_call_path_impl(cbm_mcp_server_t *srv, const char *args
         }
         yyjson_mut_obj_add_val(doc, root, "definitions", origins);
     }
-    trace_add_source(srv, project, doc, root, args);
+    if (!path_suppressed && direct_strict &&
+        (cbm_mcp_get_int_arg(args, "source_lines", 0) > 0 ||
+         cbm_mcp_get_int_arg(args, "source_context", 0) > 0)) {
+        yyjson_mut_obj_add_bool(doc, root, "source_withheld", true);
+        yyjson_mut_obj_add_strcpy(
+            doc, root, "source_note",
+            "Strict mode validates the indexed relationship snapshot but withholds live source "
+            "snippets because they are not read from the validated hash stream. Use a separate "
+            "focused source read or freshness_mode=index_only for historical indexed ranges.");
+    } else if (!path_suppressed) {
+        trace_add_source(srv, project, doc, root, args);
+    }
 
     /* Serialize BEFORE freeing traversal results (yyjson borrows strings) */
     bool is_error = yyjson_mut_obj_get(root, "error") != nullptr;
@@ -5710,6 +6078,7 @@ static char *handle_trace_call_path_impl(cbm_mcp_server_t *srv, const char *args
     free(mode);
     free(param_name);
     free(entry);
+    free(freshness_mode);
     if (et_doc_keep) {
         yyjson_doc_free(et_doc_keep);
     }
@@ -5722,6 +6091,7 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     yyjson_val *input_root = yyjson_doc_get_root(input);
     yyjson_val *entry = yyjson_obj_get(input_root, "from_function");
     yyjson_val *max_work = yyjson_obj_get(input_root, "max_work");
+    yyjson_val *freshness = yyjson_obj_get(input_root, "freshness_mode");
     bool invalid_entry = false;
     if (entry) {
         const char *name = yyjson_get_str(entry);
@@ -5744,11 +6114,18 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
         invalid_entry = invalid_entry || !entry || !yyjson_is_int(max_work) || work < 1 ||
                         work > MCP_PATH_WORK_MAX;
     }
+    if (freshness) {
+        const char *name = yyjson_get_str(freshness);
+        invalid_entry = invalid_entry || !entry || !name ||
+                        strlen(name) != yyjson_get_len(freshness) ||
+                        (strcmp(name, "strict") != 0 && strcmp(name, "index_only") != 0);
+    }
     yyjson_doc_free(input);
     if (invalid_entry) {
         return cbm_mcp_text_result(
             "{\"error\":\"from_function requires a nonempty string of at most 512 bytes, "
-            "direction=inbound, mode=calls, CALLS edges, and max_work from 1 to 100000\"}",
+            "direction=inbound, mode=calls, CALLS edges, freshness_mode strict or index_only, and "
+            "max_work from 1 to 100000\"}",
             true);
     }
     char *result = handle_trace_call_path_impl(srv, args);
@@ -6841,8 +7218,6 @@ char *cbm_mcp_index_run_supervised_path(const char *root_path) {
     return index_run_supervised_path(NULL, root_path);
 }
 
-bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
-
 /* #1211: index_repository requires repo_path, but list_projects only ever
  * advertises the project NAME, and every read tool accepts that name back via
  * get_project_arg's "project"/"project_name"/"project_id"/"projectName"
@@ -7380,6 +7755,8 @@ static char *trace_read_source(const char *root, const char *file, int start, in
 static void trace_attach_source(const char *project_root, const char *file, int start, int end,
                                 bool clipped, int budget, yyjson_mut_doc *doc,
                                 yyjson_mut_val *item) {
+    yyjson_mut_obj_add_strcpy(doc, item, "source_range_basis", "indexed_range");
+    yyjson_mut_obj_add_bool(doc, item, "current_definition_extent_validated", false);
     if (!file || start <= 0 || end < start) {
         yyjson_mut_obj_add_bool(doc, item, "source_unavailable", true);
         return;
@@ -7438,7 +7815,9 @@ static void trace_add_source(cbm_mcp_server_t *srv, const char *project, yyjson_
     yyjson_mut_obj_add_str(
         doc, root, "source_note",
         "Current source at indexed locations; locations and relationships may be stale. "
-        "source_clipped, source_unavailable or source_omitted require a focused source read.");
+        "source_range_basis=indexed_range; source_clipped=false only means that indexed range was "
+        "read completely, not that the current definition extent was validated. source_clipped, "
+        "source_unavailable or source_omitted require a focused source read.");
     if (context > 0) {
         for (const char *key : {"caller_edges", "callee_edges"}) {
             yyjson_mut_val *edges = yyjson_mut_obj_get(root, key);

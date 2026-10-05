@@ -24,6 +24,18 @@
 #include <errno.h>
 #include <zlib.h>
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" int cbm_codex_native_hooks_for_testing(const char *binary_path, const char *config_path,
+                                                  bool json, bool remove);
+extern "C" int cbm_install_codex_hooks_for_testing(const char *binary_path, const char *config_path,
+                                                   const char *hooks_path);
+extern "C" int cbm_install_codex_hooks_write_failure_for_testing(const char *binary_path,
+                                                                 const char *config_path,
+                                                                 const char *hooks_path);
+extern "C" int cbm_install_codex_agent_config_for_testing(const char *home,
+                                                           const char *binary_path);
+#endif
+
 /* Helper: create a file with content */
 static int write_test_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
@@ -1945,6 +1957,300 @@ TEST(cli_codex_hook_preserves_foreign_tables) {
     PASS();
 }
 
+TEST(cli_codex_native_prompt_hook_toml) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-native-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char cfg[512];
+    snprintf(cfg, sizeof(cfg), "%s/config.toml", tmpdir);
+    write_test_file(cfg, "[[hooks.UserPromptSubmit]]\n"
+                         "[[hooks.UserPromptSubmit.hooks]]\n"
+                         "type = \"command\"\n"
+                         "command = \"echo user-owned\"\n"
+                         "\n[mcp_servers.other]\ncommand = \"x\"\n");
+
+    const char *binary = "/tmp/O'Brien $bin/code-cortex-mcp";
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing(binary, cfg, false, false), 0);
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing(binary, cfg, false, false), 0);
+    const char *data = read_test_file(cfg);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NOT_NULL(strstr(data, "[[hooks.UserPromptSubmit]]"));
+    ASSERT_NOT_NULL(strstr(data, "--code-cortex-user-prompt-submit"));
+    ASSERT_NOT_NULL(strstr(data, "timeout = 2"));
+    ASSERT_NOT_NULL(strstr(data, "additionalContextLimit = 3000"));
+    ASSERT_NOT_NULL(strstr(data, "echo user-owned"));
+    ASSERT_NOT_NULL(strstr(data, "O'\\\\''Brien $bin"));
+    const char *owned = strstr(data, "--code-cortex-user-prompt-submit");
+    ASSERT_NOT_NULL(owned);
+    ASSERT_NULL(strstr(owned + 1, "--code-cortex-user-prompt-submit"));
+
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing(binary, cfg, false, true), 0);
+    data = read_test_file(cfg);
+    ASSERT_NULL(strstr(data, "--code-cortex-user-prompt-submit"));
+    ASSERT_NULL(strstr(data, "code-cortex-mcp SessionStart"));
+    ASSERT_NOT_NULL(strstr(data, "echo user-owned"));
+    ASSERT_NOT_NULL(strstr(data, "[mcp_servers.other]"));
+
+    ASSERT_EQ(cbm_unlink(cfg), 0);
+    ASSERT_EQ(cbm_rmdir(tmpdir), 0);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_codex_native_prompt_hook_json) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-native-json-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char cfg[512];
+    snprintf(cfg, sizeof(cfg), "%s/hooks.json", tmpdir);
+    write_test_file(cfg, "{\"keep\":true,\"hooks\":{"
+                         "\"SessionStart\":[{\"matcher\":\"startup|resume|clear|compact\","
+                         "\"label\":\"keep-session-group\",\"hooks\":["
+                         "{\"type\":\"command\",\"command\":\"echo code-cortex-mcp: old\"},"
+                         "{\"type\":\"command\",\"command\":\"echo user-session\"}]}],"
+                         "\"UserPromptSubmit\":[{\"label\":\"keep-prompt-group\",\"hooks\":["
+                         "{\"type\":\"command\",\"command\":\"old hook-augment "
+                         "--code-cortex-user-prompt-submit\"},"
+                         "{\"type\":\"command\",\"command\":\"echo user-prompt\"}]}]}}");
+
+    ASSERT_EQ(
+        cbm_codex_native_hooks_for_testing("/opt/code cortex/code-cortex-mcp", cfg, true, false),
+        0);
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing("/new/code-cortex-mcp", cfg, true, false), 0);
+    const char *data = read_test_file(cfg);
+    ASSERT_NOT_NULL(data);
+    yyjson_doc *doc = yyjson_read(data, strlen(data), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "keep")));
+    yyjson_val *hooks = yyjson_obj_get(root, "hooks");
+    ASSERT_EQ((int)yyjson_arr_size(yyjson_obj_get(hooks, "SessionStart")), 2);
+    yyjson_val *prompts = yyjson_obj_get(hooks, "UserPromptSubmit");
+    ASSERT_EQ((int)yyjson_arr_size(prompts), 2);
+    int ours = 0;
+    size_t i, n;
+    yyjson_val *entry;
+    yyjson_arr_foreach(prompts, i, n, entry) {
+        yyjson_val *handler = yyjson_arr_get(yyjson_obj_get(entry, "hooks"), 0);
+        const char *command = yyjson_get_str(yyjson_obj_get(handler, "command"));
+        if (command && strstr(command, "--code-cortex-user-prompt-submit")) {
+            ours++;
+            ASSERT_EQ((int)yyjson_get_int(yyjson_obj_get(handler, "timeout")), 2);
+            ASSERT_EQ((int)yyjson_get_int(yyjson_obj_get(handler, "additionalContextLimit")), 3000);
+            ASSERT_NOT_NULL(strstr(command, "/new/code-cortex-mcp"));
+        }
+    }
+    ASSERT_EQ(ours, 1);
+    yyjson_doc_free(doc);
+    ASSERT_NOT_NULL(strstr(data, "keep-session-group"));
+    ASSERT_NOT_NULL(strstr(data, "keep-prompt-group"));
+    ASSERT_NOT_NULL(strstr(data, "echo user-session"));
+    ASSERT_NOT_NULL(strstr(data, "echo user-prompt"));
+
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing(NULL, cfg, true, true), 0);
+    data = read_test_file(cfg);
+    ASSERT_NOT_NULL(strstr(data, "echo user-session"));
+    ASSERT_NOT_NULL(strstr(data, "echo user-prompt"));
+    ASSERT_NOT_NULL(strstr(data, "keep-session-group"));
+    ASSERT_NOT_NULL(strstr(data, "keep-prompt-group"));
+    ASSERT_NULL(strstr(data, "--code-cortex-user-prompt-submit"));
+    ASSERT_NULL(strstr(data, "code-cortex-mcp: use inspect_symbol"));
+
+    ASSERT_EQ(cbm_unlink(cfg), 0);
+    ASSERT_EQ(cbm_rmdir(tmpdir), 0);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_codex_hook_representation_migration) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-migrate-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char toml[512];
+    char json[512];
+    snprintf(toml, sizeof(toml), "%s/config.toml", tmpdir);
+    snprintf(json, sizeof(json), "%s/hooks.json", tmpdir);
+    write_test_file(toml, "[[hooks.UserPromptSubmit]]\n"
+                          "[[hooks.UserPromptSubmit.hooks]]\n"
+                          "type = \"command\"\n"
+                          "command = \"echo user-toml\"\n"
+                          "\n[hooks.state]\ntrusted_hash = \"sha256:user\"\n");
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing("/old/code-cortex-mcp", toml, false, false), 0);
+    write_test_file(json, "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":"
+                          "\"command\",\"command\":\"echo user-json\"}]}]}}");
+
+    ASSERT_EQ(cbm_install_codex_hooks_for_testing("/new/code-cortex-mcp", toml, json), 0);
+    const char *data = read_test_file(toml);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NULL(strstr(data, "--code-cortex-user-prompt-submit"));
+    ASSERT_NULL(strstr(data, "code-cortex-mcp SessionStart"));
+    ASSERT_NOT_NULL(strstr(data, "echo user-toml"));
+    ASSERT_NOT_NULL(strstr(data, "trusted_hash = \"sha256:user\""));
+
+    data = read_test_file(json);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NOT_NULL(strstr(data, "--code-cortex-user-prompt-submit"));
+    ASSERT_NOT_NULL(strstr(data, "/new/code-cortex-mcp"));
+    ASSERT_NOT_NULL(strstr(data, "echo user-json"));
+
+    ASSERT_EQ(cbm_unlink(toml), 0);
+    ASSERT_EQ(cbm_unlink(json), 0);
+    ASSERT_EQ(cbm_rmdir(tmpdir), 0);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_codex_hook_migration_rejects_malformed_json) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-badjson-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char toml[512];
+    char json[512];
+    snprintf(toml, sizeof(toml), "%s/config.toml", tmpdir);
+    snprintf(json, sizeof(json), "%s/hooks.json", tmpdir);
+    write_test_file(toml, "[mcp_servers.other]\ncommand = \"keep\"\n");
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing("/old/code-cortex-mcp", toml, false, false), 0);
+    static const char malformed[] = "{not valid hooks json\n";
+    write_test_file(json, malformed);
+
+    ASSERT_EQ(cbm_install_codex_hooks_for_testing("/new/code-cortex-mcp", toml, json), -1);
+    const char *data = read_test_file(toml);
+    ASSERT_NOT_NULL(data);
+    ASSERT_NOT_NULL(strstr(data, "--code-cortex-user-prompt-submit"));
+    ASSERT_NOT_NULL(strstr(data, "/old/code-cortex-mcp"));
+    ASSERT_NOT_NULL(strstr(data, "[mcp_servers.other]"));
+    data = read_test_file(json);
+    ASSERT_NOT_NULL(data);
+    ASSERT_STR_EQ(data, malformed);
+
+    ASSERT_EQ(cbm_unlink(toml), 0);
+    ASSERT_EQ(cbm_unlink(json), 0);
+    ASSERT_EQ(cbm_rmdir(tmpdir), 0);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_codex_hook_migration_rejects_invalid_event_schema) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-badschema-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char toml[512];
+    char json[512];
+    snprintf(toml, sizeof(toml), "%s/config.toml", tmpdir);
+    snprintf(json, sizeof(json), "%s/hooks.json", tmpdir);
+    write_test_file(toml, "[mcp_servers.other]\ncommand = \"keep\"\n");
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing("/old/code-cortex-mcp", toml, false, false), 0);
+    static const char invalid[] =
+        "{\"keep\":true,\"hooks\":{\"UserPromptSubmit\":{\"hooks\":[]}}}\n";
+    write_test_file(json, invalid);
+
+    std::string toml_before = read_test_file(toml);
+    ASSERT_EQ(cbm_install_codex_hooks_for_testing("/new/code-cortex-mcp", toml, json), -1);
+    ASSERT_STR_EQ(read_test_file(toml), toml_before.c_str());
+    ASSERT_STR_EQ(read_test_file(json), invalid);
+
+    ASSERT_EQ(cbm_unlink(toml), 0);
+    ASSERT_EQ(cbm_unlink(json), 0);
+    ASSERT_EQ(cbm_rmdir(tmpdir), 0);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_codex_hook_migration_preserves_toml_on_json_write_failure) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-writefail-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char toml[512];
+    char json[512];
+    snprintf(toml, sizeof(toml), "%s/config.toml", tmpdir);
+    snprintf(json, sizeof(json), "%s/hooks.json", tmpdir);
+    write_test_file(toml, "[mcp_servers.other]\ncommand = \"keep\"\n");
+    ASSERT_EQ(cbm_codex_native_hooks_for_testing("/old/code-cortex-mcp", toml, false, false), 0);
+    static const char original_json[] =
+        "{\"keep\":true,\"hooks\":{\"UserPromptSubmit\":[{\"label\":\"foreign\","
+        "\"hooks\":[{\"type\":\"command\",\"command\":\"echo user\"}]}]}}\n";
+    write_test_file(json, original_json);
+
+    std::string toml_before = read_test_file(toml);
+    ASSERT_EQ(cbm_install_codex_hooks_write_failure_for_testing("/new/code-cortex-mcp", toml, json),
+              -1);
+    ASSERT_STR_EQ(read_test_file(toml), toml_before.c_str());
+    ASSERT_STR_EQ(read_test_file(json), original_json);
+
+    ASSERT_EQ(cbm_unlink(toml), 0);
+    ASSERT_EQ(cbm_unlink(json), 0);
+    ASSERT_EQ(cbm_rmdir(tmpdir), 0);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_codex_hook_install_failure_propagates) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-propagate-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char codex_dir[512];
+    char hooks_json[512];
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
+    snprintf(hooks_json, sizeof(hooks_json), "%s/hooks.json", codex_dir);
+    ASSERT_EQ(cbm_mkdir(codex_dir), 0);
+    write_test_file(hooks_json, "{not valid hooks json\n");
+
+    ASSERT_EQ(cbm_install_codex_agent_config_for_testing(tmpdir, "/new/code-cortex-mcp"), -1);
+
+    char config_toml[512];
+    char agents_md[512];
+    snprintf(config_toml, sizeof(config_toml), "%s/config.toml", codex_dir);
+    snprintf(agents_md, sizeof(agents_md), "%s/AGENTS.md", codex_dir);
+    ASSERT_EQ(cbm_unlink(config_toml), 0);
+    ASSERT_EQ(cbm_unlink(agents_md), 0);
+    ASSERT_EQ(cbm_unlink(hooks_json), 0);
+    ASSERT_EQ(cbm_rmdir(codex_dir), 0);
+    ASSERT_EQ(cbm_rmdir(tmpdir), 0);
+    PASS();
+#else
+    SKIP("requires CBM_TEST_SEAMS");
+#endif
+}
+
+TEST(cli_install_help_has_no_side_effects) {
+    char *args[] = {(char *)"--help"};
+    ASSERT_EQ(cbm_cmd_install(1, args), 0);
+    PASS();
+}
+
 /* Gemini/Antigravity SessionStart reminder parity (settings.json JSON path). */
 TEST(cli_gemini_session_hook_parity) {
     char tmpdir[256];
@@ -2984,11 +3290,14 @@ TEST(cli_prompt_evidence_block_reads_matches_from_disk) {
     ASSERT_NOT_NULL(strstr(block, "  definition: def.c:3: int target_fn(void) {"));
     ASSERT_NOT_NULL(strstr(block, "  declaration: api.h:1: int target_fn(void);"));
     ASSERT_NOT_NULL(strstr(block, "  every whole-word match (7 lines):"));
-    ASSERT_NOT_NULL(strstr(block, "    a.c:1: void a(void) { target_fn(); }  [call]"));
-    ASSERT_NOT_NULL(strstr(block, "    b_test.c:2: target_fn();  [call (text only, not resolved "
-                                  "by the graph)]"));
-    ASSERT_NOT_NULL(strstr(block, "    comment.c:1: // target_fn is old  [comment]"));
-    ASSERT_NOT_NULL(strstr(block, "    str.c:1: const char *s = \"target_fn\";  [string]"));
+    ASSERT_NOT_NULL(strstr(block, "    a.c:1: void a(void) { target_fn(); }  [indexed edge "
+                                  "candidate; binding not re-resolved]"));
+    ASSERT_NOT_NULL(strstr(block,
+                           "    b_test.c:2: target_fn();  [unresolved call shape]"));
+    ASSERT_NOT_NULL(
+        strstr(block, "    comment.c:1: // target_fn is old  [comment occurrence]"));
+    ASSERT_NOT_NULL(
+        strstr(block, "    str.c:1: const char *s = \"target_fn\";  [string occurrence]"));
     ASSERT_NOT_NULL(strstr(block, "    def.c:3: int target_fn(void) {  [definition]"));
     ASSERT_NOT_NULL(strstr(block, "    doc.md:1: See target_fn for details.  [reference]"));
     ASSERT_NULL(strstr(block, "near.c")); /* target_fn_extra is not a whole-word match */
@@ -2996,10 +3305,15 @@ TEST(cli_prompt_evidence_block_reads_matches_from_disk) {
                                   "    doc.md:1: See target_fn for details."));
     ASSERT_NOT_NULL(strstr(block, "  aliases: none found (checked import-as, assignment, #define, "
                                   "using, module import)"));
-    ASSERT_NOT_NULL(strstr(block, "no whole-word `target_fn` on disk now (stale, re-check): "
-                                  "lib/gone.c"));
-    ASSERT_NOT_NULL(strstr(block, "  files containing `target_fn` (7):\n    a.c  calls=1 other=0\n"
-                                  "    api.h  calls=0 other=1\n    b_test.c  calls=1 other=0\n"));
+    /* A stale graph-only caller must not be presented as current evidence. */
+    ASSERT_NULL(strstr(block, "lib/gone.c"));
+    ASSERT_NOT_NULL(strstr(block, "  files containing `target_fn` (7):\n"
+                                  "    a.c  indexed_edge_candidates=1 unresolved_call_shapes=0 "
+                                  "other_occurrences=0\n"
+                                  "    api.h  indexed_edge_candidates=0 unresolved_call_shapes=0 "
+                                  "other_occurrences=1\n"
+                                  "    b_test.c  indexed_edge_candidates=0 "
+                                  "unresolved_call_shapes=1 other_occurrences=0\n"));
     ASSERT_NOT_NULL(strstr(block, "  scanned 9 text files (all extensions, the files git would "
                                   "track; skipped: 0 binary, 0 over 2 MB; vendored dirs: none "
                                   "skipped); 7 files contain the whole word; by extension: .c 5, "
@@ -3011,13 +3325,16 @@ TEST(cli_prompt_evidence_block_reads_matches_from_disk) {
     /* Too much to list: one summary per file, the table stays complete. */
     block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 1);
     ASSERT_NOT_NULL(block);
-    ASSERT_NOT_NULL(strstr(block, "    b_test.c: 1 matches (1 calls) lines 2"));
+    ASSERT_NOT_NULL(
+        strstr(block, "    b_test.c: 1 matches (1 unresolved call shapes) lines 2"));
     ASSERT_NOT_NULL(strstr(block, "    comment.c: 1 matches (1 comments) lines 1"));
-    ASSERT_NOT_NULL(strstr(block, "    b_test.c  calls=1 other=0"));
+    ASSERT_NOT_NULL(strstr(block, "    b_test.c  indexed_edge_candidates=0 "
+                                  "unresolved_call_shapes=1 other_occurrences=0"));
     free(block);
     block = cbm_prompt_evidence_for_testing(root, facts, names, 9, 2);
     ASSERT_NOT_NULL(strstr(block, "per-line listing dropped to fit the context budget"));
-    ASSERT_NOT_NULL(strstr(block, "    str.c  calls=0 other=1"));
+    ASSERT_NOT_NULL(strstr(block, "    str.c  indexed_edge_candidates=0 "
+                                  "unresolved_call_shapes=0 other_occurrences=1"));
     free(block);
 
     /* The name is not near the indexed start: a stale mark, not a claim. */
@@ -3198,6 +3515,7 @@ TEST(cli_prompt_chain_block_has_call_sites) {
     ASSERT_NOT_NULL(strstr(block, "\n    a_fn -> b_fn: x.c:7: b_fn();"));
     /* The recorded line 99 does not name c_fn: found in b_fn's body. */
     ASSERT_NOT_NULL(strstr(block, "\n    b_fn -> c_fn: x.c:3: c_fn();"));
+    ASSERT_NOT_NULL(strstr(block, "this is not a current shortest-path claim"));
     ASSERT_NULL(strstr(block, "__decl"));
     ASSERT_NULL(strstr(block, "@overload"));
     free(block);
@@ -3414,11 +3732,13 @@ TEST(cli_source_context_preserves_interleaved_paths) {
 
 TEST(cli_hook_brief_uses_exact_file_total) {
 #ifdef CBM_ENABLE_TEST_SEAMS
-    char *text = cbm_hook_symbol_brief_for_testing("{\"symbol\":{\"label\":\"Function\",\"file\":"
-                                                   "\"target.c\",\"start_line\":2,\"end_line\":4},"
-                                                   "\"callers_total\":301,\"caller_files_total\":"
-                                                   "301,\"caller_files\":[{\"file\":\"first.c\"}]}",
-                                                   "target");
+    char *text =
+        cbm_hook_symbol_brief_for_testing("{\"symbol\":{\"label\":\"Function\",\"file\":"
+                                          "\"target.c\",\"start_line\":2,\"end_line\":4},"
+                                          "\"index\":{\"file_modified_after_index\":false},"
+                                          "\"callers_total\":301,\"caller_files_total\":"
+                                          "301,\"caller_files\":[{\"file\":\"first.c\"}]}",
+                                          "target");
     ASSERT_NOT_NULL(text);
     ASSERT_NOT_NULL(strstr(text, "defined at target.c:2-4"));
     ASSERT_NOT_NULL(strstr(text, "301 direct caller(s) in 301 file(s)"));
@@ -3426,6 +3746,7 @@ TEST(cli_hook_brief_uses_exact_file_total) {
     free(text);
     text = cbm_hook_symbol_brief_for_testing("{\"symbol\":{\"label\":\"Declaration\",\"file\":"
                                              "\"api.h\",\"start_line\":1,\"end_line\":1},"
+                                             "\"index\":{\"file_modified_after_index\":false},"
                                              "\"callers_total\":0,\"caller_files\":[]}",
                                              "api_only");
     ASSERT_NOT_NULL(text);
@@ -4135,6 +4456,14 @@ SUITE(cli) {
     RUN_TEST(cli_codex_session_hook_issue330);
     RUN_TEST(cli_codex_hook_migrates_legacy_block);
     RUN_TEST(cli_codex_hook_preserves_foreign_tables);
+    RUN_TEST(cli_codex_native_prompt_hook_toml);
+    RUN_TEST(cli_codex_native_prompt_hook_json);
+    RUN_TEST(cli_codex_hook_representation_migration);
+    RUN_TEST(cli_codex_hook_migration_rejects_malformed_json);
+    RUN_TEST(cli_codex_hook_migration_rejects_invalid_event_schema);
+    RUN_TEST(cli_codex_hook_migration_preserves_toml_on_json_write_failure);
+    RUN_TEST(cli_codex_hook_install_failure_propagates);
+    RUN_TEST(cli_install_help_has_no_side_effects);
     RUN_TEST(cli_gemini_session_hook_parity);
     RUN_TEST(cli_detect_agents_finds_gemini);
     RUN_TEST(cli_detect_agents_finds_zed);

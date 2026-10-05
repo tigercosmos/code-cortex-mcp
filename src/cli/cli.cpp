@@ -860,6 +860,110 @@ static int write_json_file(const char *path, yyjson_mut_doc *doc) {
     return written == len ? 0 : CLI_ERR;
 }
 
+/* Publish a buffer without ever exposing a truncated destination. The
+ * temporary file lives beside the target, so the final replace is atomic on
+ * POSIX and uses write-through replacement on Windows. */
+#ifdef CBM_ENABLE_TEST_SEAMS
+static bool g_codex_test_fail_atomic_publish = false;
+#endif
+static int write_file_buffer_atomic(const char *path, const char *data, size_t len) {
+    const char *publish_path = path;
+#ifndef _WIN32
+    /* Preserve a user-managed symlink: replace its resolved target rather than
+     * replacing the link itself with a new regular file. */
+    char resolved[CLI_BUF_4K];
+    if (realpath(path, resolved)) {
+        publish_path = resolved;
+    }
+#endif
+    char tmp[CLI_BUF_4K];
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", publish_path);
+    if (n < 0 || (size_t)n >= sizeof(tmp)) {
+        return CLI_ERR;
+    }
+    int fd = cbm_mkstemp(tmp);
+    if (fd < 0) {
+        return CLI_ERR;
+    }
+#ifdef _WIN32
+    FILE *f = _fdopen(fd, "wb");
+#else
+    struct stat old_st;
+    if (stat(publish_path, &old_st) == 0) {
+        (void)fchmod(fd, old_st.st_mode & 0777);
+    }
+    FILE *f = fdopen(fd, "wb");
+#endif
+    if (!f) {
+#ifdef _WIN32
+        _close(fd);
+#else
+        close(fd);
+#endif
+        (void)cbm_unlink(tmp);
+        return CLI_ERR;
+    }
+
+    bool ok = fwrite(data, CLI_ELEM_SIZE, len, f) == len && fflush(f) == 0;
+    if (ok) {
+#ifdef _WIN32
+        ok = _commit(cbm_fileno(f)) == 0;
+#else
+        ok = fsync(cbm_fileno(f)) == 0;
+#endif
+    }
+    if (fclose(f) != 0) {
+        ok = false;
+    }
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (g_codex_test_fail_atomic_publish) {
+        ok = false;
+    }
+#endif
+    if (!ok || cbm_rename_replace(tmp, publish_path) != 0) {
+        (void)cbm_unlink(tmp);
+        return CLI_ERR;
+    }
+#ifndef _WIN32
+    /* The file contents are durable above; sync the directory entry when the
+     * local filesystem supports it. Failure here cannot be rolled back after
+     * a successful atomic rename, so it remains a best-effort crash barrier. */
+    char parent[CLI_BUF_4K];
+    snprintf(parent, sizeof(parent), "%s", publish_path);
+    char *slash = strrchr(parent, '/');
+    if (slash) {
+        *slash = '\0';
+        int dir_fd = open(parent[0] ? parent : "/", O_RDONLY);
+        if (dir_fd >= 0) {
+            (void)fsync(dir_fd);
+            close(dir_fd);
+        }
+    }
+#endif
+    return 0;
+}
+
+static int write_json_file_atomic(const char *path, yyjson_mut_doc *doc) {
+    yyjson_write_flag flags = YYJSON_WRITE_PRETTY | YYJSON_WRITE_ESCAPE_UNICODE;
+    size_t len = 0;
+    char *json = yyjson_mut_write(doc, flags, &len);
+    if (!json) {
+        return CLI_ERR;
+    }
+    char *with_newline = (char *)malloc(len + CLI_PAIR_LEN);
+    if (!with_newline) {
+        free(json);
+        return CLI_ERR;
+    }
+    memcpy(with_newline, json, len);
+    with_newline[len] = '\n';
+    with_newline[len + CLI_SKIP_ONE] = '\0';
+    int rc = write_file_buffer_atomic(path, with_newline, len + CLI_SKIP_ONE);
+    free(with_newline);
+    free(json);
+    return rc;
+}
+
 /* ── Editor MCP: Cursor/Windsurf/Gemini (mcpServers key) ──────── */
 
 int cbm_install_editor_mcp(const char *binary_path, const char *config_path) {
@@ -1692,6 +1796,86 @@ int cbm_remove_codex_mcp(const char *config_path) {
  * put there by Codex and has to survive removal. */
 #define CODEX_HOOK_TABLE "[[hooks.SessionStart]]"
 #define CODEX_HOOK_SUBTABLE "[[hooks.SessionStart.hooks]]"
+#define CODEX_PROMPT_HOOK_TABLE "[[hooks.UserPromptSubmit]]"
+#define CODEX_PROMPT_HOOK_SUBTABLE "[[hooks.UserPromptSubmit.hooks]]"
+#define CODEX_PROMPT_HOOK_MARKER "--code-cortex-user-prompt-submit"
+#define CODEX_PROMPT_HOOK_TIMEOUT_SEC 2
+#define CODEX_PROMPT_CONTEXT_LIMIT 3000
+
+/* Build a shell command for the current platform, then escape it for a TOML
+ * basic string.  The private trailing argument is ignored by the CLI
+ * dispatcher after it sees `hook-augment`; it gives hooks.json installs an
+ * exact ownership marker that cannot collide with a user's own prompt hook. */
+static int codex_prompt_hook_command(const char *binary_path, char *out, size_t out_sz) {
+    if (!binary_path || !binary_path[0] || !out || out_sz == 0) {
+        return CLI_ERR;
+    }
+#ifdef _WIN32
+    if (strchr(binary_path, '"')) {
+        return CLI_ERR; /* invalid in a Windows path, but keep quoting explicit */
+    }
+    int n = snprintf(out, out_sz, "\"%s\" hook-augment %s", binary_path, CODEX_PROMPT_HOOK_MARKER);
+    return n >= 0 && (size_t)n < out_sz ? 0 : CLI_ERR;
+#else
+    /* POSIX single-quote escaping: ' becomes '\'' (close, escaped quote,
+     * reopen). This also keeps $, backticks, spaces, and backslashes literal. */
+    size_t w = 0;
+    if (w + CLI_SKIP_ONE >= out_sz) {
+        return CLI_ERR;
+    }
+    out[w++] = '\'';
+    for (const char *p = binary_path; *p; p++) {
+        const char *piece = (*p == '\'') ? "'\\''" : NULL;
+        size_t piece_len = piece ? strlen(piece) : (size_t)CLI_SKIP_ONE;
+        if (w + piece_len >= out_sz) {
+            return CLI_ERR;
+        }
+        if (piece) {
+            memcpy(out + w, piece, piece_len);
+            w += piece_len;
+        } else {
+            out[w++] = *p;
+        }
+    }
+    int n = snprintf(out + w, out_sz - w, "' hook-augment %s", CODEX_PROMPT_HOOK_MARKER);
+    return n >= 0 && (size_t)n < out_sz - w ? 0 : CLI_ERR;
+#endif
+}
+
+static int toml_escape_basic_string(const char *raw, char *out, size_t out_sz) {
+    if (!raw || !out || out_sz == 0) {
+        return CLI_ERR;
+    }
+    size_t w = 0;
+    for (const unsigned char *p = (const unsigned char *)raw; *p; p++) {
+        const char *escape = NULL;
+        if (*p == '\\') {
+            escape = "\\\\";
+        } else if (*p == '"') {
+            escape = "\\\"";
+        } else if (*p == '\n') {
+            escape = "\\n";
+        } else if (*p == '\r') {
+            escape = "\\r";
+        } else if (*p == '\t') {
+            escape = "\\t";
+        } else if (*p < 0x20) {
+            return CLI_ERR;
+        }
+        size_t n = escape ? strlen(escape) : (size_t)CLI_SKIP_ONE;
+        if (w + n >= out_sz) {
+            return CLI_ERR;
+        }
+        if (escape) {
+            memcpy(out + w, escape, n);
+            w += n;
+        } else {
+            out[w++] = (char)*p;
+        }
+    }
+    out[w] = '\0';
+    return 0;
+}
 
 /* Splice out an existing [begin .. end] block (inclusive, plus a leading
  * newline). Returns a newly-malloc'd string the caller frees, or NULL if no
@@ -1743,8 +1927,11 @@ static char *codex_hook_strip_one(const char *content, const char *begin_marker,
         }
         const char *body = toml_line_body(p);
         if (*body == '[') {
-            owned = strncmp(body, CODEX_HOOK_TABLE, strlen(CODEX_HOOK_TABLE)) == 0 ||
-                    strncmp(body, CODEX_HOOK_SUBTABLE, strlen(CODEX_HOOK_SUBTABLE)) == 0;
+            owned =
+                strncmp(body, CODEX_HOOK_TABLE, strlen(CODEX_HOOK_TABLE)) == 0 ||
+                strncmp(body, CODEX_HOOK_SUBTABLE, strlen(CODEX_HOOK_SUBTABLE)) == 0 ||
+                strncmp(body, CODEX_PROMPT_HOOK_TABLE, strlen(CODEX_PROMPT_HOOK_TABLE)) == 0 ||
+                strncmp(body, CODEX_PROMPT_HOOK_SUBTABLE, strlen(CODEX_PROMPT_HOOK_SUBTABLE)) == 0;
         }
         if (!owned) {
             if (!salvaged) {
@@ -1775,20 +1962,52 @@ static char *codex_hook_strip(const char *content) {
     return legacy;
 }
 
-/* Install/update the Codex SessionStart reminder hook in config.toml. */
-int cbm_upsert_codex_hooks(const char *config_path) {
+/* Install/update the Codex hooks in config.toml. The public one-argument
+ * helper retains its SessionStart-only contract for callers that do not know
+ * the installed binary path; the installer supplies that path and gets the
+ * native UserPromptSubmit augmenter as well. */
+static int cbm_upsert_codex_hooks_impl(const char *config_path, const char *binary_path) {
     if (!config_path) {
         return CLI_ERR;
     }
-    char block[CLI_BUF_2K];
-    snprintf(block, sizeof(block),
-             "\n" CODEX_HOOK_BEGIN "\n"
-             "[[hooks.SessionStart]]\n"
-             "matcher = \"startup|resume|clear|compact\"\n\n"
-             "[[hooks.SessionStart.hooks]]\n"
-             "type = \"command\"\n"
-             "command = '%s'\n" CODEX_HOOK_END "\n",
-             CMM_SESSION_REMINDER_CMD);
+    char prompt_command[CLI_BUF_2K] = "";
+    char prompt_toml[CLI_BUF_4K] = "";
+    if (binary_path &&
+        (codex_prompt_hook_command(binary_path, prompt_command, sizeof(prompt_command)) != 0 ||
+         toml_escape_basic_string(prompt_command, prompt_toml, sizeof(prompt_toml)) != 0)) {
+        return CLI_ERR;
+    }
+    char block[CLI_BUF_8K];
+    int block_len;
+    if (binary_path) {
+        block_len = snprintf(block, sizeof(block),
+                             "\n" CODEX_HOOK_BEGIN "\n"
+                             "[[hooks.SessionStart]]\n"
+                             "matcher = \"startup|resume|clear|compact\"\n\n"
+                             "[[hooks.SessionStart.hooks]]\n"
+                             "type = \"command\"\n"
+                             "command = '%s'\n\n"
+                             "[[hooks.UserPromptSubmit]]\n\n"
+                             "[[hooks.UserPromptSubmit.hooks]]\n"
+                             "type = \"command\"\n"
+                             "command = \"%s\"\n"
+                             "timeout = %d\n"
+                             "additionalContextLimit = %d\n" CODEX_HOOK_END "\n",
+                             CMM_SESSION_REMINDER_CMD, prompt_toml, CODEX_PROMPT_HOOK_TIMEOUT_SEC,
+                             CODEX_PROMPT_CONTEXT_LIMIT);
+    } else {
+        block_len = snprintf(block, sizeof(block),
+                             "\n" CODEX_HOOK_BEGIN "\n"
+                             "[[hooks.SessionStart]]\n"
+                             "matcher = \"startup|resume|clear|compact\"\n\n"
+                             "[[hooks.SessionStart.hooks]]\n"
+                             "type = \"command\"\n"
+                             "command = '%s'\n" CODEX_HOOK_END "\n",
+                             CMM_SESSION_REMINDER_CMD);
+    }
+    if (block_len < 0 || (size_t)block_len >= sizeof(block)) {
+        return CLI_ERR;
+    }
 
     size_t len = 0;
     char *content = read_file_str(config_path, &len);
@@ -1814,6 +2033,10 @@ int cbm_upsert_codex_hooks(const char *config_path) {
     return rc;
 }
 
+int cbm_upsert_codex_hooks(const char *config_path) {
+    return cbm_upsert_codex_hooks_impl(config_path, NULL);
+}
+
 int cbm_remove_codex_hooks(const char *config_path) {
     if (!config_path) {
         return CLI_ERR;
@@ -1828,7 +2051,7 @@ int cbm_remove_codex_hooks(const char *config_path) {
         free(content);
         return CLI_TRUE; /* nothing to remove */
     }
-    int rc = write_file_str(config_path, stripped);
+    int rc = write_file_buffer_atomic(config_path, stripped, strlen(stripped));
     free(content);
     free(stripped);
     return rc;
@@ -2005,6 +2228,27 @@ static bool is_cmm_hook_entry(yyjson_mut_val *entry, const char *matcher_str,
     return true;
 }
 
+/* Remove only handlers carrying our command marker from a shared matcher
+ * group. A user may place multiple handlers (and metadata) in the same entry;
+ * owning one command never gives us ownership of its siblings. */
+static bool remove_cmm_hook_handlers(yyjson_mut_val *entry, const char *command_substr) {
+    yyjson_mut_val *hooks = yyjson_mut_obj_get(entry, "hooks");
+    if (!hooks || !yyjson_mut_is_arr(hooks) || !command_substr) {
+        return false;
+    }
+    bool removed = false;
+    for (size_t i = yyjson_mut_arr_size(hooks); i > 0; i--) {
+        yyjson_mut_val *handler = yyjson_mut_arr_get(hooks, i - CLI_SKIP_ONE);
+        yyjson_mut_val *cmd = handler ? yyjson_mut_obj_get(handler, "command") : NULL;
+        const char *text = cmd && yyjson_mut_is_str(cmd) ? yyjson_mut_get_str(cmd) : NULL;
+        if (text && strstr(text, command_substr)) {
+            yyjson_mut_arr_remove(hooks, i - CLI_SKIP_ONE);
+            removed = true;
+        }
+    }
+    return removed;
+}
+
 /* Generic hook upsert for both Claude Code and Gemini CLI */
 
 typedef struct {
@@ -2014,15 +2258,79 @@ typedef struct {
     const char *command_str;
     const char *const *old_matchers;  /* NULL-terminated; may be NULL */
     int timeout_sec;                  /* >0 adds "timeout" to the hook entry */
+    int additional_context_limit;     /* >0 caps model-visible hook context */
     const char *match_command_substr; /* non-NULL: also require this in the
                                        * entry command to claim ownership */
 } hooks_upsert_args_t;
-static int upsert_hooks_json(hooks_upsert_args_t args) {
-    const char *settings_path = args.settings_path;
+static int upsert_hooks_json_in_doc(yyjson_mut_doc *mdoc, yyjson_mut_val *root,
+                                    hooks_upsert_args_t args) {
     const char *hook_event = args.hook_event;
     const char *matcher_str = args.matcher_str;
     const char *command_str = args.command_str;
     const char *const *old_matchers = args.old_matchers;
+    if (!mdoc || !root || !yyjson_mut_is_obj(root) || !hook_event || !command_str) {
+        return CLI_ERR;
+    }
+
+    /* Get or create hooks object */
+    yyjson_mut_val *hooks = yyjson_mut_obj_get(root, "hooks");
+    if (!hooks || !yyjson_mut_is_obj(hooks)) {
+        hooks = yyjson_mut_obj(mdoc);
+        yyjson_mut_obj_add_val(mdoc, root, "hooks", hooks);
+    }
+
+    /* Get or create the hook event array (e.g. PreToolUse / BeforeTool) */
+    yyjson_mut_val *event_arr = yyjson_mut_obj_get(hooks, hook_event);
+    if (!event_arr || !yyjson_mut_is_arr(event_arr)) {
+        event_arr = yyjson_mut_arr(mdoc);
+        yyjson_mut_obj_add_val(mdoc, hooks, hook_event, event_arr);
+    }
+
+    /* Remove existing CMM entry if present */
+    for (size_t idx = 0; idx < yyjson_mut_arr_size(event_arr);) {
+        yyjson_mut_val *item = yyjson_mut_arr_get(event_arr, idx);
+        if (is_cmm_hook_entry(item, matcher_str, old_matchers, args.match_command_substr)) {
+            if (!args.match_command_substr) {
+                yyjson_mut_arr_remove(event_arr, idx);
+                break;
+            }
+            remove_cmm_hook_handlers(item, args.match_command_substr);
+            yyjson_mut_val *item_hooks = yyjson_mut_obj_get(item, "hooks");
+            if (!item_hooks || yyjson_mut_arr_size(item_hooks) == 0) {
+                yyjson_mut_arr_remove(event_arr, idx);
+                continue;
+            }
+        }
+        idx++;
+    }
+
+    /* Build our hook entry */
+    yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
+    if (matcher_str) {
+        yyjson_mut_obj_add_str(mdoc, entry, "matcher", matcher_str);
+    }
+
+    yyjson_mut_val *hooks_arr = yyjson_mut_arr(mdoc);
+    yyjson_mut_val *hook_obj = yyjson_mut_obj(mdoc);
+    yyjson_mut_obj_add_str(mdoc, hook_obj, "type", "command");
+    yyjson_mut_obj_add_str(mdoc, hook_obj, "command", command_str);
+    if (args.timeout_sec > 0) {
+        yyjson_mut_obj_add_int(mdoc, hook_obj, "timeout", args.timeout_sec);
+    }
+    if (args.additional_context_limit > 0) {
+        yyjson_mut_obj_add_int(mdoc, hook_obj, "additionalContextLimit",
+                               args.additional_context_limit);
+    }
+    yyjson_mut_arr_append(hooks_arr, hook_obj);
+    yyjson_mut_obj_add_val(mdoc, entry, "hooks", hooks_arr);
+
+    yyjson_mut_arr_append(event_arr, entry);
+
+    return 0;
+}
+
+static int upsert_hooks_json(hooks_upsert_args_t args) {
+    const char *settings_path = args.settings_path;
     if (!settings_path) {
         return CLI_ERR;
     }
@@ -2046,50 +2354,10 @@ static int upsert_hooks_json(hooks_upsert_args_t args) {
     }
     yyjson_mut_doc_set_root(mdoc, root);
 
-    /* Get or create hooks object */
-    yyjson_mut_val *hooks = yyjson_mut_obj_get(root, "hooks");
-    if (!hooks || !yyjson_mut_is_obj(hooks)) {
-        hooks = yyjson_mut_obj(mdoc);
-        yyjson_mut_obj_add_val(mdoc, root, "hooks", hooks);
+    int rc = upsert_hooks_json_in_doc(mdoc, root, args);
+    if (rc == 0) {
+        rc = write_json_file(settings_path, mdoc);
     }
-
-    /* Get or create the hook event array (e.g. PreToolUse / BeforeTool) */
-    yyjson_mut_val *event_arr = yyjson_mut_obj_get(hooks, hook_event);
-    if (!event_arr || !yyjson_mut_is_arr(event_arr)) {
-        event_arr = yyjson_mut_arr(mdoc);
-        yyjson_mut_obj_add_val(mdoc, hooks, hook_event, event_arr);
-    }
-
-    /* Remove existing CMM entry if present */
-    size_t idx;
-    size_t max;
-    yyjson_mut_val *item;
-    yyjson_mut_arr_foreach(event_arr, idx, max, item) {
-        if (is_cmm_hook_entry(item, matcher_str, old_matchers, args.match_command_substr)) {
-            yyjson_mut_arr_remove(event_arr, idx);
-            break;
-        }
-    }
-
-    /* Build our hook entry */
-    yyjson_mut_val *entry = yyjson_mut_obj(mdoc);
-    if (matcher_str) {
-        yyjson_mut_obj_add_str(mdoc, entry, "matcher", matcher_str);
-    }
-
-    yyjson_mut_val *hooks_arr = yyjson_mut_arr(mdoc);
-    yyjson_mut_val *hook_obj = yyjson_mut_obj(mdoc);
-    yyjson_mut_obj_add_str(mdoc, hook_obj, "type", "command");
-    yyjson_mut_obj_add_str(mdoc, hook_obj, "command", command_str);
-    if (args.timeout_sec > 0) {
-        yyjson_mut_obj_add_int(mdoc, hook_obj, "timeout", args.timeout_sec);
-    }
-    yyjson_mut_arr_append(hooks_arr, hook_obj);
-    yyjson_mut_obj_add_val(mdoc, entry, "hooks", hooks_arr);
-
-    yyjson_mut_arr_append(event_arr, entry);
-
-    int rc = write_json_file(settings_path, mdoc);
     yyjson_mut_doc_free(mdoc);
     return rc;
 }
@@ -2139,14 +2407,21 @@ static int remove_hooks_json(hooks_remove_args_t args) {
         return 0;
     }
 
-    size_t idx;
-    size_t max;
-    yyjson_mut_val *item;
-    yyjson_mut_arr_foreach(event_arr, idx, max, item) {
+    for (size_t idx = 0; idx < yyjson_mut_arr_size(event_arr);) {
+        yyjson_mut_val *item = yyjson_mut_arr_get(event_arr, idx);
         if (is_cmm_hook_entry(item, matcher_str, old_matchers, args.match_command_substr)) {
-            yyjson_mut_arr_remove(event_arr, idx);
-            break;
+            if (!args.match_command_substr) {
+                yyjson_mut_arr_remove(event_arr, idx);
+                break;
+            }
+            remove_cmm_hook_handlers(item, args.match_command_substr);
+            yyjson_mut_val *item_hooks = yyjson_mut_obj_get(item, "hooks");
+            if (!item_hooks || yyjson_mut_arr_size(item_hooks) == 0) {
+                yyjson_mut_arr_remove(event_arr, idx);
+                continue;
+            }
         }
+        idx++;
     }
 
     /* Prune the event key once its array is empty, so removing our hook leaves
@@ -2236,6 +2511,195 @@ int cbm_remove_claude_prompt_hooks(const char *settings_path) {
         .match_command_substr = CMM_HOOK_GATE_SCRIPT,
     });
 }
+
+/* Native Codex hooks.json integration.  SessionStart ownership includes the
+ * reminder command so a user's own `startup` hook is never replaced.  The
+ * matcherless prompt hook uses the private dispatcher argument as its exact
+ * ownership marker. */
+static bool codex_hook_event_schema_valid(yyjson_val *hooks, const char *event) {
+    yyjson_val *entries = hooks ? yyjson_obj_get(hooks, event) : NULL;
+    if (!entries) {
+        return true;
+    }
+    if (!yyjson_is_arr(entries)) {
+        return false;
+    }
+    size_t idx;
+    size_t max;
+    yyjson_val *entry;
+    yyjson_arr_foreach(entries, idx, max, entry) {
+        if (!yyjson_is_obj(entry)) {
+            return false;
+        }
+        yyjson_val *handlers = yyjson_obj_get(entry, "hooks");
+        if (handlers && !yyjson_is_arr(handlers)) {
+            return false;
+        }
+        if (handlers) {
+            size_t handler_idx;
+            size_t handler_max;
+            yyjson_val *handler;
+            yyjson_arr_foreach(handlers, handler_idx, handler_max, handler) {
+                if (!yyjson_is_obj(handler)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static int cbm_upsert_codex_json_hooks(const char *binary_path, const char *hooks_path) {
+    static const char *const old_session_matchers[] = {"startup", NULL};
+    char command[CLI_BUF_2K];
+    if (!hooks_path || codex_prompt_hook_command(binary_path, command, sizeof(command)) != 0) {
+        return CLI_ERR;
+    }
+
+    bool existed = cbm_file_exists(hooks_path);
+    yyjson_doc *doc = existed ? read_json_file(hooks_path) : NULL;
+    yyjson_val *old_root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *old_hooks =
+        old_root && yyjson_is_obj(old_root) ? yyjson_obj_get(old_root, "hooks") : NULL;
+    bool valid = (!existed || (doc && old_root && yyjson_is_obj(old_root))) &&
+                 (!old_hooks || yyjson_is_obj(old_hooks)) &&
+                 codex_hook_event_schema_valid(old_hooks, "SessionStart") &&
+                 codex_hook_event_schema_valid(old_hooks, "UserPromptSubmit");
+    if (!valid) {
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+        return CLI_ERR;
+    }
+
+    yyjson_mut_doc *mdoc = yyjson_mut_doc_new(NULL);
+    if (!mdoc) {
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+        return CLI_ERR;
+    }
+    yyjson_mut_val *root = doc ? yyjson_val_mut_copy(mdoc, old_root) : yyjson_mut_obj(mdoc);
+    if (doc) {
+        yyjson_doc_free(doc);
+    }
+    if (!root) {
+        yyjson_mut_doc_free(mdoc);
+        return CLI_ERR;
+    }
+    yyjson_mut_doc_set_root(mdoc, root);
+
+    int rc = upsert_hooks_json_in_doc(mdoc, root,
+                                      (hooks_upsert_args_t){
+                                          .settings_path = hooks_path,
+                                          .hook_event = "SessionStart",
+                                          .matcher_str = "startup|resume|clear|compact",
+                                          .command_str = CMM_SESSION_REMINDER_CMD,
+                                          .old_matchers = old_session_matchers,
+                                          .match_command_substr = "code-cortex-mcp:",
+                                      });
+    if (rc == 0 &&
+        upsert_hooks_json_in_doc(mdoc, root,
+                                 (hooks_upsert_args_t){
+                                     .settings_path = hooks_path,
+                                     .hook_event = "UserPromptSubmit",
+                                     .matcher_str = NULL,
+                                     .command_str = command,
+                                     .timeout_sec = CODEX_PROMPT_HOOK_TIMEOUT_SEC,
+                                     .additional_context_limit = CODEX_PROMPT_CONTEXT_LIMIT,
+                                     .match_command_substr = CODEX_PROMPT_HOOK_MARKER,
+                                 }) != 0) {
+        rc = CLI_ERR;
+    }
+    if (rc == 0) {
+        rc = write_json_file_atomic(hooks_path, mdoc);
+    }
+    yyjson_mut_doc_free(mdoc);
+    return rc;
+}
+
+static int cbm_remove_codex_json_hooks(const char *hooks_path) {
+    static const char *const old_session_matchers[] = {"startup", NULL};
+    int rc = remove_hooks_json((hooks_remove_args_t){
+        .settings_path = hooks_path,
+        .hook_event = "SessionStart",
+        .matcher_str = "startup|resume|clear|compact",
+        .old_matchers = old_session_matchers,
+        .match_command_substr = "code-cortex-mcp:",
+    });
+    if (remove_hooks_json((hooks_remove_args_t){
+            .settings_path = hooks_path,
+            .hook_event = "UserPromptSubmit",
+            .matcher_str = NULL,
+            .match_command_substr = CODEX_PROMPT_HOOK_MARKER,
+        }) != 0) {
+        rc = CLI_ERR;
+    }
+    return rc;
+}
+
+/* Keep exactly one active Codex hook representation. If hooks.json exists,
+ * migrate our older inline block out of config.toml before upserting JSON;
+ * cbm_remove_codex_hooks removes only our sentinel block and salvages foreign
+ * tables/trust state that Codex may have moved inside it. */
+static int cbm_install_codex_hooks(const char *binary_path, const char *config_path,
+                                   const char *hooks_path) {
+    if (cbm_file_exists(hooks_path)) {
+        /* Validate, build both hook events, and atomically publish hooks.json
+         * before retiring the working TOML representation. A failed JSON
+         * update therefore leaves both user files byte-for-byte untouched. */
+        size_t old_json_len = 0;
+        char *old_json = read_file_str(hooks_path, &old_json_len);
+        if (!old_json) {
+            return CLI_ERR;
+        }
+        if (cbm_upsert_codex_json_hooks(binary_path, hooks_path) != 0) {
+            free(old_json);
+            return CLI_ERR;
+        }
+        if (cbm_remove_codex_hooks(config_path) == CLI_ERR) {
+            /* Best-effort cross-file rollback: the JSON replacement itself is
+             * atomic, so restoring this snapshot cannot leave partial JSON. */
+            (void)write_file_buffer_atomic(hooks_path, old_json, old_json_len);
+            free(old_json);
+            return CLI_ERR;
+        }
+        free(old_json);
+        return 0;
+    }
+    return cbm_upsert_codex_hooks_impl(config_path, binary_path);
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" int cbm_codex_native_hooks_for_testing(const char *binary_path, const char *config_path,
+                                                  bool json, bool remove);
+extern "C" int cbm_codex_native_hooks_for_testing(const char *binary_path, const char *config_path,
+                                                  bool json, bool remove) {
+    if (remove) {
+        return json ? cbm_remove_codex_json_hooks(config_path)
+                    : cbm_remove_codex_hooks(config_path);
+    }
+    return json ? cbm_upsert_codex_json_hooks(binary_path, config_path)
+                : cbm_upsert_codex_hooks_impl(config_path, binary_path);
+}
+extern "C" int cbm_install_codex_hooks_for_testing(const char *binary_path, const char *config_path,
+                                                   const char *hooks_path);
+extern "C" int cbm_install_codex_hooks_for_testing(const char *binary_path, const char *config_path,
+                                                   const char *hooks_path) {
+    return cbm_install_codex_hooks(binary_path, config_path, hooks_path);
+}
+extern "C" int cbm_install_codex_hooks_write_failure_for_testing(const char *binary_path,
+                                                                 const char *config_path,
+                                                                 const char *hooks_path);
+extern "C" int cbm_install_codex_hooks_write_failure_for_testing(const char *binary_path,
+                                                                 const char *config_path,
+                                                                 const char *hooks_path) {
+    g_codex_test_fail_atomic_publish = true;
+    int rc = cbm_install_codex_hooks(binary_path, config_path, hooks_path);
+    g_codex_test_fail_atomic_publish = false;
+    return rc;
+}
+#endif
 
 /* Install the search-augmenter shim to ~/.claude/hooks/.
  * The shim is a thin wrapper that delegates to `<binary> hook-augment`,
@@ -3599,8 +4063,9 @@ static void install_gemini_config(const char *home, const char *binary_path, boo
     printf("  hooks: BeforeTool + SessionStart (code-cortex-mcp reminder)\n");
 }
 
-static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const char *home,
-                                      const char *binary_path, bool dry_run) {
+static int install_cli_agent_configs(const cbm_detected_agents_t *agents, const char *home,
+                                     const char *binary_path, bool dry_run) {
+    int rc = 0;
     if (agents->codex) {
         char cp[CLI_BUF_1K];
         char ip[CLI_BUF_1K];
@@ -3621,13 +4086,21 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
             plan_record("Codex CLI", "hook", hook_target);
         } else {
             if (!dry_run) {
-                if (use_hooks_json) {
-                    cbm_upsert_gemini_session_hooks(hooks_json);
+                int hook_rc = cbm_install_codex_hooks(binary_path, cp, hooks_json);
+                if (hook_rc != 0) {
+                    (void)fprintf(stderr,
+                                  "  error: Codex hooks were not installed; fix malformed or "
+                                  "unwritable %s and rerun install\n",
+                                  hook_target);
+                    rc = -1;
                 } else {
-                    cbm_upsert_codex_hooks(cp);
+                    printf("  hooks: SessionStart + UserPromptSubmit (bounded graph context)\n");
+                    printf("  action: review and trust the code-cortex-mcp hooks in Codex "
+                           "/hooks; install never bypasses hook trust\n");
                 }
+            } else {
+                printf("  hooks: SessionStart + UserPromptSubmit (bounded graph context)\n");
             }
-            printf("  hooks: SessionStart (code-cortex-mcp reminder)\n");
         }
     }
     if (agents->gemini) {
@@ -3682,6 +4155,7 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
             printf("  instructions: %s\n", ip);
         }
     }
+    return rc;
 }
 
 /* Scan Code/User/profiles/ and install (or plan) a per-profile mcp.json for
@@ -3793,12 +4267,13 @@ static void install_editor_agent_configs(const cbm_detected_agents_t *agents, co
         if (!dry_run) {
             cbm_mkdir_p(sd, CLI_OCTAL_PERM);
         }
-        install_generic_agent_config("Junie", binary_path, cp, NULL, dry_run, cbm_upsert_junie_mcp);
+        install_generic_agent_config("Junie", binary_path, cp, NULL, dry_run,
+                                     cbm_upsert_junie_mcp);
     }
 }
 
-static void cbm_install_agent_configs(const char *home, const char *binary_path, bool force,
-                                      bool dry_run) {
+static int cbm_install_agent_configs(const char *home, const char *binary_path, bool force,
+                                     bool dry_run) {
     cbm_detected_agents_t agents = cbm_detect_agents(home);
     if (!g_install_plan) {
         print_detected_agents(&agents);
@@ -3807,9 +4282,22 @@ static void cbm_install_agent_configs(const char *home, const char *binary_path,
     if (agents.claude_code) {
         install_claude_code_config(home, binary_path, force, dry_run);
     }
-    install_cli_agent_configs(&agents, home, binary_path, dry_run);
+    int rc = install_cli_agent_configs(&agents, home, binary_path, dry_run);
     install_editor_agent_configs(&agents, home, binary_path, dry_run);
+    return rc;
 }
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" int cbm_install_codex_agent_config_for_testing(const char *home,
+                                                           const char *binary_path);
+extern "C" int cbm_install_codex_agent_config_for_testing(const char *home,
+                                                           const char *binary_path) {
+    cbm_detected_agents_t agents;
+    memset(&agents, 0, sizeof(agents));
+    agents.codex = true;
+    return install_cli_agent_configs(&agents, home, binary_path, false);
+}
+#endif
 
 /* Count .db files in the cache directory. */
 static int count_db_indexes(const char *home) {
@@ -3927,7 +4415,7 @@ char *cbm_build_install_plan_json(const char *home, const char *binary_path) {
      * site records into `plan` — so the receipt cannot drift from behavior. */
     cbm_install_plan_t plan = {0};
     g_install_plan = &plan;
-    cbm_install_agent_configs(home, binary_path, false, true);
+    (void)cbm_install_agent_configs(home, binary_path, false, true);
     g_install_plan = NULL;
 
     cbm_detected_agents_t det = cbm_detect_agents(home);
@@ -4067,12 +4555,18 @@ int cbm_migrate_legacy_install(const char *home, bool dry_run) {
 }
 
 int cbm_cmd_install(int argc, char **argv) {
-    parse_auto_answer(argc, argv);
     bool dry_run = false;
     bool force = false;
     bool plan = false;
+    bool no_stop = false;
     bool reset_indexes = false;
     for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: code-cortex-mcp install [--dry-run] [--force] [--plan] "
+                   "[--reset-indexes] [--no-stop] [-y|-n]\n");
+            printf("  --no-stop  Do not stop running MCP servers (isolated installs/tests).\n");
+            return 0;
+        }
         if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = true;
         }
@@ -4082,12 +4576,16 @@ int cbm_cmd_install(int argc, char **argv) {
         if (strcmp(argv[i], "--plan") == 0) {
             plan = true;
         }
+        if (strcmp(argv[i], "--no-stop") == 0) {
+            no_stop = true;
+        }
         /* Opt-in: delete existing indexes during install. Default preserves
          * the indexed graph (#607). Only this flag triggers deletion. */
         if (strcmp(argv[i], "--reset-indexes") == 0) {
             reset_indexes = true;
         }
     }
+    parse_auto_answer(argc, argv);
 
     const char *home = cbm_get_home_dir();
     if (!home) {
@@ -4122,7 +4620,7 @@ int cbm_cmd_install(int argc, char **argv) {
 
     /* Step 1b: Kill running MCP server instances so agents pick up new config
      * (matches the legacy binary name too, so migration can remove it). */
-    if (!dry_run) {
+    if (!dry_run && !no_stop) {
         int killed = cbm_kill_other_instances();
         if (killed > 0) {
             printf("Stopped %d running MCP server instance(s).\n\n", killed);
@@ -4199,7 +4697,9 @@ int cbm_cmd_install(int argc, char **argv) {
 #endif
 
     /* Step 3: Install/refresh all agent configs, pointing at the install target. */
-    cbm_install_agent_configs(home, bin_target, force, dry_run);
+    if (cbm_install_agent_configs(home, bin_target, force, dry_run) != 0) {
+        return CLI_TRUE;
+    }
 
     /* Step 4: Ensure PATH */
     char bin_dir[CLI_BUF_1K];
@@ -4312,6 +4812,11 @@ static void uninstall_cli_agents(const cbm_detected_agents_t *agents, const char
                                   cbm_remove_codex_mcp);
         if (!dry_run) {
             cbm_remove_codex_hooks(cp);
+            char hooks_json[CLI_BUF_1K];
+            snprintf(hooks_json, sizeof(hooks_json), "%s/.codex/hooks.json", home);
+            if (cbm_file_exists(hooks_json)) {
+                cbm_remove_codex_json_hooks(hooks_json);
+            }
         }
     }
     if (agents->gemini) {
@@ -4763,7 +5268,9 @@ int cbm_cmd_update(int argc, char **argv) {
 
     /* Step 6: Refresh all agent configs (skills, MCP entries, hooks) */
     printf("Refreshing agent configurations...\n");
-    cbm_install_agent_configs(home, bin_dest, true, false);
+    if (cbm_install_agent_configs(home, bin_dest, true, false) != 0) {
+        return CLI_TRUE;
+    }
 
     /* Step 7: Verify new version (exec directly, no shell interpretation) */
     printf("\nUpdate complete. Verifying:\n");
