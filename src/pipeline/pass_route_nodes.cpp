@@ -501,11 +501,71 @@ static bool extract_json_prop(yyjson_val *root, const char *key, char *buf, size
     return true;
 }
 
+/* A client interface method's declared request (Retrofit, upstream a031122a):
+ * an HTTP_CALLS edge to the Route, with the url_path/method properties a call
+ * site's edge carries, so the endpoint is matched to its server like any other
+ * outbound call. Called at definition time by pass_definitions.cpp and its
+ * parallel twin (upstream's cbm_pipeline_emit_def_route), so an incremental
+ * re-index, which does not run this pass, re-creates it; the route pass below
+ * re-runs it as a backstop (edges are deduped). */
+void cbm_pipeline_emit_client_route_call(cbm_gbuf_t *gb, int64_t func_id, const char *path,
+                                         const char *method) {
+    if (!gb || func_id <= 0 || !path || !path[0]) {
+        return;
+    }
+    const char *rm = method && method[0] ? method : "ANY";
+    char route_qn[CBM_ROUTE_QN_SIZE];
+    char cpath[CBM_SZ_256];
+    snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", rm,
+             cbm_route_canon_path(path, cpath, sizeof(cpath)));
+    char esc_m[CBM_SZ_64];
+    cbm_json_escape(esc_m, sizeof(esc_m), rm);
+    char rprops[CBM_SZ_256];
+    int rn = snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\"}", esc_m);
+    int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", path, route_qn, "", 0, 0,
+                                            cbm_json_props_checked(rprops, rn, sizeof(rprops)));
+    char esc_p[CBM_SZ_512];
+    cbm_json_escape(esc_p, sizeof(esc_p), path);
+    char eprops[CBM_SZ_1K];
+    int en =
+        snprintf(eprops, sizeof(eprops),
+                 "{\"callee\":\"%s\",\"url_path\":\"%s\",\"method\":\"%s\"}", esc_m, esc_p, esc_m);
+    cbm_gbuf_insert_edge(gb, func_id, route_id, "HTTP_CALLS",
+                         cbm_json_props_checked(eprops, en, sizeof(eprops)));
+}
+
+/* Route-pass backstop of the above, from a node's stored properties. */
+static void ensure_one_client_route_call(cbm_gbuf_t *gb, const cbm_gbuf_node_t *func) {
+    yyjson_doc *doc = yyjson_read(func->properties_json, strlen(func->properties_json),
+                                  YYJSON_READ_ALLOW_INVALID_UNICODE);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    char path[CBM_SZ_256];
+    char method[CBM_SZ_16] = "ANY";
+    bool found = extract_json_prop(root, "client_route_path", path, sizeof(path));
+    if (found) {
+        (void)extract_json_prop(root, "route_method", method, sizeof(method));
+    }
+    yyjson_doc_free(doc);
+    if (found) {
+        cbm_pipeline_emit_client_route_call(gb, func->id, path, method);
+    }
+}
+
 /* Process a single Function/Method node: create Route+HANDLES if it has route_path.
  * Returns 1 if a new HANDLES edge was created, 0 otherwise. */
 static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *func) {
+    if (!func->properties_json) {
+        return 0;
+    }
+    /* A client interface method (Retrofit) carries client_route_path, not
+     * route_path: test it before the route_path skip below, or the backstop
+     * never runs. */
+    if (strstr(func->properties_json, "\"client_route_path\"")) {
+        ensure_one_client_route_call(gb, func);
+        return 0;
+    }
     /* Most nodes carry no route: skip them before parsing their properties. */
-    if (!func->properties_json || !strstr(func->properties_json, "\"route_path\"")) {
+    if (!strstr(func->properties_json, "\"route_path\"")) {
         return 0;
     }
 

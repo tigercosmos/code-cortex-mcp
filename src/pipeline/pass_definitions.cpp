@@ -310,6 +310,9 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     /* A generated member's mark (cbm.h CBM_PROP_GENERATED). Early, so it can
      * never be squeezed out: the incremental registry seed reads it back. */
     append_json_string(buf, bufsize, &pos, CBM_PROP_GENERATED, def->generated);
+    /* A Retrofit client request (upstream a031122a); the route pass turns it
+     * into an HTTP_CALLS edge. Early for the same reason. */
+    append_json_string(buf, bufsize, &pos, "client_route_path", def->client_route_path);
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
     append_json_string(buf, bufsize, &pos, "parent_class", def->parent_class);
@@ -521,6 +524,12 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
                              def_rel, (int)def->start_line, (int)def->end_line, props);
     if (props != stack) {
         free(props);
+    }
+    /* A Retrofit client request: HTTP_CALLS, never a served Route. Twin of
+     * pass_parallel.cpp insert_def_into_gbuf. */
+    if (node_id > 0 && def->client_route_path) {
+        cbm_pipeline_emit_client_route_call(ctx->gbuf, node_id, def->client_route_path,
+                                            def->route_method);
     }
     /* Per definition, like pass_parallel.cpp: overloads sharing this QN each keep
      * their own route (the merged node properties hold only one of them). */

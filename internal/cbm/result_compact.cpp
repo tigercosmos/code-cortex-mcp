@@ -262,11 +262,11 @@ template <class A> void fields(A &a, CBMDefinition &v) {
            is_recursive, param_count, max_access_depth, linear_scan_in_loop, alloc_in_loop,
            recursion_in_loop, unguarded_recursion, lines, fingerprint, fingerprint_k, is_exported,
            is_abstract, is_test, is_entry_point, structural_profile, body_tokens, declaration_key,
-           definition_offset, variants, alias_target, generated] = v;
+           definition_offset, variants, alias_target, generated, client_route_path] = v;
     a(name, qualified_name, label, file_path, signature, return_type, receiver, docstring,
       parent_class, decorators, base_classes, param_names, param_types, return_types, route_path,
       route_method, structural_profile, body_tokens, declaration_key, variants, alias_target,
-      generated);
+      generated, client_route_path);
     a.array(fingerprint, fingerprint_k);
     a(start_line, end_line, complexity, cognitive, loop_count, loop_depth, is_recursive,
       param_count, max_access_depth, linear_scan_in_loop, alloc_in_loop, recursion_in_loop,

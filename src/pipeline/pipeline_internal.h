@@ -709,6 +709,13 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
  * Re-targets these edges to Route nodes for cross-service traversal. */
 void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb);
 
+/* A client interface method's declared request (Retrofit @GET("v1/x"),
+ * CBMDefinition.client_route_path): an HTTP_CALLS edge from func_id to the
+ * __route__<METHOD>__<path> Route. Emitted at definition time by both
+ * definition passes and re-run by the route pass (pass_route_nodes.cpp). */
+void cbm_pipeline_emit_client_route_call(cbm_gbuf_t *gb, int64_t func_id, const char *path,
+                                         const char *method);
+
 /* ── Pass function prototypes ────────────────────────────────────── */
 
 int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,

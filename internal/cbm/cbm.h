@@ -243,6 +243,11 @@ typedef struct {
      * extra_props pair this fork does not have). Tail field: zero-init stays
      * valid. */
     const char *generated;
+    /* Path a client interface method requests (Retrofit @GET("v1/x")), or
+     * NULL; route_method is then its verb and route_path is NULL. The route
+     * pass emits HTTP_CALLS to the Route instead of HANDLES (upstream
+     * a031122a). Tail field. */
+    const char *client_route_path;
 } CBMDefinition;
 
 /* Node-properties key of CBMDefinition.generated. */

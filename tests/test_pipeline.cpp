@@ -11438,6 +11438,54 @@ TEST(pipeline_java_record_accessors_generated_qn_only_after_incremental) {
     PASS();
 }
 
+/* Editing a Retrofit interface keeps its requests as HTTP_CALLS (#2723,
+ * upstream a031122a): the incremental re-index re-extracts the file and must
+ * not mint HANDLES for it. Returns "full=calls/handles inc=calls/handles". */
+static std::string incremental_retrofit_keep(void) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_retrofitkeep_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        return "tmpdir";
+    }
+    static const char api[] =
+        "package com.acme\n\nimport retrofit2.http.GET\nimport retrofit2.http.POST\n\n"
+        "interface OrderApi {\n"
+        "    @GET(\"/v1/orders/{id}\")\n    suspend fun getOrder(id: String): String\n"
+        "    @POST(\"v1/orders\")\n    suspend fun createOrder(body: String): String\n"
+        "}\n";
+    write_temp_file(tmp, "src/OrderApi.kt", api);
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/retrofitkeep.db", tmp);
+    static const char calls[] = "SELECT COUNT(*) FROM edges e JOIN nodes r ON r.id=e.target_id "
+                                "WHERE e.type='HTTP_CALLS' AND r.label='Route' "
+                                "AND r.qualified_name IN ('__route__GET__/v1/orders/{}',"
+                                "'__route__POST__/v1/orders')";
+    static const char handles[] = "SELECT COUNT(*) FROM edges WHERE type='HANDLES'";
+    int counts[4] = {-1, -1, -1, -1};
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            write_temp_file(tmp, "src/OrderApi.kt", (std::string("// edited\n") + api).c_str());
+        }
+        cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+        int rc = p ? cbm_pipeline_run(p) : -1;
+        cbm_pipeline_free(p);
+        if (rc == 0) {
+            counts[pass * 2] = pl_count_nodes(db_path, calls);
+            counts[pass * 2 + 1] = pl_count_nodes(db_path, handles);
+        }
+    }
+    th_rmtree(tmp);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "full=%d/%d inc=%d/%d", counts[0], counts[1], counts[2], counts[3]);
+    return buf;
+}
+
+TEST(incremental_edit_keeps_retrofit_http_calls_issue2723) {
+    std::string got = incremental_retrofit_keep();
+    ASSERT_STR_EQ(got.c_str(), "full=2/0 inc=2/0");
+    PASS();
+}
+
 /* Parallel twin (pass_parallel.cpp resolve_file_usages / resolve_file_rw):
  * upstream's sequential-only fix left 344 Go->C WRITES alive on a ~1150-file
  * repo. >= 50 files forces the parallel pipeline. */
@@ -16205,6 +16253,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_java_record_accessors_generated_qn_only);
     RUN_TEST(pipeline_java_record_accessors_generated_qn_only_parallel);
     RUN_TEST(pipeline_java_record_accessors_generated_qn_only_after_incremental);
+    RUN_TEST(incremental_edit_keeps_retrofit_http_calls_issue2723);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method_parallel);
     RUN_TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354);

@@ -3747,6 +3747,7 @@ static void reloc_definition(CBMArena *dst, const CBMArena *scratch, CBMDefiniti
     d->body_tokens = reloc_str(dst, scratch, d->body_tokens);
     d->variants = reloc_str(dst, scratch, d->variants);
     d->generated = reloc_str(dst, scratch, d->generated);
+    d->client_route_path = reloc_str(dst, scratch, d->client_route_path);
     d->decorators = reloc_str_array(dst, scratch, d->decorators);
     d->base_classes = reloc_str_array(dst, scratch, d->base_classes);
     d->param_names = reloc_str_array(dst, scratch, d->param_names);
