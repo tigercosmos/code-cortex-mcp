@@ -9085,6 +9085,121 @@ TEST(extract_go_selector_call_flags_is_method) {
     PASS();
 }
 
+TEST(extract_go_method_receiver_qualified_qn) {
+    /* A Go method QN carries the receiver type (proj.pkg.Recv.method, upstream
+     * #1909), same shape as C++ out-of-line methods and Go interface members,
+     * so two same-name methods on different receivers no longer collide in the
+     * graph upsert. Free functions keep the flat package QN. */
+    CBMFileResult *r = extract("package m\n"
+                               "type Storage struct{}\n"
+                               "type Cache struct{}\n"
+                               "func (s *Storage) Close() {}\n"
+                               "func (c Cache) Close() {}\n"
+                               "func Shutdown() {}\n",
+                               CBM_LANG_GO, "t", "x.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    bool saw_storage = false;
+    bool saw_cache = false;
+    bool saw_free = false;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (!d->name || !d->qualified_name) {
+            continue;
+        }
+        if (strcmp(d->name, "Close") == 0 && strcmp(d->qualified_name, "t.Storage.Close") == 0) {
+            ASSERT_STR_EQ(d->label, "Method");
+            ASSERT_STR_EQ(d->parent_class, "t.Storage");
+            saw_storage = true;
+        }
+        if (strcmp(d->name, "Close") == 0 && strcmp(d->qualified_name, "t.Cache.Close") == 0) {
+            ASSERT_STR_EQ(d->parent_class, "t.Cache");
+            saw_cache = true;
+        }
+        if (strcmp(d->name, "Shutdown") == 0) {
+            ASSERT_STR_EQ(d->qualified_name, "t.Shutdown");
+            saw_free = true;
+        }
+    }
+    ASSERT_TRUE(saw_storage);
+    ASSERT_TRUE(saw_cache);
+    ASSERT_TRUE(saw_free);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The call-scope QN of a call inside a Go method equals the method's def QN,
+ * so in-body calls keep their source node. */
+TEST(extract_go_method_qn_matches_call_scope) {
+    CBMFileResult *r = extract("package m\n"
+                               "type Repo struct{}\n"
+                               "func (r *Repo) Install() int { return helper() }\n"
+                               "func helper() int { return 1 }\n",
+                               CBM_LANG_GO, "t", "x.go");
+    ASSERT_NOT_NULL(r);
+    const char *install_qn = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->name && d->qualified_name && strcmp(d->name, "Install") == 0) {
+            install_qn = d->qualified_name;
+        }
+    }
+    const char *scope = NULL;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (c->callee_name && strcmp(c->callee_name, "helper") == 0) {
+            scope = c->enclosing_func_qn;
+        }
+    }
+    ASSERT_NOT_NULL(install_qn);
+    ASSERT_STR_EQ(install_qn, "t.Repo.Install");
+    ASSERT_NOT_NULL(scope);
+    ASSERT_STR_EQ(scope, install_qn);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Templ shares Go's method grammar (method_declaration with a receiver), but
+ * only Go method QNs are receiver-qualified (upstream 87cafb9e); templ's
+ * call-scope QN stays flat. The method's def QN and the enclosing-function QN
+ * of a call inside it must agree, or the call has no source node. */
+TEST(extract_templ_method_qn_matches_call_scope) {
+    CBMFileResult *r = extract("package views\n"
+                               "\n"
+                               "type Page struct{}\n"
+                               "\n"
+                               "func (p Page) Title() string {\n"
+                               "\treturn helper()\n"
+                               "}\n"
+                               "\n"
+                               "func helper() string { return \"x\" }\n"
+                               "\n"
+                               "templ hello(name string) {\n"
+                               "\t<div>{ name }</div>\n"
+                               "}\n",
+                               CBM_LANG_TEMPL, "t", "x.templ");
+    ASSERT_NOT_NULL(r);
+    const char *title_qn = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->name && d->qualified_name && strcmp(d->name, "Title") == 0) {
+            title_qn = d->qualified_name;
+        }
+    }
+    const char *scope = NULL;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (c->callee_name && strcmp(c->callee_name, "helper") == 0) {
+            scope = c->enclosing_func_qn;
+        }
+    }
+    ASSERT_NOT_NULL(title_qn);
+    ASSERT_NOT_NULL(scope);
+    ASSERT_STR_EQ(scope, title_qn);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(extract_python_member_call_flags_is_method) {
     CBMFileResult *r = extract("from pkg import helper\n"
                                "import tools as toolkit\n"
@@ -11700,6 +11815,9 @@ SUITE(extraction) {
 
     RUN_TEST(extract_python_member_call_flags_is_method);
     RUN_TEST(extract_go_selector_call_flags_is_method);
+    RUN_TEST(extract_go_method_receiver_qualified_qn);
+    RUN_TEST(extract_go_method_qn_matches_call_scope);
+    RUN_TEST(extract_templ_method_qn_matches_call_scope);
     RUN_TEST(extract_python_bare_call_flags_locally_bound_callee);
     RUN_TEST(extract_python_bare_call_flag_is_depth_independent);
 

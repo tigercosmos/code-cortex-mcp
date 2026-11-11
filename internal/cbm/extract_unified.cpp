@@ -568,6 +568,26 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
         }
     }
 
+    /* Go method `func (s *Storage) Close() {...}`: the def extractor records
+     * this as Method "proj.pkg.Storage.Close" (receiver-qualified, upstream
+     * #1909). The call-scope QN must match, or every call inside the method
+     * body falls back to File-node attribution. Same ONE formula as the def
+     * side: cbm_go_receiver_type_name + cbm_fqn_compute_source_lang. A NULL
+     * type QN (allocation failure) keeps the flat QN, as the def side does. */
+    if (ctx->language == CBM_LANG_GO && strcmp(ts_node_type(node), "method_declaration") == 0) {
+        TSNode recv = ts_node_child_by_field_name(node, TS_FIELD("receiver"));
+        if (!ts_node_is_null(recv)) {
+            char *recv_type = cbm_go_receiver_type_name(ctx->arena, recv, ctx->source);
+            if (recv_type && recv_type[0]) {
+                const char *type_qn = cbm_fqn_compute_source_lang(
+                    ctx->arena, ctx->project, ctx->rel_path, recv_type, ctx->language);
+                if (type_qn) {
+                    return cbm_arena_sprintf(ctx->arena, "%s.%s", type_qn, name);
+                }
+            }
+        }
+    }
+
     /* Nix: a binding's own attrpath contributes scope (`a.b.fn = …`), and the def
      * extractor bakes it into the def QN. Compose it identically here — otherwise
      * an in-body call sources to a QN one or more segments short of the def, and

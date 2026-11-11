@@ -10585,6 +10585,61 @@ static const char *const k_cs_fth_bodies[] = {
 static int named_edge_strategy_count(cbm_store_t *s, const char *project, const char *type,
                                      const char *src, const char *tgt, const char *strategy);
 
+/* Upstream #1909 (dbba7573, 87cafb9e): receiver-qualifying method QNs moves
+ * the def/textual-call QN to package.Type.method, so go_lsp's
+ * enclosing-function QN must move with it, or every LSP resolution sourced
+ * from inside a method body loses its caller join. The callee name collides
+ * across receivers so no short-name fallback can mask the loss. Also pins that
+ * same-name methods on two receivers stay two nodes. */
+static const char *const k_go_mcall_names[] = {"go.mod", "svc/repo.go", "svc/helper.go",
+                                               "other/other.go"};
+static const char *const k_go_mcall_bodies[] = {
+    "module example.com/fxmcall\n\ngo 1.22\n",
+    "package svc\n\ntype Repo struct {\n\tn int\n}\n\n"
+    "func (r *Repo) Install() int {\n\treturn r.helper()\n}\n",
+    "package svc\n\nfunc (r *Repo) helper() int {\n\treturn r.n\n}\n\n"
+    "type Cache struct{}\n\nfunc (c *Cache) helper() int { return 3 }\n",
+    "package other\n\ntype Decoy struct{}\n\nfunc (d *Decoy) helper() int { return 2 }\n"};
+
+/* 0 = the LSP-typed edge binds Repo.helper, nothing binds the decoys and the
+ * two same-package helpers are two nodes. */
+static int go_method_caller_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p =
+        index_fixture_with_padding(k_go_mcall_names, k_go_mcall_bodies, 4, pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -9;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -8;
+    if (s) {
+        int lsp = calls_by_qn_suffix(s, proj, ".svc.Repo.Install", ".svc.Repo.helper",
+                                     "\"strategy\":\"lsp_");
+        int decoy = calls_by_qn_suffix(s, proj, ".svc.Repo.Install", ".other.Decoy.helper", NULL) +
+                    calls_by_qn_suffix(s, proj, ".svc.Repo.Install", ".svc.Cache.helper", NULL);
+        int helpers = count_nodes_named_in(s, proj, "helper");
+        printf("  go method caller probe pad=%d: lsp=%d decoy=%d helper_nodes=%d\n", pad, lsp,
+               decoy, helpers);
+        rc = lsp < 1 ? -1 : (decoy != 0 ? -2 : (helpers != 3 ? -3 : 0));
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+TEST(pipeline_go_method_caller_keeps_lsp_join) {
+    ASSERT_EQ(go_method_caller_probe(0), 0);
+    PASS();
+}
+
+TEST(pipeline_go_method_caller_keeps_lsp_join_parallel) {
+    ASSERT_EQ(go_method_caller_probe(52), 0);
+    PASS();
+}
+
 TEST(pipeline_csharp_parallel_field_hint_requires_owner_segment) {
     char db[512];
     cbm_pipeline_t *p =
@@ -14084,6 +14139,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_receiver_parallel_suppresses_weak_method_edge);
     RUN_TEST(pipeline_go_parallel_field_hint_requires_owner_segment);
     RUN_TEST(pipeline_csharp_parallel_field_hint_requires_owner_segment);
+    RUN_TEST(pipeline_go_method_caller_keeps_lsp_join);
+    RUN_TEST(pipeline_go_method_caller_keeps_lsp_join_parallel);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

@@ -4422,7 +4422,7 @@ static void set_def_complexity(CBMDefinition *def, TSNode body, const CBMLangSpe
  * Walks to the parameter_declaration's `type` field, unwrapping pointer_type
  * and generic_type, and returns the type_identifier text (e.g. "OrderService").
  * Returns NULL if no type_identifier is found. */
-static char *go_receiver_type_name(CBMArena *a, TSNode recv, const char *source) {
+char *cbm_go_receiver_type_name(CBMArena *a, TSNode recv, const char *source) {
     uint32_t nc = ts_node_child_count(recv);
     for (uint32_t i = 0; i < nc; i++) {
         TSNode child = ts_node_child(recv, i);
@@ -5007,12 +5007,25 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
          * (and downstream Go IMPLEMENTS/OVERRIDE) link the method to its owning
          * struct/type node.  The parent QN must match the type's node QN, which
          * is computed the same way (cbm_fqn_compute on the type name). */
-        char *recv_type = go_receiver_type_name(a, recv, ctx->source);
+        char *recv_type = cbm_go_receiver_type_name(a, recv, ctx->source);
         if (recv_type && recv_type[0]) {
             /* Must match the Go type node QN (directory-based module) so the
              * DEFINES_METHOD edge links the method to its owning type. */
             def.parent_class = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path,
                                                            recv_type, ctx->language);
+            /* Receiver-qualify the method QN (proj.pkg.Recv.method, upstream
+             * #1909), the same shape as the C++ out-of-line path below and Go
+             * interface members. With the flat proj.pkg.method QN every
+             * same-name method in a package collided in the graph upsert: one
+             * body survived and the twins' call edges accreted onto it. The
+             * call-scope side (compute_func_qn in extract_unified.cpp) and the
+             * Go LSP caller QN (go_lsp.cpp process_function) mirror this
+             * formula. Go only: templ's Go-derived grammar reaches this branch
+             * too, but its call-scope QN stays flat. A NULL parent_class
+             * (arena exhaustion) keeps both sides flat. */
+            if (ctx->language == CBM_LANG_GO && def.parent_class) {
+                def.qualified_name = cbm_arena_sprintf(a, "%s.%s", def.parent_class, name);
+            }
         }
     }
 
