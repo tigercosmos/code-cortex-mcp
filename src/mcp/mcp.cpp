@@ -3304,6 +3304,54 @@ static int bm25_build_match(const char *query, char *out, size_t out_size) {
     return tokens;
 }
 
+/* A BM25 result is empty although nodes match when the label is spelled in a
+ * case no node carries: labels are case-sensitive, so `label=class` finds
+ * nothing while Class nodes match the query (upstream #2386). Writes a hint
+ * naming the label this project actually holds into `out` and returns true,
+ * or returns false when the label exists exactly (a true zero). The exact
+ * probe is an index seek on (project, label); the case-insensitive scan runs
+ * only when it misses. The caller's label is never echoed back, only the
+ * stored spelling. */
+static bool bm25_label_zero_hint(sqlite3 *db, const char *project, const char *label, char *out,
+                                 size_t out_size) {
+    enum { HINT_BIND_PROJECT = 1, HINT_BIND_LABEL = 2, HINT_COL_LABEL = 0, HINT_PROBE_EXACT = 0 };
+    if (!db || !label || !label[0] || !out || out_size == 0) {
+        return false;
+    }
+    static const char *const probes[] = {
+        "SELECT label FROM nodes WHERE project = ?1 AND label = ?2 LIMIT 1",
+        "SELECT label FROM nodes WHERE project = ?1 AND label = ?2 COLLATE NOCASE LIMIT 1",
+    };
+    char found[CBM_SZ_256] = "";
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]) && !found[0]; i++) {
+        sqlite3_stmt *st = NULL;
+        if (sqlite3_prepare_v2(db, probes[i], BM25_SQL_AUTO_LEN, &st, NULL) != SQLITE_OK) {
+            return false;
+        }
+        sqlite3_bind_text(st, HINT_BIND_PROJECT, project, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, HINT_BIND_LABEL, label, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *stored = (const char *)sqlite3_column_text(st, HINT_COL_LABEL);
+            snprintf(found, sizeof(found), "%s", stored ? stored : "");
+        }
+        sqlite3_finalize(st);
+        if (found[0] && i == HINT_PROBE_EXACT) {
+            return false;
+        }
+    }
+    if (!found[0]) {
+        snprintf(out, out_size,
+                 "no node in this project carries this label; get_graph_schema lists the labels "
+                 "this index holds");
+        return true;
+    }
+    snprintf(out, out_size,
+             "no node carries this label as spelled; labels are case-sensitive -- retry with "
+             "label=\"%s\"",
+             found);
+    return true;
+}
+
 static char *bm25_file_pattern_like(const char *file_pattern) {
     if (!file_pattern) {
         return NULL;
@@ -3340,6 +3388,19 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
  * column an instance actually landed in, so the fifth is never consulted. */
 #define BM25_WEIGHTS "bm25(nodes_fts, 1.0, 1.0, 1.0, 1.0, 0.3)"
 
+/* Labels an UNLABELLED query never ranks: path-shaped File/Folder nodes, the
+ * Project node and Variables match almost any token through their qualified
+ * name and file path, and would crowd definitions out of the result. They are
+ * still in nodes_fts, so an explicit `label` that names one of them is served
+ * from its own label-scoped window like any other label (?7 is the caller's
+ * label, NULL when none was given). Excluding them there too returned 0 rows
+ * although such nodes match (upstream #2386). Section and Module are NOT
+ * excluded (#518/#519): they carry the prose the body column indexes. Shared
+ * by every candidate set and by the ranked and the count query, so they
+ * cannot desynchronise. */
+#define BM25_UNLABELLED_EXCLUSION(alias) \
+    "(?7 IS NOT NULL OR " alias ".label NOT IN ('File','Folder','Variable','Project'))"
+
 /* Candidate rows for BM25 search, shared by the ranked and the count query.
  * fts_top is the top BM25_INNER_LIMIT (?5) FTS hits. A filter applied after
  * that window only sees what survived it, so with thousands of partial
@@ -3360,50 +3421,51 @@ static char *bm25_file_pattern_like(const char *file_pattern) {
  *     full window of rows that pass it (the extra rows would rank below).
  * On a synthetic 1M-match index the ranked query takes 1.8-2.1 s with or
  * without filters (the unfiltered fts_top scoring dominates); opencv ~80 ms. */
-#define BM25_CANDIDATE_CTES                                                       \
-    "WITH fts_top AS MATERIALIZED ("                                              \
-    "    SELECT rowid, " BM25_WEIGHTS " AS base_rank"                             \
-    "    FROM nodes_fts WHERE nodes_fts MATCH ?1"                                 \
-    "    ORDER BY base_rank LIMIT ?5), "                                          \
-    "exact_extra AS MATERIALIZED ("                                               \
-    "    SELECT x.id AS rowid,"                                                   \
-    "           COALESCE((SELECT min(base_rank) FROM fts_top), 0.0) AS base_rank" \
-    "    FROM nodes x WHERE x.project = ?2 AND x.name = ?8"                       \
-    "      AND x.label NOT IN ('File','Folder','Variable','Project')"             \
-    "      AND (?6 IS NULL OR x.file_path LIKE ?6)"                               \
-    "      AND (?7 IS NULL OR x.label = ?7)"                                      \
-    "      AND x.id NOT IN (SELECT rowid FROM fts_top)"                           \
-    "    LIMIT ?5), "                                                             \
-    "nocase_extra AS MATERIALIZED ("                                              \
-    "    SELECT f.rowid AS rowid,"                                                \
-    "           COALESCE((SELECT min(base_rank) FROM fts_top), 0.0) AS base_rank" \
-    "    FROM nodes_fts f CROSS JOIN nodes w ON w.id = f.rowid"                   \
-    "    WHERE (SELECT count(*) FROM fts_top) >= ?5"                              \
-    "      AND nodes_fts MATCH ('name : (' || ?1 || ')')"                         \
-    "      AND w.project = ?2 AND w.name != ?8 AND lower(w.name) = lower(?8)"     \
-    "      AND w.label NOT IN ('File','Folder','Variable','Project')"             \
-    "      AND (?6 IS NULL OR w.file_path LIKE ?6)"                               \
-    "      AND (?7 IS NULL OR w.label = ?7)"                                      \
-    "      AND f.rowid NOT IN (SELECT rowid FROM fts_top)"                        \
-    "    LIMIT ?5), "                                                             \
-    "filtered_extra AS ("                                                         \
-    "    SELECT f.rowid AS rowid, " BM25_WEIGHTS " AS base_rank"                  \
-    "    FROM nodes_fts f CROSS JOIN nodes y ON y.id = f.rowid"                   \
-    "    WHERE (?7 IS NOT NULL OR ?6 IS NOT NULL)"                                \
-    "      AND (SELECT count(*) FROM fts_top t JOIN nodes z ON z.id = t.rowid"    \
-    "           WHERE z.project = ?2"                                             \
-    "             AND z.label NOT IN ('File','Folder','Variable','Project')"      \
-    "             AND (?6 IS NULL OR z.file_path LIKE ?6)"                        \
-    "             AND (?7 IS NULL OR z.label = ?7)) < ?5"                         \
-    "      AND nodes_fts MATCH ?1"                                                \
-    "      AND y.project = ?2"                                                    \
-    "      AND y.label NOT IN ('File','Folder','Variable','Project')"             \
-    "      AND (?6 IS NULL OR y.file_path LIKE ?6)"                               \
-    "      AND (?7 IS NULL OR y.label = ?7)"                                      \
-    "      AND f.rowid NOT IN (SELECT rowid FROM fts_top)"                        \
-    "      AND f.rowid NOT IN (SELECT rowid FROM exact_extra)"                    \
-    "      AND f.rowid NOT IN (SELECT rowid FROM nocase_extra)"                   \
-    "    ORDER BY base_rank LIMIT ?5) "
+#define BM25_CANDIDATE_CTES                                                                        \
+    "WITH fts_top AS MATERIALIZED ("                                                               \
+    "    SELECT rowid, " BM25_WEIGHTS " AS base_rank"                                              \
+    "    FROM nodes_fts WHERE nodes_fts MATCH ?1"                                                  \
+    "    ORDER BY base_rank LIMIT ?5), "                                                           \
+    "exact_extra AS MATERIALIZED ("                                                                \
+    "    SELECT x.id AS rowid,"                                                                    \
+    "           COALESCE((SELECT min(base_rank) FROM fts_top), 0.0) AS base_rank"                  \
+    "    FROM nodes x WHERE x.project = ?2 AND x.name = ?8"                                        \
+    "      AND " BM25_UNLABELLED_EXCLUSION(                                                        \
+        "x") "      AND (?6 IS NULL OR x.file_path LIKE ?6)"                                       \
+             "      AND (?7 IS NULL OR x.label = ?7)"                                              \
+             "      AND x.id NOT IN (SELECT rowid FROM fts_top)"                                   \
+             "    LIMIT ?5), "                                                                     \
+             "nocase_extra AS MATERIALIZED ("                                                      \
+             "    SELECT f.rowid AS rowid,"                                                        \
+             "           COALESCE((SELECT min(base_rank) FROM fts_top), 0.0) AS base_rank"         \
+             "    FROM nodes_fts f CROSS JOIN nodes w ON w.id = f.rowid"                           \
+             "    WHERE (SELECT count(*) FROM fts_top) >= ?5"                                      \
+             "      AND nodes_fts MATCH ('name : (' || ?1 || ')')"                                 \
+             "      AND w.project = ?2 AND w.name != ?8 AND lower(w.name) = lower(?8)"             \
+             "      AND " BM25_UNLABELLED_EXCLUSION(                                               \
+                 "w") "      AND (?6 IS NULL OR w.file_path LIKE ?6)"                              \
+                      "      AND (?7 IS NULL OR w.label = ?7)"                                     \
+                      "      AND f.rowid NOT IN (SELECT rowid FROM fts_top)"                       \
+                      "    LIMIT ?5), "                                                            \
+                      "filtered_extra AS ("                                                        \
+                      "    SELECT f.rowid AS rowid, " BM25_WEIGHTS " AS base_rank"                 \
+                      "    FROM nodes_fts f CROSS JOIN nodes y ON y.id = f.rowid"                  \
+                      "    WHERE (?7 IS NOT NULL OR ?6 IS NOT NULL)"                               \
+                      "      AND (SELECT count(*) FROM fts_top t JOIN nodes z ON z.id = t.rowid"   \
+                      "           WHERE z.project = ?2"                                            \
+                      "             AND " BM25_UNLABELLED_EXCLUSION(                               \
+                          "z") "             AND (?6 IS NULL OR z.file_path LIKE ?6)"              \
+                               "             AND (?7 IS NULL OR z.label = ?7)) < ?5"               \
+                               "      AND nodes_fts MATCH ?1"                                      \
+                               "      AND y.project = ?2"                                          \
+                               "      AND " BM25_UNLABELLED_EXCLUSION(                             \
+                                   "y") "      AND (?6 IS NULL OR y.file_path LIKE ?6)"            \
+                                        "      AND (?7 IS NULL OR y.label = ?7)"                   \
+                                        "      AND f.rowid NOT IN (SELECT rowid FROM fts_top)"     \
+                                        "      AND f.rowid NOT IN (SELECT rowid FROM exact_extra)" \
+                                        "      AND f.rowid NOT IN (SELECT rowid FROM "             \
+                                        "nocase_extra)"                                            \
+                                        "    ORDER BY base_rank LIMIT ?5) "
 
 static char *bm25_search(cbm_store_t *store, const char *project, const char *query,
                          const char *file_pattern, const char *label, int limit, int offset) {
@@ -3465,14 +3527,15 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         /* Section and Module are NO LONGER excluded (#518/#519): they carry the
          * prose — a Markdown section's body, a config file's description.
          * MIRRORED in the count query below; change the two together. */
-        "  AND n.label NOT IN ('File','Folder','Variable','Project') "
-        "  AND (?6 IS NULL OR n.file_path LIKE ?6) "
-        /* The caller's label filter applies in query mode exactly as it does
-         * in the structural mode (`label=Class` used to be ignored here and
-         * Methods came back). MIRRORED in the count query. */
-        "  AND (?7 IS NULL OR n.label = ?7) "
-        "ORDER BY rank "
-        "LIMIT ?3 OFFSET ?4";
+        "  AND " BM25_UNLABELLED_EXCLUSION(
+            "n") " "
+                 "  AND (?6 IS NULL OR n.file_path LIKE ?6) "
+                 /* The caller's label filter applies in query mode exactly as it does
+                  * in the structural mode (`label=Class` used to be ignored here and
+                  * Methods came back). MIRRORED in the count query. */
+                 "  AND (?7 IS NULL OR n.label = ?7) "
+                 "ORDER BY rank "
+                 "LIMIT ?3 OFFSET ?4";
 
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(db, sql, BM25_SQL_AUTO_LEN, &stmt, NULL) != SQLITE_OK) {
@@ -3510,10 +3573,11 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
             "    JOIN nodes n ON n.id = fts.rowid "
             "    WHERE n.project = ?2 "
             /* MIRRORS the ranked query verbatim: same weights, same exclusions. */
-            "      AND n.label NOT IN ('File','Folder','Variable','Project')"
-            "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
-            "      AND (?7 IS NULL OR n.label = ?7)"
-            ")";
+            "      AND " BM25_UNLABELLED_EXCLUSION(
+                "n") " "
+                     "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
+                     "      AND (?7 IS NULL OR n.label = ?7)"
+                     ")";
         sqlite3_stmt *cs = NULL;
         if (sqlite3_prepare_v2(db, count_sql, BM25_SQL_AUTO_LEN, &cs, NULL) == SQLITE_OK) {
             sqlite3_bind_text(cs, BM25_BIND_QUERY, fts_query, BM25_SQL_AUTO_LEN,
@@ -3570,6 +3634,11 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
 
     yyjson_mut_obj_add_val(doc, root, "results", results);
     yyjson_mut_obj_add_bool(doc, root, "has_more", total > offset + emitted);
+    /* Never a silent zero for a label the index spells differently. */
+    char zero_hint[CBM_SZ_512];
+    if (total == 0 && bm25_label_zero_hint(db, project, label, zero_hint, sizeof(zero_hint))) {
+        yyjson_mut_obj_add_strcpy(doc, root, "hint", zero_hint);
+    }
 
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);

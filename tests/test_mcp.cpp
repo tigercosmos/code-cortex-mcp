@@ -7185,6 +7185,103 @@ TEST(bm25_identifier_match_outranks_prose_only_match_issue518) {
     PASS();
 }
 
+/* An unlabelled BM25 query never ranks File, Folder, Variable or Project nodes
+ * (they match almost any token through their path), but an explicit label
+ * naming one of them must be served: those nodes are in nodes_fts, and
+ * excluding them there too answered `query=config label=Folder` with 0 rows
+ * (upstream #2386). One node per label shares the query tokens with a
+ * Function. */
+static cbm_mcp_server_t *setup_bm25_unranked_labels_server(const char *proj) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    if (!srv) {
+        return NULL;
+    }
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/bm25-noise");
+    struct {
+        const char *label, *name, *qn, *file;
+    } rows[] = {
+        {"Function", "loadconfig", "bm25-noise.app.loadconfig", "app/config.py"},
+        {"File", "__file__", "bm25-noise.app.config.py", "app/config.py"},
+        {"Folder", "config", "bm25-noise.app.config", "app/config"},
+        {"Variable", "CONFIG_PATH", "bm25-noise.app.config.CONFIG_PATH", "app/config.py"},
+        {"Project", "bm25-noise", "bm25-noise", ""},
+    };
+    for (auto &row : rows) {
+        cbm_node_t n = prose_node(proj, row.label, row.name, row.qn, row.file, NULL);
+        cbm_store_upsert_node(st, &n);
+    }
+    cbm_store_fts_rebuild(st);
+    return srv;
+}
+
+TEST(bm25_serves_unranked_labels_when_named) {
+    cbm_mcp_server_t *srv = setup_bm25_unranked_labels_server("bm25-noise");
+    ASSERT_NOT_NULL(srv);
+    static const struct {
+        const char *label, *qn;
+    } named[] = {
+        {"File", "\"qualified_name\":\"bm25-noise.app.config.py\",\"label\":\"File\""},
+        {"Folder", "\"qualified_name\":\"bm25-noise.app.config\",\"label\":\"Folder\""},
+        {"Variable",
+         "\"qualified_name\":\"bm25-noise.app.config.CONFIG_PATH\",\"label\":\"Variable\""},
+        {"Project", "\"qualified_name\":\"bm25-noise\",\"label\":\"Project\""},
+    };
+    for (const auto &want : named) {
+        char *inner = bm25_find_search(srv, "bm25-noise", "noise config", want.label);
+        ASSERT_NOT_NULL(inner);
+        ASSERT_NOT_NULL(strstr(inner, "\"search_mode\":\"bm25\""));
+        ASSERT_NOT_NULL(strstr(inner, want.qn));
+        ASSERT_NOT_NULL(strstr(inner, "\"total\":1,"));
+        ASSERT_NULL(strstr(inner, "\"hint\""));
+        free(inner);
+    }
+
+    /* Without a label the four stay out of the ranking: only the Function. */
+    char *inner = bm25_find_search(srv, "bm25-noise", "noise config", NULL);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"qualified_name\":\"bm25-noise.app.loadconfig\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":1,"));
+    ASSERT_NULL(strstr(inner, "\"File\""));
+    ASSERT_NULL(strstr(inner, "\"Folder\""));
+    ASSERT_NULL(strstr(inner, "\"Variable\""));
+    ASSERT_NULL(strstr(inner, "\"Project\""));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Labels are case-sensitive. A BM25 query whose label no node carries as
+ * spelled answers 0 rows like the structural path does, but never silently:
+ * the hint names the stored spelling, or get_graph_schema when the label is
+ * unknown. An existing label with no matching row is a true zero: no hint. */
+TEST(bm25_zero_hint_names_the_label) {
+    cbm_mcp_server_t *srv = setup_bm25_unranked_labels_server("bm25-noise-hint");
+    ASSERT_NOT_NULL(srv);
+
+    char *inner = bm25_find_search(srv, "bm25-noise-hint", "config", "folder");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":0,"));
+    ASSERT_NOT_NULL(strstr(inner, "\"hint\":"));
+    ASSERT_NOT_NULL(strstr(inner, "retry with label=\\\"Folder\\\""));
+    free(inner);
+
+    inner = bm25_find_search(srv, "bm25-noise-hint", "config", "Widget");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":0,"));
+    ASSERT_NOT_NULL(strstr(inner, "get_graph_schema"));
+    free(inner);
+
+    inner = bm25_find_search(srv, "bm25-noise-hint", "zzznomatch", "Function");
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "\"total\":0,"));
+    ASSERT_NULL(strstr(inner, "\"hint\""));
+    free(inner);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(bm25_searches_legacy_four_column_fts_without_error_issue518) {
     /* No format bump: a database whose nodes_fts predates `body` is opened by
      * this binary. The five-weight bm25() must be inert there, not an error. */
@@ -8589,6 +8686,8 @@ SUITE(mcp) {
     RUN_TEST(bm25_results_and_total_stay_consistent_issue518);
     RUN_TEST(bm25_identifier_match_outranks_prose_only_match_issue518);
     RUN_TEST(bm25_applies_label_filter);
+    RUN_TEST(bm25_serves_unranked_labels_when_named);
+    RUN_TEST(bm25_zero_hint_names_the_label);
     RUN_TEST(bm25_ranks_exact_name_first);
     RUN_TEST(bm25_exact_name_survives_the_inner_limit);
     RUN_TEST(bm25_label_filter_survives_the_inner_limit);
