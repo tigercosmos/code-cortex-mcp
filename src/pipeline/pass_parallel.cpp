@@ -811,6 +811,8 @@ static char *pp_props_buf(const CBMDefinition *def, char *stack, size_t *size) {
     if (def->variants && def->variants[0]) {
         need += strlen("variants") + strlen(def->variants) + PP_JSON_FIELD_OVERHEAD;
     }
+    need += pp_str_field_len(CBM_PROP_GENERATED, def->generated) +
+            pp_str_field_len("client_route_path", def->client_route_path);
     need += pp_str_field_len("signature", def->signature) +
             pp_str_field_len("return_type", def->return_type) +
             pp_str_field_len("parent_class", def->parent_class) +
