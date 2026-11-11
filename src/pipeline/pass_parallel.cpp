@@ -539,8 +539,8 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     size_t pos = (size_t)n;
     append_json_string(buf, bufsize, &pos, "declaration_key", def->declaration_key);
     append_json_string(buf, bufsize, &pos, "docstring", def->docstring);
-    /* Right after the docstring: the buffer is sized for exactly these two
-     * uncapped fields (pp_props_buf), so neither can be squeezed out. */
+    /* The buffer is sized for every field below (pp_props_buf), so none can be
+     * squeezed out. */
     append_json_raw(buf, bufsize, &pos, "variants", def->variants);
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
@@ -765,20 +765,66 @@ typedef struct {
  * to the response/logfile — this only throttles the stderr noise). */
 enum { PP_OVERSIZED_WARN_MAX = 32 };
 
-/* A def's properties buffer: CBM_SZ_2K for every other field plus the whole
- * serialized docstring and variants fields, which have no length cap (a field
- * that does not fit is dropped whole). Returns `stack` for a def with neither,
- * or when the larger buffer cannot be allocated. Twin of pass_definitions.cpp --
+/* Upper bound of build_def_props' fixed prefix: the Function/Method metrics
+ * literal (about 330 B) with nine ints and five true/false strings at their
+ * widest stays under 600 B. */
+enum { PP_PROPS_PREFIX_MAX = CBM_SZ_1K };
+
+/* Serialized size of one optional field as append_json_string emits it
+ * (0 when the field is absent). */
+static size_t pp_str_field_len(const char *key, const char *val) {
+    return val && val[0] ? strlen(key) + pp_json_escaped_len(val) + PP_JSON_FIELD_OVERHEAD : 0;
+}
+
+/* Serialized size of a string array as append_json_str_array emits it. */
+static size_t pp_arr_field_len(const char *key, const char **arr) {
+    if (!arr || !arr[0]) {
+        return 0;
+    }
+    size_t n = strlen(key) + PP_JSON_FIELD_OVERHEAD;
+    for (int i = 0; arr[i]; i++) {
+        n += pp_json_escaped_len(arr[i]) + PP_ESC_SPACE + (i > 0 ? SKIP_ONE : 0);
+    }
+    return n;
+}
+
+/* A def's properties buffer, sized so EVERY field build_def_props appends fits
+ * (upstream 5992ea61): the fixed metrics prefix plus each optional field's
+ * whole serialized form. A field that does not fit is dropped whole, so a
+ * buffer sized for only the docstring and variants let a long signature,
+ * decorator list or parameter list squeeze out the MinHash fingerprint ("fp"),
+ * structural profile ("sp") and body tokens ("bt") behind them: no SIMILAR_TO
+ * edge and fewer SEMANTICALLY_RELATED edges for exactly the widest
+ * definitions. fp/sp/bt are appended behind their own room checks, so both the
+ * check's reserve and the field are counted. Returns `stack` when everything
+ * fits it, or when the larger buffer cannot be allocated. Twin of pass_definitions.cpp --
  * keep both in sync. */
 static char *pp_props_buf(const CBMDefinition *def, char *stack, size_t *size) {
-    size_t need = *size;
-    if (def->docstring && def->docstring[0]) {
-        need += strlen("docstring") + pp_json_escaped_len(def->docstring) + PP_JSON_FIELD_OVERHEAD;
-    }
+    size_t need = PP_PROPS_PREFIX_MAX + pp_str_field_len("declaration_key", def->declaration_key) +
+                  pp_str_field_len("docstring", def->docstring);
     if (def->variants && def->variants[0]) {
         need += strlen("variants") + strlen(def->variants) + PP_JSON_FIELD_OVERHEAD;
     }
-    if (need == *size) {
+    need += pp_str_field_len("signature", def->signature) +
+            pp_str_field_len("return_type", def->return_type) +
+            pp_str_field_len("parent_class", def->parent_class) +
+            pp_arr_field_len("decorators", def->decorators) +
+            pp_arr_field_len("base_classes", def->base_classes) +
+            pp_arr_field_len("param_names", def->param_names) +
+            pp_arr_field_len("param_types", def->param_types) +
+            pp_str_field_len("route_path", def->route_path) +
+            pp_str_field_len("route_method", def->route_method);
+    if (def->fingerprint && def->fingerprint_k > 0) {
+        need += CBM_MINHASH_HEX_LEN + CBM_MINHASH_JSON_OVERHEAD + SKIP_ONE;
+    }
+    if (def->structural_profile) {
+        need += CBM_AST_PROFILE_BUF + pp_str_field_len("sp", def->structural_profile) + SKIP_ONE;
+    }
+    if (def->body_tokens) {
+        need += CBM_SZ_512 + pp_str_field_len("bt", def->body_tokens) + SKIP_ONE;
+    }
+    need += PP_ESC_SPACE; /* the closing '}' + NUL */
+    if (need <= *size) {
         return stack;
     }
     char *buf = (char *)malloc(need);
@@ -792,7 +838,10 @@ static char *pp_props_buf(const CBMDefinition *def, char *stack, size_t *size) {
 /* Insert one definition node (and its route if present) into the local gbuf. */
 static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_stem_marks_t *marks,
                                  const cbm_file_info_t *fi, CBMDefinition *def) {
-    char stack[CBM_SZ_2K];
+    /* 4K, not 2K: a function with fp/sp/bt is sized past 2K by *_props_buf
+     * (the room reserves alone are ~1.3K), and the common case should stay
+     * allocation-free. */
+    char stack[CBM_SZ_4K];
     size_t props_size = sizeof(stack);
     char *props = pp_props_buf(def, stack, &props_size);
     build_def_props(props, props_size, def);
