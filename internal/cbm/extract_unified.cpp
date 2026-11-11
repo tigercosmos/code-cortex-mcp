@@ -609,6 +609,21 @@ static const char *compute_gotemplate_func_qn(CBMExtractCtx *ctx, TSNode node) {
     return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, raw);
 }
 
+/* Python: the nearest named scope around the node -- a def or a class. A def
+ * or class nested in a def is qualified by that def (proj.mod.create_app.index),
+ * exactly as extract_defs.cpp mints it; enclosing_class_qn alone would skip the
+ * def and hand a def nested in a method its method's QN. Lambdas push no named
+ * frame, so they stay transparent (upstream #1548). */
+static const char *py_nearest_scope_qn(const WalkState *state) {
+    for (int i = state->scope_top - SKIP_ONE; i >= 0; i--) {
+        if ((state->scopes[i].kind == SCOPE_FUNC || state->scopes[i].kind == SCOPE_CLASS) &&
+            state->scopes[i].qn) {
+            return state->scopes[i].qn;
+        }
+    }
+    return NULL;
+}
+
 // Compute function QN for scope tracking (mirrors cbm_enclosing_func_qn logic).
 static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
                                    WalkState *state) {
@@ -797,8 +812,10 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
         }
     }
 
-    if (state->enclosing_class_qn) {
-        return cbm_arena_sprintf(ctx->arena, "%s.%s", state->enclosing_class_qn, qn_name);
+    const char *outer_qn =
+        ctx->language == CBM_LANG_PYTHON ? py_nearest_scope_qn(state) : state->enclosing_class_qn;
+    if (outer_qn) {
+        return cbm_arena_sprintf(ctx->arena, "%s.%s", outer_qn, qn_name);
     }
     /* Java/Go: directory-based module so this enclosing-func QN matches the def
      * QN and the LSP caller_qn (the lsp_resolve join keys on exact equality). */
@@ -863,9 +880,15 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const WalkS
 
     /* Nested class: prefix with the enclosing class QN (Outer.Inner) so this
      * scope QN matches the def-side class QN (extract_defs.c compute_class_qn /
-     * extract_class_def), which the lsp_resolve join requires for nested types. */
-    if (state && state->enclosing_class_qn) {
-        return cbm_arena_sprintf(ctx->arena, "%s.%s", state->enclosing_class_qn, name);
+     * extract_class_def), which the lsp_resolve join requires for nested types.
+     * Python: a class inside a def is qualified by the def (py_nearest_scope_qn). */
+    const char *outer_qn = NULL;
+    if (state) {
+        outer_qn = ctx->language == CBM_LANG_PYTHON ? py_nearest_scope_qn(state)
+                                                    : state->enclosing_class_qn;
+    }
+    if (outer_qn) {
+        return cbm_arena_sprintf(ctx->arena, "%s.%s", outer_qn, name);
     }
 
     /* Java/Go: directory-based module (see compute_func_qn). */

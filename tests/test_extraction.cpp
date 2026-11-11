@@ -5543,6 +5543,298 @@ TEST(python_init_nested_module_qn) {
     PASS();
 }
 
+/* ── #1548: Python defs nested in a function body ─────────────────── */
+
+/* How many defs carry exactly this QN. */
+static int pyn_def_count(const CBMFileResult *r, const char *qn) {
+    int n = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const char *q = r->defs.items[i].qualified_name;
+        if (q && strcmp(q, qn) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The one def with this QN, or NULL when there is none (or more than one). */
+static const CBMDefinition *pyn_def(const CBMFileResult *r, const char *qn) {
+    if (pyn_def_count(r, qn) != 1) {
+        return NULL;
+    }
+    for (int i = 0; i < r->defs.count; i++) {
+        const char *q = r->defs.items[i].qualified_name;
+        if (q && strcmp(q, qn) == 0) {
+            return &r->defs.items[i];
+        }
+    }
+    return NULL;
+}
+
+/* Calls of `callee` whose enclosing function is exactly `caller_qn`. */
+static int pyn_calls(const CBMFileResult *r, const char *callee, const char *caller_qn) {
+    int n = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (c->callee_name && strcmp(c->callee_name, callee) == 0 && c->enclosing_func_qn &&
+            strcmp(c->enclosing_func_qn, caller_qn) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* No def QN is minted twice: a nested def must not also surface as a
+ * module-level one, and walking a def body must not re-extract anything. */
+static bool pyn_defs_unique(const CBMFileResult *r) {
+    for (int i = 0; i < r->defs.count; i++) {
+        const char *q = r->defs.items[i].qualified_name;
+        if (q && pyn_def_count(r, q) != 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The issue's reproducer: `def nested()` inside `def factory()` was never
+ * extracted. It is now a Function qualified by the def it sits in, the same
+ * QN the Python LSP gives its calls. Module-level defs, and defs in a
+ * module-level `if` block, keep their QNs. */
+TEST(extract_python_nested_def_qualified_by_enclosing_def_issue1548) {
+    CBMFileResult *r = extract("def target():\n"
+                               "    return 0\n"
+                               "\n"
+                               "\n"
+                               "def module_level():\n"
+                               "    return target()\n"
+                               "\n"
+                               "\n"
+                               "if True:\n"
+                               "    def inside_if():\n"
+                               "        return target()\n"
+                               "\n"
+                               "\n"
+                               "def factory():\n"
+                               "    def nested():\n"
+                               "        return target()\n"
+                               "    return nested\n"
+                               "\n"
+                               "\n"
+                               "def outer():\n"
+                               "    def middle():\n"
+                               "        def inner():\n"
+                               "            return target()\n"
+                               "        return inner\n"
+                               "    return middle\n",
+                               CBM_LANG_PYTHON, "t", "app.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *nested = pyn_def(r, "t.app.factory.nested");
+    ASSERT_NOT_NULL(nested);
+    ASSERT_STR_EQ(nested->label, "Function");
+    ASSERT_EQ(nested->start_line, 15);
+    ASSERT_NOT_NULL(pyn_def(r, "t.app.outer.middle"));
+    ASSERT_NOT_NULL(pyn_def(r, "t.app.outer.middle.inner"));
+    /* Never minted flat, where it would collide with a module-level name. */
+    ASSERT_EQ(pyn_def_count(r, "t.app.nested"), 0);
+    ASSERT_EQ(pyn_def_count(r, "t.app.inner"), 0);
+    /* Controls: unchanged. */
+    ASSERT_NOT_NULL(pyn_def(r, "t.app.target"));
+    ASSERT_NOT_NULL(pyn_def(r, "t.app.module_level"));
+    ASSERT_NOT_NULL(pyn_def(r, "t.app.inside_if"));
+    ASSERT_NOT_NULL(pyn_def(r, "t.app.factory"));
+    ASSERT_TRUE(pyn_defs_unique(r));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A call inside a nested def belongs to that def. It used to carry the flat
+ * `t.app.nested`, a QN no node has, so the edge was pinned on the file node:
+ * inbound traces of target() lost the caller. It is not the outer def's
+ * either. */
+TEST(extract_python_nested_def_calls_attributed_to_it_issue1548) {
+    CBMFileResult *r = extract("def target():\n"
+                               "    return 0\n"
+                               "\n"
+                               "def factory():\n"
+                               "    def nested():\n"
+                               "        return target()\n"
+                               "    return nested\n"
+                               "\n"
+                               "def outer():\n"
+                               "    def middle():\n"
+                               "        def inner():\n"
+                               "            return target()\n"
+                               "        return inner\n"
+                               "    return middle\n",
+                               CBM_LANG_PYTHON, "t", "app.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(pyn_calls(r, "target", "t.app.factory.nested"), 1);
+    ASSERT_EQ(pyn_calls(r, "target", "t.app.outer.middle.inner"), 1);
+    ASSERT_EQ(pyn_calls(r, "target", "t.app.factory"), 0);
+    ASSERT_EQ(pyn_calls(r, "target", "t.app.nested"), 0);
+    ASSERT_EQ(pyn_calls(r, "target", "t.app.inner"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The app-factory shape: route handlers are decorated defs inside
+ * create_app. Each is extracted with its QN and carries the route its
+ * decorator declares, which is what mints the Route node and its HANDLES
+ * edge (pipeline_python_app_factory_routes_issue1548 checks the graph). */
+TEST(extract_python_decorated_nested_route_handler_issue1548) {
+    CBMFileResult *r = extract("from flask import Flask\n"
+                               "\n"
+                               "def create_app():\n"
+                               "    app = Flask(__name__)\n"
+                               "\n"
+                               "    @app.route(\"/users/<uid>\")\n"
+                               "    def show_user(uid):\n"
+                               "        return render(uid)\n"
+                               "\n"
+                               "    @app.get(\"/health\")\n"
+                               "    async def health():\n"
+                               "        return render(\"ok\")\n"
+                               "\n"
+                               "    return app\n",
+                               CBM_LANG_PYTHON, "t", "web.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *show = pyn_def(r, "t.web.create_app.show_user");
+    ASSERT_NOT_NULL(show);
+    ASSERT_STR_EQ(show->route_path, "/users/<uid>");
+    ASSERT_NOT_NULL(show->decorators);
+    const CBMDefinition *health = pyn_def(r, "t.web.create_app.health");
+    ASSERT_NOT_NULL(health);
+    ASSERT_STR_EQ(health->route_path, "/health");
+    ASSERT_STR_EQ(health->route_method, "GET");
+    ASSERT_EQ(pyn_calls(r, "render", "t.web.create_app.show_user"), 1);
+    ASSERT_EQ(pyn_calls(r, "render", "t.web.create_app.health"), 1);
+    ASSERT_TRUE(pyn_defs_unique(r));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A class declared in a def is qualified by the def; its methods are Methods
+ * of it, and a call in such a method is the method's. */
+TEST(extract_python_nested_class_issue1548) {
+    CBMFileResult *r = extract("def create_app():\n"
+                               "    class Settings:\n"
+                               "        debug = False\n"
+                               "\n"
+                               "        def value(self):\n"
+                               "            return load(self)\n"
+                               "\n"
+                               "    return Settings().value()\n",
+                               CBM_LANG_PYTHON, "t", "web.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *cls = pyn_def(r, "t.web.create_app.Settings");
+    ASSERT_NOT_NULL(cls);
+    ASSERT_STR_EQ(cls->label, "Class");
+    const CBMDefinition *value = pyn_def(r, "t.web.create_app.Settings.value");
+    ASSERT_NOT_NULL(value);
+    ASSERT_STR_EQ(value->label, "Method");
+    ASSERT_STR_EQ(value->parent_class, "t.web.create_app.Settings");
+    ASSERT_EQ(pyn_calls(r, "load", "t.web.create_app.Settings.value"), 1);
+    ASSERT_EQ(pyn_def_count(r, "t.web.Settings"), 0);
+    ASSERT_TRUE(pyn_defs_unique(r));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A def nested in a method, named like the method (django's
+ * AbstractBaseUser.check_password holds a `def setter`; Tree.visit here holds
+ * a `def visit`). It used to share the method's QN, so its calls -- its
+ * recursion included -- were the method's. It is its own Function now: the
+ * recursive call and render() are its, only visit(node) is the method's, and
+ * the recursion seed flags the nested def. */
+TEST(extract_python_nested_def_named_like_its_method_issue1548) {
+    CBMFileResult *r = extract("class Tree:\n"
+                               "    def visit(self, node):\n"
+                               "        def visit(n):\n"
+                               "            if n:\n"
+                               "                visit(n.child)\n"
+                               "                render(n)\n"
+                               "\n"
+                               "        visit(node)\n",
+                               CBM_LANG_PYTHON, "t", "m.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *method = pyn_def(r, "t.m.Tree.visit");
+    ASSERT_NOT_NULL(method);
+    ASSERT_STR_EQ(method->label, "Method");
+    const CBMDefinition *nested = pyn_def(r, "t.m.Tree.visit.visit");
+    ASSERT_NOT_NULL(nested);
+    ASSERT_STR_EQ(nested->label, "Function");
+    ASSERT_EQ(nested->start_line, 3);
+    ASSERT_EQ(pyn_calls(r, "visit", "t.m.Tree.visit.visit"), 1);
+    ASSERT_EQ(pyn_calls(r, "render", "t.m.Tree.visit.visit"), 1);
+    ASSERT_EQ(pyn_calls(r, "visit", "t.m.Tree.visit"), 1);
+    ASSERT_EQ(pyn_calls(r, "render", "t.m.Tree.visit"), 0);
+    ASSERT_TRUE(nested->is_recursive);
+    ASSERT_TRUE(pyn_defs_unique(r));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Controls: a lambda and the comprehensions are expressions, not defs. They
+ * mint nothing, and the calls inside them stay the enclosing def's. */
+TEST(extract_python_lambda_and_comprehension_stay_in_enclosing_def_issue1548) {
+    CBMFileResult *r = extract("def work(items):\n"
+                               "    double = lambda x: scale(x)\n"
+                               "    squares = [scale(i) for i in items]\n"
+                               "    table = {k: scale(k) for k in items}\n"
+                               "    return double(squares), table\n",
+                               CBM_LANG_PYTHON, "t", "c.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_NOT_NULL(pyn_def(r, "t.c.work"));
+    for (int i = 0; i < r->defs.count; i++) {
+        const char *q = r->defs.items[i].qualified_name;
+        ASSERT_FALSE(q && strncmp(q, "t.c.work.", strlen("t.c.work.")) == 0);
+    }
+    ASSERT_EQ(pyn_calls(r, "scale", "t.c.work"), 3);
+    ASSERT_TRUE(pyn_defs_unique(r));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Records other than calls take their enclosing function from the same
+ * unified-walk scope frame as the calls. The nested def's env read carries its
+ * QN; the outer def's reads, before and after the nested def, keep the outer
+ * QN once its frame is popped. */
+TEST(extract_python_nested_def_env_access_attributed_to_it_issue1548) {
+    CBMFileResult *r = extract("import os\n"
+                               "\n"
+                               "def outer():\n"
+                               "    token = os.environ[\"OUTER_TOKEN\"]\n"
+                               "\n"
+                               "    def inner():\n"
+                               "        return os.environ[\"INNER_TOKEN\"]\n"
+                               "\n"
+                               "    return inner, token, os.environ[\"OUTER_AGAIN\"]\n",
+                               CBM_LANG_PYTHON, "t", "e.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int seen = 0;
+    for (int i = 0; i < r->env_accesses.count; i++) {
+        const CBMEnvAccess *ea = &r->env_accesses.items[i];
+        ASSERT_NOT_NULL(ea->enclosing_func_qn);
+        if (strcmp(ea->env_key, "INNER_TOKEN") == 0) {
+            ASSERT_STR_EQ(ea->enclosing_func_qn, "t.e.outer.inner");
+            seen++;
+        } else {
+            ASSERT_STR_EQ(ea->enclosing_func_qn, "t.e.outer");
+            seen++;
+        }
+    }
+    ASSERT_EQ(seen, 3);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(js_index_module_qn_not_collide_with_folder) {
     /* Same bug for JS/TS index.ts files */
     CBMFileResult *r = extract("export function App() { return null; }\n", CBM_LANG_TYPESCRIPT,
@@ -13105,6 +13397,13 @@ SUITE(extraction) {
     /* __init__.py / index.ts Module QN collision regression */
     RUN_TEST(python_init_module_qn_not_collide_with_folder);
     RUN_TEST(python_init_nested_module_qn);
+    RUN_TEST(extract_python_nested_def_qualified_by_enclosing_def_issue1548);
+    RUN_TEST(extract_python_nested_def_calls_attributed_to_it_issue1548);
+    RUN_TEST(extract_python_decorated_nested_route_handler_issue1548);
+    RUN_TEST(extract_python_nested_class_issue1548);
+    RUN_TEST(extract_python_nested_def_named_like_its_method_issue1548);
+    RUN_TEST(extract_python_lambda_and_comprehension_stay_in_enclosing_def_issue1548);
+    RUN_TEST(extract_python_nested_def_env_access_attributed_to_it_issue1548);
     RUN_TEST(js_index_module_qn_not_collide_with_folder);
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);

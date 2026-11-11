@@ -1401,7 +1401,7 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
 
 /* Register one definition and create DEFINES + DEFINES_METHOD edges. Returns edge count. */
 static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const char *rel,
-                                 CBMLanguage lang, int *reg_entries) {
+                                 CBMLanguage lang, size_t module_prefix_len, int *reg_entries) {
     int edges = 0;
     if (!def->name || !def->qualified_name || !def->label) {
         return 0;
@@ -1413,7 +1413,8 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
         if (cbm_def_generated(def)) {
             cbm_registry_add_qn_only(ctx->registry, def->qualified_name, def->label);
         } else {
-            cbm_registry_add_lang(ctx->registry, def->name, def->qualified_name, def->label, lang);
+            cbm_registry_add_lang_in_module(ctx->registry, def->name, def->qualified_name,
+                                            def->label, lang, module_prefix_len);
         }
         (*reg_entries)++;
     }
@@ -1646,10 +1647,14 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             free(file_qn);
         }
 
-        /* Register callable symbols + DEFINES/DEFINES_METHOD edges */
+        /* Register callable symbols + DEFINES/DEFINES_METHOD edges. Bounds the
+         * function-local detection to this file (pass_definitions.cpp). */
+        size_t py_prefix_len = files[i].language == CBM_LANG_PYTHON
+                                   ? cbm_pipeline_fqn_symbol_prefix_len(ctx->project_name, rel)
+                                   : 0;
         for (int d = 0; d < result->defs.count; d++) {
             defines_edges += register_and_link_def(ctx, &result->defs.items[d], rel,
-                                                   files[i].language, &reg_entries);
+                                                   files[i].language, py_prefix_len, &reg_entries);
         }
 
         imports_edges += create_imports_edges(ctx, result, rel, namespace_map);
@@ -2100,7 +2105,18 @@ static void emit_route_registration(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *sou
              esc_rp);
     cbm_gbuf_insert_edge(gbuf, source->id, rid, "CALLS", props);
     if (handler_ref && handler_ref[0] != '\0') {
-        cbm_resolution_t hres = cbm_registry_resolve(registry, handler_ref, module_qn, ik, iv, ic);
+        /* Python: a handler an app factory registers is usually its local def
+         * (`app.add_url_rule("/", "index", index)` inside create_app); only the
+         * lexical lookup sees a function's locals (#1548). MUST match
+         * pass_calls.cpp. */
+        cbm_resolution_t hres = {};
+        if (cbm_pipeline_path_is_python(source->file_path)) {
+            hres = cbm_registry_resolve_lexical(registry, handler_ref, call->enclosing_func_qn,
+                                                module_qn);
+        }
+        if (!hres.qualified_name) {
+            hres = cbm_registry_resolve(registry, handler_ref, module_qn, ik, iv, ic);
+        }
         if (hres.qualified_name && hres.qualified_name[0] != '\0') {
             const cbm_gbuf_node_t *h = cbm_gbuf_find_by_qn(main_gbuf, hres.qualified_name);
             if (h) {
@@ -2846,8 +2862,10 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                                (cbm_pipeline_php_vendor_call(result, call) ||
                                 (lsp && !lsp_target && cbm_pipeline_lsp_external_receiver(lsp)));
         if ((!res.qualified_name || !res.qualified_name[0]) && !rust_external && !php_vendor_call) {
-            res = cbm_registry_resolve_call_lang(rc->registry, call->callee_name, module_qn,
-                                                 imp_keys, imp_vals, imp_count, lang);
+            /* Python LEGB fallback first (#1548; MUST match pass_calls.cpp). */
+            res = cbm_registry_resolve_call_scoped(rc->registry, call->callee_name, module_qn,
+                                                   imp_keys, imp_vals, imp_count, lang,
+                                                   call->enclosing_func_qn);
         }
         atomic_fetch_add_explicit(&rc->time_ns_rc_resolve, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);

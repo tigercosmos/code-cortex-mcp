@@ -682,8 +682,21 @@ static bool incr_label_is_registry_symbol(const char *label) {
  * project's definition symbols so the resolver can match cross-file symbols
  * during incremental. Mirrors the full-index registry contents exactly so an
  * incremental re-resolve picks the same nodes a full reindex would. */
+typedef struct {
+    cbm_registry_t *registry;
+    const char *project;        /* bounds Python function-local detection per file */
+    CBMHashTable *python_paths; /* rel_path of every discovered Python file; keys borrowed */
+} registry_seed_t;
+
+/* A stored node of a discovered Python file: the language discovery gave the
+ * file (user extension mappings included), as the full index records it. */
+static bool incr_node_is_python(const registry_seed_t *seed, const cbm_gbuf_node_t *node) {
+    return seed->python_paths && node->file_path && cbm_ht_get(seed->python_paths, node->file_path);
+}
+
 static void registry_visitor(const cbm_gbuf_node_t *node, void *userdata) {
-    cbm_registry_t *r = (cbm_registry_t *)userdata;
+    const registry_seed_t *seed = (const registry_seed_t *)userdata;
+    cbm_registry_t *r = seed->registry;
     if (!incr_label_is_registry_symbol(node->label)) {
         return;
     }
@@ -694,14 +707,24 @@ static void registry_visitor(const cbm_gbuf_node_t *node, void *userdata) {
         cbm_registry_add_qn_only(r, node->qualified_name, node->label);
         return;
     }
-    /* The language matters only to a C# reference-assembly stub (a `.ref.`
-     * QN), so only those pay for the filename lookup. */
+    /* The language matters to a C# reference-assembly stub (a `.ref.` QN) and
+     * to a Python def's function-local detection (#1548), so only those pay
+     * for the filename lookup. */
     CBMLanguage lang = CBM_LANG_COUNT;
     if (node->qualified_name && strstr(node->qualified_name, ".ref.") && node->file_path) {
         const char *slash = strrchr(node->file_path, '/');
         lang = cbm_language_for_filename(slash ? slash + 1 : node->file_path);
+    } else if (incr_node_is_python(seed, node)) {
+        lang = CBM_LANG_PYTHON;
     }
-    cbm_registry_add_lang(r, node->name, node->qualified_name, node->label, lang);
+    /* Same per-file bound as the full index (pass_definitions.cpp). Nodes load
+     * in id order and a file's defs are inserted parent first, so the enclosing
+     * function is seeded before its locals. */
+    size_t prefix_len = lang == CBM_LANG_PYTHON
+                            ? cbm_pipeline_fqn_symbol_prefix_len(seed->project, node->file_path)
+                            : 0;
+    cbm_registry_add_lang_in_module(r, node->name, node->qualified_name, node->label, lang,
+                                    prefix_len);
 }
 
 /* Run parallel or sequential extract+resolve for changed files. */
@@ -1067,7 +1090,16 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
     /* Step 3-5: Registry + extract + resolve */
     cbm_registry_t *registry = cbm_registry_new();
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-    cbm_gbuf_foreach_node(existing, registry_visitor, registry);
+    registry_seed_t seed = {registry, project, cbm_ht_create((uint32_t)file_count * PAIR_LEN)};
+    for (int i = 0; seed.python_paths && i < file_count; i++) {
+        if (files[i].language == CBM_LANG_PYTHON && files[i].rel_path) {
+            cbm_ht_set(seed.python_paths, files[i].rel_path, (void *)files[i].rel_path);
+        }
+    }
+    cbm_gbuf_foreach_node(existing, registry_visitor, &seed);
+    if (seed.python_paths) {
+        cbm_ht_free(seed.python_paths);
+    }
     cbm_log_info("incremental.registry_seed", "symbols", itoa_buf(cbm_registry_size(registry)),
                  "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
 

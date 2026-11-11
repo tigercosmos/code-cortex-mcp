@@ -1912,6 +1912,37 @@ static const char *path_leaf(const char *path) {
     return leaf;
 }
 
+/* A Python def or class declared inside a function body -- a closure, a
+ * decorator's `wrapper`, a test's local class -- is a local of that function:
+ * no import can name it. Its QN extends a Function/Method node's
+ * (proj.tests.mock_inputs.inner.wrapper.mock_getpass.getpass), which is how it
+ * is recognised; the symbol-name fallback bound `import getpass` to exactly
+ * that def. Only an enclosing def of the SAME file counts: a package
+ * __init__.py function can share a submodule's QN (poetry: layouts/__init__.py
+ * `def layout` vs layouts/layout.py `class Layout`). Mirrors
+ * cbm_registry_add_lang_in_module, which keeps the same symbols out of the call
+ * resolver's short-name index (upstream #1548). */
+static bool import_candidate_is_python_local(const cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *cand) {
+    const char *qn = cand->qualified_name;
+    char scope[CBM_SZ_512];
+    size_t len = qn ? strlen(qn) : 0;
+    if (!cand->file_path || len == 0 || len >= sizeof(scope) ||
+        cbm_language_for_filename(path_leaf(cand->file_path)) != CBM_LANG_PYTHON) {
+        return false;
+    }
+    memcpy(scope, qn, len + SKIP_ONE);
+    for (char *dot = strrchr(scope, '.'); dot; dot = strrchr(scope, '.')) {
+        *dot = '\0';
+        const cbm_gbuf_node_t *outer = cbm_gbuf_find_by_qn(gbuf, scope);
+        if (outer && outer->label && outer->file_path &&
+            strcmp(outer->file_path, cand->file_path) == 0 &&
+            (strcmp(outer->label, "Function") == 0 || strcmp(outer->label, "Method") == 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool node_in_php_file(const cbm_gbuf_node_t *n) {
     return n && n->file_path && cbm_language_for_filename(path_leaf(n->file_path)) == CBM_LANG_PHP;
 }
@@ -2451,7 +2482,9 @@ static const cbm_gbuf_node_t *resolve_import_strategies(
                      * (`javax.crypto.spec` -> spec()) must not bind the
                      * import, or every use of the imported name, to it
                      * (upstream 6c52e826). */
-                    if (cbm_node_props_generated(cand->properties_json)) {
+                    if (cbm_node_props_generated(cand->properties_json) ||
+                        /* A Python def-local (#1548) is no importable name. */
+                        import_candidate_is_python_local(ctx->gbuf, cand)) {
                         continue;
                     }
                     if (py_external && python_external_hit_rejected(imp, cands[ci], ci > 0, cand)) {

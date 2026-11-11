@@ -327,6 +327,14 @@ bool cbm_import_symbol_fallback_allowed(CBMLanguage lang);
 bool cbm_python_import_path_matches_qn(const char *module_path, const char *name,
                                        const char *hit_qn);
 
+/* True when `path` names a Python source file by its extension (`.py`, `.pyi`,
+ * `.pyw`). The route-handler lookups use it to gate the Python lexical step
+ * (#1548) where no language is threaded through. */
+static inline bool cbm_pipeline_path_is_python(const char *path) {
+    const char *dot = path ? strrchr(path, '.') : NULL;
+    return dot && (strcmp(dot, ".py") == 0 || strcmp(dot, ".pyi") == 0 || strcmp(dot, ".pyw") == 0);
+}
+
 /* #2127: true when the callee's root identifier is bound by the file's Python
  * imports and every such binding is EXTERNAL (no IMPORTS edge from `rel_path`
  * in `gbuf` carries its local name; NULL gbuf = none) with a module chain that

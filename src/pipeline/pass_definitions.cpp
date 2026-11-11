@@ -504,7 +504,8 @@ static void link_def_parent(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, i
  * `link_parent` links its DEFINES_METHOD right away; with the result cache the
  * pass links every method once every file is registered. */
 static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const char *rel,
-                        CBMLanguage lang, const char *file_doc, bool link_parent) {
+                        size_t module_prefix_len, CBMLanguage lang, const char *file_doc,
+                        bool link_parent) {
     if (!def->qualified_name || !def->name) {
         return;
     }
@@ -551,7 +552,8 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
         if (cbm_def_generated(def)) {
             cbm_registry_add_qn_only(ctx->registry, def->qualified_name, def->label);
         } else {
-            cbm_registry_add_lang(ctx->registry, def->name, def->qualified_name, def->label, lang);
+            cbm_registry_add_lang_in_module(ctx->registry, def->name, def->qualified_name,
+                                            def->label, lang, module_prefix_len);
         }
     }
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
@@ -889,10 +891,15 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             }
         }
 
-        /* Create nodes for each definition */
+        /* Create nodes for each definition. A Python file's module QN bounds
+         * the registry's function-local detection to this file (#1548). */
         const char *file_doc = result->module_doc; /* goes with the first def */
+        size_t py_prefix_len = lang == CBM_LANG_PYTHON
+                                   ? cbm_pipeline_fqn_symbol_prefix_len(ctx->project_name, rel)
+                                   : 0;
         for (int d = 0; d < result->defs.count; d++) {
-            process_def(ctx, &result->defs.items[d], rel, lang, file_doc, !local_cache);
+            process_def(ctx, &result->defs.items[d], rel, py_prefix_len, lang, file_doc,
+                        !local_cache);
             file_doc = NULL;
             total_defs++;
         }

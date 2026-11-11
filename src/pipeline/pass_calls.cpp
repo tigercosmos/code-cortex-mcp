@@ -286,8 +286,19 @@ static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *ca
     cbm_gbuf_insert_edge(ctx->gbuf, source_node->id, route_id, "CALLS",
                          cbm_json_props_checked(props, pn, sizeof(props)));
     if (call->second_arg_name != NULL && call->second_arg_name[0] != '\0') {
-        cbm_resolution_t hres = cbm_registry_resolve(ctx->registry, call->second_arg_name,
-                                                     module_qn, imp_keys, imp_vals, imp_count);
+        /* Python: an app factory registers its local defs
+         * (`app.add_url_rule("/", "index", index)` inside create_app); only the
+         * lexical lookup sees a function's locals (#1548). MUST match
+         * pass_parallel.cpp. */
+        cbm_resolution_t hres = {};
+        if (cbm_pipeline_path_is_python(source_node->file_path)) {
+            hres = cbm_registry_resolve_lexical(ctx->registry, call->second_arg_name,
+                                                call->enclosing_func_qn, module_qn);
+        }
+        if (!hres.qualified_name) {
+            hres = cbm_registry_resolve(ctx->registry, call->second_arg_name, module_qn, imp_keys,
+                                        imp_vals, imp_count);
+        }
         if (hres.qualified_name != NULL && hres.qualified_name[0] != '\0') {
             const cbm_gbuf_node_t *handler = cbm_gbuf_find_by_qn(ctx->gbuf, hres.qualified_name);
             if (handler != NULL) {
@@ -753,8 +764,10 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
                                                     cbm_pipeline_lsp_external_receiver(lsp));
     cbm_resolution_t res = {0};
     if (!rust_external && !php_vendor_call) {
-        res = cbm_registry_resolve_call_lang(ctx->registry, call->callee_name, module_qn, imp_keys,
-                                             imp_vals, imp_count, lang);
+        /* Python LEGB fallback first (#1548; MUST match pass_parallel.cpp). */
+        res =
+            cbm_registry_resolve_call_scoped(ctx->registry, call->callee_name, module_qn, imp_keys,
+                                             imp_vals, imp_count, lang, call->enclosing_func_qn);
     }
     if (!res.qualified_name || res.qualified_name[0] == '\0') {
         /* Resolution is empty when the callee belongs to an EXTERNAL client

@@ -161,6 +161,20 @@ typedef struct {
     int field_overlay_count;
     int field_overlay_cap;
 
+    // Defs and classes a function body declares (#1548), bound as locals of
+    // the frame that holds them: qn is the nested def's QN when the def is an
+    // exact callable (undecorated, registered, unconditional), else NULL (a
+    // hard shadow the registry's lexical_scope step resolves). A stack that
+    // py_process_function truncates on exit, so it only holds the frames of
+    // the function chain being walked. Arena-allocated.
+    struct {
+        const CBMScope *frame;
+        const char *name;
+        const char *qn;
+    } *local_defs;
+    int local_def_count;
+    int local_def_cap;
+
     // Debug mode (CBM_LSP_DEBUG env, shared across all language LSPs).
     bool debug;
 } PyLSPContext;

@@ -140,6 +140,12 @@ static void py_register_dict_literal(PyLSPContext* ctx, const char* name, TSNode
 static int py_lookup_lambda(PyLSPContext* ctx, const char* name);
 static const char* py_lookup_dict_dispatch(PyLSPContext* ctx, const char* var,
     const char* key);
+static void py_process_function(PyLSPContext* ctx, TSNode func_node, const char* container_qn);
+static void py_process_class_in(PyLSPContext* ctx, TSNode class_node, const char* outer_qn);
+typedef enum { PY_LOCAL_DEFS_BIND, PY_LOCAL_DEFS_PROCESS } PyLocalDefsMode;
+static void py_visit_local_defs(PyLSPContext* ctx, TSNode block, PyLocalDefsMode mode,
+    int depth);
+static bool py_local_def_call(PyLSPContext* ctx, const char* fname);
 
 /* ── Scope mutation wrappers ─────────────────────────────────────────────
  *
@@ -2228,6 +2234,10 @@ static void py_emit_call_for(PyLSPContext* ctx, TSNode call_node) {
             py_scope_restore(ctx, saved);
             return;
         }
+        // A def the enclosing function body declares (#1548): its exact
+        // target, or no LSP answer for a hard shadow (the registry's
+        // lexical_scope step binds it), never a same-named module symbol.
+        if (py_local_def_call(ctx, fname)) return;
         // Constructor call (ClassName()) — or a call through any other
         // NAMED scope binding (aliased imports land here too).
         const CBMType* in_scope = cbm_scope_lookup(ctx->current_scope, fname);
@@ -3565,6 +3575,129 @@ static void py_bind_parameters(PyLSPContext* ctx, TSNode params) {
     }
 }
 
+/* Record that `name` in the current frame is a def or class the function
+ * body declares (#1548). qn: the exact callable target, or NULL for a hard
+ * shadow. OOM drops the record: the name keeps its UNKNOWN shadow binding and
+ * the registry's lexical_scope step still resolves it. */
+static void py_record_local_def(PyLSPContext* ctx, const char* name, const char* qn) {
+    if (ctx->local_def_count >= ctx->local_def_cap) {
+        int new_cap = ctx->local_def_cap ? ctx->local_def_cap * 2 : 16;
+        void* grown =
+            cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*ctx->local_defs));
+        if (!grown) return;
+        if (ctx->local_defs && ctx->local_def_count > 0)
+            memcpy(grown, ctx->local_defs,
+                (size_t)ctx->local_def_count * sizeof(*ctx->local_defs));
+        ctx->local_defs = (decltype(ctx->local_defs))grown;
+        ctx->local_def_cap = new_cap;
+    }
+    ctx->local_defs[ctx->local_def_count].frame = ctx->current_scope;
+    ctx->local_defs[ctx->local_def_count].name = name;
+    ctx->local_defs[ctx->local_def_count].qn = qn;
+    ctx->local_def_count++;
+}
+
+/* Bind a def or class statement of the current function body as a local of
+ * that function (#1548): its graph QN extends the function's
+ * (enclosing_func_qn.name), the QN extraction gives it. A class is bound by
+ * its type when registered, else shadowed. An undecorated, registered def
+ * that sits directly in the body is an exact call target; a decorated one, or
+ * one under a compound statement (it may not exist on every path; upstream's
+ * LSP invalidates it at the statement's join), is a hard shadow, so no call
+ * falls through to a same-named module symbol and the registry's lexical step
+ * binds it. A parameter of the same name is already a local and keeps its own
+ * binding. Fork adaptation: the fork has no exact callable-value identity on
+ * scope bindings, so the target lives in ctx->local_defs. */
+static void py_bind_local_def(PyLSPContext* ctx, TSNode def, bool is_class, bool decorated,
+    bool conditional) {
+    TSNode name_node = ts_node_child_by_field_name(def, "name", 4);
+    char* name = ts_node_is_null(name_node) ? NULL : py_node_text(ctx, name_node);
+    if (!name || !name[0] || !ctx->enclosing_func_qn) return;
+    if (cbm_scope_lookup_local(ctx->current_scope, name)) return;
+    const char* qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->enclosing_func_qn, name);
+    if (is_class) {
+        py_scope_bind(ctx, name,
+            qn && cbm_registry_lookup_type(ctx->registry, qn) ? cbm_type_named(ctx->arena, qn)
+                                                               : cbm_type_unknown());
+        return;
+    }
+    py_scope_bind(ctx, name, cbm_type_unknown());
+    const CBMRegisteredFunc* func = qn ? cbm_registry_lookup_func(ctx->registry, qn) : NULL;
+    bool exact = func && func->qualified_name && !decorated && !conditional &&
+                 !(func->flags & (CBM_FUNC_FLAG_PROPERTY | CBM_FUNC_FLAG_OVERLOAD)) &&
+                 (!func->decorator_qns || !func->decorator_qns[0]);
+    py_record_local_def(ctx, name, exact ? func->qualified_name : NULL);
+}
+
+/* A bare call `fname()` whose nearest binding is a def the enclosing function
+ * body declares (py_bind_local_def): emits the exact target, or nothing for a
+ * hard shadow. False when the nearest binding is anything else. */
+static bool py_local_def_call(PyLSPContext* ctx, const char* fname) {
+    if (ctx->local_def_count == 0 || !fname) return false;
+    const CBMScope* frame = ctx->current_scope;
+    for (; frame; frame = frame->parent) {
+        if (cbm_scope_lookup_local(frame, fname)) break;
+    }
+    if (!frame) return false;
+    for (int i = ctx->local_def_count - 1; i >= 0; i--) {
+        if (ctx->local_defs[i].frame == frame && strcmp(ctx->local_defs[i].name, fname) == 0) {
+            if (ctx->local_defs[i].qn)
+                py_emit_resolved_call(ctx, ctx->local_defs[i].qn, "lsp_direct", 0.95f);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Statements a function body nests further statements in. A def inside any of
+ * them is still a local of the function; a nested def, class or lambda body
+ * is a scope of its own and is never entered. */
+static bool py_is_statement_block(const char* kind) {
+    static const char* const kinds[] = {
+        "block", "if_statement", "elif_clause", "else_clause", "for_statement",
+        "while_statement", "try_statement", "except_clause", "except_group_clause",
+        "finally_clause", "with_statement", "match_statement", "case_clause", NULL};
+    for (int i = 0; kinds[i]; i++) {
+        if (strcmp(kind, kinds[i]) == 0) return true;
+    }
+    return false;
+}
+
+/* Visit the def/class statements of a function body, including those inside
+ * its compound statements: BIND binds each as a local (py_bind_local_def),
+ * PROCESS walks each nested def's own body (py_process_function) and each
+ * local class's methods (py_process_class_in under the function's QN). */
+static void py_visit_local_defs(PyLSPContext* ctx, TSNode block, PyLocalDefsMode mode,
+    int depth) {
+    if (!ctx || ctx->eval_failure || ts_node_is_null(block) || depth >= cbm_lsp_max_walk_depth())
+        return;
+    PyKids kids = py_kids(ctx->arena, block);
+    for (uint32_t i = 0; i < kids.n && !ctx->eval_failure; i++) {
+        TSNode c = py_kid(&kids, i);
+        const char* ck = ts_node_type(c);
+        TSNode def = c;
+        bool decorated = strcmp(ck, "decorated_definition") == 0;
+        if (decorated) {
+            def = ts_node_child_by_field_name(c, "definition", 10);
+            if (ts_node_is_null(def)) continue;
+            ck = ts_node_type(def);
+        }
+        if (strcmp(ck, "function_definition") == 0) {
+            if (mode == PY_LOCAL_DEFS_BIND)
+                py_bind_local_def(ctx, def, false, decorated, depth > 0);
+            else
+                py_process_function(ctx, def, ctx->enclosing_func_qn);
+        } else if (strcmp(ck, "class_definition") == 0) {
+            if (mode == PY_LOCAL_DEFS_BIND)
+                py_bind_local_def(ctx, def, true, decorated, depth > 0);
+            else
+                py_process_class_in(ctx, def, ctx->enclosing_func_qn);
+        } else if (py_is_statement_block(ck)) {
+            py_visit_local_defs(ctx, c, mode, depth + 1);
+        }
+    }
+}
+
 static void py_process_function(PyLSPContext* ctx, TSNode func_node, const char* container_qn) {
     if (!ctx || ctx->eval_failure) return;
     TSNode name_node = ts_node_child_by_field_name(func_node, "name", 4);
@@ -3592,24 +3725,18 @@ static void py_process_function(PyLSPContext* ctx, TSNode func_node, const char*
     }
 
     TSNode body = ts_node_child_by_field_name(func_node, "body", 4);
+    int local_defs_mark = ctx->local_def_count;
     if (!ts_node_is_null(body)) {
+        /* Python resolves a bare name in the function's own scope first: every
+         * def/class statement of the body binds a local for the whole body
+         * (LEGB), whatever a module-level symbol of the same spelling says
+         * (#1548). */
+        py_visit_local_defs(ctx, body, PY_LOCAL_DEFS_BIND, 0);
         py_resolve_calls_in(ctx, body);
         // Also descend into nested function/class definitions in the body.
-        PyKids bk = py_kids(ctx->arena, body);
-        for (uint32_t i = 0; i < bk.n; i++) {
-            TSNode c = py_kid(&bk, i);
-            const char* ck = ts_node_type(c);
-            if (strcmp(ck, "function_definition") == 0) {
-                py_process_function(ctx, c, ctx->enclosing_func_qn);
-            } else if (strcmp(ck, "decorated_definition") == 0) {
-                TSNode def = ts_node_child_by_field_name(c, "definition", 10);
-                if (!ts_node_is_null(def) &&
-                    strcmp(ts_node_type(def), "function_definition") == 0) {
-                    py_process_function(ctx, def, ctx->enclosing_func_qn);
-                }
-            }
-        }
+        py_visit_local_defs(ctx, body, PY_LOCAL_DEFS_PROCESS, 0);
     }
+    ctx->local_def_count = local_defs_mark;
 
     py_scope_restore(ctx, saved);
     ctx->enclosing_func_qn = prev_func;
@@ -3815,6 +3942,26 @@ static void py_process_class(PyLSPContext* ctx, TSNode class_node) {
     py_process_class_in(ctx, class_node, NULL);
 }
 
+/* A class declared inside a def -- django's per-test `class MyModelAdmin`, an
+ * app factory's local class, and anything nested in one -- is a local of that
+ * def, not a global of the module: bound here by its short name, every
+ * same-named local class of the file collapsed onto whichever registered last.
+ * Its QN extends a registered function's (proj.mod.Tests.test_x.MyModelAdmin),
+ * which tells it apart from a class nested in a class (proj.mod.Outer.Inner).
+ * Only prefixes longer than the module are probed (#1548). */
+static bool py_type_is_function_local(const PyLSPContext* ctx, const char* qn, size_t module_len) {
+    char scope[512];
+    size_t len = strlen(qn);
+    if (len >= sizeof(scope)) return false;
+    memcpy(scope, qn, len + 1);
+    for (char* dot = strrchr(scope, '.'); dot && (size_t)(dot - scope) > module_len;
+         dot = strrchr(scope, '.')) {
+        *dot = '\0';
+        if (cbm_registry_lookup_func(ctx->registry, scope)) return true;
+    }
+    return false;
+}
+
 /* Bind every Class / Type definition from the registry into the root scope
  * as NAMED(qn). Lets bare references like `Foo()` and `c: Foo` resolve to
  * the registered class type. */
@@ -3840,6 +3987,8 @@ static void py_bind_module_classes(PyLSPContext* ctx) {
         if (qn[prefix_len] != '.') continue;
         /* submodule/nested classes are not package globals */
         if (package_scope && strchr(qn + prefix_len + 1, '.')) continue;
+        /* a def-local class is no module global (#1548) */
+        if (py_type_is_function_local(ctx, qn, prefix_len)) continue;
         py_scope_bind(ctx, sname, cbm_type_named(ctx->arena, qn));
     }
     cbm_arena_destroy(&scratch);
