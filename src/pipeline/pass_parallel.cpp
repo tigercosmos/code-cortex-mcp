@@ -3287,6 +3287,24 @@ static CBMTypeRegistry *pp_rust_shared_registry_get(void *ctx) {
 // successes share resolved_calls. Prove coverage by exact caller/leaf/offset.
 // Larger inputs conservatively retain cross-LSP; the primitive fast path is
 // checked by the caller before this bounded proof is attempted.
+/* Per-file LSP rows that actually resolve a call: an lsp_unresolved diagnostic
+ * row (confidence 0) or a below-floor guess is a request for the cross-file
+ * pass, not an answer. Counting every row let a TS file whose only call went
+ * through an import (per-file stage: raw `./lib` specifier, so the row is
+ * unresolved) look fully resolved, so the cross-file LSP never ran on the
+ * parallel path while the sequential pass ran it on every file. Same rule as
+ * upstream's pp_qualified_lsp_site_count. */
+static int pp_confident_lsp_row_count(const CBMFileResult *result) {
+    int count = 0;
+    for (int i = 0; i < result->resolved_calls.count; i++) {
+        const CBMResolvedCall *rc = &result->resolved_calls.items[i];
+        if (rc->caller_qn && rc->callee_qn && rc->confidence >= CBM_LSP_CONFIDENCE_FLOOR) {
+            count++;
+        }
+    }
+    return count;
+}
+
 static bool pp_cpp_sites_need_cross(const CBMFileResult *result) {
     if (result->pending_cpp_operator_count > 0 || result->calls.count > 4096 ||
         result->resolved_calls.count > 8192)
@@ -3483,8 +3501,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
          * pass too: only it knows the structs headers declare. */
         bool calls_need_cross =
             pending_calls > 0 &&
-            (jvm_cross_lsp ||
-             (cpp_cross_lsp ? cpp_sites_pending : result->resolved_calls.count < pending_calls));
+            (jvm_cross_lsp || (cpp_cross_lsp ? cpp_sites_pending
+                                             : pp_confident_lsp_row_count(result) < pending_calls));
         bool cross_lsp_eligible =
             rc->all_defs && rc->def_count > 0 && cbm_pxc_has_cross_lsp(lang) && !is_generated &&
             !primitive_complete &&

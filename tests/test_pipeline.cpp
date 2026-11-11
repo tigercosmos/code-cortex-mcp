@@ -10632,6 +10632,15 @@ TEST(pipeline_ts_renamed_import_call_issue2297) {
     PASS();
 }
 
+/* Parallel twin (52 padding files). The per-file LSP leaves an lsp_unresolved
+ * row for each import call (its specifier is still `./lib`); the parallel
+ * cross-file gate counted that row as a resolution and skipped the file, so
+ * the renamed call had no edge and the plain call fell back to import_map. */
+TEST(pipeline_ts_renamed_import_call_issue2297_parallel) {
+    ASSERT_EQ(ts_2297_probe(52), 0);
+    PASS();
+}
+
 /* #2053 Rust std-receiver probes (sequential and parallel twins). The Rust LSP
  * types `root: &Path` and dispatches `root.join(..)` to std's Path::join — a
  * symbol with no graph node. Before the fix the pipeline then fell back to the
@@ -13852,6 +13861,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354);
     RUN_TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354_parallel);
     RUN_TEST(pipeline_ts_renamed_import_call_issue2297);
+    RUN_TEST(pipeline_ts_renamed_import_call_issue2297_parallel);
     RUN_TEST(pipeline_go_bare_ref_never_binds_field);
     RUN_TEST(pipeline_go_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);
