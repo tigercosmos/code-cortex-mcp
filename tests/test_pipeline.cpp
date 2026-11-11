@@ -14358,6 +14358,198 @@ TEST(pipeline_python_class_body_sibling_base_parallel) {
     return pyb_run_class_body_base(52);
 }
 
+/* The home-assistant radarr shape: RadarrCalendarEntity(RadarrEntity,
+ * CalendarEntity), where RadarrEntity reaches the common base Entity through
+ * CoordinatorEntity and CalendarEntity overrides Entity's method. Python's C3
+ * order is [RadarrCalendarEntity, RadarrEntity, CoordinatorEntity,
+ * CalendarEntity, Entity]: a common base comes after every class that
+ * derives from it, so super() reaches CalendarEntity, not Entity through the
+ * first base's ancestry. */
+static const char pym_base_py[] = "class Entity:\n"
+                                  "    def __init__(self):\n"
+                                  "        self.ready = False\n"
+                                  "\n"
+                                  "    def write_state(self):\n"
+                                  "        return 0\n"
+                                  "\n"
+                                  "class CoordinatorEntity(Entity):\n"
+                                  "    pass\n"
+                                  "\n"
+                                  "class CalendarEntity(Entity):\n"
+                                  "    def __init__(self):\n"
+                                  "        self.events = []\n"
+                                  "\n"
+                                  "    def write_state(self):\n"
+                                  "        return 1\n";
+
+static const char pym_radarr_py[] = "from base import CoordinatorEntity, CalendarEntity\n"
+                                    "\n"
+                                    "class RadarrEntity(CoordinatorEntity):\n"
+                                    "    pass\n"
+                                    "\n"
+                                    "class RadarrCalendarEntity(RadarrEntity, CalendarEntity):\n"
+                                    "    def __init__(self):\n"
+                                    "        super().__init__()\n"
+                                    "\n"
+                                    "    def write_state(self):\n"
+                                    "        return super().write_state()\n"
+                                    "\n"
+                                    "class PlainCalendar(CalendarEntity):\n"
+                                    "    def write_state(self):\n"
+                                    "        return super().write_state()\n";
+
+static int pym_run_super_c3(int fillers) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_py_superc3_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "base.py", pym_base_py);
+    write_temp_file(tmp, "radarr.py", pym_radarr_py);
+    for (int i = 0; i < fillers; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "filler%d.py", i);
+        snprintf(body, sizeof(body), "def filler%d():\n    return %d\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    if (fillers > 0) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/superc3.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    int rc = p ? cbm_pipeline_run(p) : -1;
+    cbm_store_t *s = rc == 0 ? cbm_store_open_path(db_path) : NULL;
+    const char *pr = p ? cbm_pipeline_project_name(p) : NULL;
+    const char *rce = "radarr.RadarrCalendarEntity";
+    char src[256];
+    snprintf(src, sizeof(src), "%s.write_state", rce);
+    bool m_c3 = s && pyn_edge(s, pr, src, "base.CalendarEntity.write_state", "CALLS");
+    bool m_dfs = s && pyn_edge(s, pr, src, "base.Entity.write_state", "CALLS");
+    snprintf(src, sizeof(src), "%s.__init__", rce);
+    bool i_c3 = s && pyn_edge(s, pr, src, "base.CalendarEntity.__init__", "CALLS");
+    bool i_dfs = s && pyn_edge(s, pr, src, "base.Entity.__init__", "CALLS");
+    bool plain = s && pyn_edge(s, pr, "radarr.PlainCalendar.write_state",
+                               "base.CalendarEntity.write_state", "CALLS");
+    if (s) {
+        cbm_store_close(s);
+    }
+    if (p) {
+        cbm_pipeline_free(p);
+    }
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(m_c3);   /* super().write_state(): CalendarEntity comes before Entity */
+    ASSERT_FALSE(m_dfs); /* ... never Entity through RadarrEntity's ancestry */
+    ASSERT_TRUE(i_c3);   /* super().__init__(): the same order */
+    ASSERT_FALSE(i_dfs);
+    ASSERT_TRUE(plain); /* control: single inheritance */
+    PASS();
+}
+
+TEST(pipeline_python_super_follows_c3_mro) {
+    return pym_run_super_c3(0);
+}
+
+TEST(pipeline_python_super_follows_c3_mro_parallel) {
+    return pym_run_super_c3(52);
+}
+
+/* ── attribute lookup follows the C3 method resolution order ─────── */
+
+/* The same diamond as the super() test, seen from an ordinary attribute:
+ * `self.write_state()` in RadarrCalendarEntity and `e.write_state()` on a
+ * RadarrCalendarEntity both look the method up along the class's C3 order,
+ * which reaches CalendarEntity before the shared base Entity. */
+static const char pya_radarr_py[] = "from base import CoordinatorEntity, CalendarEntity\n"
+                                    "\n"
+                                    "class RadarrEntity(CoordinatorEntity):\n"
+                                    "    pass\n"
+                                    "\n"
+                                    "class RadarrCalendarEntity(RadarrEntity, CalendarEntity):\n"
+                                    "    def refresh(self):\n"
+                                    "        return self.write_state()\n"
+                                    "\n"
+                                    "class PlainCalendar(CalendarEntity):\n"
+                                    "    def refresh(self):\n"
+                                    "        return self.write_state()\n"
+                                    "\n"
+                                    "def publish(e: RadarrCalendarEntity):\n"
+                                    "    return e.write_state()\n";
+
+static int pya_run_attr_c3(int fillers) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_py_attrc3_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "base.py", pym_base_py);
+    write_temp_file(tmp, "radarr.py", pya_radarr_py);
+    for (int i = 0; i < fillers; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "filler%d.py", i);
+        snprintf(body, sizeof(body), "def filler%d():\n    return %d\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    if (fillers > 0) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/attrc3.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    int rc = p ? cbm_pipeline_run(p) : -1;
+    cbm_store_t *s = rc == 0 ? cbm_store_open_path(db_path) : NULL;
+    const char *pr = p ? cbm_pipeline_project_name(p) : NULL;
+    const char *c3 = "base.CalendarEntity.write_state";
+    const char *dfs = "base.Entity.write_state";
+    const char *self_src = "radarr.RadarrCalendarEntity.refresh";
+    bool self_c3 = s && pyn_edge(s, pr, self_src, c3, "CALLS");
+    bool self_dfs = s && pyn_edge(s, pr, self_src, dfs, "CALLS");
+    bool typed_c3 = s && pyn_edge(s, pr, "radarr.publish", c3, "CALLS");
+    bool typed_dfs = s && pyn_edge(s, pr, "radarr.publish", dfs, "CALLS");
+    bool plain = s && pyn_edge(s, pr, "radarr.PlainCalendar.refresh", c3, "CALLS");
+    if (s) {
+        cbm_store_close(s);
+    }
+    if (p) {
+        cbm_pipeline_free(p);
+    }
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(self_c3);   /* self.write_state(): CalendarEntity before Entity */
+    ASSERT_FALSE(self_dfs); /* ... never Entity through RadarrEntity's ancestry */
+    ASSERT_TRUE(typed_c3);  /* e.write_state() on a RadarrCalendarEntity */
+    ASSERT_FALSE(typed_dfs);
+    ASSERT_TRUE(plain); /* control: single inheritance */
+    PASS();
+}
+
+TEST(pipeline_python_attribute_follows_c3_mro) {
+    return pya_run_attr_c3(0);
+}
+
+TEST(pipeline_python_attribute_follows_c3_mro_parallel) {
+    return pya_run_attr_c3(52);
+}
+
 /* ── Semantic pass, batched == unbatched ─────────────────────────────── */
 
 /* Under memory pressure the semantic pass tokenizes, counts and vectorizes in
@@ -17253,6 +17445,10 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_python_nested_class_methods_resolve_parallel);
     RUN_TEST(pipeline_python_class_body_sibling_base);
     RUN_TEST(pipeline_python_class_body_sibling_base_parallel);
+    RUN_TEST(pipeline_python_super_follows_c3_mro);
+    RUN_TEST(pipeline_python_super_follows_c3_mro_parallel);
+    RUN_TEST(pipeline_python_attribute_follows_c3_mro);
+    RUN_TEST(pipeline_python_attribute_follows_c3_mro_parallel);
     RUN_TEST(pipeline_semantic_batched_matches_unbatched);
     RUN_TEST(sem_tfidf_terms_compare_vocabulary_not_positions);
     RUN_TEST(sem_combine_weighs_signals);

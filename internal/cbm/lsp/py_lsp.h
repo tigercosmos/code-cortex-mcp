@@ -44,6 +44,16 @@ typedef struct {
     const CBMType *result; // full-fidelity result, never NULL in a live entry
 } CBMPyTypeCacheEntry;
 
+// A class's C3 method resolution order (py_c3_linearize), computed once per
+// class and file. The registry is complete before the walk starts, so an entry
+// never goes stale.
+typedef struct {
+    const char *qn;   // class QN; NULL marks an empty slot
+    uint32_t hash;    // hash of qn
+    int len;          // entries in mro; -1 = the class has no C3 order
+    const char **mro; // arena-allocated, mro[0] is the class (or its alias target)
+} CBMPyMroCacheEntry;
+
 // PyLSPContext holds state for one Python file's type evaluation.
 typedef struct {
     CBMArena *arena;
@@ -110,6 +120,11 @@ typedef struct {
     int eval_depth;                  // evaluator recursion depth (PY_LSP_MAX_EVAL_DEPTH)
     uint32_t eval_truncations;       // depth-cap cutoff count — gates memo inserts
     CBMLSPStatus eval_failure;       // sticky: memo/depth failure makes this walk incomplete
+    // C3 orders of the classes whose attributes this file looks up: one
+    // linearization per class, open addressing, arena-allocated.
+    CBMPyMroCacheEntry *mro_cache;
+    int mro_cache_count; // occupied slots (kept < 75% of cap)
+    int mro_cache_cap;   // power-of-two capacity
     // Pending links of the left-associative chains being evaluated
     // iteratively (operator, receiver, subscript, conditional and
     // parenthesis chains): one stack shared by nested evaluations.
