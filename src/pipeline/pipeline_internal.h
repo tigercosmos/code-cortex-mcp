@@ -207,6 +207,16 @@ static inline int cbm_pipeline_relpath_is_excluded(const char *rel_path, char *c
 CBMHashTable *cbm_pipeline_get_pkgmap(void);
 void cbm_pipeline_set_pkgmap(CBMHashTable *map);
 
+/* A definition's decorator route (def->route_path, e.g. a FastAPI @app.get or a
+ * Spring @GetMapping handler): upsert its Route node and the definition ->
+ * Route HANDLES edge. Both resolvers call it per DEFINITION at node creation
+ * (pass_parallel.cpp, pass_definitions.cpp), so overloads sharing one QN -- a
+ * GET form action and its POST submit -- each keep their route; the merged
+ * node properties hold only one of them (upstream 2ecf202b). Defined in
+ * pass_route_nodes.cpp. */
+void cbm_pipeline_emit_def_route(cbm_gbuf_t *gb, int64_t func_id, const CBMDefinition *def,
+                                 const char *rel);
+
 /* Get the current pipeline's declared-package map (NULL if none): the
  * namespace/package -> File-QN map built by cbm_pipeline_namespace_map_build
  * from every indexed file's own `package`/`namespace`/`using` declaration.

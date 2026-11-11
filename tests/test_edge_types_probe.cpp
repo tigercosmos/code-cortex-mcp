@@ -2035,6 +2035,60 @@ TEST(data_flows_test_files_pair_within_their_file_parallel) {
     PASS();
 }
 
+/* Upstream 2ecf202b (#1692): two decorated definitions sharing one QN (a GET
+ * form action and its POST submit) collapse into one node whose merged
+ * properties keep only one route. The parallel resolver emitted each
+ * definition's route at node creation and kept both; the sequential one
+ * rebuilt routes from the merged properties afterwards and kept only the last.
+ * Upstream's fixture is ASP.NET MVC, whose attribute routes the fork does not
+ * extract; the same shape in FastAPI and Spring shows it here. Returns how many
+ * of the four expected Routes have a HANDLES edge. */
+static int et_overload_routes_handled(int parallel) {
+    static const EtFile f[] = {
+        {"views.py", "from fastapi import FastAPI\n\napp = FastAPI()\n\n\n"
+                     "@app.get(\"/login\")\ndef login():\n    return 1\n\n\n"
+                     "@app.post(\"/login\")\ndef login():\n    return 2\n"},
+        {"src/main/java/com/ex/AccountController.java",
+         "package com.ex;\n\nimport org.springframework.web.bind.annotation.*;\n\n"
+         "@RestController\n@RequestMapping(\"/account\")\npublic class AccountController {\n"
+         "    @GetMapping(\"/login\")\n    public String login() { return \"form\"; }\n\n"
+         "    @PostMapping(\"/login\")\n    public String login(String body) { return \"ok\"; }\n"
+         "}\n"}};
+    static const char *const route_qns[] = {"__route__GET__/login", "__route__POST__/login",
+                                            "__route__GET__/account/login",
+                                            "__route__POST__/account/login"};
+    EtProj lp;
+    cbm_store_t *store = parallel ? et_index_parallel(&lp, f, 2) : et_index_files(&lp, f, 2);
+    int handled = 0;
+    for (int i = 0; store && i < 4; i++) {
+        cbm_node_t route = {};
+        if (cbm_store_find_node_by_qn(store, lp.project, route_qns[i], &route) != CBM_STORE_OK) {
+            fprintf(stderr, "  [ET-OVERLOAD] %s path: missing Route %s\n",
+                    parallel ? "parallel" : "sequential", route_qns[i]);
+            continue;
+        }
+        cbm_edge_t *edges = NULL;
+        int n = 0;
+        if (cbm_store_find_edges_by_target_type(store, route.id, "HANDLES", &edges, &n) ==
+                CBM_STORE_OK &&
+            n == 1) {
+            handled++;
+        }
+        cbm_store_free_edges(edges, n);
+        cbm_node_free_fields(&route);
+    }
+    et_cleanup(&lp, store);
+    return handled;
+}
+
+TEST(handles_overloaded_decorated_handlers_both_venues_issue1692) {
+    int seq = et_overload_routes_handled(0);
+    int par = et_overload_routes_handled(1);
+    ASSERT_EQ(seq, 4);
+    ASSERT_EQ(par, 4);
+    PASS();
+}
+
 SUITE(edge_types_probe) {
     /* HANDLES — route→handler across web frameworks (8 frameworks) */
     RUN_TEST(handles_flask_python);
@@ -2043,6 +2097,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_fastify_js);
     RUN_TEST(handles_gin_go);
     RUN_TEST(handles_spring_java);
+    RUN_TEST(handles_overloaded_decorated_handlers_both_venues_issue1692);
     RUN_TEST(data_flows_test_files_pair_within_their_file_sequential);
     RUN_TEST(data_flows_test_files_pair_within_their_file_parallel);
     RUN_TEST(handles_spring_java_path_attribute_fourth);

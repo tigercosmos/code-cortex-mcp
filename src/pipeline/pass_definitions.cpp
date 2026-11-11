@@ -519,6 +519,11 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
     if (props != stack) {
         free(props);
     }
+    /* Per definition, like pass_parallel.cpp: overloads sharing this QN each keep
+     * their own route (the merged node properties hold only one of them). */
+    if (node_id > 0) {
+        cbm_pipeline_emit_def_route(ctx->gbuf, node_id, def, def_rel);
+    }
     /* Registry membership is defined ONCE by cbm_label_is_registry_symbol
      * (helpers.cpp): callables + type-like containers (INHERITS/IMPLEMENTS/
      * method/field resolution), Variable/Field (READS/WRITES resolution), and

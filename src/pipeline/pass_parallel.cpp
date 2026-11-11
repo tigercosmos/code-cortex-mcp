@@ -858,31 +858,9 @@ static void insert_def_into_gbuf(extract_worker_state_t *ws, const cbm_stem_mark
         free(props);
     }
     ws->nodes_created++;
-    if (def->route_path && def->route_path[0] != '\0') {
-        const char *rm = def->route_method ? def->route_method : "ANY";
-        char route_qn[CBM_ROUTE_QN_SIZE];
-        char cpath[CBM_SZ_256];
-        snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", rm,
-                 cbm_route_canon_path(def->route_path, cpath, sizeof(cpath)));
-        char esc_rm[CBM_SZ_64]; /* decorator-derived verb: escape sliced text */
-        cbm_json_escape(esc_rm, sizeof(esc_rm), rm);
-        char rprops[CBM_SZ_256];
-        int rn = snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}",
-                          esc_rm);
-        int64_t route_id =
-            cbm_gbuf_upsert_node(ws->local_gbuf, "Route", def->route_path, route_qn,
-                                 def->file_path ? def->file_path : fi->rel_path, 0, 0,
-                                 cbm_json_props_checked(rprops, rn, sizeof(rprops)));
-        /* hprops must exceed the escaped QN + wrapper: at CBM_SZ_512 a deep
-         * qualified name cut the blob before its closing quote+brace (the
-         * sequential twin in pass_calls.cpp already uses CBM_SZ_1K). */
-        char hprops[CBM_SZ_2K];
-        char esc_h[CBM_SZ_1K];
-        cbm_json_escape(esc_h, sizeof(esc_h), def->qualified_name);
-        int hn = snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
-        cbm_gbuf_insert_edge(ws->local_gbuf, func_id, route_id, "HANDLES",
-                             cbm_json_props_checked(hprops, hn, sizeof(hprops)));
-    }
+    /* Per definition, like pass_definitions.cpp: overloads sharing this QN each
+     * keep their own route (the merged node properties hold only one). */
+    cbm_pipeline_emit_def_route(ws->local_gbuf, func_id, def, fi->rel_path);
 }
 
 static void log_extract_fail(int pos, uint64_t ms, const char *path) {

@@ -366,6 +366,19 @@ TEST(infrascan_handles_properties_hold_a_long_handler_qn) {
     memset(qn, 'q', sizeof(qn) - SKIP_ONE);
     qn[sizeof(qn) - SKIP_ONE] = '\0';
 
+    cbm_gbuf_t *emitted = cbm_gbuf_new("test", "/tmp/cbm_infrascan_long_qn_emit");
+    ASSERT_NOT_NULL(emitted);
+    int64_t handler = cbm_gbuf_upsert_node(emitted, "Function", "GET", qn, "server.ts", 1, 1, "{}");
+    ASSERT_GT(handler, 0);
+    CBMDefinition def = {};
+    def.qualified_name = qn;
+    def.file_path = "server.ts";
+    def.route_path = "/long";
+    def.route_method = "GET";
+    cbm_pipeline_emit_def_route(emitted, handler, &def, "server.ts");
+    bool emitted_parses = handles_names_handler(emitted, "__route__GET__/long", qn);
+    cbm_gbuf_free(emitted);
+
     cbm_gbuf_t *rebuilt = cbm_gbuf_new("test", "/tmp/cbm_infrascan_long_qn_rebuild");
     ASSERT_NOT_NULL(rebuilt);
     ASSERT_GT(cbm_gbuf_upsert_node(rebuilt, "Function", "GET", qn, "server.ts", 1, 1,
@@ -375,6 +388,7 @@ TEST(infrascan_handles_properties_hold_a_long_handler_qn) {
     bool rebuilt_parses = handles_names_handler(rebuilt, "__route__GET__/long", qn);
     cbm_gbuf_free(rebuilt);
 
+    ASSERT_TRUE(emitted_parses);
     ASSERT_TRUE(rebuilt_parses);
     PASS();
 }
@@ -383,6 +397,20 @@ TEST(infrascan_handles_properties_hold_a_long_handler_qn) {
  * (`@action(methods=['a"b'])`), so the Route's properties hold it escaped and
  * the one rebuilt from the handler's metadata must parse. */
 TEST(infrascan_route_properties_escape_the_method) {
+    cbm_gbuf_t *emitted = cbm_gbuf_new("test", "/tmp/cbm_infrascan_method_emit");
+    ASSERT_NOT_NULL(emitted);
+    int64_t handler =
+        cbm_gbuf_upsert_node(emitted, "Function", "act", "test.views.act", "views.py", 1, 1, "{}");
+    ASSERT_GT(handler, 0);
+    CBMDefinition def = {};
+    def.qualified_name = "test.views.act";
+    def.file_path = "views.py";
+    def.route_path = "/m";
+    def.route_method = "A\"B";
+    cbm_pipeline_emit_def_route(emitted, handler, &def, "views.py");
+    bool emitted_parses = route_names_method(emitted, "__route__A\"B__/m", "A\"B");
+    cbm_gbuf_free(emitted);
+
     cbm_gbuf_t *rebuilt = cbm_gbuf_new("test", "/tmp/cbm_infrascan_method_rebuild");
     ASSERT_NOT_NULL(rebuilt);
     ASSERT_GT(cbm_gbuf_upsert_node(rebuilt, "Function", "act", "test.views.act", "views.py", 1, 1,
@@ -392,6 +420,7 @@ TEST(infrascan_route_properties_escape_the_method) {
     bool rebuilt_parses = route_names_method(rebuilt, "__route__A\"B__/m", "A\"B");
     cbm_gbuf_free(rebuilt);
 
+    ASSERT_TRUE(emitted_parses);
     ASSERT_TRUE(rebuilt_parses);
     PASS();
 }
