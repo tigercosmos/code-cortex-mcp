@@ -2741,14 +2741,18 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * EXPLICIT drop-list leaves lsp_ts_method / lsp_cross untouched.
          * cbm_suppress_weak_call owns the language set, shared with
          * pass_calls.cpp. */
-        bool drop_plain_call = cbm_suppress_weak_call(lang, call, res.strategy) ||
-                               /* Import-binding suppression (#2127) -- see pass_calls.cpp; this
-                                * gate MUST stay identical to the one there. */
-                               (lang == CBM_LANG_PYTHON &&
-                                cbm_suppress_weak_import_bound_call(true, true, res.strategy) &&
-                                cbm_python_import_binding_contradicts(
-                                    &result->imports, call->callee_name, res.qualified_name,
-                                    rc->main_gbuf, rc->project_name, rel));
+        bool drop_plain_call =
+            cbm_suppress_weak_call(lang, call, res.strategy) ||
+            /* Go selector guard (#1906) -- see pass_calls.cpp. */
+            cbm_go_suppress_weak_method_match(lang == CBM_LANG_GO, call->is_method, res.strategy,
+                                              res.confidence) ||
+            /* Import-binding suppression (#2127) -- see pass_calls.cpp; this
+             * gate MUST stay identical to the one there. */
+            (lang == CBM_LANG_PYTHON &&
+             cbm_suppress_weak_import_bound_call(true, true, res.strategy) &&
+             cbm_python_import_binding_contradicts(&result->imports, call->callee_name,
+                                                   res.qualified_name, rc->main_gbuf,
+                                                   rc->project_name, rel));
 
         /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the
          * service signal lives in the callee_name. The registry can mis-resolve

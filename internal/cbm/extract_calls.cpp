@@ -2551,6 +2551,22 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                     }
                 }
             }
+            // Go receiver-aware guard (#1906; same direction as the TS/JS flag
+            // above). Flag a selector call x.foo(). The Go AST cannot separate a
+            // method call on a value from a package-qualified call, but every
+            // selector call the Go LSP or the import/qualified registry
+            // strategies CAN place never reaches the weak short-name guards, so
+            // the flag only bites on unresolvable receivers (`f.Close()` on an
+            // os.File), where a project-wide short-name match fabricates an edge
+            // to an unrelated project symbol. Bare calls keep is_method=false.
+            if (ctx->language == CBM_LANG_GO &&
+                strcmp(ts_node_type(node), "call_expression") == 0) {
+                TSNode gofn = ts_node_child_by_field_name(node, TS_FIELD("function"));
+                if (!ts_node_is_null(gofn) &&
+                    strcmp(ts_node_type(gofn), "selector_expression") == 0) {
+                    call.is_method = true;
+                }
+            }
 
             /* tree-sitter-elixir attaches NO field name to a call's arguments
              * node, so a plain field lookup is always null for Elixir and

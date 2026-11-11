@@ -10410,6 +10410,68 @@ TEST(pipeline_go_rw_usage_never_cross_into_c_parallel) {
     PASS();
 }
 
+/* Upstream #1906 fixture: a Go selector call whose receiver the Go LSP cannot
+ * type (`f.Close()` on an *os.File) must not bind the lone project `Close` by
+ * a weak short-name strategy. go.mod makes project imports resolvable, and the
+ * caller imports util so an unreachable unique_name candidate carries the
+ * import penalty. Controls: a typed same-package call, a bare local call and an
+ * import-qualified cross-package call keep their edges. */
+static const char *const k_go_recv_names[] = {"go.mod", "storage/storage.go", "util/util.go",
+                                              "hash/hash.go"};
+static const char *const k_go_recv_bodies[] = {
+    "module example.com/myapp\n\ngo 1.22\n",
+    "package storage\n\ntype Storage struct{ open bool }\n\n"
+    "func NewStorage() *Storage { return &Storage{open: true} }\n\n"
+    "func (s *Storage) Close() {\n\ts.open = false\n}\n\n"
+    "func Boot() {\n\ts := NewStorage()\n\ts.Close()\n}\n",
+    "package util\n\nfunc Tag() string { return \"t\" }\n",
+    "package hash\n\nimport (\n\t\"os\"\n\n\t\"example.com/myapp/util\"\n)\n\n"
+    "func FileLen(path string) int64 {\n\tf, err := os.Open(path)\n\tif err != nil {\n"
+    "\t\treturn 0\n\t}\n\tdefer f.Close()\n\tst, err := f.Stat()\n\tif err != nil {\n"
+    "\t\treturn 0\n\t}\n\treturn st.Size()\n}\n\n"
+    "func localHelper() int { return 1 }\n\n"
+    "func CallsLocal() int { return localHelper() }\n\n"
+    "func UsesUtil() string { return util.Tag() }\n"};
+
+/* 0 = the false edge is gone and every control kept; <0 names the failure. */
+static int go_receiver_guard_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p =
+        index_fixture_with_padding(k_go_recv_names, k_go_recv_bodies, 4, pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -9;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -8;
+    if (s) {
+        int bad = named_edge_count(s, proj, "CALLS", "FileLen", "Close");
+        int boot = named_edge_count(s, proj, "CALLS", "Boot", "Close");
+        int local = named_edge_count(s, proj, "CALLS", "CallsLocal", "localHelper");
+        int util = named_edge_count(s, proj, "CALLS", "UsesUtil", "Tag");
+        printf("  go receiver probe pad=%d: false=%d boot=%d local=%d util=%d\n", pad, bad, boot,
+               local, util);
+        rc = bad != 0 ? -1 : (boot < 1 ? -2 : (local < 1 ? -3 : (util < 1 ? -4 : 0)));
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+/* Sequential twin (pass_calls.cpp). */
+TEST(pipeline_go_receiver_suppresses_weak_method_edge) {
+    ASSERT_EQ(go_receiver_guard_probe(0), 0);
+    PASS();
+}
+
+/* Parallel twin (pass_parallel.cpp, upstream 7528ec06): >= 50 files. */
+TEST(pipeline_go_receiver_parallel_suppresses_weak_method_edge) {
+    ASSERT_EQ(go_receiver_guard_probe(52), 0);
+    PASS();
+}
+
 /* Issue #1354: a method call on an instance built with `new ImportedClass()`
  * produced no CALLS edge (only the constructor edge), while the identical
  * shape in the class's own file resolved via lsp_ts_method. End to end: both
@@ -13882,6 +13944,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_cross_package_field_chain_resolves_parallel);
     RUN_TEST(pipeline_go_textual_call_never_binds_field);
     RUN_TEST(pipeline_go_textual_call_never_binds_field_parallel);
+    RUN_TEST(pipeline_go_receiver_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_go_receiver_parallel_suppresses_weak_method_edge);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

@@ -667,6 +667,35 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
     return cbm_weak_short_name_strategy(strategy);
 }
 
+/* Go analog of the member guard above, same failure class (upstream #1906): a
+ * selector call whose receiver the Go LSP could not type reaches the registry,
+ * and a bare short-name strategy binds it to an arbitrary same-named project
+ * symbol (`f.Close()` on an os.File -> a project `Close`, suffix_match over 15
+ * candidates). Built on the shared drop-list so "weak" means one thing for
+ * every guard; Go narrows it in two places only. */
+bool cbm_go_suppress_weak_method_match(bool is_go, bool is_method, const char *strategy,
+                                       double confidence) {
+    if (!is_go || !is_method || !cbm_weak_short_name_strategy(strategy)) {
+        return false;
+    }
+    /* field_type_hint is KEPT for Go: a Go struct field carries a declared
+     * type, so the parallel resolver's field-type hint is receiver-aware for
+     * Go (lrp_go_s8_field_type_hint), not a heuristic. */
+    if (strcmp(strategy, "field_type_hint") == 0) {
+        return false;
+    }
+    if (strcmp(strategy, "unique_name") != 0) {
+        return true; /* suffix_match, fuzzy */
+    }
+    /* unique_name is dropped only when PENALIZED: resolve_name_lookup scales
+     * CONF_UNIQUE_NAME by DEFAULT_CONFIDENCE exactly when the lone candidate is
+     * not reachable through the caller's imports, the stdlib/vendor hijack
+     * shape (`io.Copy` -> a project `Copy`). An unpenalized unique_name target
+     * sits inside the caller's import closure (or the file has no imports, e.g.
+     * a same-package call) and is kept. */
+    return confidence < CONF_UNIQUE_NAME;
+}
+
 /* Bare-call counterpart of the member guard above. A Python call `foo()` whose
  * callee identifier is bound as a parameter of an enclosing scope cannot be the
  * module-level `foo`: the parameter shadows it for the whole body. Binding such

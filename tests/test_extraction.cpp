@@ -9057,6 +9057,34 @@ TEST(extract_cpp_export_macro_collector_raw_string_unterminated_issue1989) {
  * self) IS flagged so the resolver can suppress a weak short-name match, while
  * self/cls/super() and import-bound receivers — Python's canonical cross-file
  * call shape — are NOT, so their true edges survive. */
+TEST(extract_go_selector_call_flags_is_method) {
+    /* Go selector calls are flagged so the weak-match guard can fire when the
+     * Go LSP cannot type the receiver (upstream #1906); bare calls stay
+     * unflagged. */
+    CBMFileResult *r = extract("package m\n"
+                               "func run(o Obj) { o.Commit(); helper() }\n",
+                               CBM_LANG_GO, "t", "x.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    bool saw_selector = false;
+    bool saw_bare = false;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (c->callee_name && strstr(c->callee_name, "Commit") != NULL) {
+            ASSERT_TRUE(c->is_method);
+            saw_selector = true;
+        }
+        if (c->callee_name && strcmp(c->callee_name, "helper") == 0) {
+            ASSERT_FALSE(c->is_method);
+            saw_bare = true;
+        }
+    }
+    ASSERT_TRUE(saw_selector);
+    ASSERT_TRUE(saw_bare);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(extract_python_member_call_flags_is_method) {
     CBMFileResult *r = extract("from pkg import helper\n"
                                "import tools as toolkit\n"
@@ -11671,6 +11699,7 @@ SUITE(extraction) {
     cbm_init();
 
     RUN_TEST(extract_python_member_call_flags_is_method);
+    RUN_TEST(extract_go_selector_call_flags_is_method);
     RUN_TEST(extract_python_bare_call_flags_locally_bound_callee);
     RUN_TEST(extract_python_bare_call_flag_is_depth_independent);
 

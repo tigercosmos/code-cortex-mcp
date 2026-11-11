@@ -791,6 +791,11 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
      * cbm_suppress_weak_call owns the language set for both guards. */
     bool drop_plain_call =
         cbm_suppress_weak_call(lang, call, res.strategy) ||
+        /* Go selector guard (#1906): its own predicate (field_type_hint and an
+         * unpenalized unique_name differ from the shared gate) -- MUST match
+         * pass_parallel.cpp exactly. */
+        cbm_go_suppress_weak_method_match(lang == CBM_LANG_GO, call->is_method, res.strategy,
+                                          res.confidence) ||
         /* Import-binding suppression (#2127): an external `from m import f`
          * binds `f` for the whole module, so a weak short-name match onto a
          * project `X.f` outside m is fabricated. Python-only (the import
