@@ -885,6 +885,46 @@ TEST(sw_publish_preserves_live_reader) {
     PASS();
 }
 
+TEST(sw_page_offsets_do_not_wrap_past_4gib) {
+    /* A 32-bit long offset wraps negative at 2 GiB and back to 0 at 4 GiB: on
+     * Windows a staging DB stopped at exactly 4 GiB with its first pages
+     * overwritten, and publish failed with persist_failed (#2399). */
+    ASSERT_EQ(cbm_writer_page_offset(1), 0);
+    ASSERT_EQ(cbm_writer_page_offset(2), 65536);
+    ASSERT_EQ(cbm_writer_page_offset(32769), INT64_C(2147483648));
+    ASSERT_EQ(cbm_writer_page_offset(65537), INT64_C(4294967296));
+    ASSERT_EQ(cbm_writer_page_offset(UINT32_MAX), (int64_t)(UINT32_MAX - 1) * 65536);
+    PASS();
+}
+
+TEST(sw_writer_seek_addresses_past_4gib) {
+    /* The page offsets above only help if the seek/tell under them is 64-bit
+     * too. Seeking past EOF allocates nothing, so this is cheap everywhere. */
+    char path[256];
+    ASSERT_EQ(make_temp_db(path, sizeof(path)), 0);
+    FILE *fp = fopen(path, "r+b");
+    ASSERT(fp != NULL);
+    const int64_t past_4gib = cbm_writer_page_offset(65538); /* 4 GiB + 64 KiB */
+    ASSERT_EQ(cbm_writer_seek(fp, past_4gib, SEEK_SET), 0);
+    ASSERT_EQ(cbm_writer_tell(fp), past_4gib);
+#ifndef _WIN32
+    /* POSIX file systems keep the hole sparse, so one byte past 4 GiB costs one
+     * block. (NTFS would zero-fill the gap, so Windows stops at the tell.) */
+    const uint8_t one = 1;
+    ASSERT_EQ((int)fwrite(&one, 1, 1, fp), 1);
+    ASSERT_EQ(fflush(fp), 0);
+    ASSERT_EQ(cbm_writer_seek(fp, 0, SEEK_END), 0);
+    ASSERT_EQ(cbm_writer_tell(fp), past_4gib + 1);
+    ASSERT_EQ(cbm_writer_seek(fp, past_4gib, SEEK_SET), 0);
+    uint8_t back = 0;
+    ASSERT_EQ((int)fread(&back, 1, 1, fp), 1);
+    ASSERT_EQ(back, 1);
+#endif
+    fclose(fp);
+    cbm_unlink(path);
+    PASS();
+}
+
 TEST(sw_open_truncated_path_names_its_reason) {
     /* final_path is a fixed 4K buffer and make_writer_temp_path only fails by
      * truncation. Neither sets an errno of its own, so without naming one the
@@ -955,6 +995,8 @@ SUITE(sqlite_writer) {
     RUN_TEST(sw_publish_failure_preserves_destination_sidecars);
     RUN_TEST(sw_publish_supports_non_ascii_path);
     RUN_TEST(sw_publish_preserves_live_reader);
+    RUN_TEST(sw_page_offsets_do_not_wrap_past_4gib);
+    RUN_TEST(sw_writer_seek_addresses_past_4gib);
     RUN_TEST(sw_open_truncated_path_names_its_reason);
     RUN_TEST(sw_publish_failure_reports_the_rename_not_the_cleanup);
 }

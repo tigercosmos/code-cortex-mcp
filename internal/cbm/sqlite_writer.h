@@ -2,6 +2,7 @@
 #define CBM_SQLITE_WRITER_H
 
 #include <stdint.h>
+#include <stdio.h> // FILE
 
 // --- Input structs (flat, borrowed strings) ---
 
@@ -93,6 +94,15 @@ int cbm_writer_finalize(cbm_db_writer_t *w, const char *project, const char *roo
                         const char *indexed_at, CBMDumpNode *nodes, int node_count,
                         CBMDumpEdge *edges, int edge_count, CBMDumpVector *vectors,
                         int vector_count, CBMDumpTokenVec *token_vecs, int token_vec_count);
+
+// Byte offset of 1-based page `page_num` in the output file. 64-bit on every
+// platform, so databases larger than 2 GiB are addressed correctly on Windows.
+int64_t cbm_writer_page_offset(uint32_t page_num);
+
+// 64-bit fseek/ftell used for every page write (_fseeki64/_ftelli64 on Windows,
+// fseeko/ftello elsewhere). Same return conventions as fseek/ftell.
+int cbm_writer_seek(FILE *fp, int64_t off, int whence);
+int64_t cbm_writer_tell(FILE *fp);
 
 #ifdef __cplusplus
 }
