@@ -2080,6 +2080,11 @@ static const cbm_gbuf_node_t *resolve_header_include(const cbm_pipeline_ctx_t *c
     return resolve_exact_file_node(ctx, base, source_file_qn);
 }
 
+/* An explicit `./` or `../` path names exactly one location. */
+static bool explicit_relative_path(const char *p) {
+    return p && (strncmp(p, "./", PAIR_LEN) == 0 || strncmp(p, "../", PAIR_LEN + SKIP_ONE) == 0);
+}
+
 /* Resolve a sibling-file import: a bare path/name (no leading "./") that names
  * a file relative to the importer's directory.  This covers build/markup
  * grammars whose import string is a sibling filename or directory rather than a
@@ -2131,8 +2136,12 @@ static const cbm_gbuf_node_t *resolve_sibling_file(const cbm_pipeline_ctx_t *ctx
     snprintf(cands[ncand++], PKGMAP_PATH_BUF, "%s%s%s/meson.build", dir, dir[0] ? "/" : "", base);
     /* 4. Basename sibling: dir/<basename(module_path)>.  Covers include paths
      *    that carry a non-relative prefix (Hyprlang `source = ~/.config/.../x.conf`,
-     *    absolute include paths) but reference a file sitting beside the importer. */
-    {
+     *    absolute include paths) but reference a file sitting beside the importer.
+     *    An explicit `./` or `../` path names one location, which Strategy 1c
+     *    resolves exactly; its basename beside the importer is another file
+     *    (upstream 2d06fe30, #2797: `import ../gone/values.nix` bound the
+     *    importer's own checks/values.nix). */
+    if (!explicit_relative_path(module_path)) {
         const char *slash = strrchr(base, '/');
         if (slash && slash[1]) {
             snprintf(cands[ncand++], PKGMAP_PATH_BUF, "%s%s%s", dir, dir[0] ? "/" : "", slash + 1);
@@ -2156,6 +2165,35 @@ static const cbm_gbuf_node_t *resolve_sibling_file(const cbm_pipeline_ctx_t *ctx
     }
     free(dir);
     return found;
+}
+
+/* The File an explicit relative import (`./x`, `../x`) names exactly, for files
+ * whose File QN differs from the module QN Strategy 1 tries
+ * (`../styles/global.css`, `../layouts/Layout.astro`; upstream c1e2414f, #2558).
+ * cbm_pipeline_normalize_relative_path refuses a path above the repository
+ * root, and php_only is honoured like every other strategy (upstream
+ * 0baad945). Never the importer itself. */
+static const cbm_gbuf_node_t *resolve_relative_file(const cbm_pipeline_ctx_t *ctx,
+                                                    const char *source_rel,
+                                                    const char *source_file_qn,
+                                                    const char *module_path, bool php_only) {
+    if (!source_rel || !explicit_relative_path(module_path)) {
+        return NULL;
+    }
+    char *path = cbm_pipeline_normalize_relative_path(source_rel, module_path);
+    if (!path) {
+        return NULL;
+    }
+    char *qn = cbm_pipeline_fqn_compute(ctx->project_name, path, "__file__");
+    free(path);
+    const cbm_gbuf_node_t *file = qn ? cbm_gbuf_find_by_qn(ctx->gbuf, qn) : NULL;
+    free(qn);
+    if (!file || (php_only && !node_in_php_file(file)) ||
+        (source_file_qn && file->qualified_name &&
+         strcmp(file->qualified_name, source_file_qn) == 0)) {
+        return NULL;
+    }
+    return file;
 }
 
 /* Language-generic strategies retain their ordering. A PHP `use` that has no
@@ -2232,6 +2270,15 @@ static const cbm_gbuf_node_t *resolve_import_strategies(
         if (sib) {
             return sib;
         }
+    }
+
+    /* Strategy 1c: relative non-module files can have a File QN that does not
+     * match the module QN above. Resolve the exact file after module and
+     * sibling lookup. */
+    const cbm_gbuf_node_t *rel_file =
+        resolve_relative_file(ctx, source_rel, source_file_qn, imp->module_path, php_only);
+    if (rel_file) {
+        return rel_file;
     }
 
     /* Strategy 2: namespace map.  `using App.Utils`, `import com.example.Foo`,

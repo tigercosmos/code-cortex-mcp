@@ -231,7 +231,7 @@ char *cbm_pipeline_resolve_relative_import(const char *source_rel, const char *m
 /* Join the importing file's directory with a slash-separated relative path,
  * collapsing "." and ".." segments.  Language-neutral: the extension is kept
  * (e.g. "src/a/b.c" + "../x.h" → "src/x.h").  Returns a malloc'd path, or NULL
- * on overflow. */
+ * on overflow or for a path that climbs above the repository root. */
 char *cbm_pipeline_normalize_relative_path(const char *source_rel, const char *rel_path);
 
 /* Derive project name from an absolute path.

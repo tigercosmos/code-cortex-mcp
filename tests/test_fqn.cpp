@@ -69,6 +69,20 @@ TEST(fqn_relative_js_import_preserves_dotted_basename_issue1682) {
     PASS();
 }
 
+/* Upstream c1e2414f/0baad945: a relative path that climbs above the repository
+ * root names no file in the tree; clamping it at the root bound
+ * `../../../Badge.astro` from src/pages to a root Badge.astro. */
+TEST(fqn_relative_import_above_root_is_refused) {
+    ASSERT_NULL(cbm_pipeline_resolve_relative_import("src/pages/index.astro", "../../../Badge"));
+    ASSERT_NULL(cbm_pipeline_normalize_relative_path("src/pages/index.astro", "../../../x.css"));
+    ASSERT_NULL(cbm_pipeline_resolve_relative_import("top.ts", "../x"));
+    /* Exactly at the root is still inside the tree. */
+    ASSERT_FQN(cbm_pipeline_resolve_relative_import("src/pages/index.astro", "../../Badge"),
+               "Badge");
+    ASSERT_FQN(cbm_pipeline_normalize_relative_path("src/a/b.c", "../x.h"), "src/x.h");
+    PASS();
+}
+
 TEST(fqn_compute_basic_rs) {
     ASSERT_FQN(cbm_pipeline_fqn_compute("proj", "lib.rs", "new"), "proj.lib.new");
     PASS();
@@ -582,6 +596,7 @@ SUITE(fqn) {
     RUN_TEST(fqn_compute_basic_js);
     RUN_TEST(fqn_compute_basic_c);
     RUN_TEST(fqn_relative_js_import_preserves_dotted_basename_issue1682);
+    RUN_TEST(fqn_relative_import_above_root_is_refused);
     RUN_TEST(fqn_compute_basic_rs);
     RUN_TEST(fqn_compute_file_sibling_distinct);
     RUN_TEST(fqn_compute_symbol_still_strips);

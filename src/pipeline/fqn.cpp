@@ -312,8 +312,11 @@ static size_t strip_js_module_ext(const char *seg_start, size_t seg_len) {
 }
 
 /* Append a slash-separated relative path to the directory already in `buf`,
- * collapsing "." and ".." segments (".." at the root stays at the root).
- * Language-neutral: no extension handling.  Returns false on overflow. */
+ * collapsing "." and ".." segments.  Language-neutral: no extension handling.
+ * Returns false on overflow, and for a ".." that would climb above the
+ * repository root (upstream c1e2414f/0baad945): `../../../Badge.astro` from
+ * src/pages names no file in the tree, and clamping it to the root bound the
+ * import to a root Badge.astro it never named. */
 static bool normalize_relative_path(char *buf, size_t buf_size, const char *rel_path) {
     const char *p = rel_path;
     while (*p) {
@@ -332,6 +335,9 @@ static bool normalize_relative_path(char *buf, size_t buf_size, const char *rel_
             continue;
         }
         if (seg_len == FQN_DOTDOT_LEN && seg_start[0] == '.' && seg_start[FQN_SEP_LEN] == '.') {
+            if (!buf[0]) {
+                return false;
+            }
             path_pop_segment(buf);
             continue;
         }
