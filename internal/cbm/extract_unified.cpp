@@ -588,6 +588,20 @@ static const char *compute_func_qn(CBMExtractCtx *ctx, TSNode node, const CBMLan
         }
     }
 
+    /* Go init(): the def extractor folds the file basename and the init's
+     * per-file ordinal into the QN so every init in a package survives the
+     * upsert (upstream #1910). Name it through the same cbm_go_init_qn, or
+     * init-body calls fall back to File-node attribution. A NULL base QN
+     * (allocation failure) keeps the flat QN, as the receiver branch does. */
+    if (ctx->language == CBM_LANG_GO && strcmp(name, "init") == 0 &&
+        strcmp(ts_node_type(node), "function_declaration") == 0) {
+        const char *base_qn = cbm_fqn_compute_source_lang(ctx->arena, ctx->project, ctx->rel_path,
+                                                          name, ctx->language);
+        if (base_qn) {
+            return cbm_go_init_qn(ctx->arena, base_qn, ctx->rel_path, node, ctx->source);
+        }
+    }
+
     /* Nix: a binding's own attrpath contributes scope (`a.b.fn = …`), and the def
      * extractor bakes it into the def QN. Compose it identically here — otherwise
      * an in-body call sources to a QN one or more segments short of the def, and

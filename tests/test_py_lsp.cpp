@@ -1848,8 +1848,8 @@ TEST(pylsp_issue1527_cross_memo_failure_fallback_reports_error) {
     CBMFileResult result = {};
     cbm_arena_init(&result.arena);
     cbm_py_lsp_test_memo_fail_after(0);
-    cbm_pxc_run_one(CBM_LANG_PYTHON, &result, src, (int)strlen(src), "test", defs, 2, NULL, NULL,
-                    0);
+    cbm_pxc_run_one(CBM_LANG_PYTHON, &result, src, (int)strlen(src), "test", NULL, defs, 2, NULL,
+                    NULL, 0);
     cbm_py_lsp_test_memo_fail_after(-1);
     bool reported = result.lsp_skipped && result.lsp_skip_reason == CBM_LSP_SKIP_EVAL_MEMO &&
                     result.resolved_calls.count == 0;
@@ -1906,8 +1906,8 @@ TEST(pylsp_issue1527_depth_failure_reports_all_entry_points) {
     }
     CBMFileResult fallback = {};
     cbm_arena_init(&fallback.arena);
-    cbm_pxc_run_one(CBM_LANG_PYTHON, &fallback, src, (int)strlen(src), "test", defs, 2, NULL, NULL,
-                    0);
+    cbm_pxc_run_one(CBM_LANG_PYTHON, &fallback, src, (int)strlen(src), "test", NULL, defs, 2, NULL,
+                    NULL, 0);
     correct = correct && fallback.lsp_skipped &&
               fallback.lsp_skip_reason == CBM_LSP_SKIP_EVAL_DEPTH &&
               fallback.resolved_calls.count == 0;
@@ -2001,7 +2001,7 @@ static int pylsp_long_chain_case(bool receiver) {
         }
         CBMFileResult cross = {};
         cbm_arena_init(&cross.arena);
-        cbm_pxc_run_one(CBM_LANG_PYTHON, &cross, src, (int)strlen(src), "test", defs, 7, NULL,
+        cbm_pxc_run_one(CBM_LANG_PYTHON, &cross, src, (int)strlen(src), "test", NULL, defs, 7, NULL,
                         NULL, 0);
         free(src);
         bool no_error = !cross.has_error && !cross.lsp_skipped;

@@ -12,6 +12,7 @@
 #include "test_framework.h"
 #include "cbm.h"
 #include "lsp/go_lsp.h"
+#include "pipeline/lsp_resolve.h"
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -846,7 +847,7 @@ TEST(golsp_crossfile_method_dispatch) {
     cbm_arena_init(&arena);
     CBMResolvedCallArray out = {0};
 
-    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", defs, 4, imp_names,
+    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", NULL, defs, 4, imp_names,
                          imp_qns, 1, NULL, &out);
 
     ASSERT_GTE(find_resolved_arr(&out, "doQuery", "Connect"), 0);
@@ -892,7 +893,7 @@ TEST(golsp_crossfile_return_type_chain) {
     cbm_arena_init(&arena);
     CBMResolvedCallArray out = {0};
 
-    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", defs, 4, imp_names,
+    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", NULL, defs, 4, imp_names,
                          imp_qns, 1, NULL, &out);
 
     ASSERT_GTE(find_resolved_arr(&out, "showUser", "Name"), 0);
@@ -932,7 +933,7 @@ TEST(golsp_crossfile_interface_dispatch) {
     cbm_arena_init(&arena);
     CBMResolvedCallArray out = {0};
 
-    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", defs, 4, imp_names,
+    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", NULL, defs, 4, imp_names,
                          imp_qns, 1, NULL, &out);
 
     int idx = find_resolved_arr_confident(&out, "handler", "Bind");
@@ -988,7 +989,7 @@ TEST(golsp_crossfile_interface_field_chain) {
     cbm_arena_init(&arena);
     CBMResolvedCallArray out = {0};
 
-    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", defs, 6, imp_names,
+    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", NULL, defs, 6, imp_names,
                          imp_qns, 1, NULL, &out);
 
     int idx = find_resolved_arr_confident(&out, "process", "Bind");
@@ -1028,7 +1029,7 @@ TEST(golsp_crossfile_map_index) {
     cbm_arena_init(&arena);
     CBMResolvedCallArray out = {0};
 
-    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", defs, 3, imp_names,
+    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", NULL, defs, 3, imp_names,
                          imp_qns, 1, NULL, &out);
 
     int idx = find_resolved_arr_confident(&out, "dispatch", "ServeHTTP");
@@ -1058,7 +1059,7 @@ TEST(golsp_crossfile_stdlib_interface) {
     cbm_arena_init(&arena);
     CBMResolvedCallArray out = {0};
 
-    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", defs, 1, imp_names,
+    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", NULL, defs, 1, imp_names,
                          imp_qns, 1, NULL, &out);
 
     ASSERT_GTE(find_resolved_arr_confident(&out, "process", "Done"), 0);
@@ -1131,7 +1132,7 @@ TEST(golsp_crossfile_aliased_field_requal) {
     CBMTypeRegistry *reg = cbm_go_build_cross_registry(&arena, defs, 6);
     ASSERT_NOT_NULL(reg);
 
-    cbm_run_go_lsp_cross_with_registry(&arena, source, (int)strlen(source), "test.main", reg,
+    cbm_run_go_lsp_cross_with_registry(&arena, source, (int)strlen(source), "test.main", NULL, reg,
                                        imp_names, imp_qns, 2, NULL, &out);
 
     int svc_idx = find_resolved_arr_confident(&out, "callSvc", "Svc.Ping");
@@ -1198,7 +1199,7 @@ TEST(golsp_crossfile_local_interface_single_impl) {
     cbm_arena_init(&arena);
     CBMResolvedCallArray out = {0};
 
-    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", defs, 5, imp_names,
+    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.main", NULL, defs, 5, imp_names,
                          imp_qns, 1, NULL, &out);
 
     int idxGet = find_resolved_arr_confident(&out, "process", "Get");
@@ -1215,6 +1216,130 @@ TEST(golsp_crossfile_local_interface_single_impl) {
 }
 
 /* ── Suite ─────────────────────────────────────────────────────── */
+
+/* ── Go init(): per-file caller QN (upstream #1910) ─────────────── */
+
+/* Every init() of a package is its own node, pkg.init#<file>:<N>
+ * (cbm_go_init_qn). The LSP's enclosing-function QN must be exactly that QN:
+ * the pipeline joins LSP rows to textual calls by caller QN, so a flat
+ * pkg.init loses every LSP resolution inside an init body. Two inits in one
+ * file pin the ordinal; the method name exists on both types, so only the
+ * typed receiver tells the targets apart. */
+TEST(golsp_init_caller_qn_matches_def) {
+    const char *source = "package main\n\n"
+                         "type Codec struct{}\n\n"
+                         "func (c *Codec) register() {}\n\n"
+                         "type Store struct{}\n\n"
+                         "func (s *Store) register() {}\n\n"
+                         "func init() {\n\tc := &Codec{}\n\tc.register()\n}\n\n"
+                         "func init() {\n\ts := &Store{}\n\ts.register()\n}\n";
+    CBMFileResult *r = extract_go(source);
+    ASSERT_NOT_NULL(r);
+    const char *init1 = NULL;
+    const char *init2 = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->name && strcmp(d->name, "init") == 0) {
+            if (!init1) {
+                init1 = d->qualified_name;
+            } else {
+                init2 = d->qualified_name;
+            }
+        }
+    }
+    ASSERT_NOT_NULL(init1);
+    ASSERT_NOT_NULL(init2);
+    ASSERT_NOT_NULL(strstr(init1, ".init#main.go:1"));
+    ASSERT_NOT_NULL(strstr(init2, ".init#main.go:2"));
+
+    int a = require_resolved(r, "init", "Codec.register");
+    ASSERT_GTE(a, 0);
+    ASSERT_STR_EQ(r->resolved_calls.items[a].caller_qn, init1);
+    int b = require_resolved(r, "init", "Store.register");
+    ASSERT_GTE(b, 0);
+    ASSERT_STR_EQ(r->resolved_calls.items[b].caller_qn, init2);
+
+    /* The join itself: each textual register() call finds its own init's row. */
+    int joined = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (!c->callee_name || !strstr(c->callee_name, ".register")) {
+            continue;
+        }
+        const CBMResolvedCall *rc = cbm_pipeline_find_lsp_resolution(&r->resolved_calls, c, false);
+        ASSERT_NOT_NULL(rc);
+        ASSERT_STR_EQ(rc->caller_qn, c->enclosing_func_qn);
+        ASSERT_NOT_NULL(
+            strstr(rc->callee_qn, strcmp(c->enclosing_func_qn, init1) == 0 ? "Codec" : "Store"));
+        joined++;
+    }
+    ASSERT_EQ(joined, 2);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Cross-file twin: both cross entry points (per-file defs, and the shared
+ * Tier-2 registry the pipeline uses) name the init caller from rel_path. */
+TEST(golsp_crossfile_init_caller_qn_per_file) {
+    const char *source = "package reg\n\n"
+                         "func init() {\n\tc := NewCodec()\n\tc.Register()\n}\n\n"
+                         "func init() {\n\ts := NewStore()\n\ts.Register()\n}\n";
+    CBMLSPDef defs[6] = {};
+    defs[0].qualified_name = "test.reg.NewCodec";
+    defs[0].short_name = "NewCodec";
+    defs[0].label = "Function";
+    defs[0].def_module_qn = "test.reg";
+    defs[0].return_types = "*Codec";
+    defs[1].qualified_name = "test.reg.Codec";
+    defs[1].short_name = "Codec";
+    defs[1].label = "Class";
+    defs[1].def_module_qn = "test.reg";
+    defs[2].qualified_name = "test.reg.Codec.Register";
+    defs[2].short_name = "Register";
+    defs[2].label = "Method";
+    defs[2].def_module_qn = "test.reg";
+    defs[2].receiver_type = "test.reg.Codec";
+    defs[3].qualified_name = "test.reg.NewStore";
+    defs[3].short_name = "NewStore";
+    defs[3].label = "Function";
+    defs[3].def_module_qn = "test.reg";
+    defs[3].return_types = "*Store";
+    defs[4].qualified_name = "test.reg.Store";
+    defs[4].short_name = "Store";
+    defs[4].label = "Class";
+    defs[4].def_module_qn = "test.reg";
+    defs[5].qualified_name = "test.reg.Store.Register";
+    defs[5].short_name = "Register";
+    defs[5].label = "Method";
+    defs[5].def_module_qn = "test.reg";
+    defs[5].receiver_type = "test.reg.Store";
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+    cbm_run_go_lsp_cross(&arena, source, (int)strlen(source), "test.reg", "reg/b.go", defs, 6, NULL,
+                         NULL, 0, NULL, &out);
+    int c1 = find_resolved_arr_confident(&out, "init", "Codec.Register");
+    ASSERT_GTE(c1, 0);
+    ASSERT_STR_EQ(out.items[c1].caller_qn, "test.reg.init#b.go:1");
+    int s1 = find_resolved_arr_confident(&out, "init", "Store.Register");
+    ASSERT_GTE(s1, 0);
+    ASSERT_STR_EQ(out.items[s1].caller_qn, "test.reg.init#b.go:2");
+
+    CBMResolvedCallArray shared_out = {0};
+    CBMTypeRegistry *reg = cbm_go_build_cross_registry(&arena, defs, 6);
+    ASSERT_NOT_NULL(reg);
+    cbm_run_go_lsp_cross_with_registry(&arena, source, (int)strlen(source), "test.reg", "reg/b.go",
+                                       reg, NULL, NULL, 0, NULL, &shared_out);
+    int c2 = find_resolved_arr_confident(&shared_out, "init", "Codec.Register");
+    ASSERT_GTE(c2, 0);
+    ASSERT_STR_EQ(shared_out.items[c2].caller_qn, "test.reg.init#b.go:1");
+    int s2 = find_resolved_arr_confident(&shared_out, "init", "Store.Register");
+    ASSERT_GTE(s2, 0);
+    ASSERT_STR_EQ(shared_out.items[s2].caller_qn, "test.reg.init#b.go:2");
+    cbm_arena_destroy(&arena);
+    PASS();
+}
 
 SUITE(go_lsp) {
     /* Single-file: param type inference */
@@ -1329,4 +1454,6 @@ SUITE(go_lsp) {
     RUN_TEST(golsp_crossfile_map_index);
     RUN_TEST(golsp_crossfile_stdlib_interface);
     RUN_TEST(golsp_crossfile_local_interface_single_impl);
+    RUN_TEST(golsp_init_caller_qn_matches_def);
+    RUN_TEST(golsp_crossfile_init_caller_qn_per_file);
 }

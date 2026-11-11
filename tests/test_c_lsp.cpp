@@ -16197,7 +16197,8 @@ TEST(clsp_issue1527_depth_failure_reports_all_entry_points) {
     }
     CBMFileResult fallback = {};
     cbm_arena_init(&fallback.arena);
-    cbm_pxc_run_one(CBM_LANG_CPP, &fallback, src, (int)strlen(src), "test", defs, 2, NULL, NULL, 0);
+    cbm_pxc_run_one(CBM_LANG_CPP, &fallback, src, (int)strlen(src), "test", NULL, defs, 2, NULL,
+                    NULL, 0);
     correct = correct && fallback.lsp_skipped &&
               fallback.lsp_skip_reason == CBM_LSP_SKIP_EVAL_DEPTH &&
               fallback.resolved_calls.count == 0;

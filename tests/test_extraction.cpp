@@ -9200,6 +9200,81 @@ TEST(extract_templ_method_qn_matches_call_scope) {
     PASS();
 }
 
+TEST(extract_go_multiple_init_disambiguated) {
+    /* Go allows several init() per package (even per file); each gets a
+     * file+ordinal-suffixed QN (upstream #1910) so none is lost to the same-QN
+     * upsert. The ordinal, unlike a line number, must not move when code is
+     * inserted above the function: the QN is node identity. */
+    CBMFileResult *r = extract("package m\n"
+                               "func init() { a() }\n"
+                               "func init() { b() }\n"
+                               "func a() {}\n"
+                               "func b() {}\n",
+                               CBM_LANG_GO, "t", "x.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const char *first = NULL;
+    const char *second = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (!d->name || strcmp(d->name, "init") != 0) {
+            continue;
+        }
+        if (!first) {
+            first = d->qualified_name;
+        } else {
+            second = d->qualified_name;
+        }
+    }
+    ASSERT_NOT_NULL(first);
+    ASSERT_NOT_NULL(second);
+    ASSERT_STR_EQ(first, "t.init#x.go:1");
+    ASSERT_STR_EQ(second, "t.init#x.go:2");
+    /* The call-scope side names each init the same way. */
+    int scoped = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (c->callee_name && strcmp(c->callee_name, "a") == 0) {
+            ASSERT_STR_EQ(c->enclosing_func_qn, "t.init#x.go:1");
+            scoped++;
+        }
+        if (c->callee_name && strcmp(c->callee_name, "b") == 0) {
+            ASSERT_STR_EQ(c->enclosing_func_qn, "t.init#x.go:2");
+            scoped++;
+        }
+    }
+    ASSERT_EQ(scoped, 2);
+
+    /* Stability: an insertion ABOVE both inits must not change either QN. */
+    CBMFileResult *r2 = extract("package m\n"
+                                "import \"fmt\"\n"
+                                "var shifted = fmt.Sprint(\"pad\")\n"
+                                "func init() { a() }\n"
+                                "func init() { b() }\n"
+                                "func a() {}\n"
+                                "func b() {}\n",
+                                CBM_LANG_GO, "t", "x.go");
+    ASSERT_NOT_NULL(r2);
+    ASSERT_FALSE(r2->has_error);
+    int seen = 0;
+    for (int i = 0; i < r2->defs.count; i++) {
+        const CBMDefinition *d = &r2->defs.items[i];
+        if (!d->name || strcmp(d->name, "init") != 0) {
+            continue;
+        }
+        seen++;
+        if (seen == 1) {
+            ASSERT_STR_EQ(d->qualified_name, "t.init#x.go:1");
+        } else {
+            ASSERT_STR_EQ(d->qualified_name, "t.init#x.go:2");
+        }
+    }
+    ASSERT_EQ(seen, 2);
+    cbm_free_result(r2);
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(extract_python_member_call_flags_is_method) {
     CBMFileResult *r = extract("from pkg import helper\n"
                                "import tools as toolkit\n"
@@ -11818,6 +11893,7 @@ SUITE(extraction) {
     RUN_TEST(extract_go_method_receiver_qualified_qn);
     RUN_TEST(extract_go_method_qn_matches_call_scope);
     RUN_TEST(extract_templ_method_qn_matches_call_scope);
+    RUN_TEST(extract_go_multiple_init_disambiguated);
     RUN_TEST(extract_python_bare_call_flags_locally_bound_callee);
     RUN_TEST(extract_python_bare_call_flag_is_depth_independent);
 

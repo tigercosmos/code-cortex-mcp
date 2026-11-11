@@ -1572,7 +1572,9 @@ static void process_function(GoLSPContext* ctx, TSNode func_node) {
     // resolver. Since receiver-qualified Go method QNs (upstream #1909) that
     // shared form is package_qn.ReceiverType.method for methods (the
     // ONE-formula contract: cbm_go_receiver_type_name) and package_qn.func for
-    // functions.
+    // functions. A package may hold any number of init() functions, so each
+    // one is package_qn.init#<file>:<N> (upstream #1910, cbm_go_init_qn -- the
+    // same formula); without rel_path the init caller stays flat.
     ctx->enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->package_qn, func_name);
     if (strcmp(ts_node_type(func_node), "method_declaration") == 0) {
         TSNode recv = ts_node_child_by_field_name(func_node, "receiver", 8);
@@ -1583,6 +1585,9 @@ static void process_function(GoLSPContext* ctx, TSNode func_node) {
                                                            recv_type, func_name);
             }
         }
+    } else if (strcmp(func_name, "init") == 0) {
+        ctx->enclosing_func_qn = cbm_go_init_qn(ctx->arena, ctx->enclosing_func_qn, ctx->rel_path,
+                                                func_node, ctx->source);
     }
 
     // Push function scope
@@ -1764,8 +1769,8 @@ const CBMType* cbm_parse_return_type_text(CBMArena* a, const char* text, const c
 
 // --- Entry point: build registry from file defs + run LSP ---
 
-void cbm_run_go_lsp(CBMArena* arena, CBMFileResult* result,
-    const char* source, int source_len, TSNode root) {
+void cbm_run_go_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
+                    TSNode root, const char *rel_path) {
 
     CBMTypeRegistry reg;
     cbm_registry_init(&reg, arena);
@@ -2076,6 +2081,7 @@ void cbm_run_go_lsp(CBMArena* arena, CBMFileResult* result,
     // Phase 2: Build LSP context and run
     GoLSPContext lsp_ctx;
     go_lsp_init(&lsp_ctx, arena, source, source_len, &reg, module_qn, &result->resolved_calls);
+    lsp_ctx.rel_path = rel_path;
 
     // Add imports
     for (int i = 0; i < result->imports.count; i++) {
@@ -2567,15 +2573,10 @@ static void extract_type_params_from_ast(CBMArena* arena, CBMTypeRegistry* reg,
 // Forward: tree-sitter Go language (from lang_specs.c)
 extern "C" { extern const TSLanguage* tree_sitter_go(void); }
 
-void cbm_run_go_lsp_cross(
-    CBMArena* arena,
-    const char* source, int source_len,
-    const char* module_qn,
-    CBMLSPDef* defs, int def_count,
-    const char** import_names, const char** import_qns, int import_count,
-    TSTree* cached_tree,
-    CBMResolvedCallArray* out)
-{
+void cbm_run_go_lsp_cross(CBMArena *arena, const char *source, int source_len,
+                          const char *module_qn, const char *rel_path, CBMLSPDef *defs,
+                          int def_count, const char **import_names, const char **import_qns,
+                          int import_count, TSTree *cached_tree, CBMResolvedCallArray *out) {
     if (!source || source_len <= 0) return;
 
     // 1. Use cached tree if available, otherwise parse fresh
@@ -2812,6 +2813,7 @@ void cbm_run_go_lsp_cross(
     // 4. Build LSP context and run
     GoLSPContext ctx;
     go_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, out);
+    ctx.rel_path = rel_path;
 
     for (int i = 0; i < import_count; i++) {
         if (import_names[i] && import_qns[i]) {
@@ -2925,14 +2927,11 @@ CBMTypeRegistry* cbm_go_build_cross_registry(
     return reg;
 }
 
-void cbm_run_go_lsp_cross_with_registry(
-    CBMArena* arena,
-    const char* source, int source_len,
-    const char* module_qn,
-    CBMTypeRegistry* reg,
-    const char** import_names, const char** import_qns, int import_count,
-    TSTree* cached_tree,
-    CBMResolvedCallArray* out) {
+void cbm_run_go_lsp_cross_with_registry(CBMArena *arena, const char *source, int source_len,
+                                        const char *module_qn, const char *rel_path,
+                                        CBMTypeRegistry *reg, const char **import_names,
+                                        const char **import_qns, int import_count,
+                                        TSTree *cached_tree, CBMResolvedCallArray *out) {
     if (!source || source_len <= 0 || !reg) return;
 
     TSParser* parser = NULL;
@@ -2953,6 +2952,7 @@ void cbm_run_go_lsp_cross_with_registry(
 
     GoLSPContext ctx;
     go_lsp_init(&ctx, arena, source, source_len, reg, module_qn, out);
+    ctx.rel_path = rel_path;
     for (int i = 0; i < import_count; i++) {
         if (import_names[i] && import_qns[i]) {
             go_lsp_add_import(&ctx, import_names[i], import_qns[i]);
@@ -3088,14 +3088,9 @@ void cbm_batch_go_lsp_cross(
         memset(&file_out, 0, sizeof(file_out));
 
         // Delegate to existing per-file function
-        cbm_run_go_lsp_cross(
-            &file_arena,
-            file->source, file->source_len,
-            file->module_qn,
-            file->defs, file->def_count,
-            file->import_names, file->import_qns, file->import_count,
-            file->cached_tree,
-            &file_out);
+        cbm_run_go_lsp_cross(&file_arena, file->source, file->source_len, file->module_qn,
+                             file->rel_path, file->defs, file->def_count, file->import_names,
+                             file->import_qns, file->import_count, file->cached_tree, &file_out);
 
         // Copy results to output arena (must outlive per-file arena)
         if (file_out.count > 0) {

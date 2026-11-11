@@ -172,9 +172,12 @@ const struct CBMCargoManifest *cbm_pxc_get_rust_manifest(void);
  * owns source, module_qn, defs, imp_names, imp_qns.
  * NOTE: defs is read-only in practice but typed non-const to match
  * the existing cbm_run_X_lsp_cross callee signatures. */
+/* rel_path: the file's repo-relative path. Go needs it to name the file's
+ * init() functions as the def extractor does (upstream #1910); NULL leaves Go
+ * init() callers flat. */
 void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int source_len,
-                     const char *module_qn, CBMLSPDef *defs, int def_count, const char **imp_names,
-                     const char **imp_qns, int imp_count);
+                     const char *module_qn, const char *rel_path, CBMLSPDef *defs, int def_count,
+                     const char **imp_names, const char **imp_qns, int imp_count);
 
 /* TS / JS / JSX / TSX variant with explicit dialect flags. */
 void cbm_pxc_run_one_ts(CBMFileResult *r, const char *source, int source_len, const char *module_qn,

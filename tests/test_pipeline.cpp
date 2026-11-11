@@ -10585,6 +10585,294 @@ static const char *const k_cs_fth_bodies[] = {
 static int named_edge_strategy_count(cbm_store_t *s, const char *project, const char *type,
                                      const char *src, const char *tgt, const char *strategy);
 
+/* Edges of `edge_type` whose source and target QNs end in the given suffixes. */
+static int edges_by_qn_suffix(cbm_store_t *s, const char *project, const char *edge_type,
+                              const char *caller_suffix, const char *callee_suffix) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    cbm_store_find_edges_by_type(s, project, edge_type, &edges, &edge_count);
+    size_t cs = strlen(caller_suffix);
+    size_t ts = strlen(callee_suffix);
+    int hits = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t src = {0};
+        cbm_node_t tgt = {0};
+        if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
+            cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK &&
+            src.qualified_name && tgt.qualified_name) {
+            size_t sl = strlen(src.qualified_name);
+            size_t tl = strlen(tgt.qualified_name);
+            if (sl >= cs && tl >= ts && strcmp(src.qualified_name + sl - cs, caller_suffix) == 0 &&
+                strcmp(tgt.qualified_name + tl - ts, callee_suffix) == 0) {
+                hits++;
+            }
+        }
+        cbm_node_free_fields(&src);
+        cbm_node_free_fields(&tgt);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return hits;
+}
+
+/* Upstream #1910 (adff62e7): two files, one package, one init() each. On the
+ * flat QN both collapsed onto one node. */
+static const char *const k_go_multi_init_names[] = {"go.mod", "reg/a.go", "reg/b.go"};
+static const char *const k_go_multi_init_bodies[] = {
+    "module example.com/reg\n\ngo 1.22\n",
+    ("package reg\n\nvar handlers = map[string]func(){}\n\n"
+     "func init() { handlers[\"a\"] = handleA }\n\nfunc handleA() {}\n"),
+    "package reg\n\nfunc init() { handlers[\"b\"] = handleB }\n\nfunc handleB() {}\n"};
+
+TEST(pipeline_go_multi_init_nodes_survive) {
+    char db[512];
+    cbm_pipeline_t *p = index_fixture_with_padding(k_go_multi_init_names, k_go_multi_init_bodies, 3,
+                                                   0, db, sizeof(db));
+    ASSERT_NOT_NULL(p);
+    cbm_store_t *s = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(s);
+    int inits = count_nodes_named_in(s, cbm_pipeline_project_name(p), "init");
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    ASSERT_EQ(inits, 2);
+    PASS();
+}
+
+/* Upstream 6e784c38: three init() in two files of one package (two in b.go,
+ * so the per-file ordinal is pinned too), each calling a method only the Go
+ * LSP can bind: the receiver's type comes from a constructor in another file,
+ * and the method name also exists on a second package type and on
+ * other.Decoy. The fork has no CALL_REFERENCE edge, so upstream's
+ * `add("a", handleA)` reference assertion is dropped. */
+static const char *const k_go_init_lsp_names[] = {"go.mod",   "reg/codec.go", "reg/store.go",
+                                                  "reg/a.go", "reg/b.go",     "other/other.go"};
+static const char *const k_go_init_lsp_bodies[] = {
+    "module example.com/fxinit\n\ngo 1.22\n",
+    "package reg\n\ntype Codec struct{ n int }\n\n"
+    "func NewCodec() *Codec { return &Codec{} }\n\n"
+    "func (c *Codec) register() { c.n++ }\n",
+    "package reg\n\ntype Store struct{ open bool }\n\n"
+    "func NewStore() *Store { return &Store{} }\n\n"
+    "func (s *Store) register() { s.open = true }\n\nfunc (s *Store) warm() {}\n",
+    "package reg\n\nvar handlers = map[string]func(){}\n\nfunc handleA() {}\n\n"
+    "func add(name string, fn func()) { handlers[name] = fn }\n\n"
+    "func init() {\n\tc := NewCodec()\n\tc.register()\n\tadd(\"a\", handleA)\n}\n",
+    "package reg\n\nfunc init() {\n\ts := NewStore()\n\ts.register()\n}\n\n"
+    "func init() {\n\ts := NewStore()\n\ts.warm()\n}\n",
+    "package other\n\ntype Decoy struct{}\n\nfunc (d *Decoy) register() {}\n\n"
+    "func (d *Decoy) warm() {}\n"};
+
+/* 0 = each init's LSP-resolved edges start at its own node, no cross-wiring
+ * and nothing onto the decoy; <0 names the failed check. */
+static int go_init_lsp_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p = index_fixture_with_padding(k_go_init_lsp_names, k_go_init_lsp_bodies, 6,
+                                                   pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -99;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -98;
+    if (s) {
+        const char *lsp = "\"strategy\":\"lsp_";
+        rc = 0;
+        if (calls_by_qn_suffix(s, proj, ".reg.init#a.go:1", ".reg.Codec.register", lsp) < 1)
+            rc = -1;
+        else if (calls_by_qn_suffix(s, proj, ".reg.init#b.go:1", ".reg.Store.register", lsp) < 1)
+            rc = -2;
+        else if (calls_by_qn_suffix(s, proj, ".reg.init#b.go:2", ".reg.Store.warm", lsp) < 1)
+            rc = -3;
+        else if (calls_by_qn_suffix(s, proj, ".reg.init#a.go:1", ".reg.Store.register", NULL) +
+                     calls_by_qn_suffix(s, proj, ".reg.init#b.go:1", ".reg.Codec.register", NULL) +
+                     calls_by_qn_suffix(s, proj, ".reg.init#b.go:2", ".reg.Store.register", NULL) !=
+                 0)
+            rc = -4;
+        else if (calls_by_qn_suffix(s, proj, ".reg.init#a.go:1", ".other.Decoy.register", NULL) +
+                     calls_by_qn_suffix(s, proj, ".reg.init#b.go:1", ".other.Decoy.register",
+                                        NULL) +
+                     calls_by_qn_suffix(s, proj, ".reg.init#b.go:2", ".other.Decoy.warm", NULL) !=
+                 0)
+            rc = -5;
+        cbm_store_close(s);
+    }
+    printf("  go init lsp probe pad=%d: rc=%d\n", pad, rc);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+TEST(pipeline_go_init_lsp_edges_per_file) {
+    ASSERT_EQ(go_init_lsp_probe(0), 0);
+    PASS();
+}
+
+TEST(pipeline_go_init_lsp_edges_per_file_parallel) {
+    ASSERT_EQ(go_init_lsp_probe(52), 0);
+    PASS();
+}
+
+/* With no shared Go registry (the incremental route can pass NULL
+ * cross_registries) the dispatch takes the per-file fallback, which must name
+ * each init() caller from the file path exactly as the def extractor does. */
+TEST(pipeline_go_init_dispatch_fallback_names_init_caller) {
+    const char *source = "package reg\n\n"
+                         "func init() {\n\tc := NewCodec()\n\tc.Register()\n}\n\n"
+                         "func init() {\n\tc := NewCodec()\n\tc.Register()\n}\n";
+    CBMLSPDef defs[3] = {};
+    defs[0].qualified_name = "test.reg.NewCodec";
+    defs[0].short_name = "NewCodec";
+    defs[0].label = "Function";
+    defs[0].def_module_qn = "test.reg";
+    defs[0].return_types = "*Codec";
+    defs[0].lang = CBM_LANG_GO;
+    defs[1].qualified_name = "test.reg.Codec";
+    defs[1].short_name = "Codec";
+    defs[1].label = "Class";
+    defs[1].def_module_qn = "test.reg";
+    defs[1].lang = CBM_LANG_GO;
+    defs[2].qualified_name = "test.reg.Codec.Register";
+    defs[2].short_name = "Register";
+    defs[2].label = "Method";
+    defs[2].def_module_qn = "test.reg";
+    defs[2].receiver_type = "test.reg.Codec";
+    defs[2].lang = CBM_LANG_GO;
+    CBMFileResult result = {};
+    cbm_arena_init(&result.arena);
+    cbm_pxc_dispatch_file(CBM_LANG_GO, &result, source, (int)strlen(source), "reg/b.go", "test.reg",
+                          NULL, NULL, defs, 3, NULL, NULL, 0, NULL, NULL);
+    int first = 0;
+    int second = 0;
+    for (int i = 0; i < result.resolved_calls.count; i++) {
+        const CBMResolvedCall *rc = &result.resolved_calls.items[i];
+        if (!rc->caller_qn || !rc->callee_qn || rc->confidence <= 0 ||
+            strcmp(rc->callee_qn, "test.reg.Codec.Register") != 0) {
+            continue;
+        }
+        first += strcmp(rc->caller_qn, "test.reg.init#b.go:1") == 0;
+        second += strcmp(rc->caller_qn, "test.reg.init#b.go:2") == 0;
+    }
+    cbm_arena_destroy(&result.arena);
+    ASSERT_EQ(first, 1);
+    ASSERT_EQ(second, 1);
+    PASS();
+}
+
+/* Upstream 4a78fe6a fixture: a local closure `init := func(ctx)` that is
+ * called, written and passed by value, a parameter named init, and a
+ * `package init` directory. The decoys are a package init in the caller's own
+ * package and an unrelated Watcher.init method. Watcher.Start and Boot call
+ * that method through a selector, the control that must keep resolving. */
+static const char *const k_go_bare_init_names[] = {"go.mod", "suites/suite.go",
+                                                   "watcher/watcher.go", "boot/init/init.go"};
+static const char *const k_go_bare_init_bodies[] = {
+    "module example.com/fxbareinit\n\ngo 1.22\n",
+    "package suites\n\nimport \"context\"\n\nvar registered []string\n\n"
+    "func init() { registered = append(registered, \"volumes\") }\n\n"
+    "func wrap(fn func(context.Context)) { _ = fn }\n\n"
+    "func DefineTests(ctx context.Context) {\n\tinit := func(ctx context.Context) {\n"
+    "\t\t_ = ctx\n\t}\n\tinit(ctx)\n\twrap(init)\n}\n\n"
+    "func Sum(init func() int) int {\n\treturn init()\n}\n",
+    "package watcher\n\ntype Watcher struct{ ready bool }\n\n"
+    "func NewWatcher() *Watcher { return &Watcher{} }\n\n"
+    "func (w *Watcher) init() { w.ready = true }\n\n"
+    "func (w *Watcher) Start() {\n\tw.init()\n}\n\n"
+    "func Boot() {\n\tw := NewWatcher()\n\tw.init()\n}\n",
+    ("// Package init installs defaults for its importers.\npackage init\n\n"
+     "func init() { setup() }\n\nfunc setup() {}\n")};
+
+static bool bare_init_qn_ends_with(const char *qn, const char *suffix) {
+    size_t ql = strlen(qn);
+    size_t sl = strlen(suffix);
+    return ql >= sl && strcmp(qn + ql - sl, suffix) == 0;
+}
+
+/* Resolver edges into any node named `init` whose source is not one of the
+ * two selector controls: every such edge binds a bare `init`. */
+static int go_bare_init_false_edges(cbm_store_t *s, const char *project) {
+    static const char *const types[] = {"CALLS", "USAGE", "WRITES", "READS"};
+    int hits = 0;
+    for (size_t t = 0; t < sizeof(types) / sizeof(types[0]); t++) {
+        cbm_edge_t *edges = NULL;
+        int edge_count = 0;
+        cbm_store_find_edges_by_type(s, project, types[t], &edges, &edge_count);
+        for (int i = 0; i < edge_count; i++) {
+            cbm_node_t src = {0};
+            cbm_node_t tgt = {0};
+            if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
+                cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK &&
+                src.qualified_name && tgt.name && strcmp(tgt.name, "init") == 0 &&
+                !bare_init_qn_ends_with(src.qualified_name, ".watcher.Watcher.Start") &&
+                !bare_init_qn_ends_with(src.qualified_name, ".watcher.Boot")) {
+                printf("  bare init bound: %s %s -> %s\n", types[t], src.qualified_name,
+                       tgt.qualified_name ? tgt.qualified_name : "?");
+                hits++;
+            }
+            cbm_node_free_fields(&src);
+            cbm_node_free_fields(&tgt);
+        }
+        if (edges) {
+            cbm_store_free_edges(edges, edge_count);
+        }
+    }
+    return hits;
+}
+
+/* 0 = the decoys exist, no bare init binds anything, the selector controls
+ * keep their edges; <0 names the failed check. */
+static int go_bare_init_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p = index_fixture_with_padding(k_go_bare_init_names, k_go_bare_init_bodies, 4,
+                                                   pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -99;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -98;
+    if (s) {
+        cbm_node_t *inits = NULL;
+        int ic = 0;
+        cbm_store_find_nodes_by_name(s, proj, "init", &inits, &ic);
+        int functions = 0;
+        int methods = 0;
+        for (int i = 0; i < ic; i++) {
+            functions += inits[i].label && strcmp(inits[i].label, "Function") == 0;
+            methods += inits[i].label && strcmp(inits[i].label, "Method") == 0;
+        }
+        cbm_store_free_nodes(inits, ic);
+        rc = 0;
+        if (functions != 2 || methods != 1)
+            rc = -1;
+        else if (go_bare_init_false_edges(s, proj) != 0)
+            rc = -2;
+        else if (calls_by_qn_suffix(s, proj, ".watcher.Watcher.Start", ".watcher.Watcher.init",
+                                    NULL) < 1 ||
+                 calls_by_qn_suffix(s, proj, ".watcher.Boot", ".watcher.Watcher.init", NULL) < 1)
+            rc = -3;
+        printf("  go bare init probe pad=%d: functions=%d methods=%d rc=%d\n", pad, functions,
+               methods, rc);
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+TEST(pipeline_go_bare_init_binds_nothing) {
+    ASSERT_EQ(go_bare_init_probe(0), 0);
+    PASS();
+}
+
+TEST(pipeline_go_bare_init_binds_nothing_parallel) {
+    ASSERT_EQ(go_bare_init_probe(52), 0);
+    PASS();
+}
+
 /* Upstream #1909 (dbba7573, 87cafb9e): receiver-qualifying method QNs moves
  * the def/textual-call QN to package.Type.method, so go_lsp's
  * enclosing-function QN must move with it, or every LSP resolution sourced
@@ -14141,6 +14429,12 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_csharp_parallel_field_hint_requires_owner_segment);
     RUN_TEST(pipeline_go_method_caller_keeps_lsp_join);
     RUN_TEST(pipeline_go_method_caller_keeps_lsp_join_parallel);
+    RUN_TEST(pipeline_go_multi_init_nodes_survive);
+    RUN_TEST(pipeline_go_init_lsp_edges_per_file);
+    RUN_TEST(pipeline_go_init_lsp_edges_per_file_parallel);
+    RUN_TEST(pipeline_go_init_dispatch_fallback_names_init_caller);
+    RUN_TEST(pipeline_go_bare_init_binds_nothing);
+    RUN_TEST(pipeline_go_bare_init_binds_nothing_parallel);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

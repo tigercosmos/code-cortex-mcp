@@ -301,6 +301,12 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         if (cbm_suppress_ref_edge(lang, usage->is_member_access, tgt, &lang_memo)) {
             continue;
         }
+        /* A bare Go `init` names a local, never a package init or an init
+         * method (cbm_go_suppress_bare_init_bind). Mirrors pass_parallel.cpp. */
+        if (cbm_go_suppress_bare_init_bind(lang == CBM_LANG_GO, usage->is_member_access,
+                                           usage->ref_name, res.strategy, tgt->label)) {
+            continue;
+        }
 
         /* ref_name is sliced source text and can contain quotes/newlines —
          * escape it or the edge properties JSON is malformed. */
@@ -414,6 +420,13 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
          * Go or C reference never binds a struct field, though a selector-LHS write
          * (`t.err = x`) may. */
         if (cbm_suppress_ref_edge(lang, rw->is_member_access, tgt, &lang_memo)) {
+            continue;
+        }
+        /* `init := func(...)`: a bare Go `init` names a local, never a package
+         * init or an init method (cbm_go_suppress_bare_init_bind). Mirrors
+         * pass_parallel.cpp. */
+        if (cbm_go_suppress_bare_init_bind(lang == CBM_LANG_GO, rw->is_member_access, rw->var_name,
+                                           res.strategy, tgt->label)) {
             continue;
         }
 

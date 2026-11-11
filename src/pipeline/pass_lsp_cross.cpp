@@ -1166,8 +1166,8 @@ static CBMRustLSPDef *pxc_lspdefs_to_rust(CBMArena *arena, const CBMLSPDef *defs
  * 1100-file repo before this fix). Output gets copied into the file's own
  * arena and merged into result->resolved_calls. */
 void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int source_len,
-                     const char *module_qn, CBMLSPDef *defs, int def_count, const char **imp_names,
-                     const char **imp_qns, int imp_count) {
+                     const char *module_qn, const char *rel_path, CBMLSPDef *defs, int def_count,
+                     const char **imp_names, const char **imp_qns, int imp_count) {
     TSTree *tree = r->cached_tree; /* may be NULL — LSP re-parses then */
 
     CBMArena scratch;
@@ -1179,8 +1179,8 @@ void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int
 
     switch (lang) {
     case CBM_LANG_GO:
-        cbm_run_go_lsp_cross(&scratch, source, source_len, module_qn, defs, def_count, imp_names,
-                             imp_qns, imp_count, tree, &out);
+        cbm_run_go_lsp_cross(&scratch, source, source_len, module_qn, rel_path, defs, def_count,
+                             imp_names, imp_qns, imp_count, tree, &out);
         break;
     case CBM_LANG_C:
     case CBM_LANG_CPP:
@@ -1376,7 +1376,7 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
              * variant is read-only, so the sealed registry is safe for
              * parallel workers. */
             cbm_go_fast_resolve_qualified_calls(result, prebuilt, imp_keys, imp_vals, imp_count);
-            cbm_run_go_lsp_cross_with_registry(&result->arena, source, source_len, def_module,
+            cbm_run_go_lsp_cross_with_registry(&result->arena, source, source_len, def_module, rel,
                                                prebuilt, imp_keys, imp_vals, imp_count,
                                                result->cached_tree, &result->resolved_calls);
             used_prebuilt = true;
@@ -1502,8 +1502,8 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
                                                  &result->resolved_calls,
                                                  /*result=*/NULL);
         } else {
-            cbm_pxc_run_one(lang, result, source, source_len, def_module, file_defs, file_def_count,
-                            imp_keys, imp_vals, imp_count);
+            cbm_pxc_run_one(lang, result, source, source_len, def_module, rel, file_defs,
+                            file_def_count, imp_keys, imp_vals, imp_count);
         }
     } else if (lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX) {
         bool js;
@@ -1513,8 +1513,8 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         cbm_pxc_run_one_ts(result, source, source_len, def_module, file_defs, file_def_count,
                            imp_keys, imp_vals, imp_count, js, jsx, dts);
     } else {
-        cbm_pxc_run_one(lang, result, source, source_len, def_module, file_defs, file_def_count,
-                        imp_keys, imp_vals, imp_count);
+        cbm_pxc_run_one(lang, result, source, source_len, def_module, rel, file_defs,
+                        file_def_count, imp_keys, imp_vals, imp_count);
     }
     if (lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) {
         const char *marker =

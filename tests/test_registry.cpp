@@ -1320,6 +1320,44 @@ TEST(weak_call_guards_share_one_drop_list) {
     PASS();
 }
 
+TEST(go_bare_init_never_binds_init_namesake) {
+    /* Go cannot refer to a package init function, and a method or field
+     * named init needs a selector, so a bare `init` (a closure, a parameter,
+     * a `package init` clause) is always a local name (upstream 4a78fe6a).
+     * Every Go Function named init is a package init: refused for every
+     * registry strategy, same_module included. */
+    ASSERT_TRUE(cbm_go_suppress_bare_init_bind(true, false, "init", "same_module", "Function"));
+    ASSERT_TRUE(cbm_go_suppress_bare_init_bind(true, false, "init", "suffix_match", "Function"));
+    ASSERT_TRUE(cbm_go_suppress_bare_init_bind(true, false, "init", "import_map", "Function"));
+    ASSERT_TRUE(cbm_go_suppress_bare_init_bind(true, false, "init", NULL, "Function"));
+    /* A Method or Field namesake found by the name alone is refused. */
+    ASSERT_TRUE(cbm_go_suppress_bare_init_bind(true, false, "init", "suffix_match", "Method"));
+    ASSERT_TRUE(cbm_go_suppress_bare_init_bind(true, false, "init", "unique_name", "Method"));
+    ASSERT_TRUE(cbm_go_suppress_bare_init_bind(true, false, "init", "suffix_match", "Field"));
+    /* ... but not one that an import- or module-aware strategy produced. */
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "init", "same_module", "Method"));
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "init", "import_map", "Method"));
+    /* lsp_* answers are kept: the sequential resolver emits them before its
+     * registry guards run, so refusing one here would split the resolvers. */
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "init", "lsp_direct", "Function"));
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "init", "lsp_direct", "Method"));
+    /* The member half of a selector (`w.init()`, `e.init`) is not bare. */
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, true, "init", "suffix_match", "Method"));
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, true, "init", "suffix_match", "Field"));
+    /* Other names and other target kinds are untouched. */
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "initAll", "suffix_match", "Method"));
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "Init", "suffix_match", "Function"));
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "init", "suffix_match", "Variable"));
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "init", "suffix_match", "Module"));
+    /* Go only: elsewhere a bare `init()` is an ordinary call. */
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(false, false, "init", "suffix_match", "Method"));
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(false, false, "init", "same_module", "Function"));
+    /* Degenerate input: nothing to judge. */
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, NULL, "suffix_match", "Function"));
+    ASSERT_FALSE(cbm_go_suppress_bare_init_bind(true, false, "init", "suffix_match", NULL));
+    PASS();
+}
+
 TEST(go_suppress_drops_weak_selector_matches) {
     /* Go selector call with an untyped receiver, landed via a receiver-blind
      * short-name strategy -> drop (same failure class as #592/#606).
@@ -1749,6 +1787,7 @@ SUITE(registry) {
     RUN_TEST(python_import_binding_contradicts_only_foreign_chains);
     RUN_TEST(python_external_base_contradicts_django_shapes);
     RUN_TEST(weak_call_guards_share_one_drop_list);
+    RUN_TEST(go_bare_init_never_binds_init_namesake);
     RUN_TEST(go_suppress_drops_weak_selector_matches);
     RUN_TEST(go_suppress_keeps_typed_and_import_aware_matches);
     RUN_TEST(weak_call_guard_owns_language_set);

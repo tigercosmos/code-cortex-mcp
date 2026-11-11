@@ -4299,7 +4299,7 @@ static CBMFileResult *extract_file_impl_body(const char *source, int source_len,
      * resolve -- cbm_pxc_dispatch_file makes the same check). */
     if (!result->lsp_skipped) {
         if (language == CBM_LANG_GO) {
-            cbm_run_go_lsp(la, result, source, source_len, root);
+            cbm_run_go_lsp(la, result, source, source_len, root, rel_path);
         }
         if (language == CBM_LANG_C || language == CBM_LANG_CPP || language == CBM_LANG_CUDA) {
             cbm_run_c_lsp(la, result, source, source_len, root, language != CBM_LANG_C);

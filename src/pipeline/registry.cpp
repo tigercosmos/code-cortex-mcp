@@ -693,6 +693,39 @@ bool cbm_go_suppress_weak_method_match(bool is_go, bool is_method, const char *s
     return confidence < CONF_UNIQUE_NAME;
 }
 
+bool cbm_go_suppress_bare_init_bind(bool is_go, bool is_member, const char *name,
+                                    const char *strategy, const char *target_label) {
+    /* Upstream 4a78fe6a. The Go spec gives `init` no binding in the package
+     * block: init functions "cannot be referred to from anywhere in a
+     * program", and a method or field named init is reached only through a
+     * selector (`x.init()`, `e.init`), which arrives here as is_member and is
+     * left alone. So a BARE `init` is always a local name: a closure
+     * (`init := func(ctx) {...}; init(ctx)`), a parameter, or the `package
+     * init` clause of a directory named init. None of them is a project node.
+     *
+     * Every Go Function named init is a package init, so that target is
+     * refused for every registry strategy (with per-file init QNs the old
+     * same_module bind misses, and the name fallback would pick an unrelated
+     * init). A Method or Field namesake is refused when only the name found
+     * it (the shared weak drop-list). lsp_* answers are untouched: the
+     * sequential resolver emits them before its registry guards run, so
+     * refusing one here would split the two resolvers. Go-gated: elsewhere
+     * `init` is an ordinary name. */
+    if (!is_go || is_member || !name || strcmp(name, "init") != 0 || !target_label) {
+        return false;
+    }
+    if (strategy && strncmp(strategy, "lsp_", strlen("lsp_")) == 0) {
+        return false;
+    }
+    if (strcmp(target_label, "Function") == 0) {
+        return true;
+    }
+    if (strcmp(target_label, "Method") == 0 || strcmp(target_label, "Field") == 0) {
+        return cbm_weak_short_name_strategy(strategy);
+    }
+    return false;
+}
+
 /* Bare-call counterpart of the member guard above. A Python call `foo()` whose
  * callee identifier is bound as a parameter of an enclosing scope cannot be the
  * module-level `foo`: the parameter shadows it for the whole body. Binding such

@@ -441,6 +441,17 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
 bool cbm_go_suppress_weak_method_match(bool is_go, bool is_method, const char *strategy,
                                        double confidence);
 
+/* A bare Go `init` (a call or reference that is not the member half of a
+ * selector) is always a local name: Go forbids referring to a package init
+ * function, and a method or field needs a selector. True when such a name
+ * resolved onto a Function (every Go Function named init is a package init;
+ * any registry strategy) or onto a Method or Field found by a weak short-name
+ * strategy. lsp_* answers are kept. Go only. Pure; unit-tested in
+ * test_registry.cpp; wired at the CALLS, USAGE and READS/WRITES seams of both
+ * resolvers (pass_calls.cpp, pass_usages.cpp, pass_parallel.cpp). */
+bool cbm_go_suppress_bare_init_bind(bool is_go, bool is_member, const char *name,
+                                    const char *strategy, const char *target_label);
+
 /* Bare-call counterpart of the guard above. True when a resolved BARE call edge
  * binds a callee that is shadowed by an enclosing parameter, and the match came
  * from a weak short-name strategy — so the edge is fabricated by construction

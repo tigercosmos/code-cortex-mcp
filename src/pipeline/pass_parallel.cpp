@@ -2877,6 +2877,13 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             }
             continue;
         }
+        if (target_node && source_node->id != target_node->id &&
+            cbm_go_suppress_bare_init_bind(lang == CBM_LANG_GO, call->is_method, call->callee_name,
+                                           res.strategy, target_node->label)) {
+            /* Same guard as pass_calls.cpp: a bare Go `init` is a local name,
+             * never a package init or a method found by name alone. */
+            continue;
+        }
         /* A textual resolution that landed on a struct Field: refused across
          * languages and for a bare C call; a C/C++ member call takes the Field
          * its object's type names, and with an untyped object only a member
@@ -3026,6 +3033,12 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (cbm_suppress_ref_edge(lang, usage->is_member_access, tgt, &lang_memo)) {
             continue;
         }
+        /* A bare Go `init` names a local (cbm_go_suppress_bare_init_bind).
+         * Mirrors the sequential twin (pass_usages.cpp). */
+        if (cbm_go_suppress_bare_init_bind(lang == CBM_LANG_GO, usage->is_member_access,
+                                           usage->ref_name, res.strategy, tgt->label)) {
+            continue;
+        }
         /* uprops must exceed the escaped value + wrapper (the sequential twin in
          * pass_usages.cpp already uses CBM_SZ_512): at CBM_SZ_256 a long
          * reference name cut the blob before its closing quote+brace. */
@@ -3131,6 +3144,12 @@ static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFi
          * though a selector-LHS write (`t.err = x`) may. Shared with
          * pass_usages.cpp resolve_rw_edges. */
         if (cbm_suppress_ref_edge(lang, rw->is_member_access, tgt, &lang_memo)) {
+            continue;
+        }
+        /* A bare Go `init` names a local (cbm_go_suppress_bare_init_bind).
+         * Mirrors the sequential twin (pass_usages.cpp). */
+        if (cbm_go_suppress_bare_init_bind(lang == CBM_LANG_GO, rw->is_member_access, rw->var_name,
+                                           res.strategy, tgt->label)) {
             continue;
         }
         const char *etype = rw->is_write ? "WRITES" : "READS";
