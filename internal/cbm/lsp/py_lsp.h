@@ -61,6 +61,15 @@ typedef struct {
     int source_len;
     const CBMTypeRegistry *registry;
     CBMScope *current_scope;
+    // Names that only a module-level `if TYPE_CHECKING:` imports (#1277):
+    // consulted by annotation resolution only, after the ordinary scope chain
+    // misses, so a runtime call through such a name never resolves. NULL when
+    // none.
+    CBMScope *annotation_scope;
+    // The file's extracted imports, whose type_checking_only flags decide
+    // which import-map names bind into annotation_scope instead of the module
+    // scope (py_lsp_bind_imports). NULL: every name binds at runtime.
+    const CBMImportArray *file_imports;
 
     // Import map: local_name -> module_qn (arena-allocated, NULL-terminated).
     // Built from CBMFileResult.imports.
@@ -202,12 +211,15 @@ const CBMType *cbm_py_lsp_test_eval(PyLSPContext *ctx, TSNode node);
 // Status variants distinguish memo/depth failure; bool wrappers report success.
 // Existing no-op/parser exits keep their previous behavior (COMPLETE).
 
+// file_imports: the file's extracted imports (NULL = none known); a name only
+// its annotation-only imports bind resolves annotations, never runtime calls.
 CBMLSPStatus cbm_run_py_lsp_cross_status(CBMArena *arena, const char *source, int source_len,
                                          const char *module_qn, CBMLSPDef *defs, int def_count,
                                          const char **import_names, const char **import_qns,
                                          int import_count,
                                          TSTree *cached_tree, // NULL = parse internally
-                                         CBMResolvedCallArray *out);
+                                         CBMResolvedCallArray *out,
+                                         const CBMImportArray *file_imports = NULL);
 
 bool cbm_run_py_lsp_cross(CBMArena *arena, const char *source, int source_len,
                           const char *module_qn, CBMLSPDef *defs, int def_count,
@@ -223,7 +235,7 @@ CBMLSPStatus cbm_run_py_lsp_cross_with_registry_status(
     CBMArena *arena, const char *source, int source_len, const char *module_qn,
     CBMTypeRegistry *reg, // pre-built, finalized, READ-ONLY
     const char **import_names, const char **import_qns, int import_count, TSTree *cached_tree,
-    CBMResolvedCallArray *out);
+    CBMResolvedCallArray *out, const CBMImportArray *file_imports = NULL);
 
 bool cbm_run_py_lsp_cross_with_registry(CBMArena *arena, const char *source, int source_len,
                                         const char *module_qn,

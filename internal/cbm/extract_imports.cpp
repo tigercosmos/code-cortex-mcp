@@ -317,6 +317,139 @@ static void process_py_import_from(CBMExtractCtx *ctx, TSNode node) {
     }
 }
 
+/* `TYPE_CHECKING` or `<module>.TYPE_CHECKING` (typing.TYPE_CHECKING, t.TYPE_CHECKING). */
+static bool py_is_type_checking_condition(CBMExtractCtx *ctx, TSNode cond) {
+    if (ts_node_is_null(cond)) {
+        return false;
+    }
+    TSNode name = cond;
+    if (strcmp(ts_node_type(cond), "attribute") == 0) {
+        name = ts_node_child_by_field_name(cond, TS_FIELD("attribute"));
+    }
+    if (ts_node_is_null(name) || strcmp(ts_node_type(name), "identifier") != 0) {
+        return false;
+    }
+    const char *text = cbm_node_text(ctx->arena, name, ctx->source);
+    return text && strcmp(text, "TYPE_CHECKING") == 0;
+}
+
+/* One import statement; `type_only` flags every import it records. */
+static void process_py_import_node(CBMExtractCtx *ctx, TSNode node, bool type_only) {
+    const char *kind = ts_node_type(node);
+    int before = ctx->result->imports.count;
+    if (strcmp(kind, "import_statement") == 0) {
+        process_py_import_stmt(ctx, node);
+    } else if (strcmp(kind, "import_from_statement") == 0 ||
+               strcmp(kind, "future_import_statement") == 0) {
+        // `from __future__ import annotations` is a distinct node type in
+        // tree-sitter-python but has the same shape (module + name list).
+        process_py_import_from(ctx, node);
+    }
+    for (int i = before; type_only && i < ctx->result->imports.count; i++) {
+        ctx->result->imports.items[i].type_checking_only = true;
+    }
+}
+
+static bool py_is_import_node(TSNode node) {
+    const char *kind = ts_node_type(node);
+    return strcmp(kind, "import_statement") == 0 || strcmp(kind, "import_from_statement") == 0 ||
+           strcmp(kind, "future_import_statement") == 0;
+}
+
+static bool py_import_is_wildcard(TSNode import_node) {
+    uint32_t n = ts_node_child_count(import_node);
+    for (uint32_t i = 0; i < n; i++) {
+        if (strcmp(ts_node_type(ts_node_child(import_node, i)), "wildcard_import") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Records, unflagged, every import statement anywhere under `root` (the
+ * runtime alternative of a TYPE_CHECKING block usually nests them in
+ * try/except ImportError). An iterative pre-order walk: adversarially deep
+ * nesting must not exhaust the stack. Returns true when one of them is a star
+ * import. */
+static bool py_record_subtree_imports(CBMExtractCtx *ctx, TSNode root) {
+    bool star = false;
+    TSTreeCursor cursor = ts_tree_cursor_new(root);
+    for (;;) {
+        TSNode node = ts_tree_cursor_current_node(&cursor);
+        bool is_import = py_is_import_node(node);
+        if (is_import) {
+            process_py_import_node(ctx, node, false);
+            star = star || py_import_is_wildcard(node);
+        }
+        if (!is_import && ts_tree_cursor_goto_first_child(&cursor)) {
+            continue;
+        }
+        while (!ts_tree_cursor_goto_next_sibling(&cursor)) {
+            if (!ts_tree_cursor_goto_parent(&cursor)) {
+                ts_tree_cursor_delete(&cursor);
+                return star;
+            }
+        }
+    }
+}
+
+/* Drops the imports [first, mark) whose local name an import at [mark, count)
+ * binds as well (every one when `star`), then the imports [mark, count). */
+static void py_drop_rebound_imports(CBMImportArray *imports, int first, int mark, bool star) {
+    int keep = first;
+    for (int i = first; i < mark; i++) {
+        const CBMImport *imp = &imports->items[i];
+        bool rebound = star;
+        for (int j = mark; !rebound && j < imports->count; j++) {
+            rebound = imp->local_name && imports->items[j].local_name &&
+                      strcmp(imp->local_name, imports->items[j].local_name) == 0;
+        }
+        if (!rebound) {
+            imports->items[keep++] = *imp;
+        }
+    }
+    imports->count = keep;
+}
+
+/* A module-level `if TYPE_CHECKING:` holds imports a type checker sees and
+ * the interpreter never runs (#1277: an annotated field's type is usually
+ * imported exactly there, to avoid an import cycle). Record the imports of
+ * its consequence block, flagged type_checking_only. Its elif/else branches
+ * are runtime alternatives and stay unrecorded, as every other compound
+ * statement's imports do; a name they bind again (the compat shape: the same
+ * name imported in `else:` under try/except ImportError) is bound at runtime,
+ * so its TYPE_CHECKING import is no annotation-only import and is dropped as
+ * well, and a star import there may bind any name. */
+static void process_py_type_checking_block(CBMExtractCtx *ctx, TSNode if_node) {
+    if (!py_is_type_checking_condition(
+            ctx, ts_node_child_by_field_name(if_node, TS_FIELD("condition")))) {
+        return;
+    }
+    TSNode body = ts_node_child_by_field_name(if_node, TS_FIELD("consequence"));
+    if (ts_node_is_null(body)) {
+        return;
+    }
+    int first = ctx->result->imports.count;
+    TSTreeCursor cursor = ts_tree_cursor_new(body);
+    if (ts_tree_cursor_goto_first_child(&cursor)) {
+        do {
+            process_py_import_node(ctx, ts_tree_cursor_current_node(&cursor), true);
+        } while (ts_tree_cursor_goto_next_sibling(&cursor));
+    }
+    ts_tree_cursor_delete(&cursor);
+    int mark = ctx->result->imports.count;
+    bool star = false;
+    uint32_t n = ts_node_child_count(if_node);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode alt = ts_node_child(if_node, i);
+        const char *kind = ts_node_type(alt);
+        if (strcmp(kind, "elif_clause") == 0 || strcmp(kind, "else_clause") == 0) {
+            star = py_record_subtree_imports(ctx, alt) || star;
+        }
+    }
+    py_drop_rebound_imports(&ctx->result->imports, first, mark, star);
+}
+
 static void parse_python_imports(CBMExtractCtx *ctx) {
     TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
     if (!ts_tree_cursor_goto_first_child(&cursor)) {
@@ -325,15 +458,10 @@ static void parse_python_imports(CBMExtractCtx *ctx) {
     }
     do {
         TSNode node = ts_tree_cursor_current_node(&cursor);
-        const char *kind = ts_node_type(node);
-
-        if (strcmp(kind, "import_statement") == 0) {
-            process_py_import_stmt(ctx, node);
-        } else if (strcmp(kind, "import_from_statement") == 0 ||
-                   strcmp(kind, "future_import_statement") == 0) {
-            // `from __future__ import annotations` is a distinct node type in
-            // tree-sitter-python but has the same shape (module + name list).
-            process_py_import_from(ctx, node);
+        if (strcmp(ts_node_type(node), "if_statement") == 0) {
+            process_py_type_checking_block(ctx, node);
+        } else {
+            process_py_import_node(ctx, node, false);
         }
     } while (ts_tree_cursor_goto_next_sibling(&cursor));
     ts_tree_cursor_delete(&cursor);

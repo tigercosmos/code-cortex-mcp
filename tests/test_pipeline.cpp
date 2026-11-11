@@ -2792,8 +2792,10 @@ TEST(pipeline_python_init_scope_parallel) {
 /* #1277: typed instance fields of a Python class imported from another file.
  * Counts CALLS edges caller -> callee (QN suffixes) whose properties name an
  * LSP strategy. */
-static int count_lsp_calls(cbm_store_t *s, const char *project, const char *caller_suffix,
-                           const char *callee_suffix) {
+/* CALLS edges whose caller/callee QNs end in the given suffixes and whose
+ * properties contain `fragment`. */
+static int count_calls_with(cbm_store_t *s, const char *project, const char *caller_suffix,
+                            const char *callee_suffix, const char *fragment) {
     cbm_edge_t *edges = NULL;
     int edge_count = 0;
     cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &edge_count);
@@ -2809,7 +2811,7 @@ static int count_lsp_calls(cbm_store_t *s, const char *project, const char *call
             size_t ts = strlen(callee_suffix);
             if (sl >= cs && tl >= ts && strcmp(src.qualified_name + sl - cs, caller_suffix) == 0 &&
                 strcmp(tgt.qualified_name + tl - ts, callee_suffix) == 0 &&
-                edges[i].properties_json && strstr(edges[i].properties_json, "lsp")) {
+                edges[i].properties_json && strstr(edges[i].properties_json, fragment)) {
                 hits++;
             }
         }
@@ -2819,6 +2821,11 @@ static int count_lsp_calls(cbm_store_t *s, const char *project, const char *call
     if (edges)
         cbm_store_free_edges(edges, edge_count);
     return hits;
+}
+
+static int count_lsp_calls(cbm_store_t *s, const char *project, const char *caller_suffix,
+                           const char *callee_suffix) {
+    return count_calls_with(s, project, caller_suffix, callee_suffix, "lsp");
 }
 
 static int check_python_crossfile_typed_field_calls_issue1277(bool parallel) {
@@ -3043,6 +3050,110 @@ TEST(python_dotted_base_inheritance) {
 
 TEST(python_dotted_base_inheritance_parallel) {
     return check_python_dotted_base_inheritance(true);
+}
+
+/* #1277, second half: the reporter's chain with both annotation imports
+ * under `if TYPE_CHECKING:` (the usual shape when the import would cycle).
+ * trainer.strategies is typed through a TYPE_CHECKING import of Contract, and
+ * run()'s parameter through a typing.TYPE_CHECKING import of Trainer; the call
+ * resolves by the LSP exactly as with runtime imports. A runtime call through
+ * a TYPE_CHECKING-only name cannot happen: it gets no CALLS edge at all. */
+static int check_python_type_checking_typed_field_issue1277(bool parallel) {
+    const char *contracts = "class Contract:\n"
+                            "    def process_batch(self) -> None:\n"
+                            "        ...\n";
+    const char *trainer = "from __future__ import annotations\n"
+                          "from typing import TYPE_CHECKING\n\n"
+                          "if TYPE_CHECKING:\n"
+                          "    from contracts import Contract\n\n"
+                          "class Trainer:\n"
+                          "    def __init__(self, strategies: Contract) -> None:\n"
+                          "        self.strategies = strategies\n";
+    const char *loop = "from __future__ import annotations\n"
+                       "import typing\n\n"
+                       "if typing.TYPE_CHECKING:\n"
+                       "    from trainer import Trainer\n\n"
+                       "def run(trainer: Trainer) -> None:\n"
+                       "    trainer.strategies.process_batch()\n\n"
+                       "def bad():\n"
+                       "    return Trainer()\n";
+    if (setup_usages_repo("contracts.py", contracts, "trainer.py", trainer) != 0) {
+        FAIL("failed to create temp dir");
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/loop.py", g_usages_tmpdir);
+    if (th_write_file(path, loop) != 0) {
+        teardown_usages_repo();
+        FAIL("failed to write loop.py");
+    }
+    if (parallel) {
+        for (int i = 0; i < 50; i++) {
+            snprintf(path, sizeof(path), "%s/tc_pad_%02d.py", g_usages_tmpdir, i);
+            if (th_write_file(path, "tc_padding = 0\n") != 0) {
+                teardown_usages_repo();
+                FAIL("failed to write parallel-selection fixture");
+            }
+        }
+    }
+
+    const char *old_workers = getenv("CBM_WORKERS");
+    char *saved_workers = old_workers ? strdup(old_workers) : NULL;
+    const char *old_single = getenv("CBM_INDEX_SINGLE_THREAD");
+    char *saved_single = old_single ? strdup(old_single) : NULL;
+    if ((old_workers && !saved_workers) || (old_single && !saved_single)) {
+        free(saved_workers);
+        free(saved_single);
+        teardown_usages_repo();
+        FAIL("failed to save pipeline environment");
+    }
+    int pin_workers_rc = parallel ? cbm_setenv("CBM_WORKERS", "4", 1) : 0;
+    int pin_single_rc = parallel ? cbm_unsetenv("CBM_INDEX_SINGLE_THREAD") : 0;
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/test_1277_tc.db", g_usages_tmpdir);
+    cbm_pipeline_t *p = pin_workers_rc == 0 && pin_single_rc == 0
+                            ? cbm_pipeline_new(g_usages_tmpdir, db_path, CBM_MODE_FULL)
+                            : NULL;
+    int run_rc = p ? cbm_pipeline_run(p) : -1;
+    cbm_store_t *s = run_rc == 0 ? cbm_store_open_path(db_path) : NULL;
+    bool store_opened = s != NULL;
+    int via_field = -1, runtime_import = -1, runtime_lsp = -1;
+    if (s) {
+        const char *project = cbm_pipeline_project_name(p);
+        via_field = count_lsp_calls(s, project, "loop.run", "contracts.Contract.process_batch");
+        runtime_import = count_calls_with(s, project, "loop.bad", "trainer.Trainer",
+                                          "\"strategy\":\"import_map");
+        runtime_lsp = count_lsp_calls(s, project, "loop.bad", "trainer.Trainer");
+        cbm_store_close(s);
+    }
+
+    cbm_pipeline_free(p);
+    int restore_workers_rc =
+        saved_workers ? cbm_setenv("CBM_WORKERS", saved_workers, 1) : cbm_unsetenv("CBM_WORKERS");
+    int restore_single_rc = saved_single ? cbm_setenv("CBM_INDEX_SINGLE_THREAD", saved_single, 1)
+                                         : cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    free(saved_workers);
+    free(saved_single);
+    teardown_usages_repo();
+
+    ASSERT_EQ(pin_workers_rc, 0);
+    ASSERT_EQ(pin_single_rc, 0);
+    ASSERT_EQ(restore_workers_rc, 0);
+    ASSERT_EQ(restore_single_rc, 0);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_TRUE(store_opened);
+    ASSERT_EQ(via_field, 1);      /* annotation through TYPE_CHECKING imports */
+    ASSERT_EQ(runtime_import, 0); /* control: no CALLS import map binds the name */
+    ASSERT_EQ(runtime_lsp, 0);    /* control: the LSP binds it for annotations only */
+    PASS();
+}
+
+TEST(python_type_checking_typed_field_issue1277) {
+    return check_python_type_checking_typed_field_issue1277(false);
+}
+
+TEST(python_type_checking_typed_field_issue1277_parallel) {
+    return check_python_type_checking_typed_field_issue1277(true);
 }
 
 /* Bind the external-import veto specifically to #1277's typed-field fold.
@@ -17139,6 +17250,8 @@ SUITE(pipeline) {
     RUN_TEST(python_crossfile_typed_field_calls_issue1277_parallel);
     RUN_TEST(python_dotted_base_inheritance);
     RUN_TEST(python_dotted_base_inheritance_parallel);
+    RUN_TEST(python_type_checking_typed_field_issue1277);
+    RUN_TEST(python_type_checking_typed_field_issue1277_parallel);
     RUN_TEST(python_typed_field_external_import_stays_unresolved);
     RUN_TEST(python_typed_field_project_class_resolves);
     RUN_TEST(usages_creates_edges);

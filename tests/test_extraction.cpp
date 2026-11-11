@@ -4215,6 +4215,82 @@ TEST(python_package_relative_import_paths) {
     PASS();
 }
 
+/* #1277: the import an annotated field's type comes from usually sits under
+ * `if TYPE_CHECKING:`. It is recorded, flagged annotation-only; a runtime
+ * import is not flagged; an else branch (a runtime alternative) and an
+ * ordinary `if` stay unrecorded as before. */
+static const CBMImport *py_find_import(const CBMFileResult *r, const char *local) {
+    for (int i = 0; i < r->imports.count; i++) {
+        if (r->imports.items[i].local_name && strcmp(r->imports.items[i].local_name, local) == 0)
+            return &r->imports.items[i];
+    }
+    return NULL;
+}
+
+TEST(python_type_checking_imports_flagged_issue1277) {
+    const char *src = "from typing import TYPE_CHECKING\n"
+                      "import typing\n"
+                      "if TYPE_CHECKING:\n"
+                      "    from trainer import Trainer\n"
+                      "    import contracts\n"
+                      "else:\n"
+                      "    from fallback import Runtime\n"
+                      "if typing.TYPE_CHECKING:\n"
+                      "    from engine import Engine as Eng\n"
+                      "if FLAG:\n"
+                      "    from other import Conditional\n";
+    CBMFileResult *r = extract(src, CBM_LANG_PYTHON, "t", "loop.py");
+    ASSERT_NOT_NULL(r);
+    const CBMImport *tc = py_find_import(r, "TYPE_CHECKING");
+    const CBMImport *trainer = py_find_import(r, "Trainer");
+    const CBMImport *contracts = py_find_import(r, "contracts");
+    const CBMImport *eng = py_find_import(r, "Eng");
+    ASSERT_NOT_NULL(tc);
+    ASSERT_FALSE(tc->type_checking_only);
+    ASSERT_NOT_NULL(trainer);
+    ASSERT_TRUE(trainer->type_checking_only);
+    ASSERT_NOT_NULL(contracts);
+    ASSERT_TRUE(contracts->type_checking_only);
+    ASSERT_NOT_NULL(eng);
+    ASSERT_TRUE(eng->type_checking_only);
+    ASSERT_NULL(py_find_import(r, "Runtime"));
+    ASSERT_NULL(py_find_import(r, "Conditional"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A name the alternative of an `if TYPE_CHECKING:` binds again (the airflow
+ * compat shape, usually inside try/except ImportError) is bound at runtime, so
+ * its TYPE_CHECKING import is not annotation-only: it stays unrecorded, as the
+ * runtime import itself does. A star import in an alternative may bind any
+ * name, so it covers every name of the block. */
+TEST(python_type_checking_rebound_in_else_unrecorded_issue1277) {
+    const char *src = "from typing import TYPE_CHECKING\n"
+                      "if TYPE_CHECKING:\n"
+                      "    from airflow.sdk.execution_time.secrets_masker import mask_secret\n"
+                      "    from airflow.sdk.types import OnlyTyped\n"
+                      "else:\n"
+                      "    try:\n"
+                      "        from airflow.sdk.log import mask_secret\n"
+                      "    except ImportError:\n"
+                      "        mask_secret = None\n"
+                      "if TYPE_CHECKING:\n"
+                      "    from compat.types import Starred\n"
+                      "elif SOMETHING:\n"
+                      "    from compat import *\n";
+    CBMFileResult *r = extract(src, CBM_LANG_PYTHON, "t", "hook.py");
+    ASSERT_NOT_NULL(r);
+    const CBMImport *typed = py_find_import(r, "OnlyTyped");
+    ASSERT_NOT_NULL(typed);
+    ASSERT_TRUE(typed->type_checking_only);        /* only the type checker binds it */
+    ASSERT_NULL(py_find_import(r, "mask_secret")); /* the else branch binds it at runtime */
+    ASSERT_NULL(py_find_import(r, "Starred"));     /* the elif star import may bind it */
+    ASSERT_NULL(py_find_import(r, "compat"));      /* alternatives stay unrecorded */
+    ASSERT_NOT_NULL(py_find_import(r, "TYPE_CHECKING"));
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(js_imports) {
     CBMFileResult *r = extract("import React from 'react';\nimport { useState } from "
                                "'react';\nconst fs = require('fs');\n",
@@ -12964,6 +13040,8 @@ SUITE(extraction) {
     RUN_TEST(go_calls);
     RUN_TEST(python_imports);
     RUN_TEST(python_package_relative_import_paths);
+    RUN_TEST(python_type_checking_imports_flagged_issue1277);
+    RUN_TEST(python_type_checking_rebound_in_else_unrecorded_issue1277);
     RUN_TEST(js_imports);
     RUN_TEST(go_imports);
     RUN_TEST(go_cgo_pseudo_import_dropped);

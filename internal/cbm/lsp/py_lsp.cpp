@@ -276,6 +276,7 @@ static void py_bind_dotted_prefixes(PyLSPContext* ctx, const char* qn) {
 
 void py_lsp_bind_imports(PyLSPContext* ctx) {
     if (!ctx || !ctx->current_scope) return;
+    CBMScope* runtime_scope = ctx->current_scope;
     for (int i = 0; i < ctx->import_count; i++) {
         const char* local = ctx->import_local_names[i];
         const char* qn = ctx->import_module_qns[i];
@@ -285,6 +286,18 @@ void py_lsp_bind_imports(PyLSPContext* ctx) {
         // concrete name — skip the scope insertion. Phase 9 cross-file
         // logic will use the import map directly to find re-exports.
         if (strcmp(local, "*") == 0) continue;
+
+        /* A name only `if TYPE_CHECKING:` imports (#1277) binds into the
+         * annotation-only frame: an annotation resolves through it, a runtime
+         * call never does (the interpreter never runs the block). */
+        ctx->current_scope = runtime_scope;
+        if (ctx->file_imports &&
+            !cbm_imports_local_binds_runtime_name(ctx->file_imports, local)) {
+            if (!ctx->annotation_scope)
+                ctx->annotation_scope = cbm_scope_push(ctx->arena, NULL);
+            if (!ctx->annotation_scope) continue;
+            ctx->current_scope = ctx->annotation_scope;
+        }
 
         const CBMType* t;
         if (import_is_from_style(local, qn)) {
@@ -318,6 +331,7 @@ void py_lsp_bind_imports(PyLSPContext* ctx) {
         // wouldn't reference an unimported parent module name.
         py_bind_dotted_prefixes(ctx, qn);
     }
+    ctx->current_scope = runtime_scope;
 }
 
 const CBMType* py_lsp_lookup_in_scope(const PyLSPContext* ctx, const char* name) {
@@ -3461,6 +3475,10 @@ static const CBMType* py_resolve_annotation(PyLSPContext* ctx, const char* ann) 
 
     const CBMType* t = cbm_scope_lookup(ctx->current_scope, ann);
     if (!cbm_type_is_unknown(t)) return t;
+    if (ctx->annotation_scope) {
+        t = cbm_scope_lookup(ctx->annotation_scope, ann);
+        if (!cbm_type_is_unknown(t)) return t;
+    }
     if (ctx->module_qn) {
         const char* qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, ann);
         const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, qn);
@@ -4106,6 +4124,7 @@ void cbm_run_py_lsp(CBMArena* arena, CBMFileResult* result,
      * dunder desugaring so those recovered calls reach the CALLS-edge pipeline. */
     ctx.syn_calls = &result->calls;
 
+    ctx.file_imports = &result->imports;
     for (int i = 0; i < result->imports.count; i++) {
         CBMImport* imp = &result->imports.items[i];
         if (imp->local_name && imp->module_path) {
@@ -4283,7 +4302,8 @@ CBMLSPStatus cbm_run_py_lsp_cross_status(
     CBMLSPDef* defs, int def_count,
     const char** import_names, const char** import_qns, int import_count,
     TSTree* cached_tree,
-    CBMResolvedCallArray* out) {
+    CBMResolvedCallArray* out,
+    const CBMImportArray* file_imports) {
     if (!arena || !source || source_len <= 0 || !out) return CBM_LSP_COMPLETE;
 
     TSParser* parser = NULL;
@@ -4313,6 +4333,7 @@ CBMLSPStatus cbm_run_py_lsp_cross_status(
 
     PyLSPContext ctx;
     py_lsp_init(&ctx, arena, source, source_len, &reg, module_qn, out);
+    ctx.file_imports = file_imports;
     for (int i = 0; i < import_count; i++) {
         if (import_names && import_qns && import_names[i] && import_qns[i]) {
             py_lsp_add_import(&ctx, import_names[i], import_qns[i]);
@@ -4390,7 +4411,8 @@ CBMLSPStatus cbm_run_py_lsp_cross_with_registry_status(
     CBMTypeRegistry* reg,
     const char** import_names, const char** import_qns, int import_count,
     TSTree* cached_tree,
-    CBMResolvedCallArray* out) {
+    CBMResolvedCallArray* out,
+    const CBMImportArray* file_imports) {
     if (!arena || !source || source_len <= 0 || !out || !reg) return CBM_LSP_COMPLETE;
 
     TSParser* parser = NULL;
@@ -4408,6 +4430,7 @@ CBMLSPStatus cbm_run_py_lsp_cross_with_registry_status(
 
     PyLSPContext ctx;
     py_lsp_init(&ctx, arena, source, source_len, reg, module_qn, out);
+    ctx.file_imports = file_imports;
     for (int i = 0; i < import_count; i++) {
         if (import_names && import_qns && import_names[i] && import_qns[i]) {
             py_lsp_add_import(&ctx, import_names[i], import_qns[i]);

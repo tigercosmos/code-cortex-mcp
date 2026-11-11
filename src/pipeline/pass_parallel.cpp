@@ -583,8 +583,14 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     }
 }
 
-/* Build import map from graph buffer IMPORTS edges (read-only access to gbuf). */
+/* Build import map from graph buffer IMPORTS edges (read-only access to gbuf).
+ * Without include_type_only it is the CALLS map: a local name only an
+ * annotation-only import binds (Python `if TYPE_CHECKING:`, #1277) is left
+ * out. With it, the LSP map, which resolves annotations through such names.
+ * The sequential twins are pass_calls.cpp build_import_map (CALLS) and
+ * pass_lsp_cross.cpp pxc_build_import_map (LSP). */
 static int build_import_map(const cbm_gbuf_t *gbuf, const char *project_name, const char *rel_path,
+                            const CBMFileResult *result, bool include_type_only,
                             const char ***out_keys, const char ***out_vals, int *out_count) {
     *out_keys = NULL;
     *out_vals = NULL;
@@ -620,9 +626,17 @@ static int build_import_map(const cbm_gbuf_t *gbuf, const char *project_name, co
             start += strlen("\"local_name\":\"");
             const char *end = strchr(start, '"');
             if (end && end > start) {
-                keys[count] = cbm_strndup(start, end - start);
-                vals[count] = target->qualified_name;
-                count++;
+                char *key = cbm_strndup(start, end - start);
+                if (key && !include_type_only &&
+                    !cbm_imports_local_binds_runtime_name(result ? &result->imports : NULL, key)) {
+                    free(key); /* annotation-only import (#1277): no CALLS binding */
+                    key = NULL;
+                }
+                if (key) {
+                    keys[count] = key;
+                    vals[count] = target->qualified_name;
+                    count++;
+                }
             }
         }
     }
@@ -3707,7 +3721,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         const char **imp_vals = NULL;
         int imp_count = 0;
         uint64_t _imp_t0 = extract_now_ns();
-        build_import_map(rc->main_gbuf, rc->project_name, rel, &imp_keys, &imp_vals, &imp_count);
+        build_import_map(rc->main_gbuf, rc->project_name, rel, result, false, &imp_keys, &imp_vals,
+                         &imp_count);
         atomic_fetch_add_explicit(&rc->time_ns_import_map, extract_now_ns() - _imp_t0,
                                   memory_order_relaxed);
 
@@ -3776,10 +3791,26 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
                  * this file, not to a stale extraction marker. */
                 cbm_index_mark_start(rel);
                 bool was_skipped = result->lsp_skipped;
-                cbm_pxc_dispatch_file(lang, result, lsp_source, lsp_source_len, rel, def_module,
-                                      rc->cross_registries, rc->module_def_index, rc->all_defs,
-                                      rc->def_count, imp_keys, imp_vals, imp_count,
-                                      pp_rust_shared_registry_get, rc);
+                /* The LSP map also binds annotation-only imports (#1277);
+                 * only a file that records one needs its own map, every
+                 * other file passes the CALLS map unchanged. MUST match the
+                 * sequential dispatch in pass_lsp_cross.cpp. */
+                const char **lsp_keys = NULL;
+                const char **lsp_vals = NULL;
+                int lsp_count = 0;
+                bool own_lsp_map = cbm_imports_have_type_only(&result->imports);
+                if (own_lsp_map) {
+                    build_import_map(rc->main_gbuf, rc->project_name, rel, result, true, &lsp_keys,
+                                     &lsp_vals, &lsp_count);
+                }
+                cbm_pxc_dispatch_file(
+                    lang, result, lsp_source, lsp_source_len, rel, def_module, rc->cross_registries,
+                    rc->module_def_index, rc->all_defs, rc->def_count,
+                    own_lsp_map ? lsp_keys : imp_keys, own_lsp_map ? lsp_vals : imp_vals,
+                    own_lsp_map ? lsp_count : imp_count, pp_rust_shared_registry_get, rc);
+                if (own_lsp_map) {
+                    free_import_map(lsp_keys, lsp_vals, lsp_count);
+                }
                 cbm_index_mark_done(rel);
                 if (!was_skipped && result->lsp_skipped && rc->lsp_failures) {
                     rc->lsp_failures[file_idx] = cbm_lsp_skip_reason_name(result->lsp_skip_reason);

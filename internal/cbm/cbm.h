@@ -321,7 +321,17 @@ typedef struct {
      * re-export, bare `require('x').y`), so local_name is the path's last
      * segment, not a binding the file can call through (#1128). Default false. */
     bool local_name_synthesized;
+    bool type_checking_only; // Python: under a module-level `if TYPE_CHECKING:`
 } CBMImport;
+
+/* True when an import binds its local name at runtime. A Python import under
+ * `if TYPE_CHECKING:` exists for annotations only: a call through that name
+ * cannot happen, so no CALLS import map may bind it (an import_map edge
+ * through it would be fabricated by construction). THE one rule every CALLS
+ * import-map builder applies. */
+static inline bool cbm_import_binds_runtime_name(const CBMImport *imp) {
+    return imp && !imp->type_checking_only;
+}
 
 typedef struct {
     const char *ref_name;          // referenced identifier
@@ -880,6 +890,13 @@ void cbm_usage_slow_parent_fallback_test_reset(void);
 uint64_t cbm_usage_slow_parent_fallback_test_count(void);
 #endif
 void cbm_imports_push(CBMImportArray *arr, CBMArena *a, CBMImport imp);
+/* True unless every import of `imports` that binds `local_name` is
+ * annotation-only (cbm_import_binds_runtime_name), so also true when no import
+ * names it: the rule for the builders that key IMPORTS edges by local name. */
+bool cbm_imports_local_binds_runtime_name(const CBMImportArray *imports, const char *local_name);
+/* True when `imports` records an annotation-only import (the LSP import map
+ * then differs from the CALLS map and must be built separately). */
+bool cbm_imports_have_type_only(const CBMImportArray *imports);
 void cbm_usages_push(CBMUsageArray *arr, CBMArena *a, CBMUsage usage);
 void cbm_throws_push(CBMThrowArray *arr, CBMArena *a, CBMThrow thr);
 void cbm_rw_push(CBMRWArray *arr, CBMArena *a, CBMReadWrite rw);

@@ -1466,7 +1466,7 @@ void cbm_pxc_run_one(CBMLanguage lang, CBMFileResult *r, const char *source, int
     case CBM_LANG_PYTHON: {
         CBMLSPStatus status =
             cbm_run_py_lsp_cross_status(&scratch, source, source_len, module_qn, defs, def_count,
-                                        imp_names, imp_qns, imp_count, tree, &out);
+                                        imp_names, imp_qns, imp_count, tree, &out, &r->imports);
         if (status != CBM_LSP_COMPLETE)
             cbm_py_lsp_record_failure(r, status);
         break;
@@ -1651,7 +1651,7 @@ void cbm_pxc_dispatch_file(CBMLanguage lang, CBMFileResult *result, const char *
         case CBM_LANG_PYTHON: {
             CBMLSPStatus status = cbm_run_py_lsp_cross_with_registry_status(
                 &result->arena, source, source_len, def_module, prebuilt, imp_keys, imp_vals,
-                imp_count, result->cached_tree, &result->resolved_calls);
+                imp_count, result->cached_tree, &result->resolved_calls, &result->imports);
             if (status != CBM_LSP_COMPLETE)
                 cbm_py_lsp_record_failure(result, status);
             used_prebuilt = true;

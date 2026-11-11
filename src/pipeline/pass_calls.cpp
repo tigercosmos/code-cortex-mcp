@@ -139,8 +139,9 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
 
         for (int i = 0; i < result->imports.count; i++) {
             const CBMImport *imp = &result->imports.items[i];
-            if (!imp->local_name || !imp->local_name[0] || !imp->module_path) {
-                continue;
+            if (!imp->local_name || !imp->local_name[0] || !imp->module_path ||
+                !cbm_import_binds_runtime_name(imp)) {
+                continue; /* annotation-only import (#1277): no CALLS binding */
             }
             const cbm_gbuf_node_t *target =
                 cbm_pipeline_resolve_import_node(ctx, rel_path, file_qn, imp, NULL);
@@ -194,6 +195,10 @@ static int build_import_map(cbm_pipeline_ctx_t *ctx, const char *rel_path,
             continue;
         }
         char *key = extract_local_name_from_json(e->properties_json);
+        if (key && !cbm_imports_local_binds_runtime_name(result ? &result->imports : NULL, key)) {
+            free(key); /* annotation-only import (#1277): no CALLS binding */
+            key = NULL;
+        }
         if (key) {
             keys[count] = key;
             vals[count] = target->qualified_name;

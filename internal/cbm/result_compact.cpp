@@ -291,8 +291,8 @@ template <class A> void fields(A &a, CBMCall &v) {
     a.array(args, arg_count);
 }
 template <class A> void fields(A &a, CBMImport &v) {
-    auto &[local_name, module_path, local_name_synthesized] = v;
-    a(local_name, module_path, local_name_synthesized);
+    auto &[local_name, module_path, local_name_synthesized, type_checking_only] = v;
+    a(local_name, module_path, local_name_synthesized, type_checking_only);
 }
 template <class A> void fields(A &a, CBMUsage &v) {
     auto &[ref_name, enclosing_func_qn, is_member_access] = v;
