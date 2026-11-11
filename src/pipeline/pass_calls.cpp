@@ -846,7 +846,12 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
          * The language list is inside the helper -- MUST match pass_parallel.cpp. */
         cbm_suppress_same_module_bound_receiver(lang, call->is_method, call->callee_name,
                                                 res.qualified_name, res.strategy, imports,
-                                                call->receiver_is_amd_dependency);
+                                                call->receiver_is_amd_dependency) ||
+        /* PHP receiver typed as an unindexed class (#606, upstream 5fd9e4f3):
+         * the sub-floor php_method_typed_unindexed row vetoes a weak name
+         * guess. MUST match pass_parallel.cpp exactly. */
+        (lang == CBM_LANG_PHP && cbm_suppress_weak_member_match(true, true, res.strategy) &&
+         cbm_pipeline_php_receiver_type_unindexed(lsp_calls, call, ctx->registry));
 
     /* Service-pattern HTTP/ASYNC calls to an EXTERNAL client library (e.g.
      * `requests.get("/api/orders/{id}")`) resolve to a QN containing the library

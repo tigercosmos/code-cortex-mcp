@@ -10840,6 +10840,180 @@ TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922_parallel) {
     return rust_grouped_import_case(52);
 }
 
+/* #606 (upstream 5fd9e4f3): a receiver typed as an unindexed class must not
+ * weakly bind a same-named project method (`$file->getUid()` -> App\Item).
+ * The PHP LSP knows the class, finds it nowhere, and emits a sub-floor
+ * php_method_typed_unindexed row; that row now vetoes the weak name guess.
+ * Shapes that reach it here: a fully qualified vendor parameter type, a `new`
+ * of a vendor class, and a same-namespace class the project does not define.
+ * (A vendor class imported by `use` was already proven external, #1186, and
+ * stays covered by vendorCall. Upstream's chained shape,
+ * `$repository->findFile()->getUid()`, does not reach the guard in this fork:
+ * the PHP LSP does not type that cross-file chain, so it emits no row.)
+ * Calls on a project-typed receiver and on $this still resolve. pad > 0
+ * forces the parallel resolver. */
+static int php_unindexed_receiver_case(int pad) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_php_recv_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "src/Item.php",
+                    "<?php\n"
+                    "namespace App;\n"
+                    "\n"
+                    "class Item\n"
+                    "{\n"
+                    "    public function getUid(): int\n"
+                    "    {\n"
+                    "        return 1;\n"
+                    "    }\n"
+                    "}\n");
+    cbm_mkdir((std::string(tmp) + "/src/Domain").c_str());
+    write_temp_file(tmp, "src/Domain/Repository.php",
+                    "<?php\n"
+                    "namespace App\\Domain;\n"
+                    "\n"
+                    "use App\\Item;\n"
+                    "use Vendor\\Storage\\File;\n"
+                    "\n"
+                    "class Repository\n"
+                    "{\n"
+                    "    public function findItem(): Item\n"
+                    "    {\n"
+                    "        return new Item();\n"
+                    "    }\n"
+                    "\n"
+                    "    public function findFile(): File\n"
+                    "    {\n"
+                    "        return new File();\n"
+                    "    }\n"
+                    "}\n");
+    write_temp_file(tmp, "src/Listener.php",
+                    "<?php\n"
+                    "namespace App;\n"
+                    "\n"
+                    "use Vendor\\Storage\\File;\n"
+                    "use function sprintf;\n"
+                    "\n"
+                    "class Listener\n"
+                    "{\n"
+                    "    public function vendorCall(File $file): int\n"
+                    "    {\n"
+                    "        return $file->getUid();\n"
+                    "    }\n"
+                    "\n"
+                    "    public function selfCall(): int\n"
+                    "    {\n"
+                    "        return $this->localHelper();\n"
+                    "    }\n"
+                    "\n"
+                    "    private function localHelper(): int\n"
+                    "    {\n"
+                    "        return 1;\n"
+                    "    }\n"
+                    "}\n");
+    write_temp_file(tmp, "src/ChainListener.php",
+                    "<?php\n"
+                    "namespace App;\n"
+                    "\n"
+                    "use App\\Domain\\Repository;\n"
+                    "\n"
+                    "class ChainListener\n"
+                    "{\n"
+                    "    public function chainedVendorCall(Repository $repository): int\n"
+                    "    {\n"
+                    "        return $repository->findFile()->getUid();\n"
+                    "    }\n"
+                    "\n"
+                    "    public function projectCall(Repository $repository): Item\n"
+                    "    {\n"
+                    "        return $repository->findItem();\n"
+                    "    }\n"
+                    "}\n");
+    write_temp_file(tmp, "src/Direct.php",
+                    "<?php\n"
+                    "namespace App;\n"
+                    "\n"
+                    "class Direct\n"
+                    "{\n"
+                    "    public function fqVendorCall(\\Vendor\\Storage\\File $file): int\n"
+                    "    {\n"
+                    "        return $file->getUid();\n"
+                    "    }\n"
+                    "\n"
+                    "    public function sameNsMissing(Missing $m): int\n"
+                    "    {\n"
+                    "        return $m->getUid();\n"
+                    "    }\n"
+                    "\n"
+                    "    public function newVendor(): int\n"
+                    "    {\n"
+                    "        $f = new \\Vendor\\Storage\\File();\n"
+                    "        return $f->getUid();\n"
+                    "    }\n"
+                    "}\n");
+    for (int i = 0; i < pad; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/Filler%d.php", i);
+        snprintf(body, sizeof(body), "<?php\nfunction filler%d(): int\n{\n    return %d;\n}\n", i,
+                 i);
+        write_temp_file(tmp, name, body);
+    }
+    const char *old_workers = getenv("CBM_WORKERS");
+    std::string saved = old_workers ? old_workers : "";
+    bool had = old_workers != NULL;
+    if (pad > 0) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/php_recv.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    int run = p ? cbm_pipeline_run(p) : -1;
+    if (pad > 0) {
+        if (had) {
+            cbm_setenv("CBM_WORKERS", saved.c_str(), 1);
+        } else {
+            cbm_unsetenv("CBM_WORKERS");
+        }
+    }
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(run, 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    int item_methods =
+        rs_edge_to_file(s, project, "DEFINES_METHOD", "Item", "getUid", "src/Item.php");
+    int vendor = rs_calls_with(s, project, "vendorCall", "getUid", NULL);
+    int fq_vendor = rs_calls_with(s, project, "fqVendorCall", "getUid", NULL);
+    int missing = rs_calls_with(s, project, "sameNsMissing", "getUid", NULL);
+    int new_vendor = rs_calls_with(s, project, "newVendor", "getUid", NULL);
+    int project_call = rs_calls_with(s, project, "projectCall", "findItem", NULL);
+    int self_call = rs_calls_with(s, project, "selfCall", "localHelper", NULL);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    ASSERT_GTE(item_methods, 1); /* the project namesake exists ... */
+    ASSERT_EQ(vendor, 0);        /* ... and neither vendor call binds it */
+    ASSERT_EQ(fq_vendor, 0);
+    ASSERT_EQ(missing, 0);
+    ASSERT_EQ(new_vendor, 0);
+    ASSERT_GTE(project_call, 1);
+    ASSERT_GTE(self_call, 1);
+    PASS();
+}
+
+/* Fewer than 50 files exercises pass_calls.cpp. */
+TEST(pipeline_php_receiver_suppresses_weak_method_edge) {
+    return php_unindexed_receiver_case(0);
+}
+
+/* >= 50 files forces pass_parallel.cpp. */
+TEST(pipeline_php_receiver_parallel_suppresses_weak_method_edge) {
+    return php_unindexed_receiver_case(52);
+}
+
 /* Parallel twin (pass_parallel.cpp resolve_file_usages / resolve_file_rw):
  * upstream's sequential-only fix left 344 Go->C WRITES alive on a ~1150-file
  * repo. >= 50 files forces the parallel pipeline. */
@@ -15598,6 +15772,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_rust_generic_impl_method_sources_its_calls_parallel);
     RUN_TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922);
     RUN_TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922_parallel);
+    RUN_TEST(pipeline_php_receiver_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_php_receiver_parallel_suppresses_weak_method_edge);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method_parallel);
     RUN_TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354);

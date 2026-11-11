@@ -407,6 +407,57 @@ static inline bool cbm_pipeline_lsp_external_receiver(const CBMResolvedCall *res
            strcmp(resolved->strategy, "php_external_receiver") == 0;
 }
 
+/* registry.cpp (declared in pipeline.h too): a project class-like symbol
+ * with this simple name exists. Declared here so this header stays free of
+ * pipeline.h. */
+typedef struct cbm_registry cbm_registry_t;
+bool cbm_registry_has_type_named(const cbm_registry_t *r, const char *name);
+
+/* #606 (upstream 5fd9e4f3): a sub-floor `php_method_typed_unindexed` row still
+ * proves the receiver is not a project class, so a weak short-name fallback
+ * must not bind the call: `$file->getUid()` on a vendor File became a CALLS
+ * edge to App\Item::getUid. A project class with the same simple name keeps
+ * the fallback, since the PHP LSP does not follow every cross-file type.
+ *
+ * The row is matched to the call by caller QN, call site (source_byte, when
+ * both carry one) and callee leaf -- the same join cbm_pipeline_find_lsp_resolution
+ * uses, without its confidence floor. (Upstream matches through
+ * cbm_pipeline_invocation_site_rank / _leaf_matches, which this fork lacks.)
+ * Both resolvers call this, so pass_calls.cpp and pass_parallel.cpp agree. */
+static inline bool cbm_pipeline_php_receiver_type_unindexed(const CBMResolvedCallArray *arr,
+                                                            const CBMCall *call,
+                                                            const cbm_registry_t *registry) {
+    if (!arr || !call || !call->enclosing_func_qn || !call->callee_name) {
+        return false;
+    }
+    const char *call_leaf = cbm_pipeline_call_callee_leaf(call->callee_name);
+    for (int i = 0; i < arr->count; i++) {
+        const CBMResolvedCall *rc = &arr->items[i];
+        if (!rc->caller_qn || !rc->callee_qn || !rc->strategy ||
+            strcmp(rc->strategy, "php_method_typed_unindexed") != 0 ||
+            strcmp(rc->caller_qn, call->enclosing_func_qn) != 0) {
+            continue;
+        }
+        if (rc->source_byte && call->source_byte && rc->source_byte != call->source_byte) {
+            continue;
+        }
+        const char *method_dot = strrchr(rc->callee_qn, '.');
+        if (!method_dot || method_dot == rc->callee_qn || !call_leaf ||
+            strcmp(method_dot + SKIP_ONE, call_leaf) != 0) {
+            continue;
+        }
+        char class_qn[CBM_SZ_512];
+        size_t class_len = (size_t)(method_dot - rc->callee_qn);
+        if (class_len >= sizeof(class_qn)) {
+            continue;
+        }
+        memcpy(class_qn, rc->callee_qn, class_len);
+        class_qn[class_len] = '\0';
+        return !cbm_registry_has_type_named(registry, cbm_lsp_bare_segment(class_qn));
+    }
+    return false;
+}
+
 /* The service-pattern name of a call: its callee text, or, when that names no
  * service and the LSP proved the receiver a vendor class, the vendor method
  * (`GuzzleClient::get` -> `GuzzleHttp.Client.get`). The extractor names a

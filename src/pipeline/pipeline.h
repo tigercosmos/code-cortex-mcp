@@ -537,6 +537,10 @@ const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);
 int cbm_registry_find_by_name(const cbm_registry_t *r, const char *name, const char ***out,
                               int *count);
 
+/* True when a project class-like symbol (cbm_label_is_type_like) has this
+ * simple name. */
+bool cbm_registry_has_type_named(const cbm_registry_t *r, const char *name);
+
 /* Return total number of entries. */
 int cbm_registry_size(const cbm_registry_t *r);
 

@@ -2863,7 +2863,11 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
              * the language list is inside the helper, so the two cannot drift. */
             cbm_suppress_same_module_bound_receiver(
                 lang, call->is_method, call->callee_name, res.qualified_name, res.strategy,
-                &result->imports, call->receiver_is_amd_dependency);
+                &result->imports, call->receiver_is_amd_dependency) ||
+            /* PHP unindexed receiver class (#606) -- MUST match
+             * pass_calls.cpp exactly. */
+            (lang == CBM_LANG_PHP && cbm_suppress_weak_member_match(true, true, res.strategy) &&
+             cbm_pipeline_php_receiver_type_unindexed(&result->resolved_calls, call, rc->registry));
 
         /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the
          * service signal lives in the callee_name. The registry can mis-resolve
