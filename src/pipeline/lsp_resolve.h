@@ -115,7 +115,9 @@ static inline const char *cbm_pipeline_call_callee_leaf(const char *callee_name)
  *   - lsp_dict_dispatch — the dispatch table variable name;
  *   - lsp_method_ref_ctor{,_synth} — Java constructor method refs;
  *   - php_method_dynamic — the dynamic method name;
- *   - lsp_import_alias — `from m import f as g; g()`: textual `g`, QN tail `f`.
+ *   - lsp_import_alias — `from m import f as g; g()`: textual `g`, QN tail `f`;
+ *   - lsp_constructor_init — Python `Foo()` bound to Foo's own __init__:
+ *     textual `Foo`, QN tail `__init__`.
  *
  * Both join venues MUST agree on this set. The matcher below consults it as a
  * fallback when the tails differ; the parallel path's O(1) per-file index
@@ -131,7 +133,8 @@ static inline bool cbm_lsp_strategy_matches_on_reason(const char *strategy) {
             strcmp(strategy, "lsp_method_ref_ctor_synth") == 0 ||
             strcmp(strategy, "lsp_dict_dispatch") == 0 || strcmp(strategy, "lsp_destructor") == 0 ||
             strcmp(strategy, "php_method_dynamic") == 0 ||
-            strcmp(strategy, "lsp_import_alias") == 0);
+            strcmp(strategy, "lsp_import_alias") == 0 ||
+            strcmp(strategy, "lsp_constructor_init") == 0);
 }
 
 /* Gate for the unique-`Class.method`-tail fallbacks below. Tail-matching by

@@ -3521,6 +3521,28 @@ static int pp_confident_lsp_row_count(const CBMFileResult *result) {
     return count;
 }
 
+/* Python: a per-file lsp_constructor row on a class outside this file's module
+ * (an imported class) is provisional. The per-file pass cannot see that
+ * class's own __init__, so only the cross-file pass can bind the call to it
+ * (lsp_constructor_init, #1642). The entry-count gate below would otherwise
+ * count the row as resolved and skip the cross pass, which the sequential
+ * driver always runs. */
+static bool pp_py_constructor_rows_need_cross(const CBMFileResult *result) {
+    const char *mod = result->module_qn;
+    size_t mod_len = mod ? strlen(mod) : 0;
+    for (int i = 0; i < result->resolved_calls.count; i++) {
+        const CBMResolvedCall *rc = &result->resolved_calls.items[i];
+        if (!rc->strategy || !rc->callee_qn || strcmp(rc->strategy, "lsp_constructor") != 0) {
+            continue;
+        }
+        if (mod_len == 0 || strncmp(rc->callee_qn, mod, mod_len) != 0 ||
+            rc->callee_qn[mod_len] != '.') {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool pp_cpp_sites_need_cross(const CBMFileResult *result) {
     if (result->pending_cpp_operator_count > 0 || result->calls.count > 4096 ||
         result->resolved_calls.count > 8192)
@@ -3718,8 +3740,10 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
          * pass too: only it knows the structs headers declare. */
         bool calls_need_cross =
             pending_calls > 0 &&
-            (jvm_cross_lsp || (cpp_cross_lsp ? cpp_sites_pending
-                                             : pp_confident_lsp_row_count(result) < pending_calls));
+            (jvm_cross_lsp ||
+             (cpp_cross_lsp ? cpp_sites_pending
+                            : pp_confident_lsp_row_count(result) < pending_calls) ||
+             (lang == CBM_LANG_PYTHON && pp_py_constructor_rows_need_cross(result)));
         bool cross_lsp_eligible =
             rc->all_defs && rc->def_count > 0 && cbm_pxc_has_cross_lsp(lang) && !is_generated &&
             !primitive_complete &&

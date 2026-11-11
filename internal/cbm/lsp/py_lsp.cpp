@@ -2253,7 +2253,30 @@ static void py_emit_call_for(PyLSPContext* ctx, TSNode call_node) {
                  * lsp_dict_dispatch (see lsp_resolve.h) (#988). */
                 py_emit_resolved_call_reason(ctx, qn, "lsp_import_alias", 0.85f, fname);
             } else {
-                py_emit_resolved_call(ctx, qn, "lsp_constructor", 0.85f);
+                /* ClassName() binds to the __init__ the class declares itself
+                 * (upstream 1b64c50c / 05471904, #1642). An inherited __init__
+                 * is not followed: B(A) without its own __init__ keeps the call
+                 * on B, so a base constructor does not collect every subclass
+                 * construction as its caller. Only a registered TYPE is
+                 * retargeted (this NAMED binding can also be a from-imported
+                 * function), and a builtins.* __init__ is not a project
+                 * constructor, so the class target stays. The textual callee
+                 * (the class name) rides in `reason` for the join. Fork: 0.86,
+                 * one notch over lsp_constructor, because this resolver's
+                 * per-file pass (which cannot see another file's __init__)
+                 * already left an lsp_constructor class row for an imported
+                 * class at the same site, and every join keeps the strictly
+                 * more confident row (upstream: 0.85, no competing row). */
+                const CBMRegisteredFunc* fi = cbm_registry_lookup_type(ctx->registry, qn)
+                    ? cbm_registry_lookup_method(ctx->registry, qn, "__init__")
+                    : NULL;
+                if (fi && fi->qualified_name &&
+                    strncmp(fi->qualified_name, "builtins.", sizeof("builtins.") - 1) != 0) {
+                    py_emit_resolved_call_reason(ctx, fi->qualified_name,
+                        "lsp_constructor_init", 0.86f, fname);
+                } else {
+                    py_emit_resolved_call(ctx, qn, "lsp_constructor", 0.85f);
+                }
             }
             return;
         }

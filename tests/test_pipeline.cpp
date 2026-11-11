@@ -15207,8 +15207,9 @@ static int pyn_run_init_collision(int fillers) {
             const char *project = cbm_pipeline_project_name(p);
             imports[run] = pyn_edge(s, project, "tests.test_app.py.__file__",
                                     "src.rowpkg.layout.Layout", "IMPORTS");
+            /* Layout defines __init__, so Layout("demo") targets it (#1642). */
             calls[run] = pyn_edge(s, project, "tests.test_app.test_build",
-                                  "src.rowpkg.layout.Layout", "CALLS");
+                                  "src.rowpkg.layout.Layout.__init__", "CALLS");
             method[run] = pyn_edge(s, project, "tests.test_app.test_build",
                                    "src.rowpkg.layout.Layout.create", "CALLS");
             cbm_store_close(s);
@@ -15227,7 +15228,7 @@ static int pyn_run_init_collision(int fillers) {
     for (int run = 0; run < 2; run++) {
         ASSERT_EQ(rc[run], 0);
         ASSERT_TRUE(imports[run]); /* the class stays importable */
-        ASSERT_TRUE(calls[run]);   /* Layout("demo") */
+        ASSERT_TRUE(calls[run]);   /* Layout("demo") -> Layout.__init__ */
         ASSERT_TRUE(method[run]);  /* .create() through the constructed type */
     }
     PASS();
@@ -15334,6 +15335,117 @@ TEST(pipeline_python_nested_helper_keeps_tests_issue1548) {
 
 TEST(pipeline_python_nested_helper_keeps_tests_parallel_issue1548) {
     return pyn_run_nested_helper_tests(52);
+}
+
+/* #1642 (upstream 1b64c50c / 05471904, graph level): ClassName() binds only to
+ * an __init__ the class declares itself. Same file: B(A) declares none, so
+ * make_b keeps its CALLS edge on the class B and the inherited A.__init__ gets
+ * none; C(A) declares its own, so make_c calls C.__init__, not C and not
+ * A.__init__. Cross-file: an imported class with its own __init__ binds that
+ * __init__ (the cross-file row must outrank the per-file pass's class row); a
+ * class without one stays on the Class. Upstream pins these in
+ * test_lsp_resolution_probe / test_edge_structural with helpers this fork
+ * does not carry; same assertions, both venues. */
+static const char pyc_main_py[] = "class A:\n"
+                                  "    def __init__(self):\n"
+                                  "        self.ready = True\n"
+                                  "\n"
+                                  "class B(A):\n"
+                                  "    def go(self):\n"
+                                  "        return 1\n"
+                                  "\n"
+                                  "class C(A):\n"
+                                  "    def __init__(self):\n"
+                                  "        self.ready = False\n"
+                                  "\n"
+                                  "def make_b():\n"
+                                  "    return B()\n"
+                                  "\n"
+                                  "def make_c():\n"
+                                  "    return C()\n";
+static const char pyc_models_py[] = "class User:\n"
+                                    "    def __init__(self, name):\n"
+                                    "        self.name = name\n"
+                                    "\n"
+                                    "class Bare:\n"
+                                    "    def method(self):\n"
+                                    "        return 1\n";
+static const char pyc_use_py[] = "from models import User, Bare\n"
+                                 "\n"
+                                 "def create_user(name):\n"
+                                 "    return User(name)\n"
+                                 "\n"
+                                 "def create_bare():\n"
+                                 "    return Bare()\n";
+
+static int pyc_run_constructor_own_init(int fillers) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_py_ctor_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "main.py", pyc_main_py);
+    write_temp_file(tmp, "models.py", pyc_models_py);
+    write_temp_file(tmp, "use.py", pyc_use_py);
+    for (int i = 0; i < fillers; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "filler%d.py", i);
+        snprintf(body, sizeof(body), "def filler%d():\n    return %d\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    if (fillers > 0) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/ctor.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    int rc = p ? cbm_pipeline_run(p) : -1;
+    cbm_store_t *s = rc == 0 ? cbm_store_open_path(db_path) : NULL;
+    const char *pr = p ? cbm_pipeline_project_name(p) : NULL;
+    bool b_class = s && pyn_edge(s, pr, "main.make_b", "main.B", "CALLS");
+    bool b_base_init = s && pyn_edge(s, pr, "main.make_b", "main.A.__init__", "CALLS");
+    bool c_own_init = s && pyn_edge_with(s, pr, "main.make_c", "main.C.__init__", "CALLS",
+                                         "\"strategy\":\"lsp_constructor_init\"");
+    bool c_class = s && pyn_edge(s, pr, "main.make_c", "main.C", "CALLS");
+    bool c_base_init = s && pyn_edge(s, pr, "main.make_c", "main.A.__init__", "CALLS");
+    bool x_init = s && pyn_edge_with(s, pr, "use.create_user", "models.User.__init__", "CALLS",
+                                     "\"strategy\":\"lsp_constructor_init\"");
+    bool x_class = s && pyn_edge(s, pr, "use.create_user", "models.User", "CALLS");
+    bool bare_class = s && pyn_edge(s, pr, "use.create_bare", "models.Bare", "CALLS");
+    if (s) {
+        cbm_store_close(s);
+    }
+    if (p) {
+        cbm_pipeline_free(p);
+    }
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(b_class);      /* no own __init__: the Class */
+    ASSERT_FALSE(b_base_init); /* never the inherited A.__init__ */
+    ASSERT_TRUE(c_own_init);   /* own __init__ */
+    ASSERT_FALSE(c_class);
+    ASSERT_FALSE(c_base_init);
+    ASSERT_TRUE(x_init);     /* cross-file: the imported class's own __init__ */
+    ASSERT_FALSE(x_class);   /* ... and not also the Class */
+    ASSERT_TRUE(bare_class); /* cross-file, no __init__: the Class */
+    PASS();
+}
+
+TEST(pipeline_python_constructor_binds_own_init_issue1642) {
+    return pyc_run_constructor_own_init(0);
+}
+
+TEST(pipeline_python_constructor_binds_own_init_parallel_issue1642) {
+    return pyc_run_constructor_own_init(52);
 }
 
 /* ── Semantic pass, batched == unbatched ─────────────────────────────── */
@@ -18249,6 +18361,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_python_init_function_shares_submodule_qn_parallel_issue1548);
     RUN_TEST(pipeline_python_nested_helper_keeps_tests_issue1548);
     RUN_TEST(pipeline_python_nested_helper_keeps_tests_parallel_issue1548);
+    RUN_TEST(pipeline_python_constructor_binds_own_init_issue1642);
+    RUN_TEST(pipeline_python_constructor_binds_own_init_parallel_issue1642);
     RUN_TEST(pipeline_semantic_batched_matches_unbatched);
     RUN_TEST(sem_tfidf_terms_compare_vocabulary_not_positions);
     RUN_TEST(sem_combine_weighs_signals);
