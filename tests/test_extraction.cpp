@@ -4973,6 +4973,25 @@ TEST(extract_python_bare_decorator_route_rules) {
                                "@app.route()\n"
                                "def index():\n"
                                "    pass\n",
+/* Issue #2090: Solidity modifier_invocation tracked as decorator (upstream
+ * 6b56d78e / 7036c4d5). */
+TEST(solidity_modifier_decorator) {
+    CBMFileResult *r = extract("pragma solidity ^0.8.0;\n"
+                               "contract Vault {\n"
+                               "    modifier onlyOwner() { _; }\n"
+                               "    function withdraw() public onlyOwner {\n"
+                               "    }\n"
+                               "}\n",
+                               CBM_LANG_SOLIDITY, "t", "Vault.sol");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *m = find_def_by_name(r, "withdraw");
+    ASSERT_NOT_NULL(m);
+    ASSERT(decorators_contain(m, "onlyOwner"));
+    cbm_free_result(r);
+    PASS();
+}
+
                                CBM_LANG_PYTHON, "t", "routes.py");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
@@ -12286,6 +12305,7 @@ SUITE(extraction) {
     RUN_TEST(extract_ts_url_builder_issue1009);
     RUN_TEST(extract_ts_await_generic_call_issue2210);
     RUN_TEST(extract_ts_route_handler_after_named_middleware);
+    RUN_TEST(solidity_modifier_decorator);
     RUN_TEST(extract_ts_route_handler_after_inline_middleware);
     RUN_TEST(extract_ts_url_builder_composed_issue1009);
     RUN_TEST(extract_c_url_builder_gated_issue1009);
