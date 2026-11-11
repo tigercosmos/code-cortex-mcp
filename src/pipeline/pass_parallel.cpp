@@ -3304,13 +3304,18 @@ static void resolve_def_inherits(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (cbm_pipeline_php_vendor_ref(result, def->base_classes[b])) {
             continue;
         }
-        const char *bqn =
-            resolve_as_class(rc->registry, def->base_classes[b], mq, ik, iv, ic, fs->lang);
-        /* Same external-base gate as the sequential semantic pass. */
-        if (!bqn ||
-            cbm_python_external_base_contradicts(fs->lang, fs->imports, def->base_classes[b], bqn,
-                                                 rc->main_gbuf, rc->project_name, fs->rel)) {
-            continue;
+        /* Same order as the sequential semantic pass: an earlier sibling of
+         * the class body first (no external-base gate), then the registry. */
+        const char *bqn = cbm_registry_resolve_python_class_body_base(
+            rc->registry, rc->main_gbuf, def->qualified_name, def->base_classes[b], fs->lang);
+        if (!bqn) {
+            bqn = resolve_as_class(rc->registry, def->base_classes[b], mq, ik, iv, ic, fs->lang);
+            /* Same external-base gate as the sequential semantic pass. */
+            if (!bqn || cbm_python_external_base_contradicts(
+                            fs->lang, fs->imports, def->base_classes[b], bqn, rc->main_gbuf,
+                            rc->project_name, fs->rel)) {
+                continue;
+            }
         }
         const cbm_gbuf_node_t *bn = cbm_gbuf_find_by_qn(rc->main_gbuf, bqn);
         if (bn && node->id != bn->id) {

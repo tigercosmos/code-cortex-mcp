@@ -1399,6 +1399,47 @@ const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn) {
     return (const char *)cbm_ht_get(r->exact, qn);
 }
 
+/* Python evaluates a class statement's bases in the namespace of the body
+ * that encloses it. For a class nested in a class, a bare base naming a class
+ * defined EARLIER in that same class body is that sibling
+ * (`class IntegrityError(DatabaseError)` in sqlalchemy's asyncpg adapter),
+ * whatever same-named classes the project has elsewhere. A sibling defined
+ * later is not bound yet when the base is evaluated. Exact lookups only. */
+const char *cbm_registry_resolve_python_class_body_base(const cbm_registry_t *r,
+                                                        const cbm_gbuf_t *gb, const char *class_qn,
+                                                        const char *base, CBMLanguage lang) {
+    if (lang != CBM_LANG_PYTHON || !r || !gb || !class_qn || !base || !base[0] ||
+        strchr(base, '.')) {
+        return NULL;
+    }
+    const char *dot = strrchr(class_qn, '.');
+    if (!dot || dot == class_qn) {
+        return NULL;
+    }
+    char sibling[CBM_SZ_1K];
+    int enclosing_len = (int)(dot - class_qn);
+    int n = snprintf(sibling, sizeof(sibling), "%.*s", enclosing_len, class_qn);
+    if (n < 0 || (size_t)n >= sizeof(sibling) ||
+        !cbm_label_is_type_like(cbm_registry_label_of(r, sibling))) {
+        return NULL; /* not nested in a class body (module level, or a def) */
+    }
+    n = snprintf(sibling, sizeof(sibling), "%.*s.%s", enclosing_len, class_qn, base);
+    if (n < 0 || (size_t)n >= sizeof(sibling) || strcmp(sibling, class_qn) == 0) {
+        return NULL;
+    }
+    const char *owned = cbm_ht_get_key(r->exact, sibling);
+    if (!owned || !cbm_label_is_type_like(cbm_registry_label_of(r, owned))) {
+        return NULL;
+    }
+    const cbm_gbuf_node_t *cls = cbm_gbuf_find_by_qn(gb, class_qn);
+    const cbm_gbuf_node_t *sib = cbm_gbuf_find_by_qn(gb, owned);
+    if (!cls || !sib || !cls->file_path || !sib->file_path ||
+        strcmp(cls->file_path, sib->file_path) != 0 || sib->start_line >= cls->start_line) {
+        return NULL;
+    }
+    return owned;
+}
+
 int cbm_registry_find_by_name(const cbm_registry_t *r, const char *name, const char ***out,
                               int *count) {
     if (!r || !out || !count) {

@@ -2928,6 +2928,123 @@ TEST(python_crossfile_typed_field_calls_issue1277_parallel) {
     return check_python_crossfile_typed_field_calls_issue1277(true);
 }
 
+/* A base class spelled through a root-binding import (`import pkg.mod.nodes`
+ * binds `pkg`; `class X(pkg.mod.nodes.Context)`) is the same class as the
+ * from-imported spelling. The Python LSP's inheritance view never resolved the
+ * dotted spelling, so a member inherited through it (self.m(), super().m(),
+ * super().__init__()) fell to a weak name guess or to nothing. The plain
+ * from-import control must keep resolving; the untyped receiver must not. */
+static int check_python_dotted_base_inheritance(bool parallel) {
+    const char *nodes = "class Context:\n"
+                        "    def __init__(self, line=-1):\n"
+                        "        self.line = line\n\n"
+                        "    def ctx_only_helper(self):\n"
+                        "        return 1\n\n"
+                        "    def describe(self):\n"
+                        "        return 0\n";
+    const char *types = "import pkg.mod.nodes\n"
+                        "from pkg.mod.nodes import Context\n\n"
+                        "class DottedType(pkg.mod.nodes.Context):\n"
+                        "    def __init__(self, line=-1):\n"
+                        "        super().__init__(line)\n\n"
+                        "    def run(self):\n"
+                        "        return self.ctx_only_helper()\n\n"
+                        "    def describe(self):\n"
+                        "        return super().describe()\n\n"
+                        "class PlainType(Context):\n"
+                        "    def run(self):\n"
+                        "        return self.ctx_only_helper()\n\n"
+                        "def untyped(thing):\n"
+                        "    return thing.ctx_only_helper()\n";
+    if (setup_usages_repo("pkg/mod/nodes.py", nodes, "pkg/types.py", types) != 0) {
+        FAIL("failed to create temp dir");
+    }
+    char path[512];
+    const char *inits[] = {"pkg/__init__.py", "pkg/mod/__init__.py"};
+    for (size_t i = 0; i < sizeof(inits) / sizeof(inits[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s", g_usages_tmpdir, inits[i]);
+        if (th_write_file(path, "") != 0) {
+            teardown_usages_repo();
+            FAIL("failed to write package marker");
+        }
+    }
+    if (parallel) {
+        for (int i = 0; i < 50; i++) {
+            snprintf(path, sizeof(path), "%s/dotted_pad_%02d.py", g_usages_tmpdir, i);
+            if (th_write_file(path, "dotted_padding = 0\n") != 0) {
+                teardown_usages_repo();
+                FAIL("failed to write parallel-selection fixture");
+            }
+        }
+    }
+
+    const char *old_workers = getenv("CBM_WORKERS");
+    char *saved_workers = old_workers ? strdup(old_workers) : NULL;
+    const char *old_single = getenv("CBM_INDEX_SINGLE_THREAD");
+    char *saved_single = old_single ? strdup(old_single) : NULL;
+    if ((old_workers && !saved_workers) || (old_single && !saved_single)) {
+        free(saved_workers);
+        free(saved_single);
+        teardown_usages_repo();
+        FAIL("failed to save pipeline environment");
+    }
+    int pin_workers_rc = parallel ? cbm_setenv("CBM_WORKERS", "4", 1) : 0;
+    int pin_single_rc = parallel ? cbm_unsetenv("CBM_INDEX_SINGLE_THREAD") : 0;
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/test_dotted_base.db", g_usages_tmpdir);
+    cbm_pipeline_t *p = pin_workers_rc == 0 && pin_single_rc == 0
+                            ? cbm_pipeline_new(g_usages_tmpdir, db_path, CBM_MODE_FULL)
+                            : NULL;
+    int run_rc = p ? cbm_pipeline_run(p) : -1;
+    cbm_store_t *s = run_rc == 0 ? cbm_store_open_path(db_path) : NULL;
+    bool store_opened = s != NULL;
+    int dotted_self = -1, dotted_super = -1, dotted_init = -1, plain_self = -1, untyped = -1;
+    if (s) {
+        const char *project = cbm_pipeline_project_name(p);
+        dotted_self = count_lsp_calls(s, project, "pkg.types.DottedType.run",
+                                      "pkg.mod.nodes.Context.ctx_only_helper");
+        dotted_super = count_lsp_calls(s, project, "pkg.types.DottedType.describe",
+                                       "pkg.mod.nodes.Context.describe");
+        dotted_init = count_lsp_calls(s, project, "pkg.types.DottedType.__init__",
+                                      "pkg.mod.nodes.Context.__init__");
+        plain_self = count_lsp_calls(s, project, "pkg.types.PlainType.run",
+                                     "pkg.mod.nodes.Context.ctx_only_helper");
+        untyped = count_lsp_calls(s, project, "pkg.types.untyped", "ctx_only_helper");
+        cbm_store_close(s);
+    }
+
+    cbm_pipeline_free(p);
+    int restore_workers_rc =
+        saved_workers ? cbm_setenv("CBM_WORKERS", saved_workers, 1) : cbm_unsetenv("CBM_WORKERS");
+    int restore_single_rc = saved_single ? cbm_setenv("CBM_INDEX_SINGLE_THREAD", saved_single, 1)
+                                         : cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    free(saved_workers);
+    free(saved_single);
+    teardown_usages_repo();
+
+    ASSERT_EQ(pin_workers_rc, 0);
+    ASSERT_EQ(pin_single_rc, 0);
+    ASSERT_EQ(restore_workers_rc, 0);
+    ASSERT_EQ(restore_single_rc, 0);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_TRUE(store_opened);
+    ASSERT_EQ(dotted_self, 1);  /* self.m() inherited through a dotted base */
+    ASSERT_EQ(dotted_super, 1); /* super().m() through a dotted base */
+    ASSERT_EQ(dotted_init, 1);  /* super().__init__() through a dotted base */
+    ASSERT_EQ(plain_self, 1);   /* control: from-imported base */
+    ASSERT_EQ(untyped, 0);      /* control: no receiver type, no LSP edge */
+    PASS();
+}
+
+TEST(python_dotted_base_inheritance) {
+    return check_python_dotted_base_inheritance(false);
+}
+
+TEST(python_dotted_base_inheritance_parallel) {
+    return check_python_dotted_base_inheritance(true);
+}
+
 /* Bind the external-import veto specifically to #1277's typed-field fold.
  * No base classes or CALLS edges participate: a name-only call fallback
  * cannot turn this metadata assertion into a false positive. The unguarded
@@ -13852,6 +13969,33 @@ static void pyn_qn(char *buf, size_t cap, const char *project, const char *rel) 
     }
 }
 
+/* True iff an edge of `type` runs from node `src_rel` to node `tgt_rel`. */
+static bool pyn_edge(cbm_store_t *s, const char *project, const char *src_rel, const char *tgt_rel,
+                     const char *type) {
+    char sq[512];
+    char tq[512];
+    pyn_qn(sq, sizeof(sq), project, src_rel);
+    pyn_qn(tq, sizeof(tq), project, tgt_rel);
+    cbm_node_t src = {0};
+    cbm_node_t tgt = {0};
+    bool found = false;
+    if (cbm_store_find_node_by_qn(s, project, sq, &src) == CBM_STORE_OK &&
+        cbm_store_find_node_by_qn(s, project, tq, &tgt) == CBM_STORE_OK) {
+        cbm_edge_t *edges = NULL;
+        int ec = 0;
+        cbm_store_find_edges_by_source_type(s, src.id, type, &edges, &ec);
+        for (int i = 0; i < ec && !found; i++) {
+            found = edges[i].target_id == tgt.id;
+        }
+        if (edges) {
+            cbm_store_free_edges(edges, ec);
+        }
+    }
+    cbm_node_free_fields(&src);
+    cbm_node_free_fields(&tgt);
+    return found;
+}
+
 /* True iff an edge of `type` runs from node `src_rel` to node `tgt_rel` and its
  * properties contain `fragment`. */
 static bool pyn_edge_with(cbm_store_t *s, const char *project, const char *src_rel,
@@ -14054,6 +14198,164 @@ TEST(pipeline_python_nested_class_methods_resolve) {
 
 TEST(pipeline_python_nested_class_methods_resolve_parallel) {
     return pyn_run_nested_class(52);
+}
+
+/* ── F15: a nested class's bare base resolves in its class body first ── */
+
+/* The sqlalchemy asyncpg shape: an adapter class re-declares the DBAPI
+ * exception hierarchy as nested classes, each based on an EARLIER sibling
+ * spelled bare (`class IntegrityError(DatabaseError)`). Python evaluates a
+ * class statement's bases in the enclosing class body, so the sibling wins
+ * over the same-named module classes of exc.py, which the adapter imports
+ * as a module (so a name guess prefers them, as on sqlalchemy once its
+ * relative `from ... import exc` resolves). A sibling defined LATER in the
+ * body is not bound yet: `Early(Later)` names the module-level Later. */
+static const char pyb_exc_py[] = "class DBAPIError(Exception):\n"
+                                 "    pass\n"
+                                 "\n"
+                                 "class DatabaseError(DBAPIError):\n"
+                                 "    pass\n"
+                                 "\n"
+                                 "class IntegrityError(DatabaseError):\n"
+                                 "    pass\n";
+
+static const char pyb_adapter_py[] = "import exc\n"
+                                     "from exc import DBAPIError\n"
+                                     "\n"
+                                     "class Later(Exception):\n"
+                                     "    pass\n"
+                                     "\n"
+                                     "class AsyncAdapt_dbapi:\n"
+                                     "    class Error(DBAPIError):\n"
+                                     "        pass\n"
+                                     "\n"
+                                     "    class DatabaseError(Error):\n"
+                                     "        pass\n"
+                                     "\n"
+                                     "    class IntegrityError(DatabaseError):\n"
+                                     "        pass\n"
+                                     "\n"
+                                     "    class NotNullViolationError(IntegrityError):\n"
+                                     "        pass\n"
+                                     "\n"
+                                     "    class Early(Later):\n"
+                                     "        pass\n"
+                                     "\n"
+                                     "    class Later(Exception):\n"
+                                     "        pass\n";
+
+/* A second adapter with the same nested names, as sqlalchemy has one per
+ * driver: a name-only guess has several same-named candidates to pick. */
+static const char pyb_adapter2_py[] = "class AsyncAdapt_other_dbapi:\n"
+                                      "    class Error(Exception):\n"
+                                      "        pass\n"
+                                      "\n"
+                                      "    class DatabaseError(Error):\n"
+                                      "        pass\n"
+                                      "\n"
+                                      "    class IntegrityError(DatabaseError):\n"
+                                      "        pass\n";
+
+static int pyb_run_class_body_base(int fillers) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_py_cbbase_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "exc.py", pyb_exc_py);
+    write_temp_file(tmp, "adapter.py", pyb_adapter_py);
+    write_temp_file(tmp, "adapter2.py", pyb_adapter2_py);
+    for (int i = 0; i < fillers; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "filler%d.py", i);
+        snprintf(body, sizeof(body), "def filler%d():\n    return %d\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    if (fillers > 0) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/cbbase.db", tmp);
+    int rc[2] = {-1, -1};
+    bool db_sib[2] = {false, false};
+    bool db_mod[2] = {true, true};
+    bool ie_sib[2] = {false, false};
+    bool ie_mod[2] = {true, true};
+    bool nn_sib[2] = {false, false};
+    bool err_imp[2] = {false, false};
+    bool early_mod[2] = {false, false};
+    bool early_later_sib[2] = {true, true};
+    bool other_sib[2] = {false, false};
+    for (int run = 0; run < 2; run++) {
+        if (run == 1) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/adapter.py", tmp);
+            th_append_file(path, "\n# edited: the second run re-indexes incrementally\n");
+        }
+        cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+        rc[run] = p ? cbm_pipeline_run(p) : -1;
+        cbm_store_t *s = rc[run] == 0 ? cbm_store_open_path(db_path) : NULL;
+        if (s) {
+            const char *pr = cbm_pipeline_project_name(p);
+            const char *cls = "adapter.AsyncAdapt_dbapi";
+            char a[256];
+            char b[256];
+            snprintf(a, sizeof(a), "%s.DatabaseError", cls);
+            snprintf(b, sizeof(b), "%s.Error", cls);
+            db_sib[run] = pyn_edge(s, pr, a, b, "INHERITS");
+            db_mod[run] = pyn_edge(s, pr, a, "adapter2.AsyncAdapt_other_dbapi.Error", "INHERITS");
+            snprintf(a, sizeof(a), "%s.IntegrityError", cls);
+            snprintf(b, sizeof(b), "%s.DatabaseError", cls);
+            ie_sib[run] = pyn_edge(s, pr, a, b, "INHERITS");
+            ie_mod[run] = pyn_edge(s, pr, a, "exc.DatabaseError", "INHERITS");
+            snprintf(a, sizeof(a), "%s.NotNullViolationError", cls);
+            snprintf(b, sizeof(b), "%s.IntegrityError", cls);
+            nn_sib[run] = pyn_edge(s, pr, a, b, "INHERITS");
+            snprintf(a, sizeof(a), "%s.Error", cls);
+            err_imp[run] = pyn_edge(s, pr, a, "exc.DBAPIError", "INHERITS");
+            snprintf(a, sizeof(a), "%s.Early", cls);
+            snprintf(b, sizeof(b), "%s.Later", cls);
+            early_mod[run] = pyn_edge(s, pr, a, "adapter.Later", "INHERITS");
+            early_later_sib[run] = pyn_edge(s, pr, a, b, "INHERITS");
+            other_sib[run] = pyn_edge(s, pr, "adapter2.AsyncAdapt_other_dbapi.IntegrityError",
+                                      "adapter2.AsyncAdapt_other_dbapi.DatabaseError", "INHERITS");
+            cbm_store_close(s);
+        }
+        if (p) {
+            cbm_pipeline_free(p);
+        }
+    }
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    for (int run = 0; run < 2; run++) {
+        ASSERT_EQ(rc[run], 0);
+        ASSERT_TRUE(db_sib[run]);           /* DatabaseError(Error): the earlier sibling */
+        ASSERT_FALSE(db_mod[run]);          /* ... not the other adapter's Error */
+        ASSERT_TRUE(ie_sib[run]);           /* IntegrityError(DatabaseError): the sibling */
+        ASSERT_FALSE(ie_mod[run]);          /* ... not exc.DatabaseError */
+        ASSERT_TRUE(nn_sib[run]);           /* a chain of siblings */
+        ASSERT_TRUE(err_imp[run]);          /* control: a non-sibling base keeps the import */
+        ASSERT_TRUE(early_mod[run]);        /* a LATER sibling is not bound yet: module Later */
+        ASSERT_FALSE(early_later_sib[run]); /* ... never the later sibling */
+        ASSERT_TRUE(other_sib[run]);        /* the second adapter binds its own sibling */
+    }
+    PASS();
+}
+
+TEST(pipeline_python_class_body_sibling_base) {
+    return pyb_run_class_body_base(0);
+}
+
+TEST(pipeline_python_class_body_sibling_base_parallel) {
+    return pyb_run_class_body_base(52);
 }
 
 /* ── Semantic pass, batched == unbatched ─────────────────────────────── */
@@ -16643,6 +16945,8 @@ SUITE(pipeline) {
     RUN_TEST(override_python_through_intermediate_class);
     RUN_TEST(python_crossfile_typed_field_calls_issue1277);
     RUN_TEST(python_crossfile_typed_field_calls_issue1277_parallel);
+    RUN_TEST(python_dotted_base_inheritance);
+    RUN_TEST(python_dotted_base_inheritance_parallel);
     RUN_TEST(python_typed_field_external_import_stays_unresolved);
     RUN_TEST(python_typed_field_project_class_resolves);
     RUN_TEST(usages_creates_edges);
@@ -16947,6 +17251,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_python_decorated_nested_class_extracted_parallel);
     RUN_TEST(pipeline_python_nested_class_methods_resolve);
     RUN_TEST(pipeline_python_nested_class_methods_resolve_parallel);
+    RUN_TEST(pipeline_python_class_body_sibling_base);
+    RUN_TEST(pipeline_python_class_body_sibling_base_parallel);
     RUN_TEST(pipeline_semantic_batched_matches_unbatched);
     RUN_TEST(sem_tfidf_terms_compare_vocabulary_not_positions);
     RUN_TEST(sem_combine_weighs_signals);

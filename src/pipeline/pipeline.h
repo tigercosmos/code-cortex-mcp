@@ -556,6 +556,15 @@ bool cbm_suppress_weak_call(CBMLanguage lang, const CBMCall *call, const char *s
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);
 
+/* Python: the bare base `base` of the class `class_qn` nested in a class body
+ * binds the sibling class of that body (`<enclosing class>.<base>`) when the
+ * sibling is defined earlier in the same file (Python evaluates the bases in
+ * the class body). Exact lookups only; the registry-owned sibling QN, or NULL
+ * to resolve the base as before. Every base-class resolver asks this first. */
+const char *cbm_registry_resolve_python_class_body_base(const cbm_registry_t *r,
+                                                        const cbm_gbuf_t *gb, const char *class_qn,
+                                                        const char *base, CBMLanguage lang);
+
 /* Find all QNs with a given simple name. Sets *out and *count.
  * Caller does NOT free the array (owned by registry). */
 int cbm_registry_find_by_name(const cbm_registry_t *r, const char *name, const char ***out,

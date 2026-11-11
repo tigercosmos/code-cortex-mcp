@@ -462,10 +462,92 @@ typedef struct {
     CBMLanguage lang;
 } pxc_base_scope_t;
 
+/* A type-like graph node, or NULL. */
+static const cbm_gbuf_node_t *pxc_type_node(const cbm_gbuf_node_t *node) {
+    return node && node->qualified_name && cbm_label_is_type_like(node->label) ? node : NULL;
+}
+
+/* Python `import a.b.c` binds the ROOT name `a`, so a base spelled through it
+ * (`class X(a.b.c.Base)`) is module a.b.c's Base. The registry's import_map
+ * step joins the imported module with the whole remaining spelling and
+ * misses, so a dotted base never resolved and every member inherited through
+ * it was invisible to the LSP. Resolve the spelling against the module the
+ * import names: the import map's module when the root local is unique there,
+ * else the dotted module path under the project's QN rule. Import-backed and
+ * exact -- no short-name step -- and only a type-like project node is
+ * accepted. `import a.b as m` and `from a import b` bind the module itself
+ * and keep resolving through the import map.
+ *
+ * Fork adaptation: this extractor records `import a.b.c` under its LAST
+ * segment (`c`), not the root (upstream's 87a0e3f7 root binding is not
+ * carried), so such an import is recognized by its module path being a
+ * segment prefix of the spelling. Its import-map value is keyed by that last
+ * segment, not the root the spelling starts with, so only the QN-rule lookup
+ * of the spelled module path is taken for it. */
+static const char *pxc_python_dotted_base_qn(const pxc_base_scope_t *bs, const char *raw) {
+    if (bs->lang != CBM_LANG_PYTHON || !bs->imports || !bs->gbuf || !strchr(raw, '.')) {
+        return NULL;
+    }
+    size_t root_len = strcspn(raw, ".");
+    for (int i = 0; i < bs->imports->count; i++) {
+        const CBMImport *imp = &bs->imports->items[i];
+        const char *local = imp->local_name;
+        const char *path = imp->module_path;
+        if (!local || !path || strncmp(path, raw, root_len) != 0 ||
+            (path[root_len] != '\0' && path[root_len] != '.')) {
+            continue; /* the import's module does not start with the base's root */
+        }
+        size_t path_len = strlen(path);
+        if (strncmp(raw, path, path_len) != 0 || raw[path_len] != '.') {
+            continue; /* the base does not extend this import's module path */
+        }
+        bool root_bound = strlen(local) == root_len && strncmp(raw, local, root_len) == 0;
+        if (!root_bound && (path[root_len] == '\0' || strcmp(local, strrchr(path, '.') + 1) != 0)) {
+            continue; /* an aliased import (`import a.b as m`) binds only its alias */
+        }
+        const cbm_gbuf_node_t *node = NULL;
+        if (root_bound) {
+            const char *module_qn = NULL;
+            int hits = 0;
+            for (int k = 0; k < bs->imp_count; k++) {
+                if (bs->imp_keys[k] && bs->imp_vals[k] && strcmp(bs->imp_keys[k], local) == 0) {
+                    module_qn = bs->imp_vals[k];
+                    hits++;
+                }
+            }
+            if (hits == 1) {
+                char candidate[CBM_SZ_512];
+                int n = snprintf(candidate, sizeof(candidate), "%s%s", module_qn, raw + path_len);
+                if (n > 0 && (size_t)n < sizeof(candidate)) {
+                    node = pxc_type_node(cbm_gbuf_find_by_qn(bs->gbuf, candidate));
+                }
+            }
+        }
+        if (!node) {
+            node =
+                pxc_type_node(cbm_pipeline_lsp_target_node(bs->gbuf, bs->project_name, raw, false));
+        }
+        if (node) {
+            return node->qualified_name;
+        }
+    }
+    return NULL;
+}
+
 static const char *pxc_resolve_base_qn(const pxc_base_scope_t *bs, const char *raw,
-                                       const char *module_qn) {
+                                       const char *module_qn, const char *class_qn) {
     if (!bs || !bs->reg || !raw || !raw[0]) {
         return NULL;
+    }
+    /* A base of a class nested in a class body: an earlier sibling first. */
+    const char *sibling =
+        cbm_registry_resolve_python_class_body_base(bs->reg, bs->gbuf, class_qn, raw, bs->lang);
+    if (sibling) {
+        return sibling;
+    }
+    const char *dotted = pxc_python_dotted_base_qn(bs, raw);
+    if (dotted) {
+        return dotted;
     }
     const cbm_registry_t *reg = bs->reg;
     cbm_resolution_t res = cbm_registry_resolve_lang(reg, raw, module_qn, bs->imp_keys,
@@ -492,7 +574,8 @@ static const char *pxc_resolve_base_qn(const pxc_base_scope_t *bs, const char *r
 /* pxc_join_pipe over base_classes, substituting each resolved QN for its
  * source spelling. Unresolved entries pass through verbatim. */
 static const char *pxc_join_base_qns(CBMArena *arena, const char *const *bases,
-                                     const pxc_base_scope_t *bs, const char *module_qn) {
+                                     const pxc_base_scope_t *bs, const char *module_qn,
+                                     const char *class_qn) {
     if (!bases || !bases[0]) {
         return NULL;
     }
@@ -506,7 +589,7 @@ static const char *pxc_join_base_qns(CBMArena *arena, const char *const *bases,
         return pxc_join_pipe(arena, bases);
     }
     for (int i = 0; i < count; i++) {
-        const char *qn = pxc_resolve_base_qn(bs, bases[i], module_qn);
+        const char *qn = pxc_resolve_base_qn(bs, bases[i], module_qn, class_qn);
         resolved[i] = qn ? qn : bases[i];
     }
     resolved[count] = NULL;
@@ -617,7 +700,7 @@ static void pxc_fold_py_field_types(CBMArena *arena, const CBMFileResult *result
         fields[f].type_qn = NULL;
         CBMLSPDef *owner = ft->class_qn ? (CBMLSPDef *)cbm_ht_get(by_qn, ft->class_qn) : NULL;
         const char *name = owner ? pxc_py_annotation_type_name(arena, ft->type_text) : NULL;
-        const char *qn = name ? pxc_resolve_base_qn(bs, name, module_qn) : NULL;
+        const char *qn = name ? pxc_resolve_base_qn(bs, name, module_qn, NULL) : NULL;
         if (!qn || !ft->field_name || !ft->field_name[0]) {
             continue;
         }
@@ -689,9 +772,10 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
     dst->return_types = go_list ? go_list : src->return_type;
     if (lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA)
         dst->parameter_types = src->param_types;
-    dst->embedded_types = (bs && bs->reg && pxc_lang_resolves_base_qns(lang))
-                              ? pxc_join_base_qns(arena, src->base_classes, bs, module_qn)
-                              : pxc_join_pipe(arena, src->base_classes);
+    dst->embedded_types =
+        (bs && bs->reg && pxc_lang_resolves_base_qns(lang))
+            ? pxc_join_base_qns(arena, src->base_classes, bs, module_qn, src->qualified_name)
+            : pxc_join_pipe(arena, src->base_classes);
     dst->lang = lang;
     dst->cpp_declaration_key = src->declaration_key;
     dst->alias_target = lang == CBM_LANG_GO ? src->alias_target : NULL;
