@@ -429,11 +429,28 @@ static void pd_add_file_doc(const cbm_gbuf_node_t *file_node, const char *doc) {
     free(neu);
 }
 
-/* Process one definition: create node, register, DEFINES + DEFINES_METHOD edges.
- * `file_doc`, the file's own doc (passed with its first def only), goes on the
- * File node. */
+/* DEFINES_METHOD from a method's type. The parent is looked up by QN (with the
+ * fork's suffix fallback), so the parent's node must already exist. Twin:
+ * pass_parallel.cpp register_and_link_def. */
+static void link_def_parent(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, int64_t node_id) {
+    if (node_id <= 0 || !def->parent_class || !def->label || strcmp(def->label, "Method") != 0) {
+        return;
+    }
+    const cbm_gbuf_node_t *parent = cbm_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
+    if (!parent) {
+        parent = cbm_pipeline_resolve_method_parent(ctx->gbuf, def->parent_class);
+    }
+    if (parent) {
+        cbm_gbuf_insert_edge(ctx->gbuf, parent->id, node_id, "DEFINES_METHOD", "{}");
+    }
+}
+
+/* Process one definition: create node, register, DEFINES edge. `file_doc`,
+ * the file's own doc (passed with its first def only), goes on the File node.
+ * `link_parent` links its DEFINES_METHOD right away; with the result cache the
+ * pass links every method once every file is registered. */
 static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const char *rel,
-                        CBMLanguage lang, const char *file_doc) {
+                        CBMLanguage lang, const char *file_doc, bool link_parent) {
     if (!def->qualified_name || !def->name) {
         return;
     }
@@ -470,13 +487,38 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
         cbm_gbuf_insert_edge(ctx->gbuf, file_node->id, node_id, "DEFINES", "{}");
     }
     free(file_qn);
-    if (def->parent_class && def->label && strcmp(def->label, "Method") == 0) {
-        const cbm_gbuf_node_t *parent = cbm_gbuf_find_by_qn(ctx->gbuf, def->parent_class);
-        if (!parent) {
-            parent = cbm_pipeline_resolve_method_parent(ctx->gbuf, def->parent_class);
+    if (link_parent) {
+        link_def_parent(ctx, def, node_id);
+    }
+}
+
+/* Parent links of the definitions cached in Phase 1, made once EVERY file's
+ * nodes exist (upstream d2ea417e). A method is often defined in a file the
+ * directory walk returns before its type's file (a Go method in another file
+ * of its package, an out-of-line C++ method in foo.cpp before foo.h); linking
+ * it while files were still being registered found no parent, so the
+ * sequential pipeline lost the edge -- and the IMPLEMENTS / OVERRIDE edges
+ * derived from it -- that the parallel registry build keeps. */
+static void link_cached_def_parents(cbm_pipeline_ctx_t *ctx, CBMFileResult *const *cache,
+                                    int file_count) {
+    for (int i = 0; i < file_count; i++) {
+        if (cbm_pipeline_check_cancel(ctx)) {
+            return;
         }
-        if (parent && node_id > 0) {
-            cbm_gbuf_insert_edge(ctx->gbuf, parent->id, node_id, "DEFINES_METHOD", "{}");
+        const CBMFileResult *result = cache[i];
+        if (!result) {
+            continue;
+        }
+        for (int d = 0; d < result->defs.count; d++) {
+            const CBMDefinition *def = &result->defs.items[d];
+            if (!def->parent_class || !def->qualified_name || !def->name || !def->label ||
+                strcmp(def->label, "Method") != 0) {
+                continue;
+            }
+            const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(ctx->gbuf, def->qualified_name);
+            if (node) {
+                link_def_parent(ctx, def, node->id);
+            }
         }
     }
 }
@@ -776,7 +818,7 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         /* Create nodes for each definition */
         const char *file_doc = result->module_doc; /* goes with the first def */
         for (int d = 0; d < result->defs.count; d++) {
-            process_def(ctx, &result->defs.items[d], rel, lang, file_doc);
+            process_def(ctx, &result->defs.items[d], rel, lang, file_doc, !local_cache);
             file_doc = NULL;
             total_defs++;
         }
@@ -803,6 +845,12 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
      * nodes for every file are in the graph, walk the cache again to
      * create IMPORTS / channel edges. Imports resolve against the full
      * project graph. */
+    /* Every file's nodes exist now: link methods to their types (without the
+     * cache each file linked its own above). */
+    if (local_cache) {
+        link_cached_def_parents(ctx, local_cache, file_count);
+    }
+
     if (local_cache) {
         /* Build a namespace/package → File-QN map so that namespace imports
          * (C# `using`, Java/Kotlin `import`, PHP `use`) resolve to the file

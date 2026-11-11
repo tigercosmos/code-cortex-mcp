@@ -10101,6 +10101,109 @@ static int named_edge_count(cbm_store_t *s, const char *project, const char *typ
     return hits;
 }
 
+/* Upstream d2ea417e (FD1): a method defined in another file than its type must
+ * get its DEFINES_METHOD edge on every venue. The sequential definitions pass
+ * linked the edge while it was still registering files, so a method whose type
+ * lived in a file the directory walk returns LATER found no parent. Each of the
+ * two files holds one type and the method of the OTHER file's type, so
+ * whichever order the walk returns them in, one method precedes its type. */
+struct CrossFileMethodObservation {
+    int run_rc = -1;
+    bool store_opened = false;
+    int alpha_method = -1; /* FdmAlpha -[DEFINES_METHOD]-> FdmAlphaGet */
+    int beta_method = -1;  /* FdmBeta -[DEFINES_METHOD]-> FdmBetaGet */
+};
+
+static CrossFileMethodObservation run_cross_file_method_case(bool parallel, int pad) {
+    struct SavedEnv {
+        const char *name;
+        std::string value;
+        bool present;
+        explicit SavedEnv(const char *key)
+            : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+        ~SavedEnv() {
+            if (present)
+                cbm_setenv(name, value.c_str(), 1);
+            else
+                cbm_unsetenv(name);
+        }
+    } single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
+    CrossFileMethodObservation o;
+    char tmp[256] = "/tmp/cbm_fd1_method_XXXXXX";
+    if (!cbm_mkdtemp(tmp)) {
+        return o;
+    }
+    std::string dir(tmp);
+    bool wrote = th_write_file((dir + "/x.go").c_str(),
+                               "package fdm\n\ntype FdmBeta struct{ n int }\n\n"
+                               "func (a *FdmAlpha) FdmAlphaGet() int { return a.n }\n") == 0 &&
+                 th_write_file((dir + "/y.go").c_str(),
+                               "package fdm\n\ntype FdmAlpha struct{ n int }\n\n"
+                               "func (b *FdmBeta) FdmBetaGet() int { return b.n }\n") == 0;
+    for (int i = 0; wrote && i < pad; i++) {
+        char name[64];
+        char source[128];
+        snprintf(name, sizeof(name), "/fdm_pad_%02d.go", i);
+        snprintf(source, sizeof(source), "package fdm\n\nfunc fdmPad%02d() int { return %d }\n", i,
+                 i);
+        wrote = th_write_file((dir + name).c_str(), source) == 0;
+    }
+    if (wrote) {
+        if (parallel) {
+            cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+            cbm_setenv("CBM_WORKERS", "4", 1);
+        } else {
+            cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+        }
+        std::string db = dir + "/fdm.db";
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(tmp, db.c_str(), CBM_MODE_FULL);
+        if (pipeline) {
+            o.run_rc = cbm_pipeline_run(pipeline);
+            const char *project = cbm_pipeline_project_name(pipeline);
+            cbm_store_t *store = cbm_store_open_path(db.c_str());
+            o.store_opened = store != NULL;
+            if (store && project) {
+                o.alpha_method =
+                    named_edge_count(store, project, "DEFINES_METHOD", "FdmAlpha", "FdmAlphaGet");
+                o.beta_method =
+                    named_edge_count(store, project, "DEFINES_METHOD", "FdmBeta", "FdmBetaGet");
+            }
+            if (store) {
+                cbm_store_close(store);
+            }
+            cbm_pipeline_free(pipeline);
+        }
+    }
+    th_rmtree(tmp);
+    return o;
+}
+
+TEST(pipeline_cross_file_method_defines_method_sequential) {
+    CrossFileMethodObservation o = run_cross_file_method_case(false, 0);
+    ASSERT_EQ(o.run_rc, 0);
+    ASSERT_TRUE(o.store_opened);
+    ASSERT_EQ(o.alpha_method, 1);
+    ASSERT_EQ(o.beta_method, 1);
+    PASS();
+}
+
+/* The same input through both resolvers: 55 fillers exceed
+ * MIN_FILES_FOR_PARALLEL, CBM_INDEX_SINGLE_THREAD keeps the first run
+ * sequential and CBM_WORKERS sends the second through pass_parallel.cpp. */
+TEST(pipeline_cross_file_method_defines_method_venue_parity) {
+    CrossFileMethodObservation seq = run_cross_file_method_case(false, 55);
+    CrossFileMethodObservation par = run_cross_file_method_case(true, 55);
+    ASSERT_EQ(seq.run_rc, 0);
+    ASSERT_EQ(par.run_rc, 0);
+    ASSERT_TRUE(seq.store_opened);
+    ASSERT_TRUE(par.store_opened);
+    ASSERT_EQ(par.alpha_method, 1);
+    ASSERT_EQ(par.beta_method, 1);
+    ASSERT_EQ(seq.alpha_method, par.alpha_method);
+    ASSERT_EQ(seq.beta_method, par.beta_method);
+    PASS();
+}
+
 /* Index `n` fixture files plus `pad` filler Go files (>= 50 total forces the
  * parallel pipeline) into g_lang_tmpdir; returns the pipeline, or NULL. The
  * caller opens the store at `db`, frees the pipeline and tears the repo down. */
@@ -14366,6 +14469,8 @@ TEST(pipeline_c_call_reaches_header_function_beside_field_parallel) {
 
 
 SUITE(pipeline) {
+    RUN_TEST(pipeline_cross_file_method_defines_method_sequential);
+    RUN_TEST(pipeline_cross_file_method_defines_method_venue_parity);
     RUN_TEST(pipeline_stem_folder_collision_keeps_both_nodes);
     RUN_TEST(incremental_stem_mark_change_rebuilds);
 #ifdef _WIN32
