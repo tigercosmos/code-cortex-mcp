@@ -6483,6 +6483,90 @@ static void extract_objc_impl_methods(CBMExtractCtx *ctx, TSNode impl_node, cons
     }
 }
 
+/* True for a C# 14 extension block. The vendored tree-sitter-c-sharp has no
+ * `extension` production, so `extension(string text) { ... }` parses as a
+ * constructor_declaration named `extension` and nothing flags it: has_error
+ * stays 0. A constructor carries its own type's name, so this shape can only be
+ * a genuine constructor inside a type literally called `extension` (#2071,
+ * upstream 7054e4ff) -- or `@extension`, a verbatim identifier naming the same
+ * type (upstream 70286404). */
+static bool csharp_is_extension_block(TSNode node, TSNode class_node, const char *source) {
+    if (strcmp(ts_node_type(node), "constructor_declaration") != 0) {
+        return false;
+    }
+    TSNode name = resolve_method_name(node, CBM_LANG_CSHARP);
+    if (ts_node_is_null(name)) {
+        return false;
+    }
+    const size_t kw_len = sizeof("extension") - SKIP_ONE;
+    uint32_t len = ts_node_end_byte(name) - ts_node_start_byte(name);
+    if (len != kw_len || strncmp(source + ts_node_start_byte(name), "extension", kw_len) != 0) {
+        return false;
+    }
+    TSNode type_name = ts_node_child_by_field_name(class_node, TS_FIELD("name"));
+    if (!ts_node_is_null(type_name)) {
+        const char *type_text = source + ts_node_start_byte(type_name);
+        uint32_t tlen = ts_node_end_byte(type_name) - ts_node_start_byte(type_name);
+        if (tlen > 0 && type_text[0] == '@') {
+            type_text++;
+            tlen--;
+        }
+        if (tlen == kw_len && strncmp(type_text, "extension", kw_len) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Lift the members of a misparsed C# 14 extension block onto the enclosing
+ * type. They sit in the block the grammar took for a constructor body, which
+ * nothing recurses into, so every one of them was dropped. Methods land there
+ * as local_function_statement; a property in the block parses as ERROR and is
+ * beyond recovery without a grammar that knows the construct (#2071).
+ *
+ * A member inside `#if`/`#elif`/`#else` is still a member (upstream 70286404,
+ * which reads the body through the member iterator that upstream's 42a93202
+ * introduced; this fork has no such iterator, so the conditional blocks are
+ * flattened here with a bounded worklist). Only the block's own statements
+ * are members: a local function inside one of those methods is not. */
+static void extract_csharp_extension_members(CBMExtractCtx *ctx, TSNode ext_node, TSNode class_node,
+                                             const char *class_qn, const CBMLangSpec *spec) {
+    enum { EXT_COND_DEPTH_MAX = 16 };
+    TSNode body = cbm_find_child_by_kind(ext_node, "block");
+    if (ts_node_is_null(body)) {
+        return;
+    }
+    TSNode pending[EXT_COND_DEPTH_MAX];
+    int npending = 0;
+    pending[npending++] = body;
+    while (npending > 0) {
+        TSNode cur = pending[--npending];
+        uint32_t count = ts_node_child_count(cur);
+        for (uint32_t i = 0; i < count; i++) {
+            TSNode member = ts_node_child(cur, i);
+            if (ts_node_is_null(member)) {
+                continue;
+            }
+            const char *mk = ts_node_type(member);
+            if (strcmp(mk, "preproc_if") == 0 || strcmp(mk, "preproc_elif") == 0 ||
+                strcmp(mk, "preproc_else") == 0) {
+                if (npending < EXT_COND_DEPTH_MAX) {
+                    pending[npending++] = member;
+                }
+                continue;
+            }
+            if (strcmp(mk, "local_function_statement") != 0) {
+                continue;
+            }
+            TSNode name = resolve_method_name(member, ctx->language);
+            if (ts_node_is_null(name)) {
+                continue;
+            }
+            push_method_def(ctx, member, class_node, class_qn, spec, name);
+        }
+    }
+}
+
 // Extract methods inside a class body
 static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
                                   const CBMLangSpec *spec) {
@@ -6495,6 +6579,15 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
     for (uint32_t i = 0; i < count; i++) {
         TSNode child = ts_node_child(body, i);
         if (ts_node_is_null(child)) {
+            continue;
+        }
+
+        /* C# 14 extension block: emit the members it holds as methods of the
+         * enclosing type, rather than the block itself as a constructor named
+         * `extension` with its members buried in the body (#2071). */
+        if (ctx->language == CBM_LANG_CSHARP &&
+            csharp_is_extension_block(child, class_node, ctx->source)) {
+            extract_csharp_extension_members(ctx, child, class_node, class_qn, spec);
             continue;
         }
 
