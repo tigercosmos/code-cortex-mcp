@@ -121,8 +121,12 @@ static const ext_entry_t EXT_TABLE[] = {
     {".f95", CBM_LANG_FORTRAN},
 
     /* GLSL */
+    {".comp", CBM_LANG_GLSL},
     {".frag", CBM_LANG_GLSL},
+    {".geom", CBM_LANG_GLSL},
     {".glsl", CBM_LANG_GLSL},
+    {".tesc", CBM_LANG_GLSL},
+    {".tese", CBM_LANG_GLSL},
     {".vert", CBM_LANG_GLSL},
 
     /* Go */
