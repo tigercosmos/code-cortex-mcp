@@ -223,10 +223,25 @@ static void free_import_map(const char **keys, const char **vals, int count) {
  * (`Route::get`, `$router->get`, `app.get`) with a path-shaped first argument
  * is a registration (upstream #952 fallback, mirrors the parallel path's
  * callee_suffix fallback; a callee another service family claims is not). */
-static bool unresolved_route_registration(const CBMCall *call) {
-    if (cbm_service_pattern_route_method(call->callee_name) == NULL || !call->first_string_arg ||
-        call->first_string_arg[0] != '/' ||
-        cbm_service_pattern_is_comment_text(call->first_string_arg)) {
+/* The path a route registration's first argument names: the argument itself
+ * when it opens with a slash (and is no comment), or in Go the path of a
+ * ServeMux pattern that names a method or host first ("POST /v1/x", upstream
+ * #2537; Handle / HandleFunc only). NULL when it names no path. MUST match
+ * pass_parallel.cpp find_route_path_in_args. */
+static const char *route_reg_path(const CBMCall *call, CBMLanguage lang) {
+    const char *arg = call->first_string_arg;
+    if (!arg) {
+        return NULL;
+    }
+    if (arg[0] == '/') {
+        return cbm_service_pattern_is_comment_text(arg) ? NULL : arg;
+    }
+    return cbm_pipeline_mux_route_path(call, lang);
+}
+
+static bool unresolved_route_registration(const CBMCall *call, CBMLanguage lang) {
+    if (cbm_service_pattern_route_method(call->callee_name) == NULL ||
+        route_reg_path(call, lang) == NULL) {
         return false;
     }
     cbm_svc_kind_t svc = cbm_service_pattern_match(call->callee_name);
@@ -236,20 +251,26 @@ static bool unresolved_route_registration(const CBMCall *call) {
 /* Handle a route registration call: create Route node + HANDLES edge. */
 static void handle_route_registration(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
                                       const cbm_gbuf_node_t *source_node, const char *module_qn,
-                                      const char **imp_keys, const char **imp_vals, int imp_count) {
-    const char *method = cbm_service_pattern_route_method(call->callee_name);
+                                      const char **imp_keys, const char **imp_vals, int imp_count,
+                                      CBMLanguage lang) {
+    char mux_method[CBM_SZ_16];
+    const char *method = cbm_pipeline_route_reg_method(call, lang, mux_method, sizeof(mux_method));
+    const char *path = route_reg_path(call, lang);
+    if (!path) {
+        path = call->first_string_arg;
+    }
     char route_qn[CBM_ROUTE_QN_SIZE];
     char cpath[CBM_SZ_256];
     snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method ? method : "ANY",
-             cbm_route_canon_path(call->first_string_arg, cpath, sizeof(cpath)));
+             cbm_route_canon_path(path, cpath, sizeof(cpath)));
     char route_props[CBM_SZ_256];
     snprintf(route_props, sizeof(route_props), "{\"method\":\"%s\"}", method ? method : "ANY");
-    int64_t route_id = cbm_gbuf_upsert_node(ctx->gbuf, "Route", call->first_string_arg, route_qn,
-                                            "", 0, 0, route_props);
+    int64_t route_id =
+        cbm_gbuf_upsert_node(ctx->gbuf, "Route", path, route_qn, "", 0, 0, route_props);
     char esc_cn[CBM_SZ_256]; /* sliced source text: escape quotes/newlines */
     char esc_fa[CBM_SZ_256];
     cbm_json_escape(esc_cn, sizeof(esc_cn), call->callee_name);
-    cbm_json_escape(esc_fa, sizeof(esc_fa), call->first_string_arg);
+    cbm_json_escape(esc_fa, sizeof(esc_fa), path);
     /* Must exceed both escaped values + wrapper (2 * CBM_SZ_256 + 54) or a long
      * callee/URL pair cuts the blob mid-string — the parallel twin
      * (emit_route_registration) already sizes this at CBM_SZ_1K. */
@@ -478,13 +499,14 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
                                  const cbm_gbuf_node_t *source, const cbm_gbuf_node_t *target,
                                  const cbm_resolution_t *res, const char *module_qn,
                                  const char **imp_keys, const char **imp_vals, int imp_count,
-                                 bool suppress_plain_calls) {
+                                 bool suppress_plain_calls, CBMLanguage lang) {
     cbm_svc_kind_t svc = cbm_service_pattern_match(res->qualified_name);
     /* A comment also opens with a slash; it is not a route path (mirrors
-     * pass_parallel.cpp's is_route_path_shaped). */
-    if (svc == CBM_SVC_ROUTE_REG && call->first_string_arg && call->first_string_arg[0] == '/' &&
-        !cbm_service_pattern_is_comment_text(call->first_string_arg)) {
-        handle_route_registration(ctx, call, source, module_qn, imp_keys, imp_vals, imp_count);
+     * pass_parallel.cpp's is_route_path_shaped). route_reg_path also reads a
+     * Go ServeMux pattern (upstream #2537). */
+    if (svc == CBM_SVC_ROUTE_REG && route_reg_path(call, lang) != NULL) {
+        handle_route_registration(ctx, call, source, module_qn, imp_keys, imp_vals, imp_count,
+                                  lang);
         return;
     }
     if (svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) {
@@ -658,7 +680,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
             res.strategy = lsp->strategy;
             res.candidate_count = 1;
             emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys,
-                                 imp_vals, imp_count, false);
+                                 imp_vals, imp_count, false, lang);
             return SKIP_ONE;
         }
     }
@@ -733,9 +755,9 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
          * lives in vendor/ and is never indexed, so resolution is ALWAYS empty
          * in real apps. Classify by callee suffix + path-shaped first arg like
          * the parallel path's callee_suffix fallback. */
-        if (unresolved_route_registration(call)) {
+        if (unresolved_route_registration(call, lang)) {
             handle_route_registration(ctx, call, source_node, module_qn, imp_keys, imp_vals,
-                                      imp_count);
+                                      imp_count, lang);
             return SKIP_ONE;
         }
         cbm_svc_kind_t esvc = cbm_service_pattern_match(call->callee_name);
@@ -869,9 +891,9 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
          * every GET registration in a mixed-language repo while POST (no
          * `post` to collide with) survived (upstream 124c5e29). */
         if (cbm_suppress_cross_language_suffix_match(lang, target_node->file_path, res.strategy) &&
-            unresolved_route_registration(call)) {
+            unresolved_route_registration(call, lang)) {
             handle_route_registration(ctx, call, source_node, module_qn, imp_keys, imp_vals,
-                                      imp_count);
+                                      imp_count, lang);
             return SKIP_ONE;
         }
         return 0;
@@ -885,7 +907,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
         return 0;
     }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
-                         imp_count, drop_plain_call);
+                         imp_count, drop_plain_call, lang);
     return SKIP_ONE;
 }
 

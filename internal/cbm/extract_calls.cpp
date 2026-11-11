@@ -2585,7 +2585,13 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             if (!ts_node_is_null(args)) {
                 call.first_string_arg = route_path_with_group_prefix(
                     ctx, node, call.callee_name, extract_url_or_topic_arg(ctx, args));
-                if (call.first_string_arg && call.first_string_arg[0] == '/') {
+                /* A Go ServeMux pattern names its method or host before the
+                 * slash ("POST /v1/x", upstream #2537) and keeps its handler. */
+                if (call.first_string_arg &&
+                    (call.first_string_arg[0] == '/' ||
+                     (ctx->language == CBM_LANG_GO &&
+                      cbm_service_pattern_mux_route_path(call.callee_name, call.first_string_arg) !=
+                          NULL))) {
                     call.second_arg_name = extract_handler_arg(ctx, args);
                 }
                 extract_call_args(ctx, args, &call);

@@ -9275,6 +9275,40 @@ TEST(extract_go_multiple_init_disambiguated) {
     PASS();
 }
 
+/* Upstream #2537: a Go 1.22 ServeMux pattern may open with a method and/or a
+ * host ("POST /v1/payments", "GET api.example.com/v1/x"). The written pattern
+ * stays the first string argument, and its handler is captured exactly as for
+ * a plain "/v1/payments"; it was dropped because the pattern does not open
+ * with a slash. */
+TEST(extract_go_servemux_method_pattern_handler_issue2537) {
+    CBMFileResult *r = extract("package main\n"
+                               "import \"net/http\"\n"
+                               "func setup(mux *http.ServeMux) {\n"
+                               "    mux.HandleFunc(\"POST /v1/payments\", createPayment)\n"
+                               "    mux.Handle(\"GET api.example.com/v1/x\", hostHandler)\n"
+                               "}\n",
+                               CBM_LANG_GO, "t", "routes.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMCall *method = find_call_by_callee(r, "mux.HandleFunc");
+    ASSERT_NOT_NULL(method);
+    ASSERT_NOT_NULL(method->first_string_arg);
+    ASSERT_STR_EQ(method->first_string_arg, "POST /v1/payments");
+    ASSERT_NOT_NULL(method->second_arg_name);
+    ASSERT_STR_EQ(method->second_arg_name, "createPayment");
+
+    const CBMCall *host = find_call_by_callee(r, "mux.Handle");
+    ASSERT_NOT_NULL(host);
+    ASSERT_NOT_NULL(host->first_string_arg);
+    ASSERT_STR_EQ(host->first_string_arg, "GET api.example.com/v1/x");
+    ASSERT_NOT_NULL(host->second_arg_name);
+    ASSERT_STR_EQ(host->second_arg_name, "hostHandler");
+
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(extract_python_member_call_flags_is_method) {
     CBMFileResult *r = extract("from pkg import helper\n"
                                "import tools as toolkit\n"
@@ -11894,6 +11928,7 @@ SUITE(extraction) {
     RUN_TEST(extract_go_method_qn_matches_call_scope);
     RUN_TEST(extract_templ_method_qn_matches_call_scope);
     RUN_TEST(extract_go_multiple_init_disambiguated);
+    RUN_TEST(extract_go_servemux_method_pattern_handler_issue2537);
     RUN_TEST(extract_python_bare_call_flags_locally_bound_callee);
     RUN_TEST(extract_python_bare_call_flag_is_depth_independent);
 

@@ -874,6 +874,22 @@ const char *cbm_walk_coverage_entry(const CBMFileResult *r, char *reason, size_t
  * upstream a7016270). */
 bool cbm_pipeline_close_call_props(char *props, int n, const CBMCall *call, bool with_line);
 
+/* Go 1.22 ServeMux registrations may name a method and a host before the path
+ * ("POST /v1/x", "GET api.example.com/v1/x", upstream #2537). For a Go
+ * `Handle` / `HandleFunc` call, the path inside its first argument; NULL for
+ * any other language or callee (`store.Get("users/123")`), for a URL argument,
+ * and for an argument that is no such pattern (a plain "/v1/x" included). The
+ * one reader of that grammar behind both passes (pass_parallel.cpp). */
+const char *cbm_pipeline_mux_route_path(const CBMCall *call, CBMLanguage lang);
+
+/* The method of a route registration's Route: the verb its callee names
+ * (`router.GET`), else the method its Go ServeMux pattern names
+ * (`mux.HandleFunc("POST /v1/x", h)`), else the callee's own answer (ANY or
+ * NULL). `buf` (CBM_SZ_16) holds a pattern method. Shared by both passes so
+ * their Routes stay byte-identical (pass_parallel.cpp). */
+const char *cbm_pipeline_route_reg_method(const CBMCall *call, CBMLanguage lang, char *buf,
+                                          size_t buf_sz);
+
 #ifdef __cplusplus
 }
 #endif

@@ -10585,6 +10585,139 @@ static const char *const k_cs_fth_bodies[] = {
 static int named_edge_strategy_count(cbm_store_t *s, const char *project, const char *type,
                                      const char *src, const char *tgt, const char *strategy);
 
+static int route_nodes_containing(cbm_store_t *s, const char *project, const char *part) {
+    cbm_node_t *routes = NULL;
+    int route_count = 0;
+    if (cbm_store_find_nodes_by_label(s, project, "Route", &routes, &route_count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < route_count; i++) {
+        if (routes[i].qualified_name && strstr(routes[i].qualified_name, part)) {
+            matches++;
+        }
+    }
+    if (routes) {
+        cbm_store_free_nodes(routes, route_count);
+    }
+    return matches;
+}
+
+/* CALLS edges out of the function `source_name` into a Route node: the edge a
+ * route registration emits beside its Route. */
+static int calls_into_route_count(cbm_store_t *s, const char *project, const char *source_name) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &edge_count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {};
+        cbm_node_t target = {};
+        bool source_ok = cbm_store_find_node_by_id(s, edges[i].source_id, &source) == CBM_STORE_OK;
+        bool target_ok = cbm_store_find_node_by_id(s, edges[i].target_id, &target) == CBM_STORE_OK;
+        if (source_ok && target_ok && source.name && target.label &&
+            strcmp(source.name, source_name) == 0 && strcmp(target.label, "Route") == 0) {
+            matches++;
+        }
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
+/* Upstream #2537 (ad789939, 4d97d781): since Go 1.22 a ServeMux pattern may
+ * name a method and a host before the path. Such a registration minted no
+ * Route and no HANDLES edge, because every registration gate wanted the first
+ * argument to open with a slash. The method now comes from the pattern when
+ * the callee names none, and a host is dropped from the path, in both passes
+ * alike. Only Go reads that grammar (a Python "GET /py" is still no route),
+ * and only for Handle / HandleFunc: `st.Get("users/123")` keeps its CALLS
+ * edge and mints no Route, `c.Get("https://...")` mints none either. */
+static const char *const k_go_mux_names[] = {"go.mod", "main.go", "web/site.py"};
+static const char *const k_go_mux_bodies[] = {
+    "module example.com/srv\n\ngo 1.22\n",
+    "package main\n\nimport \"net/http\"\n\n"
+    "func createPayment(w http.ResponseWriter, r *http.Request) {}\n"
+    "func getPayment(w http.ResponseWriter, r *http.Request)    {}\n"
+    "func hostOnly(w http.ResponseWriter, r *http.Request)      {}\n"
+    "func legacyList(w http.ResponseWriter, r *http.Request)    {}\n\n"
+    "type Store struct{ m map[string]string }\n\n"
+    "func (s *Store) Get(k string) string { return s.m[k] }\n\n"
+    "func lookup(st *Store) string { return st.Get(\"users/123\") }\n\n"
+    "func fetchRemote(c *http.Client) {\n\t_, _ = c.Get(\"https://api.example.com/v1/x\")\n}\n\n"
+    "func main() {\n\tmux := http.NewServeMux()\n"
+    "\tmux.HandleFunc(\"POST /v1/payments\", createPayment)\n"
+    "\tmux.HandleFunc(\"GET /v1/payments/{id}\", getPayment)\n"
+    "\tmux.HandleFunc(\"api.example.com/v1/hosted\", hostOnly)\n"
+    "\tmux.HandleFunc(\"/v1/legacy\", legacyList)\n"
+    "\t_ = http.ListenAndServe(\":8080\", mux)\n}\n",
+    "from flask import Flask\napp = Flask(__name__)\n\n"
+    "def py_view():\n    return \"ok\"\n\n"
+    "app.add_url_rule(\"GET /py\", \"py_view\", py_view)\n"};
+
+/* 0 = every Route/HANDLES/CALLS expectation holds for the given resolver. */
+static int go_servemux_probe(bool parallel) {
+    ThSavedEnv workers("CBM_WORKERS"), single("CBM_INDEX_SINGLE_THREAD");
+    if (parallel) {
+        cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    } else {
+        cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+    }
+    char db[512];
+    cbm_pipeline_t *p =
+        index_fixture_with_padding(k_go_mux_names, k_go_mux_bodies, 3, 52, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -99;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -98;
+    if (s) {
+        int post = handles_to_route(s, proj, "createPayment", "__route__POST__/v1/payments");
+        int get_id = handles_to_route(s, proj, "getPayment", "__route__GET__/v1/payments/{}");
+        int any_post = handles_to_route(s, proj, "createPayment", "__route__ANY__/v1/payments");
+        int host = handles_to_route(s, proj, "hostOnly", "__route__ANY__/v1/hosted");
+        int legacy = handles_to_route(s, proj, "legacyList", "__route__ANY__/v1/legacy");
+        int py_any = handles_to_route(s, proj, "py_view", "__route__ANY__/py");
+        int py_get = handles_to_route(s, proj, "py_view", "__route__GET__/py");
+        int store_calls = named_edge_count(s, proj, "CALLS", "lookup", "Get");
+        int store_route = route_nodes_containing(s, proj, "__route__GET__/123");
+        int lookup_reg = calls_into_route_count(s, proj, "lookup");
+        int remote_route = route_nodes_containing(s, proj, "//api.example.com");
+        int remote_reg = calls_into_route_count(s, proj, "fetchRemote");
+        printf("  servemux %s: post=%d get_id=%d any_post=%d host=%d legacy=%d py=%d/%d "
+               "store_calls=%d store_route=%d lookup_reg=%d remote=%d/%d\n",
+               parallel ? "par" : "seq", post, get_id, any_post, host, legacy, py_any, py_get,
+               store_calls, store_route, lookup_reg, remote_route, remote_reg);
+        rc = (post == 1 && get_id == 1 && any_post == 0 && host == 1 && legacy == 1 &&
+              py_any == 0 && py_get == 0 && store_calls == 1 && store_route == 0 &&
+              lookup_reg == 0 && remote_route == 0 && remote_reg == 0)
+                 ? 0
+                 : -1;
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+TEST(pipeline_go_servemux_method_patterns_issue2537) {
+    ASSERT_EQ(go_servemux_probe(false), 0);
+    PASS();
+}
+
+TEST(pipeline_go_servemux_method_patterns_issue2537_parallel) {
+    ASSERT_EQ(go_servemux_probe(true), 0);
+    PASS();
+}
+
 /* Upstream #2033 (4b03f7af): `type FeatureSet = bitmap` (featureset.go), the
  * method `bitmap.Set` (bitmap.go) and the call `reqs.Set(3)` (framework.go)
  * are three files, so the alias reaches the call only through the cross-file
@@ -14631,6 +14764,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_multi_return_receiver_is_typed_parallel);
     RUN_TEST(pipeline_go_crossfile_type_alias_method);
     RUN_TEST(pipeline_go_crossfile_type_alias_method_parallel);
+    RUN_TEST(pipeline_go_servemux_method_patterns_issue2537);
+    RUN_TEST(pipeline_go_servemux_method_patterns_issue2537_parallel);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS
