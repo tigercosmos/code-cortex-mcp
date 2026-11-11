@@ -8417,21 +8417,192 @@ bool cbm_path_within_root(const char *root_path, const char *abs_path) {
     return false;
 }
 
-static char *resolve_snippet_source(const char *root_path, const char *file_path, int start,
-                                    int end, char **out_abs_path) {
+/* Upstream #2585 (1c1d5422, snippet half): a snippet's start/end are indexed
+ * line numbers, but its bytes came from the file as it is now, so after an
+ * edit above the symbol the same range held another symbol's code under the
+ * requested name. file_hashes records the SHA-256 of the indexed bytes; the
+ * file is read once, that buffer is hashed, and the lines are sliced from the
+ * same buffer, so a concurrent write cannot produce a verified slice of bytes
+ * that were never indexed.
+ *   content_verified: the hash check ran (recorded hash + readable file).
+ *   drift: it ran and the bytes differ; the source is withheld.
+ *   freshness: "metadata_match" / "content_match" (bytes match; metadata
+ *     agrees / is stale) or "content_changed" / "metadata_changed" (bytes
+ *     differ; metadata agrees / differs). NULL when unverified.
+ * Unverifiable files (no recorded hash, unreadable, larger than
+ * SNIPPET_VERIFY_MAX_BYTES) keep the previous unverified read. */
+enum { SNIPPET_VERIFY_MAX_BYTES = 16 * 1024 * 1024 };
+
+struct snippet_source_check_t {
+    bool content_verified = false;
+    bool drift = false;
+    const char *freshness = nullptr;
+};
+
+/* Whole file into a malloc'd buffer (NUL-terminated; *len excludes the NUL).
+ * NULL on open/read failure, allocation failure, or past max_bytes. */
+static char *snippet_read_whole_file(FILE *fp, size_t max_bytes, size_t *len) {
+    *len = 0;
+    size_t cap = CBM_SZ_4K;
+    char *buf = (char *)malloc(cap);
+    if (!buf) {
+        return NULL;
+    }
+    for (;;) {
+        if (*len + CBM_SZ_4K + SKIP_ONE > cap) {
+            size_t want = cap * PAIR_LEN;
+            char *grown = want > cap ? (char *)realloc(buf, want) : NULL;
+            if (!grown) {
+                free(buf);
+                return NULL;
+            }
+            buf = grown;
+            cap = want;
+        }
+        size_t n = fread(buf + *len, 1, CBM_SZ_4K, fp);
+        *len += n;
+        if (*len > max_bytes) {
+            free(buf);
+            return NULL;
+        }
+        if (n < CBM_SZ_4K) {
+            break;
+        }
+    }
+    if (ferror(fp)) {
+        free(buf);
+        return NULL;
+    }
+    buf[*len] = '\0';
+    return buf;
+}
+
+/* Lines [start, end] of an in-memory file, with read_file_lines' result shape
+ * (text-mode line endings, NULL when the range is empty). */
+static char *snippet_slice_lines(const char *bytes, size_t len, int start, int end) {
+    size_t begin = len;
+    size_t stop = len;
+    int lineno = 1;
+    for (size_t i = 0; i < len; i++) {
+        if (lineno >= start && begin == len) {
+            begin = i;
+        }
+        if (bytes[i] == '\n') {
+            if (lineno >= end) {
+                stop = i + 1;
+                break;
+            }
+            lineno++;
+        }
+    }
+    if (begin >= stop) {
+        return NULL;
+    }
+    char *slice = (char *)malloc(stop - begin + 1);
+    if (!slice) {
+        return NULL;
+    }
+    size_t out = 0;
+    for (size_t i = begin; i < stop; i++) {
+#ifdef _WIN32
+        /* read_file_lines opens in text mode. */
+        if (bytes[i] == '\r' && i + 1 < stop && bytes[i + 1] == '\n') {
+            continue;
+        }
+#endif
+        slice[out++] = bytes[i];
+    }
+    slice[out] = '\0';
+    if (out == 0) {
+        free(slice);
+        return NULL;
+    }
+    return slice;
+}
+
+/* The verified read: NULL source with check->drift set when the bytes are not
+ * the indexed bytes; check->content_verified false when it could not run. */
+static char *snippet_read_verified(cbm_store_t *store, const char *project, const char *file_path,
+                                   const char *abs_path, int start, int end,
+                                   snippet_source_check_t *check) {
+    char stored_sha[CBM_SHA256_HEX_LEN + 1] = "";
+    int64_t stored_mtime = 0;
+    int64_t stored_size = -1;
+    if (!store || !project ||
+        cbm_store_get_file_hash(store, project, file_path, stored_sha, sizeof(stored_sha),
+                                &stored_mtime, &stored_size) != CBM_STORE_OK ||
+        !trace_sha256_valid(stored_sha)) {
+        return read_file_lines(abs_path, start, end);
+    }
+    FILE *fp = cbm_fopen(abs_path, "rb");
+    if (!fp) {
+        return NULL; /* no file: nothing to serve, verified or not */
+    }
+    trace_fd_stat_t opened = {};
+    bool stat_ok = trace_fstat(fp, &opened);
+    size_t len = 0;
+    char *bytes = stat_ok && opened.regular && opened.size >= 0 &&
+                          (uint64_t)opened.size <= (uint64_t)SNIPPET_VERIFY_MAX_BYTES
+                      ? snippet_read_whole_file(fp, SNIPPET_VERIFY_MAX_BYTES, &len)
+                      : NULL;
+    (void)fclose(fp);
+    if (!bytes) {
+        return read_file_lines(abs_path, start, end);
+    }
+    char current[CBM_SHA256_HEX_LEN + 1];
+    cbm_sha256_hex(bytes, len, current);
+    bool same_bytes = true;
+    for (size_t i = 0; i < CBM_SHA256_HEX_LEN; ++i) {
+        if (current[i] != (char)tolower((unsigned char)stored_sha[i])) {
+            same_bytes = false;
+            break;
+        }
+    }
+    bool same_meta = opened.mtime_ns == stored_mtime && opened.size == stored_size;
+    check->content_verified = true;
+    check->drift = !same_bytes;
+    if (same_bytes) {
+        check->freshness = same_meta ? "metadata_match" : "content_match";
+    } else {
+        check->freshness = same_meta ? "content_changed" : "metadata_changed";
+    }
+    char *source = same_bytes ? snippet_slice_lines(bytes, len, start, end) : NULL;
+    free(bytes);
+    return source;
+}
+
+/* store/project may be NULL: the read is then unverified, as before. */
+static char *resolve_snippet_source(cbm_store_t *store, const char *project, const char *root_path,
+                                    const char *file_path, int start, int end, char **out_abs_path,
+                                    snippet_source_check_t *check) {
     *out_abs_path = NULL;
+    *check = snippet_source_check_t{};
     if (!root_path || !file_path) {
         return NULL;
     }
     size_t apsz = strlen(root_path) + strlen(file_path) + MCP_SEPARATOR;
     char *abs_path = (char *)malloc(apsz);
+    if (!abs_path) {
+        return NULL;
+    }
     snprintf(abs_path, apsz, "%s/%s", root_path, file_path);
 
     *out_abs_path = abs_path;
     if (cbm_path_within_root(root_path, abs_path)) {
-        return read_file_lines(abs_path, start, end);
+        return snippet_read_verified(store, project, file_path, abs_path, start, end, check);
     }
     return NULL;
+}
+
+/* content_verified always; on drift the reason the source is withheld. */
+static void add_snippet_source_check(yyjson_mut_doc *doc, yyjson_mut_val *obj,
+                                     const snippet_source_check_t &check) {
+    yyjson_mut_obj_add_bool(doc, obj, "content_verified", check.content_verified);
+    if (check.drift) {
+        yyjson_mut_obj_add_bool(doc, obj, "source_drift", true);
+        yyjson_mut_obj_add_str(doc, obj, "freshness", check.freshness ? check.freshness : "");
+        yyjson_mut_obj_add_str(doc, obj, "recommended_action", "reindex_then_retry");
+    }
 }
 
 static bool utf8_is_cont(unsigned char c) {
@@ -8757,7 +8928,9 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
         snippet_clipped = true;
     }
     char *abs_path = NULL;
-    char *source = resolve_snippet_source(root_path, node->file_path, start, end, &abs_path);
+    snippet_source_check_t source_check;
+    char *source = resolve_snippet_source(srv->store, node->project, root_path, node->file_path,
+                                          start, end, &abs_path, &source_check);
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
@@ -8777,6 +8950,7 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     yyjson_mut_obj_add_str(doc, root_obj, "file_path", display_path);
     yyjson_mut_obj_add_int(doc, root_obj, "start_line", start);
     yyjson_mut_obj_add_int(doc, root_obj, "end_line", end);
+    add_snippet_source_check(doc, root_obj, source_check);
     if (snippet_clipped) {
         yyjson_mut_obj_add_bool(doc, root_obj, "source_clipped", true);
         yyjson_mut_obj_add_int(doc, root_obj, "clipped_at_lines", MCP_SNIPPET_MAX_LINES);
@@ -8790,6 +8964,11 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
         } else {
             yyjson_mut_obj_add_str(doc, root_obj, "source", "(source not available)");
         }
+    } else if (source_check.drift) {
+        yyjson_mut_obj_add_str(doc, root_obj, "source",
+                               "(source withheld: the file changed since it was indexed, so the "
+                               "indexed line range no longer holds this symbol; re-index, then "
+                               "retry)");
     } else {
         yyjson_mut_obj_add_str(doc, root_obj, "source", "(source not available)");
     }
@@ -12393,7 +12572,14 @@ static char *inspect_build_json(inspect_ctx_t *c, int callers_limit, int callees
             clipped = true;
         }
         char *abs_path = NULL;
-        char *src = resolve_snippet_source(c->root_path, def->file_path, start, end, &abs_path);
+        snippet_source_check_t source_check;
+        char *src = resolve_snippet_source(c->store, def->project, c->root_path, def->file_path,
+                                           start, end, &abs_path, &source_check);
+        if (source_check.drift) {
+            /* Same withholding as get_code_snippet: the indexed range now holds
+             * other bytes. */
+            add_snippet_source_check(doc, root, source_check);
+        }
         if (src) {
             char *safe = sanitize_utf8_lossy(src);
             yyjson_mut_obj_add_strcpy(doc, root, "source", safe ? safe : "");

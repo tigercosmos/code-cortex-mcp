@@ -2158,6 +2158,137 @@ TEST(tool_get_architecture_cycles_detects_scc) {
     PASS();
 }
 
+/* #2585 fixtures: record main.go's hash row with its real size and either its
+ * real or a shifted mtime, and either its real content hash or another
+ * file's. This reaches each freshness state without touching file times, which
+ * some platforms cannot set precisely. */
+static int record_main_go_hash(cbm_store_t *store, const char *tmp, bool real_content,
+                               bool real_mtime) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/project/main.go", tmp);
+    struct stat st = {};
+    if (stat(path, &st) != 0) {
+        return CBM_STORE_ERR;
+    }
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        return CBM_STORE_ERR;
+    }
+    char bytes[4096];
+    size_t len = fread(bytes, 1, sizeof(bytes), fp);
+    fclose(fp);
+    char sha[CBM_SHA256_HEX_LEN + 1];
+    if (real_content) {
+        cbm_sha256_hex(bytes, len, sha);
+    } else {
+        cbm_sha256_hex("other bytes", strlen("other bytes"), sha);
+    }
+    int64_t mtime_ns = snippet_mtime_ns(&st);
+    if (!real_mtime) {
+        mtime_ns -= 1000000000LL;
+    }
+    return cbm_store_upsert_file_hash(store, "test-project", "main.go", sha, mtime_ns, st.st_size);
+}
+
+static char *snippet_process_order(cbm_mcp_server_t *srv, yyjson_doc **doc) {
+    char *response =
+        cbm_mcp_handle_tool(srv, "get_code_snippet",
+                            "{\"project\":\"test-project\","
+                            "\"qualified_name\":\"test-project.cmd.server.main.ProcessOrder\"}");
+    char *inner = response ? extract_text_content(response) : NULL;
+    free(response);
+    *doc = inner ? yyjson_read(inner, strlen(inner), 0) : NULL;
+    return inner;
+}
+
+/* #2585 (and #1750): the snippet's line range is the indexed range. When the
+ * file's bytes are not the indexed bytes, the same range can hold another
+ * symbol's code, so the source is withheld rather than misattributed. */
+TEST(tool_get_code_snippet_withholds_source_whose_content_drifted_issue2585) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+
+    /* Same metadata, different bytes: mtime/size cannot see this, and the
+     * indexed range would be sliced from bytes that were never indexed. */
+    ASSERT_EQ(record_main_go_hash(store, tmp, false, true), CBM_STORE_OK);
+    yyjson_doc *doc = NULL;
+    char *inner = snippet_process_order(srv, &doc);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    ASSERT_NULL(strstr(yyjson_get_str(yyjson_obj_get(root, "source")), "func"));
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "source_drift")));
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(root, "freshness")), "content_changed");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(root, "recommended_action")), "reindex_then_retry");
+    ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "content_verified")));
+    yyjson_doc_free(doc);
+    free(inner);
+
+    /* The indexed bytes, with current or stale metadata, are served. */
+    for (int real_mtime = 1; real_mtime >= 0; real_mtime--) {
+        ASSERT_EQ(record_main_go_hash(store, tmp, true, real_mtime == 1), CBM_STORE_OK);
+        inner = snippet_process_order(srv, &doc);
+        ASSERT_NOT_NULL(doc);
+        root = yyjson_doc_get_root(doc);
+        ASSERT_NOT_NULL(
+            strstr(yyjson_get_str(yyjson_obj_get(root, "source")), "func ProcessOrder"));
+        ASSERT_NULL(yyjson_obj_get(root, "source_drift"));
+        ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(root, "content_verified")));
+        yyjson_doc_free(doc);
+        free(inner);
+    }
+
+    /* Without a usable hash the previous behavior holds, marked unverified. */
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "", 0, 0), CBM_STORE_OK);
+    inner = snippet_process_order(srv, &doc);
+    ASSERT_NOT_NULL(doc);
+    root = yyjson_doc_get_root(doc);
+    ASSERT_NOT_NULL(strstr(yyjson_get_str(yyjson_obj_get(root, "source")), "func ProcessOrder"));
+    ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(root, "content_verified")));
+    yyjson_doc_free(doc);
+    free(inner);
+
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+/* Fork: inspect_symbol's source excerpt slices the same indexed range through
+ * the same reader, so a drifted file withholds it there too. */
+TEST(tool_inspect_symbol_withholds_source_whose_content_drifted_issue2585) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    static const char *const args =
+        "{\"project\":\"test-project\",\"name\":\"test-project.cmd.server.main.ProcessOrder\"}";
+
+    char *response = cbm_mcp_handle_tool(srv, "inspect_symbol", args);
+    char *inner = response ? extract_text_content(response) : NULL;
+    free(response);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "// process")); /* the body, not just the signature */
+    ASSERT_NULL(strstr(inner, "source_drift"));
+    free(inner);
+
+    ASSERT_EQ(record_main_go_hash(store, tmp, false, true), CBM_STORE_OK);
+    response = cbm_mcp_handle_tool(srv, "inspect_symbol", args);
+    inner = response ? extract_text_content(response) : NULL;
+    free(response);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NULL(strstr(inner, "// process"));
+    ASSERT_NOT_NULL(strstr(inner, "\"source_drift\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "reindex_then_retry"));
+    free(inner);
+
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
 /* Context-bomb guard: get_code_snippet on a whole-file node (a Module/File
  * span) used to read the ENTIRE file into one response — a field-eval agent
  * that fell back to a Module snippet pulled ~400KB in a single call. The read
@@ -8634,6 +8765,8 @@ SUITE(mcp) {
     RUN_TEST(tool_search_graph_basic);
     RUN_TEST(tool_get_architecture_cycles_detects_scc);
     RUN_TEST(tool_get_code_snippet_clips_whole_file_node);
+    RUN_TEST(tool_get_code_snippet_withholds_source_whose_content_drifted_issue2585);
+    RUN_TEST(tool_inspect_symbol_withholds_source_whose_content_drifted_issue2585);
     RUN_TEST(tool_search_graph_includes_node_properties);
     RUN_TEST(tool_search_graph_caps_long_docstrings);
     RUN_TEST(tool_query_graph_basic);
