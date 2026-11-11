@@ -1058,6 +1058,73 @@ TEST(tslsp_jsx_component_with_children) {
     PASS();
 }
 
+/* Upstream ef551460: pass 2 walked only function declarations, so a JSX tag in a
+ * top-level arrow component (plain, exported, async) had no LSP resolution. The
+ * caller QN is the arrow const's own (module.X), as extract_defs names it. */
+TEST(tslsp_jsx_top_level_arrow_components_resolve) {
+    CBMFileResult *r = extract_tsx("function Card(): JSX.Element { return <span/>; }\n"
+                                   "const Direct = async () => <Card/>;\n"
+                                   "export const Exported = async () => <Card/>;\n"
+                                   "const Block = () => { return <Card/>; };\n"
+                                   "function Declared(): JSX.Element { return <Card/>; }\n");
+    ASSERT_NOT_NULL(r);
+    const char *const callers[] = {"test.main.Direct", "test.main.Exported", "test.main.Block",
+                                   "test.main.Declared"};
+    int failed = 0;
+    for (int c = 0; c < 4; c++) {
+        bool found = false;
+        for (int i = 0; i < r->resolved_calls.count; i++) {
+            const CBMResolvedCall *rc = &r->resolved_calls.items[i];
+            if (rc->caller_qn && strcmp(rc->caller_qn, callers[c]) == 0 && rc->callee_qn &&
+                strcmp(rc->callee_qn, "test.main.Card") == 0 && rc->strategy &&
+                strcmp(rc->strategy, "lsp_ts_jsx") == 0) {
+                found = true;
+            }
+        }
+        if (!found) {
+            printf("  MISSING %s -> test.main.Card [lsp_ts_jsx]\n", callers[c]);
+            failed++;
+        }
+    }
+    cbm_free_result(r);
+    ASSERT_EQ(failed, 0);
+    PASS();
+}
+
+/* Upstream 3867625c: an exported arrow const is a module definition, not a
+ * lexical local. Both callers must resolve both targets exactly, whether the
+ * caller is a function or an arrow const. */
+static bool ts_resolved_with_strategy(const CBMFileResult *r, const char *caller,
+                                      const char *callee, const char *strategy) {
+    int idx = require_resolved(r, caller, callee);
+    const char *got = idx >= 0 ? r->resolved_calls.items[idx].strategy : NULL;
+    if (idx >= 0 && (!got || strcmp(got, strategy) != 0)) {
+        printf("  %s -> %s resolved by %s, expected %s\n", caller, callee, got ? got : "(null)",
+               strategy);
+    }
+    return got && strcmp(got, strategy) == 0;
+}
+
+TEST(tslsp_jsx_exported_arrow_component_resolves_in_same_module) {
+    CBMFileResult *r =
+        extract_tsx("export const Badge = () => <span/>;\n"
+                    "export const formatLabel = (s: string) => s.trim();\n"
+                    "export function FnUser() { formatLabel('a'); return <Badge/>; }\n"
+                    "export const ArrowUser = () => { formatLabel('b'); return <Badge/>; };\n");
+    ASSERT_NOT_NULL(r);
+    bool fn_jsx = ts_resolved_with_strategy(r, "main.FnUser", "main.Badge", "lsp_ts_jsx");
+    bool arrow_jsx = ts_resolved_with_strategy(r, "main.ArrowUser", "main.Badge", "lsp_ts_jsx");
+    bool fn_call = ts_resolved_with_strategy(r, "main.FnUser", "main.formatLabel", "lsp_ts_local");
+    bool arrow_call =
+        ts_resolved_with_strategy(r, "main.ArrowUser", "main.formatLabel", "lsp_ts_local");
+    cbm_free_result(r);
+    ASSERT_TRUE(fn_jsx);
+    ASSERT_TRUE(arrow_jsx);
+    ASSERT_TRUE(fn_call);
+    ASSERT_TRUE(arrow_call);
+    PASS();
+}
+
 TEST(tslsp_jsx_intrinsic_skipped) {
     CBMFileResult *r = extract_tsx(
         "function go(): JSX.Element { return <div>plain</div>; }\n");
@@ -4572,6 +4639,8 @@ SUITE(ts_lsp) {
     /* Category 22: JSX */
     RUN_TEST(tslsp_jsx_component_self_closing);
     RUN_TEST(tslsp_jsx_component_with_children);
+    RUN_TEST(tslsp_jsx_top_level_arrow_components_resolve);
+    RUN_TEST(tslsp_jsx_exported_arrow_component_resolves_in_same_module);
     RUN_TEST(tslsp_jsx_intrinsic_skipped);
     RUN_TEST(tslsp_jsx_nested_component);
 
