@@ -994,3 +994,28 @@ bool cbm_root_matches(const char *recorded, const char *dir) {
     return cbm_root_canonical(recorded, a, sizeof(a)) && cbm_root_canonical(dir, b, sizeof(b)) &&
            strcmp(a, b) == 0;
 }
+
+/* ── CPU scheduling priority ────────────────── */
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
+
+bool cbm_lower_cpu_priority(void) {
+#ifdef _WIN32
+    HANDLE self = GetCurrentProcess();
+    DWORD current = GetPriorityClass(self);
+    if (current == IDLE_PRIORITY_CLASS || current == BELOW_NORMAL_PRIORITY_CLASS) {
+        return true; /* already at least this low: never raise priority */
+    }
+    return SetPriorityClass(self, BELOW_NORMAL_PRIORITY_CLASS) != 0;
+#else
+    /* getpriority can legitimately return -1, so errno is the only error signal. */
+    errno = 0;
+    int current = getpriority(PRIO_PROCESS, 0);
+    if (errno == 0 && current >= CBM_LOW_CPU_PRIORITY_NICE) {
+        return true; /* already at least this nice: never raise priority */
+    }
+    return setpriority(PRIO_PROCESS, 0, CBM_LOW_CPU_PRIORITY_NICE) == 0;
+#endif
+}

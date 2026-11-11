@@ -405,6 +405,15 @@ static int run_cli(int argc, char **argv) {
          * the shared connection keeps past the request to pages nobody owns
          * once the thread exits (cbm_sqlite_dedicated_heap). */
         cbm_sqlite_dedicated_heap(true);
+        /* A full index saturates every core; run it below normal priority so
+         * interactive CLI/MCP queries are not starved (upstream 349d80c6).
+         * Before any indexing thread exists, so they all inherit it. ONLY the
+         * --index-worker role: the --supervised-worker (one tool query) and the
+         * --tool-server (persistent query worker) answer the agent and must
+         * keep normal priority. Failure is harmless. */
+        if (!cbm_lower_cpu_priority()) {
+            cbm_log_info("index.worker.priority", "lowered", "false");
+        }
     }
     cbm_index_set_worker_role(index_worker || supervised_worker || tool_server, response_out);
 
