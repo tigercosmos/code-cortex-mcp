@@ -13116,6 +13116,51 @@ TEST(pipeline_c_bare_ref_never_binds_field_parallel) {
 }
 
 
+/* Upstream 51fd445f: discovery must choose the C++ grammar before the
+ * pipeline extracts .inc symbols; a direct extractor-only test would miss that
+ * routing failure. A BitBake .inc beside it keeps the BitBake grammar. */
+TEST(pipeline_inc_c_family_fragments) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_inc_cpp_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    cpp_recv_write(tmp, "runtime.inc",
+                   "#define SAMPLE_CALLBACK(T) T\n"
+                   "extern \"C\" int sample_export() { return 0; }\n"
+                   "static SAMPLE_CALLBACK(int) sample_callback() { return sample_export(); }\n");
+    cpp_recv_write(tmp, "main.cpp", "#include \"runtime.inc\"\n");
+    cpp_recv_write(tmp, "meta/base.inc",
+                   "SUMMARY = \"sample\"\n"
+                   "do_compile() {\n"
+                   "    oe_runmake\n"
+                   "}\n");
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/graph.db", tmp);
+    const cbm_index_mode_t modes[] = {CBM_MODE_FAST, CBM_MODE_FULL};
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(tmp, db_path, modes[i]);
+        ASSERT_NOT_NULL(pipeline);
+        ASSERT_EQ(cbm_pipeline_run(pipeline), 0);
+        cbm_store_t *store = cbm_store_open_path(db_path);
+        ASSERT_NOT_NULL(store);
+        const char *project = cbm_pipeline_project_name(pipeline);
+        ASSERT_EQ(fixture_node_count(store, project, "runtime.inc", "sample_export", "Function"),
+                  1);
+        ASSERT_EQ(fixture_node_count(store, project, "runtime.inc", "sample_callback", "Function"),
+                  1);
+        cbm_node_t *externs = NULL;
+        int nexterns = 0;
+        cbm_store_find_nodes_by_name(store, project, "extern", &externs, &nexterns);
+        cbm_store_free_nodes(externs, nexterns);
+        ASSERT_EQ(nexterns, 0);
+        /* The recipe still parses as BitBake (its task is a Function). */
+        ASSERT_EQ(fixture_node_count(store, project, "meta/base.inc", "do_compile", "Function"), 1);
+        cbm_store_close(store);
+        cbm_pipeline_free(pipeline);
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
 /* A C caller of a header function that shares its name with a struct member
  * elsewhere (kernel: include/linux/mm.h put_page beside the arm64
  * kvm_pgtable_mm_ops.put_page member). pad_files pushes the run past
@@ -13676,6 +13721,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_c_enum_inside_struct_reference_resolves_c1);
     RUN_TEST(pipeline_c_variants_on_sequential_and_parallel_paths_c1);
     RUN_TEST(pipeline_cpp_overloads_are_listed_as_variants_c1);
+    RUN_TEST(pipeline_inc_c_family_fragments);
     RUN_TEST(pipeline_c_bare_ref_never_binds_field);
     RUN_TEST(pipeline_c_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_c_call_reaches_header_function_beside_field);

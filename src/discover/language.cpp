@@ -277,7 +277,9 @@ static const ext_entry_t EXT_TABLE[] = {
     {"WORKSPACE", CBM_LANG_STARLARK},
     {"WORKSPACE.bazel", CBM_LANG_STARLARK},
 
-    /* BitBake include fragments — `require/include foo.inc` target files. */
+    /* BitBake include fragments — `require/include foo.inc` target files.
+     * Discovery refines this by content: C-family fragments become C++
+     * (cbm_disambiguate_inc). */
     {".inc", CBM_LANG_BITBAKE},
 
     /* Vue */
@@ -1107,4 +1109,159 @@ CBMLanguage cbm_disambiguate_cls(const char *path) {
         return CBM_LANG_APEX;
     }
     return has_vb6_markers(buf) ? CBM_LANG_COUNT : CBM_LANG_APEX;
+}
+
+/* ── .inc file disambiguation ────────────────────────────────────── */
+
+/* A complete leading token, followed by whitespace or punctuation, within a
+ * single line. In particular #include_extra is not #include. Returns the text
+ * after the token and its trailing whitespace, or NULL. */
+static const char *lang_inc_word(const char *line, const char *end, const char *word) {
+    size_t n = strlen(word);
+    if ((size_t)(end - line) < n || strncmp(line, word, n) != 0 ||
+        (line + n < end && (isalnum((unsigned char)line[n]) || line[n] == '_'))) {
+        return NULL;
+    }
+    line += n;
+    while (line < end && isspace((unsigned char)*line)) {
+        line++;
+    }
+    return line;
+}
+
+/* Recipes can embed C in quoted strings or shell/Python tasks. Recognize the
+ * recipe's own syntax before inspecting those bodies as standalone C code. */
+static bool lang_inc_recipe_line(const char *line, const char *end) {
+    static const char *const words[] = {"require", "include", "inherit", "addtask", "python", NULL};
+    for (int i = 0; words[i]; i++) {
+        const char *tail = lang_inc_word(line, end, words[i]);
+        if (tail && tail > line + strlen(words[i])) {
+            return true;
+        }
+    }
+    if ((size_t)(end - line) >= SLEN("do_") && strncmp(line, "do_", SLEN("do_")) == 0) {
+        return true;
+    }
+    const char *p = line;
+    while (p < end && (isalnum((unsigned char)*p) || *p == '_' || *p == ':' || *p == '[' ||
+                       *p == ']' || *p == '-' || *p == '.')) {
+        p++;
+    }
+    if (p == line) {
+        return false;
+    }
+    while (p < end && isspace((unsigned char)*p)) {
+        p++;
+    }
+    return p < end && (*p == '=' || ((*p == '?' || *p == '+' || *p == ':' || *p == '.') &&
+                                     p + SKIP_ONE < end && p[SKIP_ONE] == '='));
+}
+
+/* Skip only leading whitespace and C block comments, keeping block-comment
+ * state across lines. Recipe strings and bodies are handled before looking
+ * for C. */
+static const char *lang_inc_code(const char *line, const char *end, bool *block_comment) {
+    while (line < end) {
+        if (*block_comment) {
+            const char *close = strstr(line, "*/");
+            if (!close || close >= end) {
+                return end;
+            }
+            line = close + SLEN("*/");
+            *block_comment = false;
+            continue;
+        }
+        if (isspace((unsigned char)*line)) {
+            line++;
+            continue;
+        }
+        if ((size_t)(end - line) >= SLEN("/*") && strncmp(line, "/*", SLEN("/*")) == 0) {
+            *block_comment = true;
+            line += SLEN("/*");
+            continue;
+        }
+        break;
+    }
+    return line;
+}
+
+static bool lang_inc_c_code(const char *line, const char *end) {
+    static const char *const words[] = {
+        "extern", "static", "typedef", "namespace", "template",
+        "struct", "class",  "int",     "void",      NULL,
+    };
+    for (int i = 0; words[i]; i++) {
+        const char *tail = lang_inc_word(line, end, words[i]);
+        if (tail && tail < end && *tail != '=') {
+            return true;
+        }
+    }
+    const char *tail = lang_inc_word(line, end, "if");
+    return tail && tail < end && *tail == '(';
+}
+
+/* A '#' line. True when it is an ObjectScript-only directive ("#def1arg",
+ * "#;"), which rules C out. Sets *c_family for a C `#include "x"` /
+ * `#include <x>`. */
+static bool lang_inc_directive(const char *line, const char *end, bool *c_family) {
+    line += SKIP_ONE; /* '#' */
+    while (line < end && isspace((unsigned char)*line)) {
+        line++;
+    }
+    if (lang_inc_word(line, end, "def1arg") || (line < end && *line == ';')) {
+        return true;
+    }
+    const char *tail = lang_inc_word(line, end, "include");
+    if (tail && tail < end && (*tail == '"' || *tail == '<')) {
+        *c_family = true;
+    }
+    return false;
+}
+
+/* .inc is shared by C/C++, BitBake and ObjectScript. Select C++ for explicit
+ * C-family code (including C fragments); do not infer an enclosing include
+ * context. Upstream routes ObjectScript markers (a "ROUTINE <Name>" header,
+ * "#def1arg", "#;", a lone #define) to ObjectScript; this fork does not carry
+ * ObjectScript, so they keep the BitBake default, as does unknown content. */
+static CBMLanguage lang_inc_text(const char *buf) {
+    bool c_family = false;
+    bool block_comment = false;
+    const char *line = buf;
+    while (*line) {
+        const char *end = strchr(line, '\n');
+        if (!end) {
+            end = line + strlen(line);
+        }
+        const char *code = lang_inc_code(line, end, &block_comment);
+        line = *end ? end + SKIP_ONE : end;
+        if (code == end) {
+            continue;
+        }
+        const char *tail = lang_inc_word(code, end, "ROUTINE");
+        if (tail && tail < end && isupper((unsigned char)*tail)) {
+            return CBM_LANG_BITBAKE; /* ObjectScript include header: not C */
+        }
+        if (*code == '#') {
+            if (lang_inc_directive(code, end, &c_family)) {
+                return CBM_LANG_BITBAKE; /* ObjectScript directive: not C */
+            }
+            continue;
+        }
+        if ((size_t)(end - code) >= SLEN("//") && strncmp(code, "//", SLEN("//")) == 0) {
+            continue;
+        }
+        if (!c_family && lang_inc_recipe_line(code, end)) {
+            return CBM_LANG_BITBAKE;
+        }
+        c_family = c_family || lang_inc_c_code(code, end);
+    }
+    return c_family ? CBM_LANG_CPP : CBM_LANG_BITBAKE;
+}
+
+CBMLanguage cbm_disambiguate_inc(const char *path) {
+    char buf[CBM_SZ_4K + SKIP_ONE];
+    if (!path || !read_head_4k(path, buf)) {
+        return CBM_LANG_BITBAKE;
+    }
+    return lang_inc_text(buf);
 }

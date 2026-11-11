@@ -59,6 +59,14 @@ CBMLanguage cbm_disambiguate_frm(const char *path);
  * CBM_LANG_RESCRIPT. On read failure, defaults to CBM_LANG_RESCRIPT. */
 CBMLanguage cbm_disambiguate_res(const char *path);
 
+/* Disambiguate .inc files by reading first 4KB of content (upstream 51fd445f).
+ * Returns CBM_LANG_CPP for explicit C-family code (an `#include "x"`, a
+ * declaration keyword, a C statement fragment), otherwise CBM_LANG_BITBAKE:
+ * BitBake recipe syntax, ObjectScript markers (not carried by this fork) and
+ * unknown content keep the BitBake default. On read failure, defaults to
+ * CBM_LANG_BITBAKE. */
+CBMLanguage cbm_disambiguate_inc(const char *path);
+
 /* ── Gitignore pattern matching ──────────────────────────────────── */
 
 typedef struct cbm_gitignore cbm_gitignore_t;

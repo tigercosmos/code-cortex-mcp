@@ -1130,6 +1130,61 @@ TEST(lang_res_rescript_stays_rescript) {
     PASS();
 }
 
+/* Upstream 51fd445f: .inc is shared by C/C++ include fragments and BitBake.
+ * All sources are synthetic; the recipe bodies deliberately contain misleading
+ * C-like code. FORK: upstream's ObjectScript rows expect
+ * CBM_LANG_OBJECTSCRIPT_ROUTINE; this fork does not carry ObjectScript, so
+ * those markers keep the BitBake default (and still rule C out). */
+TEST(lang_inc_c_family_and_existing_dialects) {
+    static const struct {
+        const char *content;
+        CBMLanguage expected;
+    } cases[] = {
+        {"#include \"sample.h\"\nextern \"C\" int sample_export() { return 0; }\n", CBM_LANG_CPP},
+        {"extern \"C\" __declspec(dllexport) int sample_export() { return 0; }\n", CBM_LANG_CPP},
+        {"#define SAMPLE_CALLBACK(T) T\nstatic SAMPLE_CALLBACK(int) sample() { return 0; }\n",
+         CBM_LANG_CPP},
+        {"/* in-function fragment */\n#ifdef SAMPLE_ENABLED\nif (check()) return 1;\n#endif\n",
+         CBM_LANG_CPP},
+        {"int sample(void) { return 0; }\n", CBM_LANG_CPP},
+        {" \t# include <stdint.h>\r\n", CBM_LANG_CPP},
+        {"/* example:\nextern \"C\" int example();\n*/\nSUMMARY = \"sample\"\n", CBM_LANG_BITBAKE},
+        {"// extern \"C\" example only\n", CBM_LANG_BITBAKE},
+        {"#include_extra \"sample.h\"\n", CBM_LANG_BITBAKE},
+        {"#define Value 1\n", CBM_LANG_BITBAKE},
+        {"#ifndef SAMPLE\n#define SAMPLE 1\n#endif\n", CBM_LANG_BITBAKE},
+        {"ROUTINE Sample [Type=INC]\n#define Value 1\n", CBM_LANG_BITBAKE},
+        {"ROUTINE Sample [Type=INC]\nint x(void) { return 0; }\n", CBM_LANG_BITBAKE},
+        {"#def1arg Value(%x) %x\n", CBM_LANG_BITBAKE},
+        {"#; ObjectScript comment\n", CBM_LANG_BITBAKE},
+        {"#include <sample.h>\n#def1arg Value(%x) %x\n", CBM_LANG_BITBAKE},
+        {"# recipe\nSUMMARY = \"sample\"\nrequire base.inc\n", CBM_LANG_BITBAKE},
+        {"SRC_URI += \"file://sample.c\"\ndo_compile() {\nif (check) { return; }\n}\n",
+         CBM_LANG_BITBAKE},
+        {"python do_generate() {\nif (ready):\n    pass\n}\n", CBM_LANG_BITBAKE},
+        {"do_compile() {\ncat <<'EOF'\n#include <stdio.h>\nstatic int sample;\nEOF\n}\n",
+         CBM_LANG_BITBAKE},
+        {"require base.inc\nextern \"C\" example in recipe text\n", CBM_LANG_BITBAKE},
+        {"", CBM_LANG_BITBAKE},
+    };
+    char path[512];
+    snprintf(path, sizeof(path), "%s/cbm_lang_inc_routing.inc", cbm_tmpdir());
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        ASSERT_EQ(th_write_file(path, cases[i].content), 0);
+        CBMLanguage by_probe = cbm_disambiguate_inc(path);
+        remove(path);
+        if (by_probe != cases[i].expected) {
+            printf("  case %zu: got %d want %d\n", i, (int)by_probe, (int)cases[i].expected);
+        }
+        ASSERT_EQ(by_probe, cases[i].expected);
+    }
+    /* The name alone stays BitBake; an unreadable file keeps that default. */
+    ASSERT_EQ(cbm_language_for_filename("sample.inc"), CBM_LANG_BITBAKE);
+    ASSERT_EQ(cbm_disambiguate_inc(NULL), CBM_LANG_BITBAKE);
+    ASSERT_EQ(cbm_disambiguate_inc("/tmp/nonexistent_file_12345.inc"), CBM_LANG_BITBAKE);
+    PASS();
+}
+
 SUITE(language) {
     /* Extension: Tier 1 programming */
     RUN_TEST(lang_ext_go);
@@ -1289,6 +1344,7 @@ SUITE(language) {
     RUN_TEST(lang_frm_form_stays_form);
     RUN_TEST(lang_res_binary_resource_unsupported);
     RUN_TEST(lang_res_rescript_stays_rescript);
+    RUN_TEST(lang_inc_c_family_and_existing_dialects);
 
     /* Go test ports */
     /* New languages */

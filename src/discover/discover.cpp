@@ -1011,6 +1011,11 @@ static CBMLanguage detect_file_language(const char *entry_name, const char *abs_
     if (dot && strcmp(dot, ".res") == 0) {
         lang = cbm_disambiguate_res(abs_path);
     }
+    /* Special: .inc is shared by C/C++ include fragments and BitBake. Only the
+     * built-in default is refined, so a user extension mapping still wins. */
+    if (dot && strcmp(dot, ".inc") == 0 && lang == CBM_LANG_BITBAKE) {
+        lang = cbm_disambiguate_inc(abs_path);
+    }
     if (lang == CBM_LANG_COUNT) {
         return CBM_LANG_COUNT;
     }
