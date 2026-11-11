@@ -824,7 +824,15 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
          * paths are module chains) -- MUST match pass_parallel.cpp exactly. */
         (lang == CBM_LANG_PYTHON && cbm_suppress_weak_import_bound_call(true, true, res.strategy) &&
          cbm_python_import_binding_contradicts(imports, call->callee_name, res.qualified_name,
-                                               ctx->gbuf, ctx->project_name, rel));
+                                               ctx->gbuf, ctx->project_name, rel)) ||
+        /* External-import shadow (#1355): `import { eq } from "drizzle-orm"`
+         * binds `eq` to a package outside the tree, so a project-wide
+         * same-name guess must not become a CALLS edge to an unrelated
+         * project `eq`. Joined here, not returned early, so a route
+         * registration through a package import still mints its Route.
+         * MUST match pass_parallel.cpp exactly. */
+        cbm_suppress_external_import_call(lang, call->callee_name, res.strategy, imports, imp_keys,
+                                          imp_count);
 
     /* Service-pattern HTTP/ASYNC calls to an EXTERNAL client library (e.g.
      * `requests.get("/api/orders/{id}")`) resolve to a QN containing the library

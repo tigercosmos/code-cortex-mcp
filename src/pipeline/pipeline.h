@@ -21,6 +21,7 @@
 #include "discover/discover.h"         /* cbm_ignored_file_t (#963) */
 #include "foundation/constants.h"      /* CBM_SZ_512 */
 #include "graph_buffer/graph_buffer.h" /* cbm_gbuf_node_t */
+#include "foundation/hash_table.h"     /* CBMHashTable (#1355 package lookups) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -470,6 +471,25 @@ bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_b
  * Pure; unit-tested in test_registry.c. */
 bool cbm_suppress_weak_import_bound_call(bool enabled, bool import_binding_contradicts,
                                          const char *strategy);
+
+/* #1355: drop a project-wide same-name guess (suffix_match / unique_name /
+ * field_type_hint / fuzzy) for a BARE call whose name the calling file binds to
+ * a NON-RELATIVE (package) import that resolved to nothing in the graph —
+ * `import { eq } from "drizzle-orm"` must not make `eq(...)` a CALLS edge to an
+ * unrelated project `eq`. A name the import map does bind, a relative
+ * specifier, a member/qualified callee, and every import-/receiver-aware
+ * strategy are all kept. `indexed_packages` is the pipeline package map: a
+ * specifier naming a package the tree's own manifests declare (a workspace
+ * sibling) counts as in-tree. `declared_packages` is the pipeline namespace
+ * map and does the same for package-path specifiers (`import
+ * org.example.util.f` is kept when an indexed file declares `package
+ * org.example.util`). NULL disables either check. The language gate lives in
+ * cbm_suppress_external_import_call. Pure; unit-tested in test_registry.cpp. */
+bool cbm_suppress_external_import_shadow(const char *callee_name, const char *strategy,
+                                         const CBMImportArray *file_imports,
+                                         const char **import_map_keys, int import_map_count,
+                                         const CBMHashTable *indexed_packages,
+                                         const CBMHashTable *declared_packages);
 
 /* True if `name` is a method of a Python builtin type (str/bytes/list/dict/set/
  * file) or a builtin function seen as an attribute call. A language fact, kept

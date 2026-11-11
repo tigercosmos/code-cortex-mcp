@@ -1197,6 +1197,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
      * pipeline frees its own at cleanup, so an incremental run must too. */
     cbm_pkgmap_free(cbm_pipeline_get_pkgmap());
     cbm_pipeline_set_pkgmap(NULL);
+    cbm_pipeline_clear_nsmap();
 
     /* Re-link inbound cross-file edges that the purge orphaned. Runs after
      * re-resolution AND post-passes so the freshly re-created target nodes

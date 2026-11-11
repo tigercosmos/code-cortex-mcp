@@ -207,6 +207,18 @@ static inline int cbm_pipeline_relpath_is_excluded(const char *rel_path, char *c
 CBMHashTable *cbm_pipeline_get_pkgmap(void);
 void cbm_pipeline_set_pkgmap(CBMHashTable *map);
 
+/* Get the current pipeline's declared-package map (NULL if none): the
+ * namespace/package -> File-QN map built by cbm_pipeline_namespace_map_build
+ * from every indexed file's own `package`/`namespace`/`using` declaration.
+ * The import passes build it to resolve namespace imports and then publish it
+ * here (freeing any previous one), so the call passes can ask whether a
+ * package-path specifier names a package the tree itself declares (#1355).
+ * Set before resolve starts, read only afterwards; freed where the pkgmap is. */
+CBMHashTable *cbm_pipeline_get_nsmap(void);
+void cbm_pipeline_set_nsmap(CBMHashTable *map);
+/* Free the current declared-package map and clear it. */
+void cbm_pipeline_clear_nsmap(void);
+
 /* Unified module resolver: relative → pkgmap → fqn_module fallback.
  * Handles bare specifiers via pkgmap lookup with prefix matching.
  * Caller must free() the returned string. */
@@ -313,6 +325,15 @@ bool cbm_python_import_path_matches_qn(const char *module_path, const char *name
 bool cbm_python_import_binding_contradicts(const CBMImportArray *imports, const char *callee_name,
                                            const char *resolved_qn, const cbm_gbuf_t *gbuf,
                                            const char *project_name, const char *rel_path);
+
+/* #1355 at both resolver call sites: cbm_suppress_external_import_shadow
+ * with the current pipeline's package and declared-package maps, gated by
+ * language in ONE place. Python is excluded: its own #2127 guard above owns
+ * external imports there. Joined to drop_plain_call, so only the plain-CALLS
+ * fall-through is suppressed and route/HTTP/config classification still runs. */
+bool cbm_suppress_external_import_call(CBMLanguage lang, const char *callee_name,
+                                       const char *strategy, const CBMImportArray *file_imports,
+                                       const char **import_map_keys, int import_map_count);
 
 /* Base-class twin: true when a Python base spelling (`unittest.TestCase`,
  * `TestCase` under `from unittest import TestCase`, `ut.TestCase` under

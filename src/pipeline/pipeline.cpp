@@ -198,6 +198,23 @@ void cbm_pipeline_set_pkgmap(CBMHashTable *map) {
     g_pkgmap = map;
 }
 
+/* ── Global declared-package map (one active pipeline at a time) ── */
+
+static CBMHashTable *g_nsmap = NULL;
+
+CBMHashTable *cbm_pipeline_get_nsmap(void) {
+    return g_nsmap;
+}
+
+void cbm_pipeline_set_nsmap(CBMHashTable *map) {
+    g_nsmap = map;
+}
+
+void cbm_pipeline_clear_nsmap(void) {
+    cbm_pipeline_namespace_map_free(g_nsmap);
+    g_nsmap = NULL;
+}
+
 /* ── Timing helper ──────────────────────────────────────────────── */
 
 static double elapsed_ms(struct timespec start) {
@@ -2633,6 +2650,7 @@ static int pipeline_run_claimed(cbm_pipeline_t *p) {
 cleanup:
     cbm_pkgmap_free(cbm_pipeline_get_pkgmap());
     cbm_pipeline_set_pkgmap(NULL);
+    cbm_pipeline_clear_nsmap();
     cbm_discover_free(files, file_count);
     cbm_gbuf_free(p->gbuf);
     p->gbuf = NULL;

@@ -832,7 +832,11 @@ int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
             create_channel_edges_for_file(ctx, result, files[i].rel_path);
             create_env_configures_for_file(ctx, result, files[i].rel_path);
         }
-        cbm_pipeline_namespace_map_free(namespace_map);
+        /* Publish instead of free: the call pass needs the same declared-package
+         * set to tell an in-tree package path from a third-party one (#1355).
+         * The pipeline owns it from here. Twin: cbm_build_registry_from_cache. */
+        cbm_pipeline_clear_nsmap();
+        cbm_pipeline_set_nsmap(namespace_map);
         if (owns_local_cache) {
             for (int i = 0; i < file_count; i++) {
                 if (local_cache[i]) {

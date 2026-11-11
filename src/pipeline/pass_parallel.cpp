@@ -1600,7 +1600,11 @@ int cbm_build_registry_from_cache(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t
         create_env_configures(ctx, result, rel);
     }
 
-    cbm_pipeline_namespace_map_free(namespace_map);
+    /* Publish instead of free: the call pass needs the same declared-package
+     * set to tell an in-tree package path from a third-party one (#1355).
+     * The pipeline owns it from here. Twin: cbm_pipeline_pass_definitions. */
+    cbm_pipeline_clear_nsmap();
+    cbm_pipeline_set_nsmap(namespace_map);
 
     cbm_log_info("parallel.registry.done", "entries", itoa_log(reg_entries), "defines",
                  itoa_log(defines_edges), "imports", itoa_log(imports_edges));
@@ -2815,7 +2819,11 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
              cbm_suppress_weak_import_bound_call(true, true, res.strategy) &&
              cbm_python_import_binding_contradicts(&result->imports, call->callee_name,
                                                    res.qualified_name, rc->main_gbuf,
-                                                   rc->project_name, rel));
+                                                   rc->project_name, rel)) ||
+            /* External-import shadow (#1355) -- see pass_calls.cpp; this
+             * gate MUST stay identical to the one there. */
+            cbm_suppress_external_import_call(lang, call->callee_name, res.strategy,
+                                              &result->imports, imp_keys, imp_count);
 
         /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the
          * service signal lives in the callee_name. The registry can mis-resolve

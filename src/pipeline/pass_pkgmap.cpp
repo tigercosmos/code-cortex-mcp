@@ -1762,6 +1762,25 @@ bool cbm_python_import_binding_contradicts(const CBMImportArray *imports, const 
     return bound;
 }
 
+/* See pipeline_internal.h. The one owner of the language gate for
+ * cbm_suppress_external_import_shadow (#1355, registry.cpp), so
+ * the sequential and parallel resolvers cannot diverge. Python is left to its
+ * own import-binding guard (#2127, cbm_python_import_binding_contradicts): it
+ * already drops a weak match that contradicts an external import's module
+ * chain, and it knows a pyproject-named package's absolute self-imports are
+ * internal (`from fastapi.responses import X` inside fastapi), which this
+ * specifier-shape test would read as external. */
+bool cbm_suppress_external_import_call(CBMLanguage lang, const char *callee_name,
+                                       const char *strategy, const CBMImportArray *file_imports,
+                                       const char **import_map_keys, int import_map_count) {
+    if (lang == CBM_LANG_PYTHON) {
+        return false;
+    }
+    return cbm_suppress_external_import_shadow(callee_name, strategy, file_imports, import_map_keys,
+                                               import_map_count, cbm_pipeline_get_pkgmap(),
+                                               cbm_pipeline_get_nsmap());
+}
+
 /* Base-class twin of the #2127 call gate. `class SimpleTestCase(
  * unittest.TestCase)` under `import unittest` names the STDLIB base; the
  * registry's same-module suffix fallback (`unittest.TestCase` -> module's

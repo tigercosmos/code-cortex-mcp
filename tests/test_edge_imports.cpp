@@ -744,6 +744,224 @@ TEST(ei_py_external_import_never_binds_project_symbol) {
     PASS();
 }
 
+/* ── #1355 external-import shadow (upstream eaf59046, 138a6225, 81820262,
+ * 797a11a1) ──────────────────────────────────────────────────────────────
+ * A bare call whose name the file imports from a package outside the tree
+ * never binds a same-named project symbol by a project-wide guess. Each case
+ * runs with pad 0 (sequential resolver) and pad 64 (> MIN_FILES_FOR_PARALLEL,
+ * parallel resolver); both legs run before asserting. */
+enum { EI_1355_PAD = 64, EI_1355_MAX = 8 + EI_1355_PAD };
+
+/* Append `pad` filler files under `dir` in `lang_ext` to f[n..]. */
+static int ei_1355_pad(EILangFile *f, int n, int pad, const char *dir, bool kotlin,
+                       char (*names)[32], char (*bodies)[96]) {
+    for (int i = 0; i < pad && n < EI_1355_MAX; i++) {
+        snprintf(names[n], sizeof(names[n]), "%s/pad_%02d.%s", dir, i, kotlin ? "kt" : "ts");
+        if (kotlin) {
+            snprintf(bodies[n], sizeof(bodies[n]),
+                     "package com.example.app\n\nfun pkgPad%02d(): Int {\n    return "
+                     "%d\n}\n",
+                     i, i);
+        } else {
+            snprintf(bodies[n], sizeof(bodies[n]),
+                     "export function shadowPad%02d(): number { return %d; }\n", i, i);
+        }
+        f[n] = EILangFile{names[n], bodies[n]};
+        n++;
+    }
+    return n;
+}
+
+/* The reported case: `eq`/`sql` come from drizzle-orm (not in the tree), so
+ * the only project `eq`/`sql` must not be their target. `normalize` is
+ * imported relatively from the same file and keeps its edge; a bare `eq()`
+ * with no import keeps the pre-existing fallback. */
+static int ei_1355_homonym_case(int pad) {
+    static char names[EI_1355_MAX][32];
+    static char bodies[EI_1355_MAX][96];
+    EILangFile f[EI_1355_MAX];
+    int n = 0;
+    f[n++] = EILangFile{"src/text-utils.ts", "export function eq(a: string, b: string): boolean {\n"
+                                             "  return a.trim() === b.trim();\n}\n"
+                                             "export function sql(chunk: string): string {\n"
+                                             "  return chunk.replace(/\\s+/g, ' ');\n}\n"
+                                             "export function normalize(s: string): string {\n"
+                                             "  return s.trim().toLowerCase();\n}\n"};
+    f[n++] =
+        EILangFile{"src/queries.ts", "import { eq, sql } from 'drizzle-orm';\n"
+                                     "import { normalize } from './text-utils';\n"
+                                     "export function buildQuery(id: string): unknown {\n"
+                                     "  return [eq({ id }, id), sql('select 1'), normalize(id)];\n"
+                                     "}\n"};
+    f[n++] = EILangFile{"src/no-import.ts",
+                        "export function callsWithoutImport(a: string, b: string): boolean {\n"
+                        "  return eq(a, b);\n}\n"};
+    n = ei_1355_pad(f, n, pad, "src", false, names, bodies);
+    EILangProj lp;
+    cbm_store_t *store = ei_index_files(&lp, f, n);
+    int eq_calls = store ? ei_inbound_edges_on(store, lp.project, "eq", "Function", "CALLS") : -1;
+    int sql_calls = store ? ei_inbound_edges_on(store, lp.project, "sql", "Function", "CALLS") : -1;
+    int norm_calls =
+        store ? ei_inbound_edges_on(store, lp.project, "normalize", "Function", "CALLS") : -1;
+    int ok = eq_calls == 1 && sql_calls == 0 && norm_calls >= 1;
+    if (!ok) {
+        fprintf(stderr,
+                "  [#1355 homonym pad=%d] eq CALLS=%d (want 1) sql=%d (want 0) "
+                "normalize=%d (want >=1)\n",
+                pad, eq_calls, sql_calls, norm_calls);
+    }
+    ei_cleanup(&lp, store);
+    return ok;
+}
+
+TEST(ei_external_import_never_binds_local_homonym_issue1355) {
+    int sequential_ok = ei_1355_homonym_case(0);
+    int parallel_ok = ei_1355_homonym_case(EI_1355_PAD);
+    ASSERT_TRUE(sequential_ok);
+    ASSERT_TRUE(parallel_ok);
+    PASS();
+}
+
+/* A bare specifier naming a WORKSPACE package the tree ships (@fixture/lib,
+ * whose `main` is an unbuilt artifact) is in-tree: the call keeps its edge. A
+ * third-party package in the same file is still cut. Upstream lost thousands
+ * of in-tree edges on drizzle-orm without this. */
+static int ei_1355_workspace_case(int pad) {
+    static char names[EI_1355_MAX][32];
+    static char bodies[EI_1355_MAX][96];
+    EILangFile f[EI_1355_MAX];
+    int n = 0;
+    f[n++] = EILangFile{"lib/package.json",
+                        "{\n  \"name\": \"@fixture/lib\",\n  \"main\": \"./dist/index.js\"\n}\n"};
+    f[n++] = EILangFile{"lib/index.ts", "export function wsEq(a: string, b: string): boolean {\n"
+                                        "  return a === b;\n}\n"};
+    f[n++] = EILangFile{"app/package.json", "{\n  \"name\": \"@fixture/app\"\n}\n"};
+    f[n++] = EILangFile{"app/spec-helpers.ts", "export function wsSpec(label: string): string {\n"
+                                               "  return label;\n}\n"};
+    f[n++] = EILangFile{"app/query.ts", "import { wsEq } from '@fixture/lib';\n"
+                                        "import { wsSpec } from 'vitest';\n"
+                                        "export function wsBuild(id: string): unknown {\n"
+                                        "  return [wsEq(id, id), wsSpec('case')];\n}\n"};
+    n = ei_1355_pad(f, n, pad, "app", false, names, bodies);
+    EILangProj lp;
+    cbm_store_t *store = ei_index_files(&lp, f, n);
+    int sibling = store ? ei_inbound_edges_on(store, lp.project, "wsEq", "Function", "CALLS") : -1;
+    int vendor = store ? ei_inbound_edges_on(store, lp.project, "wsSpec", "Function", "CALLS") : -1;
+    int ok = sibling >= 1 && vendor == 0;
+    if (!ok) {
+        fprintf(stderr,
+                "  [#1355 workspace pad=%d] wsEq CALLS=%d (want >=1) wsSpec=%d "
+                "(want 0)\n",
+                pad, sibling, vendor);
+    }
+    ei_cleanup(&lp, store);
+    return ok;
+}
+
+TEST(ei_external_import_keeps_workspace_sibling_issue1355) {
+    int sequential_ok = ei_1355_workspace_case(0);
+    int parallel_ok = ei_1355_workspace_case(EI_1355_PAD);
+    ASSERT_TRUE(sequential_ok);
+    ASSERT_TRUE(parallel_ok);
+    PASS();
+}
+
+/* A package-path language: `import com.example.util.pkgEq` names a package
+ * an indexed file declares, so it is in-tree although its shape says nothing.
+ * `pkgEq` is imported twice (project + kotlin.test, the JetBrains/Exposed
+ * shape), which leaves the import map without a key. The declared-package map
+ * must outlive the import pass for this to work. */
+static int ei_1355_declared_package_case(int pad) {
+    static char names[EI_1355_MAX][32];
+    static char bodies[EI_1355_MAX][96];
+    EILangFile f[EI_1355_MAX];
+    int n = 0;
+    f[n++] = EILangFile{"util/Assert.kt", "package com.example.util\n\n"
+                                          "fun pkgEq(a: String, b: String): Boolean {\n"
+                                          "    return a == b\n}\n"};
+    f[n++] = EILangFile{"spec/SpecHelpers.kt", "package com.example.spec\n\n"
+                                               "fun pkgSpec(label: String): Boolean {\n"
+                                               "    return label.isNotEmpty()\n}\n"};
+    f[n++] = EILangFile{"app/Query.kt", "package com.example.app\n\n"
+                                        "import com.example.util.pkgEq\n"
+                                        "import kotlin.test.pkgEq\n"
+                                        "import kotlin.test.pkgSpec\n"
+                                        "import org.junit.pkgSpec\n\n"
+                                        "fun pkgBuild(id: String): Boolean {\n"
+                                        "    return pkgEq(id, id) && pkgSpec(id)\n}\n"};
+    n = ei_1355_pad(f, n, pad, "app", true, names, bodies);
+    EILangProj lp;
+    cbm_store_t *store = ei_index_files(&lp, f, n);
+    int declared =
+        store ? ei_inbound_edges_on(store, lp.project, "pkgEq", "Function", "CALLS") : -1;
+    int ok = declared >= 1;
+    if (!ok) {
+        fprintf(stderr, "  [#1355 declared pad=%d] pkgEq CALLS=%d (want >=1)\n", pad, declared);
+    }
+    ei_cleanup(&lp, store);
+    return ok;
+}
+
+TEST(ei_external_import_keeps_declared_package_issue1355) {
+    int sequential_ok = ei_1355_declared_package_case(0);
+    int parallel_ok = ei_1355_declared_package_case(EI_1355_PAD);
+    ASSERT_TRUE(sequential_ok);
+    ASSERT_TRUE(parallel_ok);
+    PASS();
+}
+
+/* The guard suppresses ONLY the plain-CALLS fall-through: a route
+ * registration through a package import (`regGet('/orders', h)`, resolved
+ * onto a QN carrying "express") still mints its Route, and the ordinary
+ * fabricated edge in the same file is still cut. */
+static int ei_1355_route_case(int pad) {
+    static char names[EI_1355_MAX][32];
+    static char bodies[EI_1355_MAX][96];
+    EILangFile f[EI_1355_MAX];
+    int n = 0;
+    f[n++] = EILangFile{"app/express-routes.ts",
+                        "export function regGet(path: string, handler: unknown): string {\n"
+                        "  return path;\n}\n"
+                        "export function regSpec(label: string): string {\n"
+                        "  return label;\n}\n"};
+    f[n++] =
+        EILangFile{"app/server.ts", "import { regGet, regSpec } from 'vendor-router';\n"
+                                    "export function boot(): string {\n"
+                                    "  return regGet('/orders', () => 'ok') + regSpec('case');\n"
+                                    "}\n"};
+    n = ei_1355_pad(f, n, pad, "app", false, names, bodies);
+    EILangProj lp;
+    cbm_store_t *store = ei_index_files(&lp, f, n);
+    int routes = -1;
+    if (store) {
+        cbm_node_t *nodes = NULL;
+        int count = 0;
+        if (cbm_store_find_nodes_by_name(store, lp.project, "/orders", &nodes, &count) ==
+            CBM_STORE_OK) {
+            routes = count;
+            cbm_store_free_nodes(nodes, count);
+        }
+    }
+    int spec = store ? ei_inbound_edges_on(store, lp.project, "regSpec", "Function", "CALLS") : -1;
+    int ok = routes >= 1 && spec == 0;
+    if (!ok) {
+        fprintf(stderr,
+                "  [#1355 route pad=%d] /orders nodes=%d (want >=1) regSpec CALLS=%d "
+                "(want 0)\n",
+                pad, routes, spec);
+    }
+    ei_cleanup(&lp, store);
+    return ok;
+}
+
+TEST(ei_external_import_keeps_route_registration_issue1355) {
+    int sequential_ok = ei_1355_route_case(0);
+    int parallel_ok = ei_1355_route_case(EI_1355_PAD);
+    ASSERT_TRUE(sequential_ok);
+    ASSERT_TRUE(parallel_ok);
+    PASS();
+}
+
 /* The fastapi shape: pyproject.toml names the distribution after the package
  * it ships (`[project] name = "pkg"`, package dir pkg/ or src/pkg/). The
  * pkgmap entry for that name made every absolute self-import
@@ -2104,6 +2322,10 @@ SUITE(edge_imports) {
     RUN_TEST(ei_py_external_import_never_binds_project_symbol);
     RUN_TEST(ei_py_pyproject_named_package_self_imports_stay_internal);
     RUN_TEST(ei_py_external_base_never_inherits_project_class);
+    RUN_TEST(ei_external_import_never_binds_local_homonym_issue1355);
+    RUN_TEST(ei_external_import_keeps_workspace_sibling_issue1355);
+    RUN_TEST(ei_external_import_keeps_declared_package_issue1355);
+    RUN_TEST(ei_external_import_keeps_route_registration_issue1355);
     RUN_TEST(ei_js_parent_relative_asset_import);
     RUN_TEST(ei_cpp_dot_relative_include_targets_header_file);
     RUN_TEST(ei_cpp_header_include_targets_header_file);
