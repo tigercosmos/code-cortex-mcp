@@ -40,8 +40,14 @@ typedef struct cbm_store cbm_store_t;
  *     member names are kept (2026-09-26 upstream sync).
  * 5 = C typedef/enumerator nodes and `#macro` QNs, macro-wrapped definition
  *     names, file/directory stem collisions keep both nodes, vocabulary-keyed
- *     semantic terms (2026-10-16 upstream sync). */
-#define CBM_INDEX_FORMAT_VERSION 5
+ *     semantic terms (2026-10-16 upstream sync).
+ * 6 = receiver-qualified Go method QNs and one QN per Go init(); Python defs
+ *     nested in function bodies and classes nested in class bodies; Haskell
+ *     operator definition names; Java record accessors and no phantom
+ *     interface-method Functions; C# 14 extension members; Elixir guarded
+ *     definitions and Phoenix channels; C-family .inc files as C++ and
+ *     dep-info .d files out of D (2026-11-11 upstream sync). */
+#define CBM_INDEX_FORMAT_VERSION 6
 
 /* ── Data structures ────────────────────────────────────────────── */
 
