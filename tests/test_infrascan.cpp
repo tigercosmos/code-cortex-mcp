@@ -201,6 +201,19 @@ TEST(infrascan_service_pattern_match_keeps_real_library_qns) {
     PASS();
 }
 
+/* Upstream cdb7a293: a graph-qualified QN starts with the project name, and
+ * that name is not library evidence. Only an exact `<project>.` prefix is
+ * stripped; a library QN and a different project's prefix still match. */
+TEST(infrascan_service_pattern_match_ignores_the_project_name) {
+    ASSERT_EQ(cbm_service_pattern_match_in_project("Dio.src.nav.navigateTo", "Dio"), CBM_SVC_NONE);
+    ASSERT_EQ(cbm_service_pattern_match("Dio.src.nav.navigateTo"), CBM_SVC_HTTP);
+    ASSERT_EQ(cbm_service_pattern_match_in_project("Dio.src.axios.get", "Dio"), CBM_SVC_HTTP);
+    ASSERT_EQ(cbm_service_pattern_match_in_project("axios.get", "Dio"), CBM_SVC_HTTP);
+    ASSERT_EQ(cbm_service_pattern_match_in_project("Dio.client.get", "Di"), CBM_SVC_HTTP);
+    ASSERT_EQ(cbm_service_pattern_match_in_project("Dio.client.get", NULL), CBM_SVC_HTTP);
+    PASS();
+}
+
 /* Document/log extensions are never HTTP routes (upstream 38d422f0, from PR
  * #1245): the arg-URL detector runs for every resolved call, so without the
  * extension guard `open("/new/file.txt")` minted a Route + HTTP_CALLS.
@@ -533,6 +546,7 @@ SUITE(infrascan) {
     RUN_TEST(infrascan_service_pattern_match_rejects_ids_inside_words);
     RUN_TEST(infrascan_service_pattern_match_keeps_real_library_qns);
     RUN_TEST(infrascan_servemux_pattern_split_issue2537);
+    RUN_TEST(infrascan_service_pattern_match_ignores_the_project_name);
     RUN_TEST(infrascan_decorator_route_metadata_keeps_its_escapes);
     RUN_TEST(infrascan_decorator_route_metadata_rejects_malformed_values);
     RUN_TEST(infrascan_decorator_route_metadata_survives_invalid_utf8);

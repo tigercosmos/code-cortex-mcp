@@ -1055,6 +1055,17 @@ void cbm_service_patterns_init(void) {
     /* No-op — tables are static const */
 }
 
+cbm_svc_kind_t cbm_service_pattern_match_in_project(const char *resolved_qn,
+                                                    const char *project_name) {
+    if (resolved_qn && project_name && project_name[0]) {
+        size_t len = strlen(project_name);
+        if (strncmp(resolved_qn, project_name, len) == 0 && resolved_qn[len] == '.') {
+            resolved_qn += len + 1; /* past the "." */
+        }
+    }
+    return cbm_service_pattern_match(resolved_qn);
+}
+
 bool cbm_service_pattern_is_global_fetch(const char *callee_name) {
     return callee_name != NULL && strcmp(callee_name, "fetch") == 0;
 }

@@ -38,6 +38,13 @@ void cbm_service_patterns_init(void);
  * Matches on library name substrings in the QN (e.g., "requests" in
  * "project.venv.requests.api.get"). Import-alias transparent. */
 cbm_svc_kind_t cbm_service_pattern_match(const char *resolved_qn);
+/* For graph-qualified symbols (upstream cdb7a293): the project's own name is
+ * not library evidence. A QN that starts with `<project_name>.` is matched
+ * without that prefix, so a project named "Dio" or "requests" does not turn
+ * every in-repo call into an HTTP client call. NULL/empty project_name is
+ * cbm_service_pattern_match. */
+cbm_svc_kind_t cbm_service_pattern_match_in_project(const char *resolved_qn,
+                                                    const char *project_name);
 
 /* True for a bare, unqualified call to the native `fetch()` API. Deliberately
  * NOT part of the substring tables above: those are matched unconditionally

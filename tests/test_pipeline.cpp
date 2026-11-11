@@ -10295,6 +10295,94 @@ TEST(pipeline_java_cross_registry_on_sequential_path) {
     PASS();
 }
 
+/* Upstream cdb7a293: the project's own name is not library evidence. In a
+ * repository named "Dio" every in-repo QN starts with "Dio.", which the
+ * service-pattern table reads as the Dio HTTP client, so a call to the
+ * project's own navigateTo('/widgets/view') became an HTTP client call: an
+ * HTTP_CALLS edge and a Route instead of its CALLS edge. Both resolvers; the
+ * parallel resolver's generic URL-argument heuristic still mints the Route,
+ * as it does in a project with any other name. Returns routes*10 + calls, or
+ * -1 on a setup failure. */
+static int project_named_like_library_case(const char *repo_name, bool parallel, int pad) {
+    struct SavedEnv {
+        const char *name;
+        std::string value;
+        bool present;
+        explicit SavedEnv(const char *key)
+            : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+        ~SavedEnv() {
+            if (present)
+                cbm_setenv(name, value.c_str(), 1);
+            else
+                cbm_unsetenv(name);
+        }
+    } single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
+    char tmp[256] = "/tmp/cbm_svc_project_XXXXXX";
+    if (!cbm_mkdtemp(tmp)) {
+        return -1;
+    }
+    std::string repo = std::string(tmp) + "/" + repo_name;
+    bool wrote =
+        th_write_file((repo + "/src/nav.ts").c_str(),
+                      "export function navigateTo(path: string): void {\n"
+                      "  console.log(path);\n}\n") == 0 &&
+        th_write_file((repo + "/src/page.ts").c_str(), "import { navigateTo } from './nav';\n"
+                                                       "export function go(): void {\n  "
+                                                       "navigateTo('/widgets/view');\n}\n") == 0;
+    for (int i = 0; wrote && i < pad; i++) {
+        char name[64];
+        char source[96];
+        snprintf(name, sizeof(name), "/src/pad_%02d.ts", i);
+        snprintf(source, sizeof(source), "export function svcPad%02d(): number { return %d; }\n", i,
+                 i);
+        wrote = th_write_file((repo + name).c_str(), source) == 0;
+    }
+    int out = -1;
+    if (wrote) {
+        if (parallel) {
+            cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+            cbm_setenv("CBM_WORKERS", "4", 1);
+        } else {
+            cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+        }
+        std::string db_path = std::string(tmp) + "/svc.db";
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(repo.c_str(), db_path.c_str(), CBM_MODE_FULL);
+        if (pipeline && cbm_pipeline_run(pipeline) == 0) {
+            const char *project = cbm_pipeline_project_name(pipeline);
+            cbm_store_t *store = cbm_store_open_path(db_path.c_str());
+            if (store && project) {
+                cbm_node_t *routes = NULL;
+                int nroutes = 0;
+                cbm_store_find_nodes_by_name(store, project, "/widgets/view", &routes, &nroutes);
+                cbm_store_free_nodes(routes, nroutes);
+                int calls = named_edge_count(store, project, "CALLS", "go", "navigateTo");
+                out = nroutes * 10 + calls;
+            }
+            if (store) {
+                cbm_store_close(store);
+            }
+        }
+        if (pipeline) {
+            cbm_pipeline_free(pipeline);
+        }
+    }
+    th_rmtree(tmp);
+    return out;
+}
+
+TEST(pipeline_project_name_is_not_service_evidence) {
+    int seq = project_named_like_library_case("Dio", false, 0);
+    int par = project_named_like_library_case("Dio", true, 55);
+    int par_plain = project_named_like_library_case("Plain", true, 55);
+    printf("  project-named-Dio: sequential=%d parallel=%d parallel-Plain=%d "
+           "(routes*10 + CALLS)\n",
+           seq, par, par_plain);
+    ASSERT_EQ(seq, 1);         /* no Route, the CALLS edge */
+    ASSERT_EQ(par % 10, 1);    /* the CALLS edge */
+    ASSERT_EQ(par, par_plain); /* the project's name changes nothing */
+    PASS();
+}
+
 /* Index `n` fixture files plus `pad` filler Go files (>= 50 total forces the
  * parallel pipeline) into g_lang_tmpdir; returns the pipeline, or NULL. The
  * caller opens the store at `db`, frees the pipeline and tears the repo down. */
@@ -14563,6 +14651,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_cross_file_method_defines_method_sequential);
     RUN_TEST(pipeline_cross_file_method_defines_method_venue_parity);
     RUN_TEST(pipeline_java_cross_registry_on_sequential_path);
+    RUN_TEST(pipeline_project_name_is_not_service_evidence);
     RUN_TEST(pipeline_stem_folder_collision_keeps_both_nodes);
     RUN_TEST(incremental_stem_mark_change_rebuilds);
 #ifdef _WIN32

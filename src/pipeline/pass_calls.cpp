@@ -500,7 +500,15 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
                                  const cbm_resolution_t *res, const char *module_qn,
                                  const char **imp_keys, const char **imp_vals, int imp_count,
                                  bool suppress_plain_calls, CBMLanguage lang) {
-    cbm_svc_kind_t svc = cbm_service_pattern_match(res->qualified_name);
+    /* An in-graph target's QN starts with the project name, which is not
+     * library evidence (upstream cdb7a293): a project named "Dio" made every
+     * call into it an HTTP client call. MUST match pass_parallel.cpp's
+     * emit_service_edge. */
+    cbm_svc_kind_t svc = cbm_service_pattern_match_in_project(
+        res->qualified_name, target && target->qualified_name && res->qualified_name &&
+                                     strcmp(target->qualified_name, res->qualified_name) == 0
+                                 ? ctx->project_name
+                                 : NULL);
     /* A comment also opens with a slash; it is not a route path (mirrors
      * pass_parallel.cpp's is_route_path_shaped). route_reg_path also reads a
      * Go ServeMux pattern (upstream #2537). */
@@ -842,7 +850,11 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
      * the missing target must NOT drop the call — otherwise no HTTP_CALLS edge
      * is written and cross-repo matching finds nothing (#523). Emit directly
      * when the call carries a URL/topic first argument. */
-    cbm_svc_kind_t svc = cbm_service_pattern_match(res.qualified_name);
+    const cbm_gbuf_node_t *target_node = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
+    /* An in-graph QN carries the project name, which is not library evidence
+     * (upstream cdb7a293). */
+    cbm_svc_kind_t svc = cbm_service_pattern_match_in_project(
+        res.qualified_name, target_node ? ctx->project_name : NULL);
     if (svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) {
         const char *u = call->first_string_arg;
         bool has_url_or_topic = u && u[0] != '\0' &&
@@ -854,7 +866,6 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
         }
     }
 
-    const cbm_gbuf_node_t *target_node = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
     if (!target_node || source_node->id == target_node->id) {
         return 0;
     }

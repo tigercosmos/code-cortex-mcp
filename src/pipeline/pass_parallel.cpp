@@ -2405,10 +2405,18 @@ static void emit_trpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
 static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
                               const cbm_gbuf_node_t *target, const CBMCall *call,
                               const cbm_resolution_t *res, const char *module_qn,
-                              const cbm_registry_t *registry, const cbm_gbuf_t *main_gbuf,
-                              const char **imp_keys, const char **imp_vals, int imp_count,
-                              bool suppress_plain_calls, CBMLanguage lang) {
-    cbm_svc_kind_t svc = cbm_service_pattern_match(res->qualified_name);
+                              const char *project_name, const cbm_registry_t *registry,
+                              const cbm_gbuf_t *main_gbuf, const char **imp_keys,
+                              const char **imp_vals, int imp_count, bool suppress_plain_calls,
+                              CBMLanguage lang) {
+    /* An in-graph target's QN starts with the project name, which is not
+     * library evidence (upstream cdb7a293). MUST match pass_calls.cpp's
+     * emit_classified_edge. */
+    cbm_svc_kind_t svc = cbm_service_pattern_match_in_project(
+        res->qualified_name, target && target->qualified_name && res->qualified_name &&
+                                     strcmp(target->qualified_name, res->qualified_name) == 0
+                                 ? project_name
+                                 : NULL);
     const char *arg = call->first_string_arg;
 
     /* Also detect route registration by callee name suffix alone (handles unresolved
@@ -2898,8 +2906,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                                             .strategy = "service_pattern",
                                             .confidence = PP_HALF_CONF};
                 emit_service_edge(ws->local_edge_buf, source_node, source_node, call, &svc_res,
-                                  module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals,
-                                  imp_count, false, lang);
+                                  module_qn, rc->project_name, rc->registry, rc->main_gbuf,
+                                  imp_keys, imp_vals, imp_count, false, lang);
                 continue;
             }
         }
@@ -2917,8 +2925,9 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                  * vendor call (`$r->get('id')` on a vendor Request, #1186)
                  * skipped its registry fallback the same way. */
                 emit_service_edge(ws->local_edge_buf, source_node, source_node, call, &fake_res,
-                                  module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals,
-                                  imp_count, rust_external || php_vendor_call, lang);
+                                  module_qn, rc->project_name, rc->registry, rc->main_gbuf,
+                                  imp_keys, imp_vals, imp_count, rust_external || php_vendor_call,
+                                  lang);
             } else if (cbm_service_pattern_is_global_fetch(call->callee_name)) {
                 /* Native `fetch()` (#856): only the global API once resolution
                  * has failed to find a local/imported `fetch`. Call the low-level
@@ -3016,8 +3025,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                                      (psvc == CBM_SVC_ASYNC && strlen(u) > PP_ESC_SPACE));
                 if (url_or_topic) {
                     emit_service_edge(ws->local_edge_buf, source_node, NULL, call, &res, module_qn,
-                                      rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count,
-                                      false, lang);
+                                      rc->project_name, rc->registry, rc->main_gbuf, imp_keys,
+                                      imp_vals, imp_count, false, lang);
                     ws->calls_resolved++;
                 }
             }
@@ -3025,8 +3034,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         }
         _rc_t0 = extract_now_ns();
         emit_service_edge(ws->local_edge_buf, source_node, target_node, call, &res, module_qn,
-                          rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count,
-                          drop_plain_call, lang);
+                          rc->project_name, rc->registry, rc->main_gbuf, imp_keys, imp_vals,
+                          imp_count, drop_plain_call, lang);
         atomic_fetch_add_explicit(&rc->time_ns_rc_emit, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
         ws->calls_resolved++;
