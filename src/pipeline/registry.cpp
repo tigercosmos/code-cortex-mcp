@@ -619,17 +619,27 @@ bool cbm_go_suppress_textual_field_call(bool is_go, const char *target_label,
     return !strategy || strncmp(strategy, "lsp_", 4) != 0;
 }
 
-bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const char *target_label) {
+bool cbm_suppress_bare_field_ref(CBMLanguage lang, bool is_member_access,
+                                 const char *target_label) {
     /* #1942/#1962: a bare Go identifier can never denote a struct field --
      * field access is always a selector expression (x.f). The extractor
      * strips the receiver before the resolver runs (resolve_lhs_write_name
      * records the trailing field name; is_reference_node records the inner
      * field_identifier), so the reference TEXT cannot carry the distinction --
      * the recorded is_member_access shape can. Only a reference that was never
-     * the member half of a selector is refused a Field bind. Go-gated: a
-     * C#/Java/C++/Python method body legitimately references its own members
-     * bare, so a global veto would break those languages. */
-    if (!is_go || is_member_access || !target_label) {
+     * the member half of a selector is refused a Field bind.
+     *
+     * #2666: C has the same rule. A struct member is named only as the member
+     * half of `a.b`, `a->b` or a designator `.b`, all recorded as
+     * field_identifier; a bare C identifier (a macro argument such as
+     * RUN_SELECTED_SUITE(mcp), a stray name in an unexpanded macro body) is
+     * never one. The call path already drops a bare C call onto a Field
+     * (cbm_call_onto_field_policy).
+     *
+     * Go- and C-gated: a C#/Java/C++/Python method body legitimately
+     * references its own members bare, so a global veto would break those
+     * languages. A `.h` is parsed as C++ and keeps that behavior. */
+    if ((lang != CBM_LANG_GO && lang != CBM_LANG_C) || is_member_access || !target_label) {
         return false;
     }
     return strcmp(target_label, "Field") == 0;
@@ -1770,7 +1780,7 @@ bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target
 bool cbm_suppress_ref_edge(CBMLanguage lang, bool is_member_access, const cbm_gbuf_node_t *target,
                            cbm_lang_memo_t *memo) {
     return cross_language_ref(lang, target->file_path, memo) ||
-           cbm_go_suppress_bare_field_ref(lang == CBM_LANG_GO, is_member_access, target->label);
+           cbm_suppress_bare_field_ref(lang, is_member_access, target->label);
 }
 
 cbm_field_call_policy_t cbm_call_onto_field_policy(CBMLanguage caller_lang, const char *callee_text,

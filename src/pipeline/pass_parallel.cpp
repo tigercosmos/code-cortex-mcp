@@ -2985,9 +2985,9 @@ static void resolve_file_usages(resolve_ctx_t *rc, resolve_worker_state_t *ws,
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* #1928 / #1942 / #1962: the registry answer is a bare-name guess --
+        /* #1928 / #1942 / #1962 / #2666: the registry answer is a bare-name guess --
          * never bind a reference across a language boundary, nor a bare Go
-         * reference to a struct field. Shared with pass_usages.cpp. */
+         * or C reference to a struct field. Shared with pass_usages.cpp. */
         if (cbm_suppress_ref_edge(lang, usage->is_member_access, tgt, &lang_memo)) {
             continue;
         }
@@ -3091,8 +3091,8 @@ static void resolve_file_rw(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFi
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* #1928 / #1942 / #1962: bare-name registry guess -- never cross a
-         * language boundary; a bare Go reference never binds a struct field,
+        /* #1928 / #1942 / #1962 / #2666: bare-name registry guess -- never cross a
+         * language boundary; a bare Go or C reference never binds a struct field,
          * though a selector-LHS write (`t.err = x`) may. Shared with
          * pass_usages.cpp resolve_rw_edges. */
         if (cbm_suppress_ref_edge(lang, rw->is_member_access, tgt, &lang_memo)) {

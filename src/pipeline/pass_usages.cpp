@@ -295,9 +295,9 @@ static int resolve_usage_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *res
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* #1928 / #1942 / #1962: the registry answer is a bare-name guess --
+        /* #1928 / #1942 / #1962 / #2666: the registry answer is a bare-name guess --
          * never bind a reference across a language boundary, nor a bare Go
-         * reference to a struct field (the member half of a selector may). */
+         * or C reference to a struct field (the member half of a selector may). */
         if (cbm_suppress_ref_edge(lang, usage->is_member_access, tgt, &lang_memo)) {
             continue;
         }
@@ -409,9 +409,9 @@ static int resolve_rw_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *result
         if (!tgt || src->id == tgt->id) {
             continue;
         }
-        /* #1928 / #1942 / #1962: every resolution here is a bare-name registry
+        /* #1928 / #1942 / #1962 / #2666: every resolution here is a bare-name registry
          * guess -- never bind a read/write across a language boundary; a bare
-         * Go reference never binds a struct field, though a selector-LHS write
+         * Go or C reference never binds a struct field, though a selector-LHS write
          * (`t.err = x`) may. */
         if (cbm_suppress_ref_edge(lang, rw->is_member_access, tgt, &lang_memo)) {
             continue;

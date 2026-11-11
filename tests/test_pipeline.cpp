@@ -13025,6 +13025,96 @@ TEST(pipeline_cpp_overloads_are_listed_as_variants_c1) {
     PASS();
 }
 
+/* #2666: upstream's test main runs every suite through a macro,
+ * RUN_SELECTED_SUITE(mcp); the argument is a bare C identifier that names no
+ * declaration, and the registry fallback bound it to whichever struct member
+ * was called `mcp`. toggle() writes a bare name the extractor cannot see
+ * declared (a macro-made global, say) that a struct member also carries.
+ * state.c holds the genuine member uses that must keep their edges.
+ * pad_files pushes the run past MIN_FILES_FOR_PARALLEL for the parallel twin. */
+static void write_c_bare_field_fixture(const char *tmp, int pad_files) {
+    cpp_recv_write(tmp, "include/suite.h",
+                   "typedef struct suite_state {\n"
+                   "    char mcp[64];\n"
+                   "    int count;\n"
+                   "    int enabled;\n"
+                   "} suite_state_t;\n");
+    cpp_recv_write(tmp, "tests/main.c",
+                   "#include \"suite.h\"\n"
+                   "#define RUN_SELECTED_SUITE(name) run_suite(#name)\n"
+                   "int run_suite(const char *name);\n"
+                   "int main(void) {\n"
+                   "    RUN_SELECTED_SUITE(mcp);\n"
+                   "    RUN_SELECTED_SUITE(count);\n"
+                   "    return 0;\n"
+                   "}\n"
+                   "void toggle(void) {\n"
+                   "    enabled = 1;\n"
+                   "}\n");
+    cpp_recv_write(tmp, "src/state.c",
+                   "#include \"suite.h\"\n"
+                   "int state_count(const suite_state_t *s) { return s->count; }\n"
+                   "void state_reset(suite_state_t *s) { s->enabled = 0; }\n");
+    for (int i = 0; i < pad_files; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "pad/filler%d.c", i);
+        snprintf(body, sizeof(body), "int filler%d(void) { return %d; }\n", i, i);
+        cpp_recv_write(tmp, name, body);
+    }
+}
+
+static int run_c_bare_field_case(const char *tmpl, int pad_files) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s", tmpl);
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_c_bare_field_fixture(tmp, pad_files);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/c_bare.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    /* The fields must exist for the probes to mean anything. */
+    ASSERT_GTE(fixture_node_count(s, project, "include/suite.h", "mcp", "Field"), 1);
+    ASSERT_GTE(fixture_node_count(s, project, "include/suite.h", "count", "Field"), 1);
+    ASSERT_GTE(fixture_node_count(s, project, "include/suite.h", "enabled", "Field"), 1);
+    /* Reproduce-first: RED before the fix -- the bare write in toggle()
+     * bound `enabled` (USAGE and WRITES). The macro-argument probes guard
+     * upstream's shape; the fork extracts no usage for them today. */
+    ASSERT_EQ(named_edge_count(s, project, "USAGE", "main", "mcp"), 0);
+    ASSERT_EQ(named_edge_count(s, project, "USAGE", "main", "count"), 0);
+    ASSERT_EQ(named_edge_count(s, project, "WRITES", "toggle", "enabled"), 0);
+    ASSERT_EQ(named_edge_count(s, project, "USAGE", "toggle", "enabled"), 0);
+    /* The member half of `s->enabled = 0` still binds the field. FORK: the
+     * read `return s->count;` yields no member USAGE edge here on the base
+     * commit either, so upstream's state_count probe is not carried. */
+    ASSERT_GTE(named_edge_count(s, project, "WRITES", "state_reset", "enabled"), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(pipeline_c_bare_ref_never_binds_field) {
+    /* Sequential path: resolve_usage_edges / resolve_rw_edges. */
+    return run_c_bare_field_case("/tmp/cbm_c_bare_XXXXXX", 0);
+}
+
+TEST(pipeline_c_bare_ref_never_binds_field_parallel) {
+    /* Parallel twin: resolve_file_usages / resolve_file_rw consult the same
+     * predicate through cbm_suppress_ref_edge. */
+    return run_c_bare_field_case("/tmp/cbm_c_barep_XXXXXX", 52);
+}
+
 
 /* A C caller of a header function that shares its name with a struct member
  * elsewhere (kernel: include/linux/mm.h put_page beside the arm64
@@ -13586,6 +13676,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_c_enum_inside_struct_reference_resolves_c1);
     RUN_TEST(pipeline_c_variants_on_sequential_and_parallel_paths_c1);
     RUN_TEST(pipeline_cpp_overloads_are_listed_as_variants_c1);
+    RUN_TEST(pipeline_c_bare_ref_never_binds_field);
+    RUN_TEST(pipeline_c_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_c_call_reaches_header_function_beside_field);
     RUN_TEST(pipeline_c_call_reaches_header_function_beside_field_parallel);
 }

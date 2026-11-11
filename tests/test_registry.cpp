@@ -475,16 +475,35 @@ TEST(go_bare_ref_never_binds_field) {
      * extractor strips the receiver before the resolver runs, so the
      * selector-vs-bare distinction arrives as the recorded is_member_access
      * signal, never as a dot in the reference text. */
-    ASSERT_TRUE(cbm_go_suppress_bare_field_ref(true, false, "Field"));
+    ASSERT_TRUE(cbm_suppress_bare_field_ref(CBM_LANG_GO, false, "Field"));
     /* The member half of a selector may bind a field. */
-    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(true, true, "Field"));
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_GO, true, "Field"));
     /* Bare references to non-fields are untouched. */
-    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(true, false, "Variable"));
-    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(true, false, "Function"));
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_GO, false, "Variable"));
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_GO, false, "Function"));
     /* Other languages reference their own members bare inside methods. */
-    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(false, false, "Field"));
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_CSHARP, false, "Field"));
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_JAVA, false, "Field"));
     /* Degenerate input -> nothing to judge. */
-    ASSERT_FALSE(cbm_go_suppress_bare_field_ref(true, false, NULL));
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_GO, false, NULL));
+    PASS();
+}
+
+TEST(c_bare_ref_never_binds_field) {
+    /* #2666: a C struct member is named only as the member half of `a.b`,
+     * `a->b` or a designator `.b` (field_identifier -> is_member_access). A
+     * bare C identifier -- a macro argument like RUN_SELECTED_SUITE(mcp) -- is
+     * never one, so it must not bind a same-named Field. */
+    ASSERT_TRUE(cbm_suppress_bare_field_ref(CBM_LANG_C, false, "Field"));
+    /* The member half still binds. */
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_C, true, "Field"));
+    /* A bare C name keeps binding globals, functions and types. */
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_C, false, "Variable"));
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_C, false, "Function"));
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_C, false, "Type"));
+    /* C++ (and every `.h`, parsed as C++): a method body names its own
+     * members bare, so the bind is kept. */
+    ASSERT_FALSE(cbm_suppress_bare_field_ref(CBM_LANG_CPP, false, "Field"));
     PASS();
 }
 
@@ -1297,7 +1316,7 @@ TEST(weak_call_guard_owns_language_set) {
 
 TEST(ref_edge_guard_matches_its_parts) {
     /* cbm_suppress_ref_edge is exactly the OR of the cross-language reference
-     * guard and the Go bare-field guard, with or without the language memo. */
+     * guard and the Go/C bare-field guard, with or without the language memo. */
     static const CBMLanguage langs[] = {CBM_LANG_GO,     CBM_LANG_C,          CBM_LANG_CPP,
                                         CBM_LANG_PYTHON, CBM_LANG_JAVASCRIPT, CBM_LANG_COUNT};
     static const char *const paths[] = {"pkg/a.go",    "pkg/b.go",  "bpf/probe.c", "bpf/probe.h",
@@ -1313,8 +1332,7 @@ TEST(ref_edge_guard_matches_its_parts) {
                     node.file_path = (char *)paths[p];
                     node.label = (char *)labels[b];
                     bool want = cbm_suppress_cross_language_ref(langs[l], paths[p]) ||
-                                cbm_go_suppress_bare_field_ref(langs[l] == CBM_LANG_GO, member != 0,
-                                                               labels[b]);
+                                cbm_suppress_bare_field_ref(langs[l], member != 0, labels[b]);
                     ASSERT_EQ(cbm_suppress_ref_edge(langs[l], member != 0, &node, &memo), want);
                     ASSERT_EQ(cbm_suppress_ref_edge(langs[l], member != 0, &node, NULL), want);
                 }
@@ -1644,6 +1662,7 @@ SUITE(registry) {
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
     RUN_TEST(cross_language_ref_drops_go_vs_c);
     RUN_TEST(go_bare_ref_never_binds_field);
+    RUN_TEST(c_bare_ref_never_binds_field);
     RUN_TEST(go_textual_call_never_binds_field);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);

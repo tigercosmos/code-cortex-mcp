@@ -281,13 +281,14 @@ bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const cha
  * unit-tested in test_registry.cpp. */
 bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target_file_path);
 
-/* #1942/#1962: a bare Go identifier can never denote a struct field -- field
- * access is always a selector expression. Drops a READS/WRITES/USAGE bind
- * whose target is a Field unless the reference was recorded as the member half
- * of a selector (CBMUsage/CBMReadWrite.is_member_access). Go only: other OO
- * languages reference their own members bare inside method bodies. Pure;
- * unit-tested in test_registry.cpp. */
-bool cbm_go_suppress_bare_field_ref(bool is_go, bool is_member_access, const char *target_label);
+/* #1942/#1962/#2666: a bare Go or C identifier can never denote a struct
+ * field -- field access is always a selector expression (or, in C, a
+ * designator). Drops a READS/WRITES/USAGE bind whose target is a Field unless
+ * the reference was recorded as the member half of a selector
+ * (CBMUsage/CBMReadWrite.is_member_access). Go and C only: other OO languages
+ * (and C++, which every `.h` is parsed as) reference their own members bare
+ * inside method bodies. Pure; unit-tested in test_registry.cpp. */
+bool cbm_suppress_bare_field_ref(CBMLanguage lang, bool is_member_access, const char *target_label);
 
 /* CALLS companion of the above: a Go CALLS edge onto a Field node is kept only
  * when a type-aware lsp_* strategy produced it. Textual registry strategies
@@ -306,8 +307,8 @@ typedef struct {
 } cbm_lang_memo_t;
 
 /* One guard for a resolved USAGE/READS/WRITES edge: true when the edge crosses
- * a language boundary (cbm_suppress_cross_language_ref) or binds a bare Go
- * reference to a Field (cbm_go_suppress_bare_field_ref). Shared by the
+ * a language boundary (cbm_suppress_cross_language_ref) or binds a bare Go or
+ * C reference to a Field (cbm_suppress_bare_field_ref). Shared by the
  * sequential (pass_usages.cpp) and parallel (pass_parallel.cpp) resolvers.
  * memo may be NULL; it changes cost, never the answer. */
 bool cbm_suppress_ref_edge(CBMLanguage lang, bool is_member_access, const cbm_gbuf_node_t *target,
