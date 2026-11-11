@@ -102,6 +102,17 @@ struct cbm_watcher {
  * daemon log names the stuck project instead of only repeating the warning. */
 #define INDEX_FAIL_SUSTAINED 10
 
+/* Success cooldown (upstream #2835): after a successful re-index the next poll
+ * waits INDEX_COOLDOWN_FACTOR x the index's own duration, counted from when the
+ * index finished, so short rebuilds spend at most ~1/(K+1) of wall time
+ * indexing one project. Sub-second indexes stay at the plain cadence. Capped at
+ * INDEX_SUCCESS_COOLDOWN_CEILING_MS (5 min) so that, under continuous writes, a
+ * project never falls more than one rebuild plus five minutes behind. Upstream
+ * reuses its failure ceiling (5 min there); this fork's failure ceiling is
+ * 15 min, so the success cap is its own constant. */
+#define INDEX_COOLDOWN_FACTOR 3
+#define INDEX_SUCCESS_COOLDOWN_CEILING_MS 300000 /* 5 min */
+
 /* Stale-root pruning (#286): a watched project whose root directory stays
  * missing is pruned — its cached DB is deleted and the watch entry removed.
  * Deletion is destructive (the DB can hold user-authored data such as the
@@ -115,7 +126,18 @@ struct cbm_watcher {
 
 /* ── Time helper ────────────────────────────────────────────────── */
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Test seam: nonzero freezes the watcher's scheduling clock at this value. */
+static cbm_atomic_int64 test_clock_ns{0};
+#endif
+
 static int64_t now_ns(void) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    int64_t frozen = atomic_load(&test_clock_ns);
+    if (frozen != 0) {
+        return frozen;
+    }
+#endif
     struct timespec ts;
     cbm_clock_gettime(CLOCK_MONOTONIC, &ts);
     return ((int64_t)ts.tv_sec * NS_PER_SEC) + ts.tv_nsec;
@@ -140,6 +162,20 @@ int cbm_watcher_index_backoff_ms(int interval_ms, int consecutive_failures) {
      * the clamp is a floor as well as a cap, so the delay never shrinks as
      * failures accumulate, whatever interval a caller passes. */
     return (int)(delay < interval_ms ? interval_ms : delay);
+}
+
+int cbm_watcher_success_delay_ms(int interval_ms, int64_t index_elapsed_ms) {
+    if (interval_ms < 0) {
+        interval_ms = 0;
+    }
+    if (index_elapsed_ms <= 0) {
+        return interval_ms;
+    }
+    /* Divide instead of multiply so a huge elapsed cannot overflow. */
+    int64_t cooldown = index_elapsed_ms > INDEX_SUCCESS_COOLDOWN_CEILING_MS / INDEX_COOLDOWN_FACTOR
+                           ? INDEX_SUCCESS_COOLDOWN_CEILING_MS
+                           : index_elapsed_ms * INDEX_COOLDOWN_FACTOR;
+    return (int)(cooldown > interval_ms ? cooldown : interval_ms);
 }
 
 int cbm_watcher_poll_interval_ms(int file_count) {
@@ -627,6 +663,23 @@ int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name) 
     return failures;
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+void cbm_watcher_test_set_clock_ns(int64_t ns) {
+    atomic_store(&test_clock_ns, ns);
+}
+
+int64_t cbm_watcher_test_next_poll_ns(cbm_watcher_t *w, const char *project) {
+    if (!w || !project) {
+        return -1;
+    }
+    cbm_mutex_lock(&w->projects_lock);
+    project_state_t *s = (project_state_t *)cbm_ht_get(w->projects, project);
+    int64_t next = s ? atomic_load(&s->next_poll_ns) : -1;
+    cbm_mutex_unlock(&w->projects_lock);
+    return next;
+}
+#endif
+
 int cbm_watcher_watch_count(cbm_watcher_t *w) {
     if (!w) {
         return 0;
@@ -825,6 +878,7 @@ static void poll_project(const char *key, void *val, void *ud) {
         // Consume only the request this callback attempts. A new mark arriving
         // during the callback must survive even when that callback succeeds.
         bool consumed_pending = atomic_exchange(&s->index_pending, false);
+        int64_t index_start = now_ns();
         int rc = ctx->w->index_fn(s->project_name, s->root_path, ctx->w->user_data);
         if (rc != 0 && consumed_pending) {
             atomic_store(&s->index_pending, true);
@@ -844,6 +898,18 @@ static void poll_project(const char *key, void *val, void *ud) {
             /* Refresh file count for interval */
             s->file_count = git_file_count(s->root_path);
             s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
+            /* Success pays back the index's cost, counted from when the index
+             * finished (upstream #2835). Measured around index_fn only, so the
+             * git probes above are not charged to the index. */
+            int64_t index_end = now_ns();
+            int delay_ms =
+                cbm_watcher_success_delay_ms(s->interval_ms, (index_end - index_start) / US_PER_MS);
+            if (delay_ms > s->interval_ms) {
+                cbm_log_info("watcher.cooldown", "project", s->project_name, "delay_ms",
+                             itoa_buf(delay_ms));
+            }
+            atomic_store(&s->next_poll_ns, index_end + ((int64_t)delay_ms * US_PER_MS));
+            return;
         } else if (rc == CBM_INDEX_BUSY) {
             cbm_log_info("watcher.index.deferred", "project", s->project_name, "reason",
                          "index_busy");
