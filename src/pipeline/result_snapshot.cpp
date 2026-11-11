@@ -169,14 +169,14 @@ template <class A> void fields(A &a, CBMDefinition &v) {
            is_recursive, param_count, max_access_depth, linear_scan_in_loop, alloc_in_loop,
            recursion_in_loop, unguarded_recursion, lines, fingerprint, fingerprint_k, is_exported,
            is_abstract, is_test, is_entry_point, structural_profile, body_tokens, declaration_key,
-           definition_offset, variants] = v;
+           definition_offset, variants, alias_target] = v;
     a(name, qualified_name, label, file_path, start_line, end_line, signature, return_type,
       receiver, docstring, parent_class, decorators, base_classes, param_names, param_types,
       return_types, route_path, route_method, complexity, cognitive, loop_count, loop_depth,
       is_recursive, param_count, max_access_depth, linear_scan_in_loop, alloc_in_loop,
       recursion_in_loop, unguarded_recursion, lines, is_exported, is_abstract, is_test,
-      is_entry_point, structural_profile, body_tokens, declaration_key, definition_offset,
-      variants);
+      is_entry_point, structural_profile, body_tokens, declaration_key, definition_offset, variants,
+      alias_target);
     a.array(fingerprint, fingerprint_k);
 }
 template <class A> void fields(A &a, CBMOverload &v) {
@@ -396,6 +396,7 @@ CBMFileResult *make_registry_summary(const CBMFileResult &result, size_t max_byt
             def.parent_class = src.parent_class;
             def.return_type = src.return_type;
             def.declaration_key = src.declaration_key;
+            def.alias_target = src.alias_target;
             def.param_types = src.param_types;
             def.base_classes = src.base_classes;
             definitions.push_back(def);

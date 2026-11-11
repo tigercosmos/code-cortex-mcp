@@ -10585,6 +10585,61 @@ static const char *const k_cs_fth_bodies[] = {
 static int named_edge_strategy_count(cbm_store_t *s, const char *project, const char *type,
                                      const char *src, const char *tgt, const char *strategy);
 
+/* Upstream #2033 (4b03f7af): `type FeatureSet = bitmap` (featureset.go), the
+ * method `bitmap.Set` (bitmap.go) and the call `reqs.Set(3)` (framework.go)
+ * are three files, so the alias reaches the call only through the cross-file
+ * defs. The same-package decoy `other.Set` means the call cannot bind by
+ * name. Before the fix the call had no CALLS edge at all. */
+static const char *const k_go_alias_names[] = {"go.mod", "fs/bitmap.go", "fs/featureset.go",
+                                               "fs/framework.go", "fs/other.go"};
+static const char *const k_go_alias_bodies[] = {
+    "module example.com/fx\n\ngo 1.22\n",
+    "package fs\n\ntype bitmap []uint64\n\n"
+    "func (b bitmap) Set(i int) { b[i/64] |= 1 << (i % 64) }\n",
+    "package fs\n\ntype FeatureSet = bitmap\n",
+    "package fs\n\ntype Framework struct{}\n\n"
+    "func (f *Framework) NewFeatureSet() FeatureSet { return make(FeatureSet, 1) }\n\n"
+    "func Use(f *Framework) {\n\treqs := f.NewFeatureSet()\n\treqs.Set(3)\n}\n",
+    "package fs\n\ntype other struct{}\n\nfunc (o other) Set(i int) {}\n"};
+
+static int calls_named_into_file(cbm_store_t *s, const char *project, const char *caller,
+                                 const char *callee, const char *file, const char *fragment);
+
+/* 0 = Use binds bitmap.Set through an LSP strategy and never the decoy. */
+static int go_crossfile_alias_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p =
+        index_fixture_with_padding(k_go_alias_names, k_go_alias_bodies, 5, pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -99;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -98;
+    if (s) {
+        int right =
+            calls_named_into_file(s, proj, "Use", "Set", "fs/bitmap.go", "\"strategy\":\"lsp_");
+        int decoy = calls_named_into_file(s, proj, "Use", "Set", "fs/other.go", NULL);
+        printf("  go alias probe pad=%d: typed=%d decoy=%d\n", pad, right, decoy);
+        rc = (right == 1 && decoy == 0) ? 0 : -1;
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+TEST(pipeline_go_crossfile_type_alias_method) {
+    ASSERT_EQ(go_crossfile_alias_probe(0), 0);
+    PASS();
+}
+
+TEST(pipeline_go_crossfile_type_alias_method_parallel) {
+    ASSERT_EQ(go_crossfile_alias_probe(52), 0);
+    PASS();
+}
+
 /* CALLS edges from a node named `caller` to a node named `callee` defined in
  * `file`, whose properties contain `fragment` (NULL = any). */
 static int calls_named_into_file(cbm_store_t *s, const char *project, const char *caller,
@@ -14574,6 +14629,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_bare_init_binds_nothing_parallel);
     RUN_TEST(pipeline_go_multi_return_receiver_is_typed);
     RUN_TEST(pipeline_go_multi_return_receiver_is_typed_parallel);
+    RUN_TEST(pipeline_go_crossfile_type_alias_method);
+    RUN_TEST(pipeline_go_crossfile_type_alias_method_parallel);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

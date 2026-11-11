@@ -1341,6 +1341,123 @@ TEST(golsp_crossfile_init_caller_qn_per_file) {
     PASS();
 }
 
+/* Upstream #2033 (4b03f7af): an identity alias declared in another file of
+ * the same package. `type FeatureSet = bitmap` lives in one file,
+ * `bitmap.Set` in a second, the call `reqs.Set` in a third, so only the defs
+ * can carry the alias. A defined type (`type Defined bitmap`) must not
+ * inherit bitmap's methods. The decoy `other.Set` keeps a name-only match from
+ * passing. Both cross-file registries are checked. */
+static void go_crossfile_alias_defs(CBMLSPDef *d) {
+    d[0].qualified_name = "test.main.bitmap";
+    d[0].short_name = "bitmap";
+    d[0].label = "Class";
+    d[0].def_module_qn = "test.main";
+    d[1].qualified_name = "test.main.bitmap.Set";
+    d[1].short_name = "Set";
+    d[1].label = "Method";
+    d[1].def_module_qn = "test.main";
+    d[1].receiver_type = "test.main.bitmap";
+    d[2].qualified_name = "test.main.FeatureSet";
+    d[2].short_name = "FeatureSet";
+    d[2].label = "Type";
+    d[2].def_module_qn = "test.main";
+    d[2].alias_target = "bitmap";
+    d[3].qualified_name = "test.main.Defined";
+    d[3].short_name = "Defined";
+    d[3].label = "Class";
+    d[3].def_module_qn = "test.main";
+    d[4].qualified_name = "test.main.Framework";
+    d[4].short_name = "Framework";
+    d[4].label = "Struct";
+    d[4].def_module_qn = "test.main";
+    d[5].qualified_name = "test.main.Framework.NewFeatureSet";
+    d[5].short_name = "NewFeatureSet";
+    d[5].label = "Method";
+    d[5].def_module_qn = "test.main";
+    d[5].receiver_type = "test.main.Framework";
+    d[5].return_types = "FeatureSet";
+    d[6].qualified_name = "test.main.Framework.NewDefined";
+    d[6].short_name = "NewDefined";
+    d[6].label = "Method";
+    d[6].def_module_qn = "test.main";
+    d[6].receiver_type = "test.main.Framework";
+    d[6].return_types = "Defined";
+    d[7].qualified_name = "test.main.other";
+    d[7].short_name = "other";
+    d[7].label = "Struct";
+    d[7].def_module_qn = "test.main";
+    d[8].qualified_name = "test.main.other.Set";
+    d[8].short_name = "Set";
+    d[8].label = "Method";
+    d[8].def_module_qn = "test.main";
+    d[8].receiver_type = "test.main.other";
+}
+
+static const char *go_crossfile_alias_source = "package main\n\n"
+                                               "func useAlias(f *Framework) {\n"
+                                               "\treqs := f.NewFeatureSet()\n"
+                                               "\treqs.Set(3)\n}\n\n"
+                                               "func useDefined(f *Framework) {\n"
+                                               "\td := f.NewDefined()\n"
+                                               "\td.Set(3)\n}\n";
+
+static int go_crossfile_alias_check(const CBMResolvedCallArray *out) {
+    int idx = find_resolved_arr_confident(out, "useAlias", ".Set");
+    if (idx < 0 || strcmp(out->items[idx].callee_qn, "test.main.bitmap.Set") != 0) {
+        printf("  resolved calls (%d):\n", out->count);
+        for (int i = 0; i < out->count; i++) {
+            const CBMResolvedCall *rc = &out->items[i];
+            printf("    %s -> %s [%s %.2f]\n", rc->caller_qn ? rc->caller_qn : "(null)",
+                   rc->callee_qn ? rc->callee_qn : "(null)", rc->strategy ? rc->strategy : "(null)",
+                   rc->confidence);
+        }
+    }
+    ASSERT_GTE(idx, 0);
+    ASSERT_STR_EQ(out->items[idx].callee_qn, "test.main.bitmap.Set");
+    /* Reached through alias_of: typed, not a name guess. */
+    ASSERT_TRUE(strncmp(out->items[idx].strategy, "lsp_", 4) == 0);
+    ASSERT_TRUE(strcmp(out->items[idx].strategy, "lsp_unresolved") != 0);
+    ASSERT_TRUE(out->items[idx].confidence >= 0.9f);
+    /* A defined type has its own (empty) method set. */
+    ASSERT_EQ(find_resolved_arr_confident(out, "useDefined", "bitmap.Set"), -1);
+    return 0;
+}
+
+TEST(golsp_crossfile_type_alias_method) {
+    CBMLSPDef defs[9] = {};
+    go_crossfile_alias_defs(defs);
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+    cbm_run_go_lsp_cross(&arena, go_crossfile_alias_source, (int)strlen(go_crossfile_alias_source),
+                         "test.main", NULL, defs, 9, NULL, NULL, 0, NULL, &out);
+    int rc = go_crossfile_alias_check(&out);
+    cbm_arena_destroy(&arena);
+    if (rc != 0) {
+        return rc;
+    }
+    PASS();
+}
+
+TEST(golsp_crossfile_type_alias_method_prebuilt) {
+    CBMLSPDef defs[9] = {};
+    go_crossfile_alias_defs(defs);
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {0};
+    CBMTypeRegistry *reg = cbm_go_build_cross_registry(&arena, defs, 9);
+    ASSERT_NOT_NULL(reg);
+    cbm_run_go_lsp_cross_with_registry(&arena, go_crossfile_alias_source,
+                                       (int)strlen(go_crossfile_alias_source), "test.main", NULL,
+                                       reg, NULL, NULL, 0, NULL, &out);
+    int rc = go_crossfile_alias_check(&out);
+    cbm_arena_destroy(&arena);
+    if (rc != 0) {
+        return rc;
+    }
+    PASS();
+}
+
 SUITE(go_lsp) {
     /* Single-file: param type inference */
     RUN_TEST(golsp_param_type_simple);
@@ -1456,4 +1573,6 @@ SUITE(go_lsp) {
     RUN_TEST(golsp_crossfile_local_interface_single_impl);
     RUN_TEST(golsp_init_caller_qn_matches_def);
     RUN_TEST(golsp_crossfile_init_caller_qn_per_file);
+    RUN_TEST(golsp_crossfile_type_alias_method);
+    RUN_TEST(golsp_crossfile_type_alias_method_prebuilt);
 }

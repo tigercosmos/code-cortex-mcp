@@ -694,6 +694,7 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
                               : pxc_join_pipe(arena, src->base_classes);
     dst->lang = lang;
     dst->cpp_declaration_key = src->declaration_key;
+    dst->alias_target = lang == CBM_LANG_GO ? src->alias_target : NULL;
     return 0;
 }
 

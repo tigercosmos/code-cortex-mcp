@@ -110,6 +110,10 @@ typedef struct {
     const char *cpp_declaring_type; // Exact header owner, joined by declaration key.
     const CBMCVisibleType *cpp_visible_types;
     int cpp_visible_type_count;
+    /* Go only (upstream #2033): raw aliased type text of `type A = B` ("B"),
+     * qualified by the registrar against def_module_qn like return_types.
+     * NULL = not an identity alias. */
+    const char *alias_target;
 } CBMLSPDef;
 
 // Parse source, build registry from defs + stdlib, run LSP.
