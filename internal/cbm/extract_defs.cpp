@@ -8889,7 +8889,12 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, wd_st
             // the generic walk re-extracted every method as a free Function
             // (a second node, and for JAX-RS a second, un-prefixed Route).
             // Upstream fixed the same omission in 87a0e3f7.
-            (strcmp(ck, "template_body") == 0 && spec->language == CBM_LANG_SCALA)) {
+            (strcmp(ck, "template_body") == 0 && spec->language == CBM_LANG_SCALA) ||
+            // Java's interface body is an `interface_body`: the same omission
+            // re-extracted every interface method as a free Function, and a
+            // Retrofit/JAX-RS annotation on it as a second, un-prefixed Route
+            // (upstream's find_class_member_body, 87a0e3f7, covers it).
+            (strcmp(ck, "interface_body") == 0 && spec->language == CBM_LANG_JAVA)) {
             push_nested_class_nodes(child, spec, s, new_enclosing, ctx);
             return;
         }

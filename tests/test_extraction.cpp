@@ -5491,6 +5491,30 @@ TEST(extract_java_method_annotations_issue382) {
     PASS();
 }
 
+/* A Java interface's methods are Methods of the interface, once. The generic
+ * def walk descended through the unrecognised `interface_body` and emitted
+ * every one again as a free Function with a file-level QN (and, for a JAX-RS
+ * or Retrofit verb on it, a second un-prefixed Route). A nested type inside
+ * the interface is still found. */
+TEST(java_interface_methods_are_not_free_functions) {
+    CBMFileResult *r = extract("package p;\n"
+                               "public interface Api {\n"
+                               "    String get(String id);\n"
+                               "    default int size() { return 0; }\n"
+                               "    class Impl { void run() {} }\n"
+                               "}\n",
+                               CBM_LANG_JAVA, "t", "Api.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT(has_def(r, "Method", "get"));
+    ASSERT(has_def(r, "Method", "size"));
+    ASSERT_FALSE(has_def(r, "Function", "get"));
+    ASSERT_FALSE(has_def(r, "Function", "size"));
+    ASSERT(has_def(r, "Class", "Impl"));
+    ASSERT(has_def(r, "Method", "run"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Java records (upstream f4c89711, ee6e78b7, 729ce339, 321dcb63): one generated
  * Method per component, none for an accessor the record declares itself. */
 TEST(java_record_accessors_are_generated_methods) {
@@ -12964,6 +12988,7 @@ SUITE(extraction) {
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(solidity_modifier_decorator);
+    RUN_TEST(java_interface_methods_are_not_free_functions);
     RUN_TEST(java_record_accessors_are_generated_methods);
     RUN_TEST(java_record_varargs_accessor_has_array_return);
     RUN_TEST(java_record_commented_accessor_has_only_explicit_span);
