@@ -1470,6 +1470,75 @@ TEST(discover_enclosing_repo_tracked_file_in_ignored_dir) {
     PASS();
 }
 
+/* ── JVM packages named like build output (upstream #2661) ──────── */
+
+/* Below src/<set>/{java,kotlin,scala,groovy}/ every directory is a package, so
+ * "target", "tmp", "vendor" there are package names, not build output. */
+TEST(jvm_package_path_predicate_issue2661) {
+    ASSERT_TRUE(cbm_discover_path_in_jvm_package("src/main/java/com/acme/target"));
+    ASSERT_TRUE(cbm_discover_path_in_jvm_package("app/src/test/kotlin/x/tmp"));
+    ASSERT_TRUE(cbm_discover_path_in_jvm_package("src/main/scala/vendor"));
+    /* The language root itself and its siblings are not packages. */
+    ASSERT_FALSE(cbm_discover_path_in_jvm_package("src/main/java"));
+    ASSERT_FALSE(cbm_discover_path_in_jvm_package("src/main/target"));
+    ASSERT_FALSE(cbm_discover_path_in_jvm_package("target"));
+    ASSERT_FALSE(cbm_discover_path_in_jvm_package("module/target/classes"));
+    ASSERT_FALSE(cbm_discover_path_in_jvm_package("src/java/main/tmp"));
+    ASSERT_FALSE(cbm_discover_path_in_jvm_package(NULL));
+    PASS();
+}
+
+TEST(discover_keeps_jvm_packages_named_like_build_dirs_issue2661) {
+    char *base = th_mktempdir("cbm_disc_jvm_pkg");
+    ASSERT(base != NULL);
+
+    th_write_file(TH_PATH(base, "src/main/java/com/acme/target/Foo.java"),
+                  "package com.acme.target;\nclass Foo {}\n");
+    th_write_file(TH_PATH(base, "src/test/java/com/acme/tmp/T.java"),
+                  "package com.acme.tmp;\nclass T {}\n");
+    th_write_file(TH_PATH(base, "src/main/kotlin/com/acme/vendor/V.kt"),
+                  "package com.acme.vendor\nclass V\n");
+    /* Real build output stays skipped. */
+    th_write_file(TH_PATH(base, "target/classes/Gen.java"), "class Gen {}\n");
+    th_write_file(TH_PATH(base, "src/main/target/Out.java"), "class Out {}\n");
+    /* The safety core is never un-skipped, even below a package root. */
+    th_write_file(TH_PATH(base, "src/main/java/com/.git/H.java"), "class H {}\n");
+
+    cbm_discover_opts_t opts = {};
+    cbm_file_info_t *files = NULL;
+    int count = 0;
+    int rc = cbm_discover(base, &opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(discover_has_rel_path(files, count, "src/main/java/com/acme/target/Foo.java"));
+    ASSERT_TRUE(discover_has_rel_path(files, count, "src/test/java/com/acme/tmp/T.java"));
+    ASSERT_TRUE(discover_has_rel_path(files, count, "src/main/kotlin/com/acme/vendor/V.kt"));
+    ASSERT_FALSE(discover_has_rel_path(files, count, "target/classes/Gen.java"));
+    ASSERT_FALSE(discover_has_rel_path(files, count, "src/main/target/Out.java"));
+    ASSERT_FALSE(discover_has_rel_path(files, count, "src/main/java/com/.git/H.java"));
+    ASSERT_EQ(count, 3);
+    cbm_discover_free(files, count);
+
+    /* Upstream d57846cb: moderate mode keeps a package named like a fast-mode
+     * skip dir below a JVM source root, while the same name at the top stays
+     * skipped. */
+    th_write_file(TH_PATH(base, "src/main/java/com/acme/integration/I.java"),
+                  "package com.acme.integration;\nclass I {}\n");
+    th_write_file(TH_PATH(base, "integration/Top.java"), "class Top {}\n");
+
+    cbm_discover_opts_t mod_opts = {};
+    mod_opts.mode = CBM_MODE_MODERATE;
+    files = NULL;
+    count = 0;
+    rc = cbm_discover(base, &mod_opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(discover_has_rel_path(files, count, "src/main/java/com/acme/integration/I.java"));
+    ASSERT_FALSE(discover_has_rel_path(files, count, "integration/Top.java"));
+
+    cbm_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
 /* ── .d: D source vs make/cargo dep-info (upstream fd1b8837) ─────── */
 
 /* rustc/cargo dep-info (and gcc -MD, CMake .o.d) files share .d with D source
@@ -1542,6 +1611,8 @@ SUITE(discover) {
     RUN_TEST(skip_venv);
     RUN_TEST(skip_dist);
     RUN_TEST(skip_target);
+    RUN_TEST(jvm_package_path_predicate_issue2661);
+    RUN_TEST(discover_keeps_jvm_packages_named_like_build_dirs_issue2661);
     RUN_TEST(skip_vendor);
     RUN_TEST(skip_vendored);
     RUN_TEST(skip_terraform);

@@ -121,6 +121,14 @@ typedef enum {
  * Only checks the basename, not the full path. */
 bool cbm_should_skip_dir(const char *dirname, cbm_index_mode_t mode);
 
+/* True when rel_path names a directory strictly below a JVM source root
+ * ("src/main/java/com/acme/target", "app/src/test/kotlin/x/tmp"). There every
+ * directory is a package, so a built-in skip name such as "target", "tmp" or
+ * "vendor" is an ordinary package name, not build output (upstream #2661).
+ * The root itself and directories beside it ("src/main/target") are not
+ * packages. Pure; unit-tested in test_discover.cpp. */
+bool cbm_discover_path_in_jvm_package(const char *rel_path);
+
 /* Check if a file has a suffix that should be skipped (e.g. .pyc, .png). */
 bool cbm_has_ignored_suffix(const char *filename, cbm_index_mode_t mode);
 
