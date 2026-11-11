@@ -10585,6 +10585,143 @@ static const char *const k_cs_fth_bodies[] = {
 static int named_edge_strategy_count(cbm_store_t *s, const char *project, const char *type,
                                      const char *src, const char *tgt, const char *strategy);
 
+/* CALLS edges from a node named `caller` to a node named `callee` defined in
+ * `file`, whose properties contain `fragment` (NULL = any). */
+static int calls_named_into_file(cbm_store_t *s, const char *project, const char *caller,
+                                 const char *callee, const char *file, const char *fragment) {
+    cbm_node_t *sources = NULL;
+    int nsrc = 0;
+    cbm_store_find_nodes_by_name(s, project, caller, &sources, &nsrc);
+    cbm_node_t *targets = NULL;
+    int ntgt = 0;
+    cbm_store_find_nodes_by_name(s, project, callee, &targets, &ntgt);
+    int hits = 0;
+    for (int i = 0; i < nsrc; i++) {
+        cbm_edge_t *edges = NULL;
+        int ne = 0;
+        cbm_store_find_edges_by_source_type(s, sources[i].id, "CALLS", &edges, &ne);
+        for (int e = 0; e < ne; e++) {
+            for (int t = 0; t < ntgt; t++) {
+                if (edges[e].target_id == targets[t].id && targets[t].file_path &&
+                    strcmp(targets[t].file_path, file) == 0 &&
+                    (!fragment ||
+                     (edges[e].properties_json && strstr(edges[e].properties_json, fragment)))) {
+                    hits++;
+                }
+            }
+        }
+        if (edges) {
+            cbm_store_free_edges(edges, ne);
+        }
+    }
+    cbm_store_free_nodes(sources, nsrc);
+    cbm_store_free_nodes(targets, ntgt);
+    return hits;
+}
+
+/* Upstream 36bce46e + bec01546 (F-G8 D1): a variable bound by a CROSS-file
+ * multi-value or named-result call is typed. The cross-file registrar got the
+ * raw result text `(*Encoder, error)`, which did not parse, so
+ * `e, err := enc.NewEncoder()` left e untyped. A single result keeps its raw
+ * text: `[]Sample` must stay a slice so that `xs[0].TS()` is typed. Every
+ * target method has two same-named decoys, so a guess cannot pass. */
+static const char *const k_go_multiret_names[] = {
+    "go.mod",       "enc/enc.go", "samples/samples.go", "diag/diag.go",
+    "app/types.go", "app/app.go", "decoy/decoy.go"};
+static const char *const k_go_multiret_bodies[] = {
+    "module example.com/fx\n\ngo 1.22\n",
+    "package enc\n\ntype Encoder struct{ n int }\n\n"
+    "func NewEncoder() (*Encoder, error) { return &Encoder{}, nil }\n\n"
+    "func NewNamed() (e *Encoder) { e = &Encoder{}; return }\n\n"
+    "func NewPair() (a, b *Encoder) { return &Encoder{}, &Encoder{} }\n\n"
+    "func (e *Encoder) EncodeTuple() int { return e.n }\n\n"
+    "func (e *Encoder) EncodeNamed() int { return e.n }\n\n"
+    "func (e *Encoder) EncodeGrouped() int { return e.n }\n",
+    "package samples\n\ntype Sample interface{ TS() int64 }\n\ntype sample struct{}\n\n"
+    "func (sample) TS() int64 { return 0 }\n\n"
+    "func Generate() []Sample { return []Sample{sample{}} }\n\n"
+    "func List() ([]Sample, error) { return []Sample{sample{}}, nil }\n",
+    "package diag\n\ntype Diagnostic struct{ msg string }\n\ntype Diagnostics []Diagnostic\n\n"
+    "func (d Diagnostics) HasErrorsSlice() bool { return len(d) > 0 }\n\n"
+    "func Run() (int, Diagnostics) { return 0, nil }\n",
+    "package app\n\ntype isolation struct{}\n\n"
+    "func (i *isolation) LowWatermarkField() int { return 0 }\n\n"
+    "type Head struct{ iso *isolation }\n\n"
+    "func newHead() (*Head, error) { return &Head{iso: &isolation{}}, nil }\n",
+    "package app\n\nimport (\n\t\"example.com/fx/diag\"\n\t\"example.com/fx/enc\"\n"
+    "\t\"example.com/fx/samples\"\n)\n\n"
+    "func UseIndex() int64 {\n\txs := samples.Generate()\n\treturn xs[0].TS()\n}\n\n"
+    "func UseTupleSlice() int64 {\n\tys, _ := samples.List()\n\treturn ys[0].TS()\n}\n\n"
+    "func UseGrouped() int {\n\tx, _ := enc.NewPair()\n\treturn x.EncodeGrouped()\n}\n\n"
+    "func UseTuple() int {\n\te, err := enc.NewEncoder()\n\t_ = err\n\treturn "
+    "e.EncodeTuple()\n}\n\n"
+    "func UseNamed() int {\n\te := enc.NewNamed()\n\treturn e.EncodeNamed()\n}\n\n"
+    "func UseField() int {\n\th, _ := newHead()\n\treturn h.iso.LowWatermarkField()\n}\n\n"
+    "func UseSlice() bool {\n\t_, d := diag.Run()\n\treturn d.HasErrorsSlice()\n}\n",
+    "package decoy\n\ntype D1 struct{}\n\ntype D2 struct{}\n\n"
+    "func (D1) EncodeTuple() int { return 0 }\nfunc (D2) EncodeTuple() int { return 0 }\n"
+    "func (D1) EncodeNamed() int { return 0 }\nfunc (D2) EncodeNamed() int { return 0 }\n"
+    "func (D1) LowWatermarkField() int { return 0 }\n"
+    "func (D2) LowWatermarkField() int { return 0 }\n"
+    "func (D1) HasErrorsSlice() bool { return false }\n"
+    "func (D2) HasErrorsSlice() bool { return false }\n"
+    "func (D1) EncodeGrouped() int { return 0 }\nfunc (D2) EncodeGrouped() int { return 0 }\n"
+    "func (D1) TS() int64 { return 0 }\nfunc (D2) TS() int64 { return 0 }\n"};
+
+/* Number of call sites that are NOT typed onto the right method (0 = pass). */
+static int go_multi_return_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p = index_fixture_with_padding(k_go_multiret_names, k_go_multiret_bodies, 7,
+                                                   pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -99;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    static const struct {
+        const char *caller;
+        const char *method;
+        const char *file;
+    } want[] = {
+        {"UseTuple", "EncodeTuple", "enc/enc.go"},         /* e, err := enc.NewEncoder() */
+        {"UseNamed", "EncodeNamed", "enc/enc.go"},         /* named result (e *Encoder) */
+        {"UseField", "LowWatermarkField", "app/types.go"}, /* h, _ := newHead(); h.iso.X() */
+        {"UseSlice", "HasErrorsSlice", "diag/diag.go"},    /* _, d := diag.Run() */
+        {"UseGrouped", "EncodeGrouped", "enc/enc.go"},     /* (a, b *Encoder) */
+        {"UseIndex", "TS", "samples/samples.go"},          /* single []Sample, xs[0] */
+        {"UseTupleSlice", "TS", "samples/samples.go"},     /* ([]Sample, error) */
+    };
+    int bad = s ? 0 : -98;
+    for (size_t i = 0; s && i < sizeof(want) / sizeof(want[0]); i++) {
+        int right = calls_named_into_file(s, proj, want[i].caller, want[i].method, want[i].file,
+                                          "\"strategy\":\"lsp_");
+        int decoy =
+            calls_named_into_file(s, proj, want[i].caller, want[i].method, "decoy/decoy.go", NULL);
+        if (right < 1 || decoy != 0) {
+            printf("  pad=%d %s -> %s: typed=%d decoy=%d\n", pad, want[i].caller, want[i].method,
+                   right, decoy);
+            bad++;
+        }
+    }
+    if (s) {
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return bad;
+}
+
+TEST(pipeline_go_multi_return_receiver_is_typed) {
+    ASSERT_EQ(go_multi_return_probe(0), 0);
+    PASS();
+}
+
+TEST(pipeline_go_multi_return_receiver_is_typed_parallel) {
+    ASSERT_EQ(go_multi_return_probe(52), 0);
+    PASS();
+}
+
 /* Edges of `edge_type` whose source and target QNs end in the given suffixes. */
 static int edges_by_qn_suffix(cbm_store_t *s, const char *project, const char *edge_type,
                               const char *caller_suffix, const char *callee_suffix) {
@@ -14435,6 +14572,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_init_dispatch_fallback_names_init_caller);
     RUN_TEST(pipeline_go_bare_init_binds_nothing);
     RUN_TEST(pipeline_go_bare_init_binds_nothing_parallel);
+    RUN_TEST(pipeline_go_multi_return_receiver_is_typed);
+    RUN_TEST(pipeline_go_multi_return_receiver_is_typed_parallel);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

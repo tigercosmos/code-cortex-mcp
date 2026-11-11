@@ -147,6 +147,169 @@ static const char *pxc_join_pipe(CBMArena *arena, const char *const *items) {
     return buf;
 }
 
+/* ── Go result lists for the cross-file registrar (upstream bec01546) ──
+ *
+ * The Go registrar reads a def's return_types as '|'-separated type texts and
+ * parses each piece on its own (go_lsp.cpp split_pipe_types ->
+ * cbm_parse_return_type_text: `*T`, `[]T`, builtins, named types). A single
+ * result already is one such text. A result LIST arrives as its raw source,
+ * `(*T, error)` or the named `(t *T, err error)`, which parses as nothing, so
+ * pxc_go_result_list splits it into its element types. The extractor's
+ * return_types are no substitute: clean_type_name strips `[]` and `*` for
+ * type-reference edges, and `[]T` read as `T` mistypes `xs[0].M()`. */
+
+enum { PXC_GO_MAX_RESULTS = 16 };
+
+typedef struct {
+    const char *text;
+    size_t len;
+} pxc_span_t;
+
+static bool pxc_is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static bool pxc_is_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int pxc_go_depth(char c, int depth) {
+    if (c == '(' || c == '[' || c == '{') {
+        return depth + 1;
+    }
+    if ((c == ')' || c == ']' || c == '}') && depth > 0) {
+        return depth - 1;
+    }
+    return depth;
+}
+
+static pxc_span_t pxc_trim(const char *s, size_t n) {
+    while (n > 0 && pxc_is_space(*s)) {
+        s++;
+        n--;
+    }
+    while (n > 0 && pxc_is_space(s[n - 1])) {
+        n--;
+    }
+    return pxc_span_t{s, n};
+}
+
+/* Split `(a, b)` at its top-level commas into trimmed elements. A trailing
+ * comma (a multi-line list) leaves no element. Returns the element count, or
+ * -1 for text that is no result list or holds an empty element. */
+static int pxc_go_split_results(const char *raw, pxc_span_t *out) {
+    size_t n = strlen(raw);
+    if (n < 2 || raw[0] != '(' || raw[n - 1] != ')') {
+        return -1;
+    }
+    const char *s = raw + 1;
+    size_t len = n - 2;
+    int count = 0;
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        bool end = i == len;
+        if (!end && (s[i] != ',' || depth != 0)) {
+            depth = pxc_go_depth(s[i], depth);
+            continue;
+        }
+        pxc_span_t e = pxc_trim(s + start, i - start);
+        if (e.len == 0 && !(end && count > 0)) {
+            return -1;
+        }
+        if (e.len > 0) {
+            if (count == PXC_GO_MAX_RESULTS) {
+                return -1;
+            }
+            out[count++] = e;
+        }
+        start = i + 1;
+    }
+    return count;
+}
+
+/* Length of the result NAME that starts an element (`err` in `err error`),
+ * 0 when the element is a bare type. A type keyword is never a name: `chan T`
+ * and `func() T` are types. *lone is set when the whole element is one
+ * identifier: a type in `(T, error)`, a grouped name in `(a, b int)`. */
+static size_t pxc_go_result_name(pxc_span_t e, bool *lone) {
+    size_t k = 0;
+    while (k < e.len && pxc_is_ident_char(e.text[k])) {
+        k++;
+    }
+    *lone = k > 0 && k == e.len;
+    if (k == 0 || k == e.len || !pxc_is_space(e.text[k])) {
+        return 0;
+    }
+    static const char *const type_keywords[] = {"chan", "func", "map", "struct", "interface", NULL};
+    for (int i = 0; type_keywords[i]; i++) {
+        if (strlen(type_keywords[i]) == k && memcmp(e.text, type_keywords[i], k) == 0) {
+            return 0;
+        }
+    }
+    return k;
+}
+
+/* Named results: each lone name takes the type of the next `name type`
+ * element, as Go groups them. Returns count, or -1 when the list is not a
+ * well-formed named list. */
+static int pxc_go_named_types(CBMArena *arena, const pxc_span_t *el, int count,
+                              const char **types) {
+    int pending = 0;
+    for (int i = 0; i < count; i++) {
+        bool lone = false;
+        size_t k = pxc_go_result_name(el[i], &lone);
+        if (k == 0) {
+            if (!lone) {
+                return -1;
+            }
+            pending++;
+            continue;
+        }
+        pxc_span_t t = pxc_trim(el[i].text + k, el[i].len - k);
+        const char *type = cbm_arena_sprintf(arena, "%.*s", (int)t.len, t.text);
+        if (!type) {
+            return -1;
+        }
+        for (int j = i - pending; j <= i; j++) {
+            types[j] = type;
+        }
+        pending = 0;
+    }
+    return pending == 0 ? count : -1;
+}
+
+/* `(*T, error)` -> `*T|error`; `(t *T, err error)` -> `*T|error`;
+ * `(a, b int)` -> `int|int`. NULL when raw is no result list (a single
+ * result) or does not split cleanly: the caller keeps the raw text then. */
+static const char *pxc_go_result_list(CBMArena *arena, const char *raw) {
+    pxc_span_t el[PXC_GO_MAX_RESULTS];
+    int count = pxc_go_split_results(raw, el);
+    if (count <= 0) {
+        return NULL;
+    }
+    bool named = false;
+    for (int i = 0; i < count && !named; i++) {
+        bool lone = false;
+        named = pxc_go_result_name(el[i], &lone) > 0;
+    }
+    const char *types[PXC_GO_MAX_RESULTS + 1];
+    if (named) {
+        if (pxc_go_named_types(arena, el, count, types) < 0) {
+            return NULL;
+        }
+    } else {
+        for (int i = 0; i < count; i++) {
+            types[i] = cbm_arena_sprintf(arena, "%.*s", (int)el[i].len, el[i].text);
+            if (!types[i]) {
+                return NULL;
+            }
+        }
+    }
+    types[count] = NULL;
+    return pxc_join_pipe(arena, types);
+}
+
 static bool pxc_is_jvm_lang(CBMLanguage lang);
 
 static const char *pxc_last_component(const char *qn) {
@@ -512,10 +675,18 @@ static int pxc_build_lsp_def(CBMArena *arena, const CBMDefinition *src, const ch
     dst->def_module_qn = module_qn;
     dst->namespace_name = namespace_name;
     dst->is_interface = (strcmp(label, "Interface") == 0 || strcmp(label, "Protocol") == 0);
-    /* Single return-type string. The per-language registrars split on '|'
-     * for multi-return languages (Go); single-return languages just see one
-     * piece, which is what's already stored. */
-    dst->return_types = src->return_type;
+    /* The return-type string. The Go registrar splits it on '|' (go_lsp.cpp
+     * split_pipe_types), so a Go result LIST arrives split into its element
+     * types: `(*T, error)` as `*T|error`, a named `(t *T)` as `*T`. The raw
+     * list text did not parse, so every variable bound by a cross-file
+     * multi-value or named-result call (`t, err := pkg.New()`) stayed untyped
+     * (upstream 36bce46e, bec01546). A single result, and every other
+     * language, keeps the raw text the registrar already parses (`[]T` stays
+     * a slice). */
+    const char *go_list = (lang == CBM_LANG_GO && src->return_type)
+                              ? pxc_go_result_list(arena, src->return_type)
+                              : NULL;
+    dst->return_types = go_list ? go_list : src->return_type;
     if (lang == CBM_LANG_C || lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA)
         dst->parameter_types = src->param_types;
     dst->embedded_types = (bs && bs->reg && pxc_lang_resolves_base_qns(lang))
