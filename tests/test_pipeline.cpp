@@ -13116,6 +13116,72 @@ TEST(pipeline_c_bare_ref_never_binds_field_parallel) {
 }
 
 
+/* Number of `label` nodes whose file_path starts with `prefix`, or -1. */
+static int count_nodes_with_path_prefix(cbm_store_t *s, const char *project, const char *label,
+                                        const char *prefix) {
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    if (cbm_store_find_nodes_by_label(s, project, label, &nodes, &count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int hits = 0;
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].file_path && strncmp(nodes[i].file_path, prefix, strlen(prefix)) == 0) {
+            hits++;
+        }
+    }
+    cbm_store_free_nodes(nodes, count);
+    return hits;
+}
+
+/* Upstream 9140e7df: make-style dep-info .d files are dropped at discovery, so
+ * the graph holds no File or Module node for them and no Folder for a
+ * directory that held only dep-info. Real D source beside a dep-info file
+ * keeps its nodes and folder. */
+TEST(pipeline_d_dep_info_leaves_no_nodes) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_dotd_graph_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    char repo[512];
+    snprintf(repo, sizeof(repo), "%s/repo", tmp);
+    cpp_recv_write(repo, "cargo-target/debug/deps/app-0123abcd.d",
+                   "/r/cargo-target/debug/deps/app-0123abcd.d: src/main.rs\n\nsrc/main.rs:\n");
+    cpp_recv_write(repo, "src/app.d", "module app;\n\nvoid main() {}\n");
+    cpp_recv_write(repo, "src/app.o.d", "src/app.o: src/app.d\n");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/test.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(repo, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    int dep_folders = count_nodes_with_path_prefix(s, project, "Folder", "cargo-target");
+    int dep_files = count_nodes_with_path_prefix(s, project, "File", "cargo-target");
+    int dep_modules = count_nodes_with_path_prefix(s, project, "Module", "cargo-target");
+    int obj_files = count_nodes_with_path_prefix(s, project, "File", "src/app.o.d");
+    int obj_modules = count_nodes_with_path_prefix(s, project, "Module", "src/app.o.d");
+    int src_folders = count_nodes_with_path_prefix(s, project, "Folder", "src");
+    int src_files = count_nodes_with_path_prefix(s, project, "File", "src/app.d");
+    int src_modules = count_nodes_with_path_prefix(s, project, "Module", "src/app.d");
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+
+    ASSERT_EQ(dep_folders, 0);
+    ASSERT_EQ(dep_files, 0);
+    ASSERT_EQ(dep_modules, 0);
+    ASSERT_EQ(obj_files, 0);
+    ASSERT_EQ(obj_modules, 0);
+    ASSERT_EQ(src_folders, 1);
+    ASSERT_EQ(src_files, 1);
+    ASSERT_EQ(src_modules, 1);
+    PASS();
+}
+
 /* Upstream 51fd445f: discovery must choose the C++ grammar before the
  * pipeline extracts .inc symbols; a direct extractor-only test would miss that
  * routing failure. A BitBake .inc beside it keeps the BitBake grammar. */
@@ -13728,6 +13794,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_c_variants_on_sequential_and_parallel_paths_c1);
     RUN_TEST(pipeline_cpp_overloads_are_listed_as_variants_c1);
     RUN_TEST(pipeline_inc_c_family_fragments);
+    RUN_TEST(pipeline_d_dep_info_leaves_no_nodes);
     RUN_TEST(pipeline_c_bare_ref_never_binds_field);
     RUN_TEST(pipeline_c_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_c_call_reaches_header_function_beside_field);

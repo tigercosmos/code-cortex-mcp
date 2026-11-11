@@ -6,6 +6,7 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "discover/discover.h"
+#include "discover/userconfig.h"
 #include "git/git_context.h"
 
 /* ── Directory skip (always skipped) ───────────────────────────── */
@@ -1458,6 +1459,70 @@ TEST(discover_enclosing_repo_tracked_file_in_ignored_dir) {
     PASS();
 }
 
+/* ── .d: D source vs make/cargo dep-info (upstream fd1b8837) ─────── */
+
+/* rustc/cargo dep-info (and gcc -MD, CMake .o.d) files share .d with D source
+ * but are Makefile rules the D grammar parses slowly into nothing useful, so
+ * they must not be indexed as D. `target/` is always skipped, so the cargo
+ * file sits under a CARGO_TARGET_DIR-style `t/`. */
+static const char CARGO_DEP_INFO[] = "/home/u/proj/t/debug/deps/foo-abc123.d: src/lib.rs src/a.rs\n"
+                                     "\n"
+                                     "src/lib.rs:\n"
+                                     "src/a.rs:\n";
+
+/* Discover `base` and return the language of `rel`, or -1 when it is not
+ * among the discovered files. */
+static int discovered_language(const char *base, const char *rel) {
+    cbm_discover_opts_t opts = {};
+    cbm_file_info_t *files = NULL;
+    int count = 0;
+    if (cbm_discover(base, &opts, &files, &count) != 0) {
+        return -2;
+    }
+    int lang = -1;
+    for (int i = 0; i < count; i++) {
+        if (files[i].rel_path && strcmp(files[i].rel_path, rel) == 0) {
+            lang = (int)files[i].language;
+        }
+    }
+    cbm_discover_free(files, count);
+    return lang;
+}
+
+TEST(discover_d_dep_info_not_indexed_as_dlang) {
+    char *base = th_mktempdir("cbm_disc_dotd");
+    ASSERT(base != NULL);
+    ASSERT_EQ(th_write_file(TH_PATH(base, "t/debug/deps/foo-abc123.d"), CARGO_DEP_INFO), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(base, "app.d"), "module app;\nimport std.stdio : writeln;\n"),
+              0);
+    int dep = discovered_language(base, "t/debug/deps/foo-abc123.d");
+    int src = discovered_language(base, "app.d");
+    th_cleanup(base);
+    ASSERT_EQ(dep, -1);
+    ASSERT_EQ(src, (int)CBM_LANG_DLANG);
+    PASS();
+}
+
+/* The probe runs only while .d maps to D, so a user override to another
+ * language wins. */
+TEST(discover_d_user_override_skips_dep_info_probe) {
+    char *base = th_mktempdir("cbm_disc_dotd_uc");
+    ASSERT(base != NULL);
+    ASSERT_EQ(th_write_file(TH_PATH(base, ".code-cortex.json"),
+                            "{\"extra_extensions\":{\".d\":\"makefile\"}}"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(base, "foo-abc123.d"), CARGO_DEP_INFO), 0);
+    cbm_userconfig_t *cfg = cbm_userconfig_load(base);
+    ASSERT_NOT_NULL(cfg);
+    cbm_set_user_lang_config(cfg);
+    int lang = discovered_language(base, "foo-abc123.d");
+    cbm_set_user_lang_config(NULL);
+    cbm_userconfig_free(cfg);
+    th_cleanup(base);
+    ASSERT_EQ(lang, (int)CBM_LANG_MAKEFILE);
+    PASS();
+}
+
 SUITE(discover) {
     /* Directory skip — always */
     RUN_TEST(skip_git);
@@ -1537,6 +1602,10 @@ SUITE(discover) {
     RUN_TEST(discover_null_path);
     RUN_TEST(discover_nonexistent_path);
     RUN_TEST(discover_free_null);
+
+    /* .d: D source vs make/cargo dep-info */
+    RUN_TEST(discover_d_dep_info_not_indexed_as_dlang);
+    RUN_TEST(discover_d_user_override_skips_dep_info_probe);
 
     /* Go test ports (cross-platform) */
     RUN_TEST(discover_skips_worktrees);
