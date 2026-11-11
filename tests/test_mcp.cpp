@@ -510,6 +510,73 @@ TEST(server_handle_unknown_method) {
     PASS();
 }
 
+/* Issue #2433 (upstream 6bc7ade1): a modern client probes server/discover
+ * before initialize. The -32601 stays so it falls back; only that probe is
+ * logged as info. Other unknown methods still log a warning, and initialize
+ * still negotiates as before. */
+enum { DISCOVER_LOG_BUF = 4096 };
+static char g_discover_log[DISCOVER_LOG_BUF];
+static size_t g_discover_log_len;
+
+static void discover_capture_sink(const char *line) {
+    size_t n = strlen(line);
+    if (g_discover_log_len + n + 2 < sizeof(g_discover_log)) {
+        memcpy(g_discover_log + g_discover_log_len, line, n);
+        g_discover_log_len += n;
+        g_discover_log[g_discover_log_len++] = '\n';
+        g_discover_log[g_discover_log_len] = '\0';
+    }
+}
+
+static void discover_log_reset(void) {
+    g_discover_log_len = 0;
+    g_discover_log[0] = '\0';
+}
+
+TEST(server_handle_discover_probe_logs_info) {
+    CBMLogLevel prev_level = cbm_log_get_level();
+    cbm_log_set_level(CBM_LOG_DEBUG);
+    cbm_log_set_format(CBM_LOG_FORMAT_TEXT);
+    discover_log_reset();
+    cbm_log_set_sink(discover_capture_sink);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+
+    char *resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\"}");
+    bool discover_ok = resp && strstr(resp, "\"code\":-32601") && strstr(resp, "Method not found");
+    bool discover_info =
+        strstr(g_discover_log, "method=server/discover") && strstr(g_discover_log, "level=info") &&
+        strstr(g_discover_log, "status=ok") && !strstr(g_discover_log, "level=warn") &&
+        !strstr(g_discover_log, "status=error");
+    free(resp);
+
+    discover_log_reset();
+    resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"unknown/method\"}");
+    bool unknown_ok = resp && strstr(resp, "-32601");
+    bool unknown_warn = strstr(g_discover_log, "method=unknown/method") &&
+                        strstr(g_discover_log, "level=warn") &&
+                        strstr(g_discover_log, "status=error");
+    free(resp);
+
+    cbm_log_set_sink(NULL);
+    cbm_log_set_level(prev_level);
+
+    resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"initialize\","
+                                      "\"params\":{\"protocolVersion\":\"2026-07-28\"}}");
+    bool init_ok = resp && strstr(resp, "2025-11-25") && !strstr(resp, "2026-07-28");
+    free(resp);
+    cbm_mcp_server_free(srv);
+
+    ASSERT_TRUE(discover_ok);
+    ASSERT_TRUE(discover_info);
+    ASSERT_TRUE(unknown_ok);
+    ASSERT_TRUE(unknown_warn);
+    ASSERT_TRUE(init_ok);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  TOOL HANDLERS (via server_handle)
  * ══════════════════════════════════════════════════════════════════ */
@@ -8734,6 +8801,7 @@ SUITE(mcp) {
     RUN_TEST(server_handle_initialized_notification);
     RUN_TEST(server_handle_tools_list);
     RUN_TEST(server_handle_unknown_method);
+    RUN_TEST(server_handle_discover_probe_logs_info);
 
     /* Server handle — edge cases */
     RUN_TEST(server_handle_invalid_json);
