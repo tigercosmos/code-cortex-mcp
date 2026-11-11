@@ -3522,7 +3522,8 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
          * cross-LSP will too: the AST is the same. C++ uses the bounded
          * call-site coverage proof below; unresolved records or duplicate
          * successes cannot establish completeness. Other non-JVM languages
-         * retain the existing entry-count gate. Java/Kotlin per-file LSP can fill the
+         * keep a count gate over QUALIFYING rows only (an lsp_unresolved row
+         * answers nothing). Java/Kotlin per-file LSP can fill the
          * count with constructors or same-file calls while a mixed-source-root
          * Java↔Kotlin call remains unresolved, so JVM callers run whenever
          * calls exist. */
