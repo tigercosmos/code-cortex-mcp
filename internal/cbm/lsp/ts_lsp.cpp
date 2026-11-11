@@ -33,6 +33,9 @@
 #include "../helpers.h"   /* cbm_node_text and friends — prototypes required since ts_lsp.c is no longer unity-built via lsp_all */
 #include "foundation/cbm_atomic.h" /* atomic_long / atomic_* — was <stdatomic.h> upstream */
 #include "foundation/compat.h"     /* CBM_TLS — was _Thread_local upstream */
+#include "foundation/log.h"        /* cbm_log_error — walk stack overflow */
+#include <limits.h>                /* INT_MAX */
+#include <stdint.h>                /* SIZE_MAX */
 
 #include <initializer_list>
 /* C++ has no C99 compound literals; materialize a CBMType* argument array in
@@ -76,6 +79,13 @@ void cbm_ts_full_registry_builds_reset(void) {
  * constructs it does not model. -1 = unlimited (no entry point armed it). */
 static CBM_TLS long g_ts_type_budget = -1;
 static CBM_TLS bool g_ts_type_budget_warned;
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* Registry entries/probes visited by the two AST signature passes in the last run. */
+static CBM_TLS unsigned long g_ts_signature_lookup_work;
+/* Maximum recursive calls in one member/method lookup during the last run. */
+static CBM_TLS int g_ts_max_member_lookup_steps;
+static CBM_TLS int g_ts_max_method_lookup_steps;
+#endif
 
 static void ts_type_budget_reset(size_t source_len) {
     const char* e = getenv("CBM_TS_TYPE_BUDGET");
@@ -190,6 +200,12 @@ extern "C" long cbm_ts_lsp_test_budget_remaining(void) {
 extern "C" bool cbm_ts_lsp_test_budget_warned(void) {
     return g_ts_type_budget_warned;
 }
+extern "C" int cbm_ts_lsp_test_max_member_lookup_steps(void) {
+    return g_ts_max_member_lookup_steps;
+}
+extern "C" int cbm_ts_lsp_test_max_method_lookup_steps(void) {
+    return g_ts_max_method_lookup_steps;
+}
 #endif
 
 #define TS_LSP_MAX_EVAL_DEPTH 64
@@ -219,6 +235,10 @@ static const CBMType* type_of_identifier(TSLSPContext* ctx, const char* name);
 static const CBMType* lookup_member_type(TSLSPContext* ctx, const CBMType* recv, const char* name);
 static const CBMRegisteredFunc* lookup_method(TSLSPContext* ctx, const CBMType* recv,
                                               const char* method_name);
+struct TSLookupState;
+static const CBMRegisteredFunc *lookup_method_at(TSLSPContext *ctx, const CBMType *recv,
+                                                 const char *method_name, int depth,
+                                                 TSLookupState *state);
 static char* node_text(TSLSPContext* ctx, TSNode node);
 
 // Collect a node's children into an arena array via a single O(n) cursor pass.
@@ -1317,28 +1337,90 @@ static const char* builtin_wrapper_class(const char* builtin_name) {
     return NULL;
 }
 
-static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType* recv,
-                                               const char* name);
-
 #define TS_LSP_MAX_MEMBER_DEPTH 64
+#define TS_LSP_INLINE_VISITED_TYPES 16
 
-/* Depth-guarded entry: member lookup recurses through wrapper classes, union
- * members and registered-type expansion; cyclic type graphs in real-world TS
+struct TSVisitedType {
+    const char *qn;
+    int depth;
+};
+
+/* Per-lookup state for lookup_member_type / lookup_method. The depth cap alone
+ * (64) stopped a cyclic `extends` chain from overflowing the stack, but not from
+ * going exponential: a diamond or cyclic hierarchy re-walked every shared base
+ * once per path, so a few dozen interfaces cost 2^depth visits. A named type is
+ * now re-entered only when reached along a strictly shallower path. */
+struct TSLookupState {
+    TSVisitedType inline_visited[TS_LSP_INLINE_VISITED_TYPES];
+    TSVisitedType *visited;
+    int visited_count;
+    int visited_capacity;
+#ifdef CBM_ENABLE_TEST_SEAMS
+    int steps;
+#endif
+};
+
+/* A named type needs another visit only when reached along a shallower path.
+ * Grow the visited table (in the arena) rather than silently dropping entries at
+ * a fixed cap: the depth bound then limits each named type to at most 64
+ * admitted visits. On arena OOM the visit is refused: the lookup degrades to
+ * "not found", never to unbounded work. */
+static bool ts_lookup_visit_named(CBMArena *arena, TSLookupState *state, const char *qn,
+                                  int depth) {
+    for (int i = 0; i < state->visited_count; i++) {
+        if (strcmp(state->visited[i].qn, qn) == 0) {
+            if (state->visited[i].depth <= depth)
+                return false;
+            state->visited[i].depth = depth;
+            return true;
+        }
+    }
+    if (!state->visited) {
+        state->visited = state->inline_visited;
+        state->visited_capacity = TS_LSP_INLINE_VISITED_TYPES;
+    } else if (state->visited_count == state->visited_capacity) {
+        int capacity = state->visited_capacity * 2;
+        TSVisitedType *larger =
+            (TSVisitedType *)cbm_arena_alloc(arena, (size_t)capacity * sizeof(*larger));
+        if (!larger)
+            return false;
+        memcpy(larger, state->visited, (size_t)state->visited_count * sizeof(*larger));
+        state->visited = larger;
+        state->visited_capacity = capacity;
+    }
+    state->visited[state->visited_count].qn = qn;
+    state->visited[state->visited_count].depth = depth;
+    state->visited_count++;
+    return true;
+}
+
+static const CBMType *lookup_member_type_at(TSLSPContext *ctx, const CBMType *recv,
+                                            const char *name, int depth, TSLookupState *state);
+
+/* Member lookup recurses through wrapper classes, union members and the
+ * extends/implements chain; cyclic type graphs in real-world TS
  * (microsoft/TypeScript reallyLargeFile.ts) recursed without bound — SIGBUS
- * stack overflow under endless lookup_member_type frames. Past the cap the
- * member resolves as unknown — graceful degradation, not a crash. */
+ * stack overflow. The depth cap bounds the stack and the visited set bounds the
+ * work (upstream e5c3ddd5). Past either the member resolves as unknown. */
 static const CBMType* lookup_member_type(TSLSPContext* ctx, const CBMType* recv, const char* name) {
-    if (!ctx || ctx->member_depth >= TS_LSP_MAX_MEMBER_DEPTH) return cbm_type_unknown();
-    ctx->member_depth++;
-    const CBMType* r = lookup_member_type_inner(ctx, recv, name);
-    ctx->member_depth--;
-    return r;
+    TSLookupState state = {};
+    const CBMType *result = lookup_member_type_at(ctx, recv, name, 0, &state);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (state.steps > g_ts_max_member_lookup_steps)
+        g_ts_max_member_lookup_steps = state.steps;
+#endif
+    return result;
 }
 
 // Look up a property `name` on a receiver type. Returns the property type or UNKNOWN.
-static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType* recv,
-                                               const char* name) {
-    if (!ctx || !recv || !name) return cbm_type_unknown();
+static const CBMType *lookup_member_type_at(TSLSPContext *ctx, const CBMType *recv,
+                                            const char *name, int depth, TSLookupState *state) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (state)
+        state->steps++;
+#endif
+    if (!ctx || !recv || !name || !state || depth >= TS_LSP_MAX_MEMBER_DEPTH)
+        return cbm_type_unknown();
     const CBMType* base = simplify_type(ctx, recv);
     if (!base) return cbm_type_unknown();
     base = unwrap_passthrough_template(base);
@@ -1349,7 +1431,7 @@ static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType*
         const char* wrap = builtin_wrapper_class(base->data.builtin.name);
         if (wrap) {
             const CBMType* wrapped = cbm_type_named(ctx->arena, wrap);
-            return lookup_member_type(ctx, wrapped, name);
+            return lookup_member_type_at(ctx, wrapped, name, depth + 1, state);
         }
         return cbm_type_unknown();
     }
@@ -1404,7 +1486,10 @@ static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType*
         // first hit instead of building a union of results.)
         if (base->data.union_type.members) {
             for (int i = 0; i < base->data.union_type.count; i++) {
-                const CBMType* m = lookup_member_type(ctx, base->data.union_type.members[i], name);
+                if (depth + 1 >= TS_LSP_MAX_MEMBER_DEPTH)
+                    break;
+                const CBMType *m = lookup_member_type_at(ctx, base->data.union_type.members[i],
+                                                         name, depth + 1, state);
                 if (!cbm_type_is_unknown(m)) return m;
             }
         }
@@ -1414,7 +1499,10 @@ static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType*
     if (base->kind == CBM_TYPE_INTERSECTION) {
         if (base->data.union_type.members) {
             for (int i = 0; i < base->data.union_type.count; i++) {
-                const CBMType* m = lookup_member_type(ctx, base->data.union_type.members[i], name);
+                if (depth + 1 >= TS_LSP_MAX_MEMBER_DEPTH)
+                    break;
+                const CBMType *m = lookup_member_type_at(ctx, base->data.union_type.members[i],
+                                                         name, depth + 1, state);
                 if (!cbm_type_is_unknown(m)) return m;
             }
         }
@@ -1424,6 +1512,10 @@ static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType*
     if (base->kind != CBM_TYPE_NAMED) return cbm_type_unknown();
 
     const char* recv_qn = base->data.named.qualified_name;
+    if (!recv_qn)
+        return cbm_type_unknown();
+    if (!ts_lookup_visit_named(ctx->arena, state, recv_qn, depth))
+        return cbm_type_unknown();
     const CBMRegisteredType* rt = cbm_registry_resolve_alias(ctx->registry, recv_qn);
     if (!rt) {
         rt = cbm_registry_lookup_type(ctx->registry, recv_qn);
@@ -1449,8 +1541,10 @@ static const CBMType* lookup_member_type_inner(TSLSPContext* ctx, const CBMType*
     // Walk extends/implements.
     if (rt->embedded_types) {
         for (int i = 0; rt->embedded_types[i]; i++) {
+            if (depth + 1 >= TS_LSP_MAX_MEMBER_DEPTH)
+                break;
             const CBMType* parent = cbm_type_named(ctx->arena, rt->embedded_types[i]);
-            const CBMType* m = lookup_member_type(ctx, parent, name);
+            const CBMType *m = lookup_member_type_at(ctx, parent, name, depth + 1, state);
             if (!cbm_type_is_unknown(m)) return m;
         }
     }
@@ -1525,9 +1619,6 @@ static const CBMType* unwrap_passthrough_template(const CBMType* t) {
     return cbm_type_unknown();
 }
 
-static const CBMRegisteredFunc* lookup_method_inner(TSLSPContext* ctx, const CBMType* recv,
-                                                    const char* method_name);
-
 /* Depth-guarded entry, same contract as lookup_member_type: the method walk
  * recurses through wrapper classes, union members and the extends/implements
  * chain. A cyclic chain (#1743: the Effect idiom `class Service extends
@@ -1536,17 +1627,26 @@ static const CBMRegisteredFunc* lookup_method_inner(TSLSPContext* ctx, const CBM
  * cap the method is simply not found. */
 static const CBMRegisteredFunc* lookup_method(TSLSPContext* ctx, const CBMType* recv,
                                               const char* method_name) {
-    if (!ctx || ctx->method_depth >= TS_LSP_MAX_MEMBER_DEPTH) return NULL;
-    ctx->method_depth++;
-    const CBMRegisteredFunc* f = lookup_method_inner(ctx, recv, method_name);
-    ctx->method_depth--;
-    return f;
+    TSLookupState state = {};
+    const CBMRegisteredFunc *result = lookup_method_at(ctx, recv, method_name, 0, &state);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (state.steps > g_ts_max_method_lookup_steps)
+        g_ts_max_method_lookup_steps = state.steps;
+#endif
+    return result;
 }
 
-// Look up a method on a receiver type — returns the registered func.
-static const CBMRegisteredFunc* lookup_method_inner(TSLSPContext* ctx, const CBMType* recv,
-                                                    const char* method_name) {
-    if (!ctx || !recv || !method_name) return NULL;
+// Look up a method on a receiver type — returns the registered func. Depth and
+// shallower-only named-type visits bound cyclic/diamond inheritance work.
+static const CBMRegisteredFunc *lookup_method_at(TSLSPContext *ctx, const CBMType *recv,
+                                                 const char *method_name, int depth,
+                                                 TSLookupState *state) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (state)
+        state->steps++;
+#endif
+    if (!ctx || !recv || !method_name || !state || depth >= TS_LSP_MAX_MEMBER_DEPTH)
+        return NULL;
     const CBMType* base = simplify_type(ctx, recv);
     if (!base) return NULL;
     base = unwrap_passthrough_template(base);
@@ -1557,7 +1657,7 @@ static const CBMRegisteredFunc* lookup_method_inner(TSLSPContext* ctx, const CBM
         const char* wrap = builtin_wrapper_class(base->data.builtin.name);
         if (wrap) {
             const CBMType* wrapped = cbm_type_named(ctx->arena, wrap);
-            return lookup_method(ctx, wrapped, method_name);
+            return lookup_method_at(ctx, wrapped, method_name, depth + 1, state);
         }
         return NULL;
     }
@@ -1585,8 +1685,10 @@ static const CBMRegisteredFunc* lookup_method_inner(TSLSPContext* ctx, const CBM
     if (base->kind == CBM_TYPE_UNION || base->kind == CBM_TYPE_INTERSECTION) {
         if (base->data.union_type.members) {
             for (int i = 0; i < base->data.union_type.count; i++) {
-                const CBMRegisteredFunc* f = lookup_method(ctx, base->data.union_type.members[i],
-                                                            method_name);
+                if (depth + 1 >= TS_LSP_MAX_MEMBER_DEPTH)
+                    break;
+                const CBMRegisteredFunc *f = lookup_method_at(ctx, base->data.union_type.members[i],
+                                                              method_name, depth + 1, state);
                 if (f) return f;
             }
         }
@@ -1595,6 +1697,10 @@ static const CBMRegisteredFunc* lookup_method_inner(TSLSPContext* ctx, const CBM
 
     if (base->kind != CBM_TYPE_NAMED) return NULL;
     const char* recv_qn = base->data.named.qualified_name;
+    if (!recv_qn)
+        return NULL;
+    if (!ts_lookup_visit_named(ctx->arena, state, recv_qn, depth))
+        return NULL;
 
     const CBMRegisteredFunc* f = cbm_registry_lookup_method_aliased(ctx->registry, recv_qn,
                                                                     method_name);
@@ -1604,8 +1710,11 @@ static const CBMRegisteredFunc* lookup_method_inner(TSLSPContext* ctx, const CBM
     const CBMRegisteredType* rt = cbm_registry_lookup_type(ctx->registry, recv_qn);
     if (rt && rt->embedded_types) {
         for (int i = 0; rt->embedded_types[i]; i++) {
+            if (depth + 1 >= TS_LSP_MAX_MEMBER_DEPTH)
+                break;
             const CBMType* parent = cbm_type_named(ctx->arena, rt->embedded_types[i]);
-            const CBMRegisteredFunc* pf = lookup_method(ctx, parent, method_name);
+            const CBMRegisteredFunc *pf =
+                lookup_method_at(ctx, parent, method_name, depth + 1, state);
             if (pf) return pf;
         }
     }
@@ -3115,6 +3224,11 @@ void ts_lsp_init(TSLSPContext* ctx, CBMArena* arena, const char* source, int sou
                  bool js_mode, bool jsx_mode, bool dts_mode,
                  CBMResolvedCallArray* out) {
     if (!ctx) return;
+#ifdef CBM_ENABLE_TEST_SEAMS
+    g_ts_signature_lookup_work = 0;
+    g_ts_max_member_lookup_steps = 0;
+    g_ts_max_method_lookup_steps = 0;
+#endif
     memset(ctx, 0, sizeof(TSLSPContext));
     ctx->arena = arena;
     ctx->source = source;
@@ -3837,15 +3951,77 @@ static void register_file_defs(CBMArena* arena, CBMTypeRegistry* reg, CBMFileRes
     }
 }
 
-// Find the first `return EXPR` inside a body and evaluate EXPR's type. Returns
-// UNKNOWN if the body has no return or every return is unresolvable.
+// AST walk stacks for the passes below. The first chunk lives on the C stack, the
+// same 256 slots the old fixed arrays used; a wider pending set grows on the heap
+// through cbm_walk_stack_reserve and is released when the walk ends, so nothing
+// is cut from the per-file result arena. A fixed cap used to stop pushing without
+// a word, which skipped every top-level declaration past the 256th and left the
+// return walk short of returns it had never reached (upstream #2388).
+enum { TS_WALK_STACK_INLINE = 256 };
+
+// top + count as a stack size, or -1 (logged) when it would overflow int.
+static int ts_walk_pending_count(int top, uint32_t count, const char *walker) {
+    if (top < 0 || count > (uint32_t)(INT_MAX - top)) {
+        char pending[24];
+        snprintf(pending, sizeof(pending), "%llu", (unsigned long long)count + (unsigned)top);
+        cbm_log_error("extract.walk_stack_alloc_failed", "walker", walker, "pending", pending);
+        return -1;
+    }
+    return top + (int)count;
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" int cbm_ts_lsp_test_walk_pending_count(int top, uint32_t count) {
+    return ts_walk_pending_count(top, count, "ts_lsp_test");
+}
+#endif
+
+// Push every child of n in cursor order (one O(N) pass). The walk pops the stack,
+// so children are visited last-child first: the order these walks have always
+// used. False means the stack could not grow; the failure has been logged.
+static bool ts_walk_push_children(TSNode **stack, int *cap, int *top, TSNode n,
+                                  const TSNode *inline_buf, const char *walker) {
+    uint32_t count = ts_node_child_count(n);
+    if (count == 0)
+        return true;
+    int need = ts_walk_pending_count(*top, count, walker);
+    if (need < 0 ||
+        !cbm_walk_stack_reserve((void **)stack, cap, need, sizeof(TSNode), inline_buf, walker))
+        return false;
+    TSTreeCursor cursor = ts_tree_cursor_new(n);
+    if (ts_tree_cursor_goto_first_child(&cursor)) {
+        uint32_t pushed = 0;
+        do {
+            (*stack)[(*top)++] = ts_tree_cursor_current_node(&cursor);
+            pushed++;
+        } while (pushed < count && ts_tree_cursor_goto_next_sibling(&cursor));
+    }
+    ts_tree_cursor_delete(&cursor);
+    return true;
+}
+
+static bool ts_walk_push(TSNode **stack, int *cap, int *top, TSNode n, const TSNode *inline_buf,
+                         const char *walker) {
+    int need = ts_walk_pending_count(*top, 1, walker);
+    if (need < 0 ||
+        !cbm_walk_stack_reserve((void **)stack, cap, need, sizeof(TSNode), inline_buf, walker))
+        return false;
+    (*stack)[(*top)++] = n;
+    return true;
+}
+
+// Find a `return EXPR` inside a body and evaluate EXPR's type. Children are visited
+// last-child first, so of several returns the one latest in the body is tried
+// first; the first one that resolves wins. Returns UNKNOWN if the body has no
+// return, every return is unresolvable, or the walk stack could not grow.
 static const CBMType* infer_return_type_from_body(TSLSPContext* ctx, TSNode body) {
     if (ts_node_is_null(body)) return cbm_type_unknown();
 
-    // Iterative DFS using a small fixed-size stack to avoid C-stack blowup on big bodies.
-    enum { STACK_CAP = 256 };
-    TSNode stack[STACK_CAP];
+    TSNode inline_stack[TS_WALK_STACK_INLINE];
+    TSNode *stack = inline_stack;
+    int cap = TS_WALK_STACK_INLINE;
     int top = 0;
+    const CBMType *found = cbm_type_unknown();
     stack[top++] = body;
     while (top > 0) {
         TSNode n = stack[--top];
@@ -3858,7 +4034,10 @@ static const CBMType* infer_return_type_from_body(TSLSPContext* ctx, TSNode body
             TSNode expr = ts_node_named_child(n, 0);
             if (ts_node_is_null(expr)) continue;
             const CBMType* t = ts_eval_expr_type(ctx, expr);
-            if (t && !cbm_type_is_unknown(t)) return t;
+            if (t && !cbm_type_is_unknown(t)) {
+                found = t;
+                break;
+            }
             continue;
         }
         // Don't recurse into nested function bodies — their returns belong to them.
@@ -3867,13 +4046,105 @@ static const CBMType* infer_return_type_from_body(TSLSPContext* ctx, TSNode body
             strcmp(k, "arrow_function") == 0 ||
             strcmp(k, "method_definition") == 0) continue;
 
-        uint32_t cnt = ts_node_child_count(n);
-        for (uint32_t i = 0; i < cnt && top < STACK_CAP; i++) {
-            stack[top++] = ts_node_child(n, i);
-        }
+        if (!ts_walk_push_children(&stack, &cap, &top, n, inline_stack, "ts_lsp_return_walk"))
+            break; // "unknown" is the safe answer for a walk that could not finish
     }
-    return cbm_type_unknown();
+    cbm_walk_stack_release(stack, inline_stack);
+    return found;
 }
+
+// rebuild_signatures_from_ast / convert_signature_type_params patch the FIRST
+// matching local registration of a QN, even where the general registry index
+// prefers the last duplicate. Both used to find it with a strcmp scan of every
+// registered func per declaration — O(decls x funcs), quadratic in one file's
+// size once the walk stacks stopped capping at 256. This one-shot QN index
+// keeps them linear. It lives only across these two passes, which mutate
+// signatures but never append or rename registered funcs, and is malloc'd
+// scratch (not the per-file result arena). If it cannot be allocated, the
+// original scan runs.
+struct TSSignatureIndex {
+    CBMRegisteredFunc **slots;
+    size_t capacity;
+};
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" unsigned long cbm_ts_lsp_test_signature_lookup_work(void) {
+    return g_ts_signature_lookup_work;
+}
+#endif
+
+static void ts_signature_work(void) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    g_ts_signature_lookup_work++;
+#endif
+}
+
+static size_t ts_signature_slot(const TSSignatureIndex *index, const char *qn) {
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    for (const unsigned char *p = (const unsigned char *)qn; *p; p++) {
+        hash ^= *p;
+        hash *= 0x100000001b3ULL;
+    }
+    size_t slot = (size_t)hash & (index->capacity - 1);
+    for (;;) {
+        ts_signature_work();
+        if (!index->slots[slot] || strcmp(index->slots[slot]->qualified_name, qn) == 0)
+            return slot;
+        slot = (slot + 1) & (index->capacity - 1);
+    }
+}
+
+static TSSignatureIndex ts_signature_index(CBMTypeRegistry *reg) {
+    TSSignatureIndex index = {};
+    if (reg->func_count <= 0 || (size_t)reg->func_count > SIZE_MAX / 2)
+        return index;
+    size_t capacity = 16;
+    while (capacity < (size_t)reg->func_count * 2) {
+        if (capacity > SIZE_MAX / 2)
+            return index;
+        capacity *= 2;
+    }
+    if (capacity > SIZE_MAX / sizeof(*index.slots))
+        return index;
+    index.slots = (CBMRegisteredFunc **)calloc(capacity, sizeof(*index.slots));
+    if (!index.slots)
+        return index; // the original scan runs on allocation failure
+    index.capacity = capacity;
+    for (int i = 0; i < reg->func_count; i++) {
+        ts_signature_work();
+        CBMRegisteredFunc *func = &reg->funcs[i];
+        if (!func->qualified_name)
+            continue;
+        size_t slot = ts_signature_slot(&index, func->qualified_name);
+        if (!index.slots[slot])
+            index.slots[slot] = func; // first registration wins
+    }
+    return index;
+}
+
+static CBMRegisteredFunc *ts_signature_func(CBMTypeRegistry *reg, const TSSignatureIndex *index,
+                                            const char *qn) {
+    if (!qn)
+        return NULL;
+    if (index && index->slots)
+        return index->slots[ts_signature_slot(index, qn)];
+    for (int i = 0; i < reg->func_count; i++) {
+        ts_signature_work();
+        if (reg->funcs[i].qualified_name && strcmp(reg->funcs[i].qualified_name, qn) == 0)
+            return &reg->funcs[i];
+    }
+    return NULL;
+}
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+extern "C" int cbm_ts_lsp_test_signature_func_index(CBMTypeRegistry *reg, const char *qn) {
+    TSSignatureIndex index = ts_signature_index(reg);
+    CBMRegisteredFunc *func = ts_signature_func(reg, &index, qn);
+    int result = func ? (int)(func - reg->funcs) : -1;
+    free(index.slots);
+    return result;
+}
+#endif
 
 // Rebuild a function's CBMRegisteredFunc signature from the AST directly. extract_defs
 // only handles type_identifier / generic_type / predefined_type for params, so function
@@ -3882,31 +4153,36 @@ static const CBMType* infer_return_type_from_body(TSLSPContext* ctx, TSNode body
 //
 // Called after `register_file_defs` so the func entries already exist; we only mutate
 // in place.
-static void rebuild_signatures_from_ast(TSLSPContext* ctx, TSNode root, CBMTypeRegistry* reg) {
+static void rebuild_signatures_from_ast(TSLSPContext *ctx, TSNode root, CBMTypeRegistry *reg,
+                                        const TSSignatureIndex *index) {
     if (ts_node_is_null(root) || !reg || !ctx->module_qn) return;
 
-    enum { STACK_CAP = 256 };
-    TSNode stack[STACK_CAP];
+    // Seeded with every top-level child, so a file with more than 256 of them
+    // needs the growing stack (see TS_WALK_STACK_INLINE). If it cannot grow, the
+    // walk stops and the declarations not yet reached keep extract_defs' signature.
+    TSNode inline_stack[TS_WALK_STACK_INLINE];
+    TSNode *stack = inline_stack;
+    int cap = TS_WALK_STACK_INLINE;
     int top = 0;
-    uint32_t nc = ts_node_child_count(root);
-    for (uint32_t i = 0; i < nc && top < STACK_CAP; i++) stack[top++] = ts_node_child(root, i);
+    bool walking =
+        ts_walk_push_children(&stack, &cap, &top, root, inline_stack, "ts_lsp_rebuild_signatures");
 
-    while (top > 0) {
+    while (walking && top > 0) {
         TSNode n = stack[--top];
         if (ts_node_is_null(n)) continue;
         const char* k = ts_node_type(n);
 
         // Recurse into export_statement and class bodies.
         if (strcmp(k, "export_statement") == 0 || strcmp(k, "class_body") == 0) {
-            uint32_t cnt = ts_node_child_count(n);
-            for (uint32_t i = 0; i < cnt && top < STACK_CAP; i++) {
-                stack[top++] = ts_node_child(n, i);
-            }
+            walking = ts_walk_push_children(&stack, &cap, &top, n, inline_stack,
+                                            "ts_lsp_rebuild_signatures");
             continue;
         }
         if (strcmp(k, "class_declaration") == 0) {
             TSNode body = ts_node_child_by_field_name(n, "body", TS_LSP_FIELD_LEN("body"));
-            if (!ts_node_is_null(body) && top < STACK_CAP) stack[top++] = body;
+            if (!ts_node_is_null(body))
+                walking = ts_walk_push(&stack, &cap, &top, body, inline_stack,
+                                       "ts_lsp_rebuild_signatures");
             continue;
         }
 
@@ -4010,55 +4286,56 @@ static void rebuild_signatures_from_ast(TSLSPContext* ctx, TSNode root, CBMTypeR
         // Build new signature and patch in registry.
         const CBMType* rets[2] = {ret, NULL};
         const CBMType* new_sig = cbm_type_func(ctx->arena, p_names, p_types, rets);
-        for (int fi = 0; fi < reg->func_count; fi++) {
-            if (!reg->funcs[fi].qualified_name) continue;
-            if (strcmp(reg->funcs[fi].qualified_name, fqn) != 0) continue;
+        CBMRegisteredFunc *func = ts_signature_func(reg, index, fqn);
+        if (func) {
             // Preserve the ret type if AST gave UNKNOWN but the existing reg sig had one.
-            if (cbm_type_is_unknown(ret) && reg->funcs[fi].signature &&
-                reg->funcs[fi].signature->kind == CBM_TYPE_FUNC &&
-                reg->funcs[fi].signature->data.func.return_types &&
-                reg->funcs[fi].signature->data.func.return_types[0] &&
-                !cbm_type_is_unknown(
-                    reg->funcs[fi].signature->data.func.return_types[0])) {
-                const CBMType* preserved[2] = {
-                    reg->funcs[fi].signature->data.func.return_types[0], NULL};
+            if (cbm_type_is_unknown(ret) && func->signature &&
+                func->signature->kind == CBM_TYPE_FUNC && func->signature->data.func.return_types &&
+                func->signature->data.func.return_types[0] &&
+                !cbm_type_is_unknown(func->signature->data.func.return_types[0])) {
+                const CBMType *preserved[2] = {func->signature->data.func.return_types[0], NULL};
                 new_sig = cbm_type_func(ctx->arena, p_names, p_types, preserved);
             }
-            reg->funcs[fi].signature = new_sig;
-            break;
+            func->signature = new_sig;
         }
     }
+    cbm_walk_stack_release(stack, inline_stack);
 }
 
 // Convert NAMED references to TYPE_PARAM for any function whose declaration has a
 // `type_parameters` block. Without this, generic functions like `function id<T>(x: T): T`
 // register T as NAMED("module.T") instead of TYPE_PARAM("T"), defeating substitution.
-static void convert_signature_type_params(TSLSPContext* ctx, TSNode root, CBMTypeRegistry* reg) {
+static void convert_signature_type_params(TSLSPContext *ctx, TSNode root, CBMTypeRegistry *reg,
+                                          const TSSignatureIndex *index) {
     if (ts_node_is_null(root) || !reg || !ctx->module_qn) return;
 
     // Walk: function_declaration, class_declaration { method_definition }, plus exported.
-    enum { STACK_CAP = 256 };
-    TSNode stack[STACK_CAP];
+    // Seeded with every top-level child, so a file with more than 256 of them needs
+    // the growing stack (see TS_WALK_STACK_INLINE). If it cannot grow, the walk stops
+    // and the generics not yet reached keep their NAMED parameters.
+    TSNode inline_stack[TS_WALK_STACK_INLINE];
+    TSNode *stack = inline_stack;
+    int cap = TS_WALK_STACK_INLINE;
     int top = 0;
-    uint32_t nc = ts_node_child_count(root);
-    for (uint32_t i = 0; i < nc && top < STACK_CAP; i++) stack[top++] = ts_node_child(root, i);
+    bool walking =
+        ts_walk_push_children(&stack, &cap, &top, root, inline_stack, "ts_lsp_type_params");
 
-    while (top > 0) {
+    while (walking && top > 0) {
         TSNode n = stack[--top];
         if (ts_node_is_null(n)) continue;
         const char* k = ts_node_type(n);
 
         // Recurse into export_statement and class_body.
         if (strcmp(k, "export_statement") == 0 || strcmp(k, "class_body") == 0) {
-            uint32_t cnt = ts_node_child_count(n);
-            for (uint32_t i = 0; i < cnt && top < STACK_CAP; i++) {
-                stack[top++] = ts_node_child(n, i);
-            }
+            walking =
+                ts_walk_push_children(&stack, &cap, &top, n, inline_stack, "ts_lsp_type_params");
             continue;
         }
         if (strcmp(k, "class_declaration") == 0) {
             TSNode body = ts_node_child_by_field_name(n, "body", TS_LSP_FIELD_LEN("body"));
-            if (!ts_node_is_null(body) && top < STACK_CAP) stack[top++] = body;
+            if (!ts_node_is_null(body))
+                walking =
+                    ts_walk_push(&stack, &cap, &top, body, inline_stack, "ts_lsp_type_params");
             continue;
         }
 
@@ -4125,24 +4402,34 @@ static void convert_signature_type_params(TSLSPContext* ctx, TSNode root, CBMTyp
         }
 
         // Patch the registered func's signature: rewrite NAMED → TYPE_PARAM.
-        for (int fi = 0; fi < reg->func_count; fi++) {
-            if (!reg->funcs[fi].qualified_name) continue;
-            if (strcmp(reg->funcs[fi].qualified_name, fqn) != 0) continue;
-            const CBMType* old_sig = reg->funcs[fi].signature;
-            if (!old_sig) break;
+        CBMRegisteredFunc *func = ts_signature_func(reg, index, fqn);
+        if (func) {
+            const CBMType *old_sig = func->signature;
+            if (!old_sig)
+                continue;
             const CBMType* new_sig = cbm_type_substitute(ctx->arena, old_sig, names, args);
-            if (new_sig) reg->funcs[fi].signature = new_sig;
+            if (new_sig)
+                func->signature = new_sig;
             // Also store the type_param_names for later overload-by-types use.
             const char** stored = (const char**)cbm_arena_alloc(ctx->arena,
                                                                 (size_t)(tpc + 1) * sizeof(const char*));
             if (stored) {
                 for (int ti = 0; ti < tpc; ti++) stored[ti] = names[ti];
                 stored[tpc] = NULL;
-                reg->funcs[fi].type_param_names = stored;
+                func->type_param_names = stored;
             }
-            break;
         }
     }
+    cbm_walk_stack_release(stack, inline_stack);
+}
+
+// Build the QN index once after shape registration and release it before later
+// passes may grow the registry. Keeps per-file lookup storage out of the result arena.
+static void refine_ast_signatures(TSLSPContext *ctx, TSNode root, CBMTypeRegistry *reg) {
+    TSSignatureIndex index = reg ? ts_signature_index(reg) : TSSignatureIndex{};
+    rebuild_signatures_from_ast(ctx, root, reg, &index);
+    convert_signature_type_params(ctx, root, reg, &index);
+    free(index.slots);
 }
 
 // Parse a JSDoc comment block for `@param {T} name` and `@returns {T}` tags. For each
@@ -4598,8 +4885,7 @@ void cbm_run_ts_lsp(CBMArena* arena, CBMFileResult* result,
     }
 
     ast_sweep_shapes(&ctx, root, &reg);
-    rebuild_signatures_from_ast(&ctx, root, &reg);
-    convert_signature_type_params(&ctx, root, &reg);
+    refine_ast_signatures(&ctx, root, &reg);
     apply_jsdoc_signatures(&ctx, root, &reg);
     infer_implicit_returns(&ctx, root, &reg);
 
@@ -4831,8 +5117,7 @@ void cbm_run_ts_lsp_cross_with_registry(CBMArena* arena,
     }
 
     ast_sweep_shapes(&ctx, root, &overlay);
-    rebuild_signatures_from_ast(&ctx, root, &overlay);
-    convert_signature_type_params(&ctx, root, &overlay);
+    refine_ast_signatures(&ctx, root, &overlay);
     apply_jsdoc_signatures(&ctx, root, &overlay);
     infer_implicit_returns(&ctx, root, &overlay);
 
@@ -5027,8 +5312,7 @@ void cbm_run_ts_lsp_cross(CBMArena* arena,
     }
 
     ast_sweep_shapes(&ctx, root, &reg);
-    rebuild_signatures_from_ast(&ctx, root, &reg);
-    convert_signature_type_params(&ctx, root, &reg);
+    refine_ast_signatures(&ctx, root, &reg);
     apply_jsdoc_signatures(&ctx, root, &reg);
     infer_implicit_returns(&ctx, root, &reg);
 

@@ -11,6 +11,7 @@
  */
 #include "test_framework.h"
 #include "cbm.h"
+#include "lsp/ts_lsp.h" /* member/method lookup work counters (test seams) */
 
 #include <sqlite3.h> // sqlite3_malloc/realloc/free — dedicated-heap switch round-trip
 #include <stdio.h>
@@ -544,6 +545,153 @@ TEST(lsp_ts_cyclic_types_no_crash) {
     PASS();
 }
 
+/* Upstream e5c3ddd5: the depth cap kept a cyclic `extends` chain off the stack
+ * but not off the CPU — every shared base was re-walked once per path, so a
+ * branching cycle cost 2^depth visits. A named type is now re-entered only along
+ * a strictly shallower path. The counters are test seams; these run in-process. */
+#ifdef CBM_ENABLE_TEST_SEAMS
+TEST(lsp_ts_cyclic_types_bounded_work) {
+    const char *src = "type A = B | null;\n"
+                      "type B = A | number;\n"
+                      "interface C extends D { c: number; }\n"
+                      "interface D extends C { d: number; }\n"
+                      "declare const a: A;\n"
+                      "declare const c: C;\n"
+                      /* Both lookup paths must traverse the inheritance cycle. */
+                      "function useIt(p: C) { p.missing(); return p.missing_member; }\n"
+                      "const y = c.also_missing;\n";
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "cycle.ts");
+    ASSERT_NOT_NULL(r);
+    /* C and D each have one parent: <= 64 admitted visits per type, plus
+     * one attempted (possibly rejected) parent visit per admitted visit. */
+    ASSERT_GT(cbm_ts_lsp_test_max_member_lookup_steps(), 0);
+    ASSERT_GT(cbm_ts_lsp_test_max_method_lookup_steps(), 0);
+    ASSERT_LTE(cbm_ts_lsp_test_max_member_lookup_steps(), 2 * 64 * 2);
+    ASSERT_LTE(cbm_ts_lsp_test_max_method_lookup_steps(), 2 * 64 * 2);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(lsp_ts_branching_cycle_has_bounded_work) {
+    const char *src =
+        "interface A extends B, C {}\n"
+        "interface B extends A, C {}\n"
+        "interface C extends A, B {}\n"
+        "function useIt(value: A) { value.missing(); return value.missing_member; }\n";
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "branching-cycle.ts");
+    ASSERT_NOT_NULL(r);
+    /* A, B, C each have two parents: <= 64 admitted visits per type, plus
+     * two attempted (possibly rejected) parent visits per admitted visit. */
+    ASSERT_GT(cbm_ts_lsp_test_max_member_lookup_steps(), 0);
+    ASSERT_GT(cbm_ts_lsp_test_max_method_lookup_steps(), 0);
+    ASSERT_LTE(cbm_ts_lsp_test_max_member_lookup_steps(), 3 * 64 * 3);
+    ASSERT_LTE(cbm_ts_lsp_test_max_method_lookup_steps(), 3 * 64 * 3);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Diamond: every level is reachable along two paths, so the unvisited walk
+ * doubled per level (2^20 visits for 20 levels). */
+TEST(lsp_ts_diamond_hierarchy_has_bounded_work) {
+    enum { LEVELS = 20, CAP = 16384 };
+    char *src = (char *)malloc(CAP);
+    ASSERT_NOT_NULL(src);
+    size_t used = (size_t)snprintf(src, CAP,
+                                   "interface L0A { root(): void; }\n"
+                                   "interface L0B { root(): void; }\n");
+    for (int i = 1; i < LEVELS; i++) {
+        int wrote = snprintf(src + used, CAP - used,
+                             "interface L%dA extends L%dA, L%dB {}\n"
+                             "interface L%dB extends L%dA, L%dB {}\n",
+                             i, i - 1, i - 1, i, i - 1, i - 1);
+        ASSERT_TRUE(wrote > 0 && (size_t)wrote < CAP - used);
+        used += (size_t)wrote;
+    }
+    int wrote =
+        snprintf(src + used, CAP - used,
+                 "function useIt(v: L%dA) { v.missing(); return v.missing_member; }\n", LEVELS - 1);
+    ASSERT_TRUE(wrote > 0 && (size_t)wrote < CAP - used);
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "diamond.ts");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    /* 2 * LEVELS named types, two parents each: linear, not 2^LEVELS. */
+    ASSERT_GT(cbm_ts_lsp_test_max_method_lookup_steps(), 0);
+    ASSERT_LTE(cbm_ts_lsp_test_max_member_lookup_steps(), 2 * LEVELS * 3 + 4);
+    ASSERT_LTE(cbm_ts_lsp_test_max_method_lookup_steps(), 2 * LEVELS * 3 + 4);
+    cbm_free_result(r);
+    PASS();
+}
+#endif /* CBM_ENABLE_TEST_SEAMS */
+
+TEST(lsp_ts_shallower_revisit_preserves_inherited_method) {
+    enum { CHAIN = 62, CAP = 16384 };
+    char *src = (char *)malloc(CAP);
+    ASSERT_NOT_NULL(src);
+    size_t used =
+        (size_t)snprintf(src, CAP,
+                         "interface Service { ping(): void; }\n"
+                         "interface Target { inherited(): void; inheritedField: Service; }\n"
+                         "interface Shared extends Target {}\n"
+                         "interface Root extends D0, Shared {}\n");
+    for (int i = 0; i < CHAIN; i++) {
+        int wrote =
+            i + 1 < CHAIN
+                ? snprintf(src + used, CAP - used, "interface D%d extends D%d {}\n", i, i + 1)
+                : snprintf(src + used, CAP - used, "interface D%d extends Shared {}\n", i);
+        ASSERT_TRUE(wrote > 0 && (size_t)wrote < CAP - used);
+        used += (size_t)wrote;
+    }
+    int wrote = snprintf(
+        src + used, CAP - used,
+        "function useIt(value: Root) { value.inherited(); value.inheritedField.ping(); }\n");
+    ASSERT_TRUE(wrote > 0 && (size_t)wrote < CAP - used);
+
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "shallower.ts");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    int inherited_method_found = 0;
+    int inherited_field_method_found = 0;
+    for (int i = 0; i < r->resolved_calls.count; i++) {
+        const CBMResolvedCall *resolved = &r->resolved_calls.items[i];
+        if (resolved->confidence > 0 && resolved->caller_qn &&
+            strstr(resolved->caller_qn, "useIt") && resolved->callee_qn &&
+            strstr(resolved->callee_qn, "inherited")) {
+            inherited_method_found = 1;
+        }
+        if (resolved->confidence > 0 && resolved->caller_qn &&
+            strstr(resolved->caller_qn, "useIt") && resolved->callee_qn &&
+            strstr(resolved->callee_qn, "ping")) {
+            inherited_field_method_found = 1;
+        }
+    }
+    cbm_free_result(r);
+    ASSERT_TRUE(inherited_method_found);
+    ASSERT_TRUE(inherited_field_method_found);
+    PASS();
+}
+
+TEST(lsp_ts_inherited_method_lookup) {
+    const char *src = "interface Base { inherited(): void; }\n"
+                      "interface Child extends Base {}\n"
+                      "function useIt(c: Child) { c.inherited(); }\n";
+    CBMFileResult *r = extract(src, CBM_LANG_TYPESCRIPT, "test", "inherited.ts");
+    ASSERT_NOT_NULL(r);
+
+    int found = 0;
+    for (int i = 0; i < r->resolved_calls.count; i++) {
+        const CBMResolvedCall *resolved = &r->resolved_calls.items[i];
+        if (resolved->confidence > 0 && resolved->caller_qn &&
+            strstr(resolved->caller_qn, "useIt") && resolved->callee_qn &&
+            strstr(resolved->callee_qn, "inherited")) {
+            found = 1;
+            break;
+        }
+    }
+    cbm_free_result(r);
+    ASSERT_TRUE(found);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  * Suite registration
  * ═══════════════════════════════════════════════════════════════════ */
@@ -609,6 +757,13 @@ SUITE(stack_overflow) {
     RUN_TEST(lsp_java_lambda_args_exceed_params_no_crash);
     RUN_TEST(lsp_cpp_deep_expression_no_crash);
     RUN_TEST(lsp_ts_cyclic_types_no_crash);
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(lsp_ts_cyclic_types_bounded_work);
+    RUN_TEST(lsp_ts_branching_cycle_has_bounded_work);
+    RUN_TEST(lsp_ts_diamond_hierarchy_has_bounded_work);
+#endif
+    RUN_TEST(lsp_ts_shallower_revisit_preserves_inherited_method);
+    RUN_TEST(lsp_ts_inherited_method_lookup);
 
     RUN_TEST(js_calls_exceed_512);
     RUN_TEST(python_calls_exceed_512);

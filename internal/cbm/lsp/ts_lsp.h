@@ -66,13 +66,6 @@ typedef struct {
     // exponential re-evaluation of shared subexpressions under overload
     // resolution. Arena-backed, so it dies with the file pass.
     struct TsEvalMemo *eval_memo;
-    // Recursion guard for lookup_member_type: cyclic type graphs (mutually
-    // recursive unions/wrappers across registered types) otherwise recurse
-    // without bound — stack overflow on real repos.
-    int member_depth;
-    // Same guard for lookup_method: its extends/implements walk recursed
-    // without bound on a cyclic heritage chain (#1743).
-    int method_depth;
 } TSLSPContext;
 
 #ifdef CBM_ENABLE_TEST_SEAMS
@@ -82,6 +75,15 @@ typedef struct {
 // pathological shape stays within budget without measuring wall-clock.
 long cbm_ts_lsp_test_budget_remaining(void);
 bool cbm_ts_lsp_test_budget_warned(void);
+// Maximum recursive calls in one member/method lookup during the last TS LSP run,
+// including attempts rejected by the depth or visited-type guard.
+int cbm_ts_lsp_test_max_member_lookup_steps(void);
+int cbm_ts_lsp_test_max_method_lookup_steps(void);
+// Registry entries/probes visited by the two AST signature passes in the last run.
+unsigned long cbm_ts_lsp_test_signature_lookup_work(void);
+// Inspect signature-index selection and checked walker addition without huge ASTs.
+int cbm_ts_lsp_test_signature_func_index(CBMTypeRegistry *reg, const char *qn);
+int cbm_ts_lsp_test_walk_pending_count(int top, uint32_t count);
 #endif
 
 // --- Initialization ---
