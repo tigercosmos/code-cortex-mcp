@@ -10204,6 +10204,97 @@ TEST(pipeline_cross_file_method_defines_method_venue_parity) {
     PASS();
 }
 
+/* Upstream 8e9caf94: the sequential cross-file LSP pass built the shared
+ * registries for Go/Python/C/C#/TS but not Java, so a <=50-file Java tree
+ * resolved every file against its own definitions only. A parameter typed
+ * with its package-qualified name (`svc.Repo r`, #2382) then fell back to the
+ * name guess on the sequential path while the parallel path typed it. Returns
+ * the strategy of runQualified's CALLS edge onto Repo.save ("" if none). */
+static std::string java_qualified_param_strategy(bool parallel, int pad) {
+    struct SavedEnv {
+        const char *name;
+        std::string value;
+        bool present;
+        explicit SavedEnv(const char *key)
+            : name(key), value(getenv(key) ? getenv(key) : ""), present(getenv(key) != nullptr) {}
+        ~SavedEnv() {
+            if (present)
+                cbm_setenv(name, value.c_str(), 1);
+            else
+                cbm_unsetenv(name);
+        }
+    } single_env("CBM_INDEX_SINGLE_THREAD"), workers_env("CBM_WORKERS");
+    std::string strategy;
+    char tmp[256] = "/tmp/cbm_java_xreg_XXXXXX";
+    if (!cbm_mkdtemp(tmp)) {
+        return strategy;
+    }
+    std::string dir(tmp);
+    bool wrote = th_write_file((dir + "/svc/Repo.java").c_str(),
+                               "package svc;\n\npublic class Repo {\n    public "
+                               "void save(String s) { }\n}\n") == 0 &&
+                 th_write_file((dir + "/other/Cache.java").c_str(),
+                               "package other;\n\npublic class Cache {\n    "
+                               "public void save(String s) { }\n"
+                               "}\n") == 0 &&
+                 th_write_file((dir + "/svc/Service.java").c_str(),
+                               "package svc;\n\npublic class Service {\n"
+                               "    public void runQualified(svc.Repo r) {\n     "
+                               "   r.save(\"y\");\n    }\n"
+                               "}\n") == 0;
+    for (int i = 0; wrote && i < pad; i++) {
+        char name[64];
+        char source[160];
+        snprintf(name, sizeof(name), "/pad/P%02d.java", i);
+        snprintf(source, sizeof(source),
+                 "package pad;\n\npublic class P%02d {\n    public int v() { "
+                 "return %d; }\n}\n",
+                 i, i);
+        wrote = th_write_file((dir + name).c_str(), source) == 0;
+    }
+    if (wrote) {
+        if (parallel) {
+            cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+            cbm_setenv("CBM_WORKERS", "4", 1);
+        } else {
+            cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+        }
+        std::string db_path = dir + "/xreg.db";
+        cbm_pipeline_t *pipeline = cbm_pipeline_new(tmp, db_path.c_str(), CBM_MODE_FULL);
+        int rc = pipeline ? cbm_pipeline_run(pipeline) : -1;
+        if (pipeline) {
+            cbm_pipeline_free(pipeline);
+        }
+        sqlite3 *db = nullptr;
+        if (rc == 0 && sqlite3_open(db_path.c_str(), &db) == SQLITE_OK) {
+            sqlite3_stmt *st = nullptr;
+            if (sqlite3_prepare_v2(db,
+                                   "SELECT json_extract(e.properties,'$.strategy') FROM edges e "
+                                   "JOIN nodes s ON s.id=e.source_id JOIN nodes t ON "
+                                   "t.id=e.target_id WHERE e.type='CALLS' AND "
+                                   "s.name='runQualified' AND t.qualified_name LIKE "
+                                   "'%.svc.Repo.save'",
+                                   -1, &st, nullptr) == SQLITE_OK &&
+                sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0)) {
+                strategy = (const char *)sqlite3_column_text(st, 0);
+            }
+            sqlite3_finalize(st);
+        }
+        sqlite3_close(db);
+    }
+    th_rmtree(tmp);
+    return strategy;
+}
+
+TEST(pipeline_java_cross_registry_on_sequential_path) {
+    std::string seq = java_qualified_param_strategy(false, 0);
+    std::string par = java_qualified_param_strategy(true, 55);
+    printf("  java qualified param: sequential=%s parallel=%s\n", seq.c_str(), par.c_str());
+    ASSERT_TRUE(seq.rfind("lsp", 0) == 0);
+    ASSERT_STR_EQ(seq.c_str(), par.c_str());
+    PASS();
+}
+
 /* Index `n` fixture files plus `pad` filler Go files (>= 50 total forces the
  * parallel pipeline) into g_lang_tmpdir; returns the pipeline, or NULL. The
  * caller opens the store at `db`, frees the pipeline and tears the repo down. */
@@ -14471,6 +14562,7 @@ TEST(pipeline_c_call_reaches_header_function_beside_field_parallel) {
 SUITE(pipeline) {
     RUN_TEST(pipeline_cross_file_method_defines_method_sequential);
     RUN_TEST(pipeline_cross_file_method_defines_method_venue_parity);
+    RUN_TEST(pipeline_java_cross_registry_on_sequential_path);
     RUN_TEST(pipeline_stem_folder_collision_keeps_both_nodes);
     RUN_TEST(incremental_stem_mark_change_rebuilds);
 #ifdef _WIN32
