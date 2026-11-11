@@ -13588,6 +13588,258 @@ TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge) {
     PASS();
 }
 
+/* CALLS edges from a caller to a callee, both matched by QN suffix (start each
+ * suffix with '.' to anchor it at a segment boundary), any strategy. *guessed
+ * is set when a matching edge came from a name guess rather than an import
+ * binding or the LSP. */
+static int py_calls_between(cbm_store_t *s, const char *project, const char *caller_suffix,
+                            const char *callee_suffix, bool *guessed) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &edge_count);
+    int hits = 0;
+    size_t cs = strlen(caller_suffix);
+    size_t ts = strlen(callee_suffix);
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t src = {0};
+        cbm_node_t tgt = {0};
+        if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
+            cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK) {
+            size_t sl = strlen(src.qualified_name);
+            size_t tl = strlen(tgt.qualified_name);
+            if (sl >= cs && tl >= ts && strcmp(src.qualified_name + sl - cs, caller_suffix) == 0 &&
+                strcmp(tgt.qualified_name + tl - ts, callee_suffix) == 0) {
+                hits++;
+                const char *pj = edges[i].properties_json ? edges[i].properties_json : "";
+                if (guessed && !strstr(pj, "\"import_map\"") && !strstr(pj, "\"lsp")) {
+                    *guessed = true;
+                }
+            }
+        }
+        cbm_node_free_fields(&src);
+        cbm_node_free_fields(&tgt);
+    }
+    if (edges)
+        cbm_store_free_edges(edges, edge_count);
+    return hits;
+}
+
+/* Pin CBM_WORKERS=4 for a padded (> 50 files) parallel run; restore after. */
+typedef struct {
+    char *saved;
+    bool had;
+    int rc;
+} py_workers_pin_t;
+
+static py_workers_pin_t py_pin_workers(bool parallel) {
+    py_workers_pin_t pin = {0};
+    if (!parallel) {
+        return pin;
+    }
+    const char *old = getenv("CBM_WORKERS");
+    pin.had = old != NULL;
+    pin.saved = old ? strdup(old) : NULL;
+    pin.rc = (old && !pin.saved) ? -1 : cbm_setenv("CBM_WORKERS", "4", 1);
+    return pin;
+}
+
+static int py_unpin_workers(bool parallel, py_workers_pin_t *pin) {
+    if (!parallel) {
+        return 0;
+    }
+    int rc = pin->had ? cbm_setenv("CBM_WORKERS", pin->saved, 1) : cbm_unsetenv("CBM_WORKERS");
+    free(pin->saved);
+    pin->saved = NULL;
+    return rc;
+}
+
+static void py_write_padding(const char *tmp, const char *stem, bool parallel) {
+    for (int i = 0; parallel && i < 52; i++) {
+        char name[64];
+        char body[96];
+        snprintf(name, sizeof(name), "%s%d.py", stem, i);
+        snprintf(body, sizeof(body), "def %s%d():\n    return %d\n", stem, i, i);
+        write_temp_file(tmp, name, body);
+    }
+}
+
+/* `from . import x`, `from .. import x` and `from . import x as y` name the
+ * importing file's own (or parent) package. The extractor recorded them one
+ * package too high ("..x"), so the import fell to pass_pkgmap's symbol-name
+ * guess -- the lexicographically first same-named project definition -- and
+ * every call became a confident edge into comp.aaa, through the import map and
+ * the Python LSP's alias binding alike (home-assistant: 7,175 call pairs).
+ * Both resolvers: <= 50 files sequential, padded > 50 parallel. */
+static int check_python_package_relative_imports(bool parallel) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_py_relpkg_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "comp/__init__.py", "");
+    write_temp_file(tmp, "comp/aaa/__init__.py",
+                    "def async_register(hass):\n"
+                    "    return 1\n\n"
+                    "def local_fn():\n"
+                    "    return 2\n");
+    write_temp_file(tmp, "comp/web/__init__.py",
+                    "def async_register(hass):\n"
+                    "    return 3\n");
+    write_temp_file(tmp, "comp/web/trigger.py",
+                    "from . import async_register\n\n"
+                    "def attach(hass):\n"
+                    "    return async_register(hass)\n");
+    write_temp_file(tmp, "comp/web/sub/__init__.py",
+                    "def local_fn():\n"
+                    "    return 4\n");
+    write_temp_file(tmp, "comp/web/sub/mod.py",
+                    "from .. import async_register\n"
+                    "from . import local_fn as lf\n\n"
+                    "def deep(hass):\n"
+                    "    async_register(hass)\n"
+                    "    return lf()\n");
+    py_write_padding(tmp, "relpad", parallel);
+
+    py_workers_pin_t pin = py_pin_workers(parallel);
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/relpkg.db", tmp);
+    cbm_pipeline_t *p = pin.rc == 0 ? cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL) : NULL;
+    int run_rc = p ? cbm_pipeline_run(p) : -1;
+    cbm_store_t *s = run_rc == 0 ? cbm_store_open_path(db_path) : NULL;
+    bool opened = s != NULL;
+    bool guessed = false;
+    int own = -1, own_decoy = -1, parent = -1, parent_decoy = -1, alias = -1, alias_decoy = -1;
+    if (s) {
+        const char *project = cbm_pipeline_project_name(p);
+        own = py_calls_between(s, project, ".comp.web.trigger.attach", ".comp.web.async_register",
+                               &guessed);
+        own_decoy = py_calls_between(s, project, ".comp.web.trigger.attach",
+                                     ".comp.aaa.async_register", NULL);
+        parent = py_calls_between(s, project, ".comp.web.sub.mod.deep", ".comp.web.async_register",
+                                  &guessed);
+        parent_decoy = py_calls_between(s, project, ".comp.web.sub.mod.deep",
+                                        ".comp.aaa.async_register", NULL);
+        alias = py_calls_between(s, project, ".comp.web.sub.mod.deep", ".comp.web.sub.local_fn",
+                                 &guessed);
+        alias_decoy =
+            py_calls_between(s, project, ".comp.web.sub.mod.deep", ".comp.aaa.local_fn", NULL);
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    int unpin_rc = py_unpin_workers(parallel, &pin);
+    th_rmtree(tmp);
+
+    ASSERT_EQ(pin.rc, 0);
+    ASSERT_EQ(unpin_rc, 0);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_TRUE(opened);
+    ASSERT_EQ(own, 1);       /* from . import x: the file's own package */
+    ASSERT_EQ(own_decoy, 0); /* never the lexicographically first namesake */
+    ASSERT_EQ(parent, 1);    /* from .. import x: the parent package */
+    ASSERT_EQ(parent_decoy, 0);
+    ASSERT_EQ(alias, 1); /* from . import x as y */
+    ASSERT_EQ(alias_decoy, 0);
+    ASSERT_FALSE(guessed); /* bound by the import, not by a name guess */
+    PASS();
+}
+
+TEST(pipeline_python_package_relative_imports) {
+    return check_python_package_relative_imports(false);
+}
+
+TEST(pipeline_python_package_relative_imports_parallel) {
+    return check_python_package_relative_imports(true);
+}
+
+/* #1237: a plain `from pkg.db import get_row_or_none` and bare calls resolve to
+ * the imported module-level def (function and method callers, plus the
+ * same-file caller), never to a same-named def elsewhere that a name guess
+ * would rank first (legacy.compat), and a re-index that only ADDS an unrelated
+ * file (the reporter's watcher re-index after writing benchmark scripts into the
+ * indexed tree) keeps exactly the same CALLS. Main already resolved this shape
+ * when the guard landed: it pins the shape and has no RED on revert. */
+static int check_python_from_import_bare_call_issue1237(bool parallel) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_py_1237_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "pkg/__init__.py", "");
+    write_temp_file(tmp, "pkg/db.py",
+                    "def get_row_or_none(model, **filters):\n"
+                    "    return None\n\n"
+                    "def other_helper():\n"
+                    "    return get_row_or_none(1, id=2)\n");
+    write_temp_file(tmp, "pkg/views.py",
+                    "from pkg.db import get_row_or_none\n\n"
+                    "def show(pk):\n"
+                    "    return get_row_or_none(object, id=pk)\n\n"
+                    "class Detail:\n"
+                    "    def get(self, pk):\n"
+                    "        return get_row_or_none(object, pk=pk)\n");
+    write_temp_file(tmp, "legacy/__init__.py", "");
+    write_temp_file(tmp, "legacy/compat.py",
+                    "def get_row_or_none(model):\n"
+                    "    return model\n");
+    py_write_padding(tmp, "rowpad", parallel);
+
+    py_workers_pin_t pin = py_pin_workers(parallel);
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/rows.db", tmp);
+    int run_rc[2] = {-1, -1};
+    int show[2] = {-1, -1};
+    int method[2] = {-1, -1};
+    int same[2] = {-1, -1};
+    int decoy[2] = {-1, -1};
+    int calls[2] = {-1, -1};
+    bool guessed = false;
+    for (int run = 0; run < 2 && pin.rc == 0; run++) {
+        if (run == 1) {
+            /* Second run on the same db: routes to the incremental re-index. */
+            write_temp_file(tmp, "bench_rows.py", "def bench():\n    return 0\n");
+        }
+        cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+        run_rc[run] = p ? cbm_pipeline_run(p) : -1;
+        cbm_store_t *s = run_rc[run] == 0 ? cbm_store_open_path(db_path) : NULL;
+        if (s) {
+            const char *project = cbm_pipeline_project_name(p);
+            const char *target = ".pkg.db.get_row_or_none";
+            const char *namesake = ".legacy.compat.get_row_or_none";
+            show[run] = py_calls_between(s, project, ".pkg.views.show", target, &guessed);
+            method[run] = py_calls_between(s, project, ".pkg.views.Detail.get", target, &guessed);
+            same[run] = py_calls_between(s, project, ".pkg.db.other_helper", target, &guessed);
+            decoy[run] = py_calls_between(s, project, ".pkg.views.show", namesake, NULL) +
+                         py_calls_between(s, project, ".pkg.views.Detail.get", namesake, NULL);
+            calls[run] = cbm_store_count_edges_by_type(s, project, "CALLS");
+            cbm_store_close(s);
+        }
+        cbm_pipeline_free(p);
+    }
+    int unpin_rc = py_unpin_workers(parallel, &pin);
+    th_rmtree(tmp);
+
+    ASSERT_EQ(pin.rc, 0);
+    ASSERT_EQ(unpin_rc, 0);
+    for (int run = 0; run < 2; run++) {
+        ASSERT_EQ(run_rc[run], 0);
+        ASSERT_EQ(show[run], 1);   /* cross-file bare call through a plain from-import */
+        ASSERT_EQ(method[run], 1); /* the same from a method */
+        ASSERT_EQ(same[run], 1);   /* same-file bare call */
+        ASSERT_EQ(decoy[run], 0);  /* never the namesake a name guess would pick */
+    }
+    ASSERT_EQ(calls[1], calls[0]); /* adding a call-free file moves no CALLS edge */
+    ASSERT_FALSE(guessed);
+    PASS();
+}
+
+TEST(pipeline_python_from_import_bare_call_issue1237) {
+    return check_python_from_import_bare_call_issue1237(false);
+}
+
+TEST(pipeline_python_from_import_bare_call_issue1237_parallel) {
+    return check_python_from_import_bare_call_issue1237(true);
+}
+
 /* ── Semantic pass, batched == unbatched ─────────────────────────────── */
 
 /* Under memory pressure the semantic pass tokenizes, counts and vectorizes in
@@ -16471,6 +16723,10 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_html_embedded_member_call_stays_unbound);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
     RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
+    RUN_TEST(pipeline_python_package_relative_imports);
+    RUN_TEST(pipeline_python_package_relative_imports_parallel);
+    RUN_TEST(pipeline_python_from_import_bare_call_issue1237);
+    RUN_TEST(pipeline_python_from_import_bare_call_issue1237_parallel);
     RUN_TEST(pipeline_semantic_batched_matches_unbatched);
     RUN_TEST(sem_tfidf_terms_compare_vocabulary_not_positions);
     RUN_TEST(sem_combine_weighs_signals);

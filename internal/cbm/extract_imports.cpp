@@ -106,6 +106,19 @@ static const char *path_last(CBMArena *a, const char *path) {
     return path;
 }
 
+/* Spell `from <module> import <name>` as one dotted path. A package-relative
+ * module (`from . import x`, `from .. import x`) is nothing but dots, which
+ * already end in the separator: joining with another '.' would add a level and
+ * name the PARENT package ("..x"), so the import resolved one package too high
+ * and fell to a same-named definition anywhere in the project. */
+static const char *python_join_from_import(CBMArena *a, const char *module, const char *name) {
+    size_t len = strlen(module);
+    if (len > 0 && module[len - SKIP_ONE] == '.') {
+        return cbm_arena_sprintf(a, "%s%s", module, name);
+    }
+    return cbm_arena_sprintf(a, "%s.%s", module, name);
+}
+
 // --- Go imports ---
 // import_declaration -> import_spec_list -> import_spec -> (name, path)
 
@@ -192,7 +205,7 @@ static void emit_py_aliased_import(CBMExtractCtx *ctx, TSNode child, const char 
     }
     const char *local = !ts_node_is_null(alias_node) ? cbm_node_text(a, alias_node, ctx->source)
                                                      : path_last(a, name);
-    const char *full = mod_prefix ? cbm_arena_sprintf(a, "%s.%s", mod_prefix, name) : name;
+    const char *full = mod_prefix ? python_join_from_import(a, mod_prefix, name) : name;
     CBMImport imp = {.local_name = local, .module_path = full};
     cbm_imports_push(&ctx->result->imports, a, imp);
 }
@@ -250,7 +263,7 @@ static void emit_py_import_from_name(CBMExtractCtx *ctx, TSNode child, const cha
     CBMArena *a = ctx->arena;
     char *name = cbm_node_text(a, child, ctx->source);
     if (name && name[0]) {
-        const char *full = mod_path ? cbm_arena_sprintf(a, "%s.%s", mod_path, name) : name;
+        const char *full = mod_path ? python_join_from_import(a, mod_path, name) : name;
         CBMImport imp = {.local_name = name, .module_path = full};
         cbm_imports_push(&ctx->result->imports, a, imp);
     }
