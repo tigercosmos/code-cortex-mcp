@@ -115,6 +115,17 @@ TEST(skip_fast_e2e) {
     ASSERT_TRUE(cbm_should_skip_dir("e2e", CBM_MODE_FAST));
     PASS();
 }
+/* Upstream 80f8bda5: `external` often holds first-party code, so fast and
+ * moderate discovery keep it. */
+TEST(no_skip_fast_external) {
+    ASSERT_FALSE(cbm_should_skip_dir("external", CBM_MODE_FAST));
+    ASSERT_FALSE(cbm_should_skip_dir("external", CBM_MODE_MODERATE));
+    ASSERT_FALSE(cbm_should_skip_dir("shop-external-api", CBM_MODE_FAST));
+    /* The dedicated vendored-code names stay skipped. */
+    ASSERT_TRUE(cbm_should_skip_dir("third_party", CBM_MODE_FAST));
+    ASSERT_TRUE(cbm_should_skip_dir("3rdparty", CBM_MODE_MODERATE));
+    PASS();
+}
 
 /* ── Suffix filters ────────────────────────────────────────────── */
 
@@ -1554,6 +1565,7 @@ SUITE(discover) {
     RUN_TEST(skip_fast_assets);
     RUN_TEST(skip_fast_3rdparty);
     RUN_TEST(skip_fast_e2e);
+    RUN_TEST(no_skip_fast_external);
 
     /* Suffix filters */
     RUN_TEST(suffix_pyc);
