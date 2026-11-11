@@ -6,6 +6,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "../src/foundation/log.h"
+#include "../src/foundation/platform.h" /* cbm_safe_getenv */
 #include "test_framework.h"
 #include "test_helpers.h"
 #include <watcher/watcher.h>
@@ -2267,7 +2268,44 @@ TEST(watcher_pending_mark_during_callback_survives_success) {
     PASS();
 }
 
+/* Upstream f1e36b58: an existing root whose name is outside the ANSI code
+ * page must never read as missing. Windows' narrow stat() could not name it,
+ * so with zero prune grace the watcher dropped the project and deleted its
+ * cached graph. POSIX stat is UTF-8 already; the guard bites on Windows. */
+TEST(watcher_unicode_root_is_not_pruned_as_missing) {
+    char *parent = th_mktempdir("cbm_watch_utf8");
+    ASSERT_NOT_NULL(parent);
+    char root[4096];
+    snprintf(root, sizeof(root), "%s/\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E", parent);
+    ASSERT_EQ(th_mkdir_p(root), 0);
+    char saved[64];
+    const char *had = cbm_safe_getenv("CBM_WATCHER_PRUNE_GRACE_S", saved, sizeof(saved), NULL);
+    cbm_setenv("CBM_WATCHER_PRUNE_GRACE_S", "0", 1);
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_store_upsert_project(store, "unicode-root", root);
+    cbm_watcher_t *watcher = cbm_watcher_new(store, NULL, NULL);
+    cbm_watcher_watch(watcher, "unicode-root", root);
+    for (int i = 0; i < 8; i++) {
+        cbm_watcher_poll_once(watcher);
+    }
+    cbm_project_t info = {};
+    bool kept = cbm_watcher_watch_count(watcher) == 1 &&
+                cbm_store_get_project(store, "unicode-root", &info) == CBM_STORE_OK;
+    cbm_project_free_fields(&info);
+    cbm_watcher_free(watcher);
+    cbm_store_close(store);
+    if (had) {
+        cbm_setenv("CBM_WATCHER_PRUNE_GRACE_S", saved, 1);
+    } else {
+        cbm_unsetenv("CBM_WATCHER_PRUNE_GRACE_S");
+    }
+    th_cleanup(parent);
+    ASSERT_TRUE(kept);
+    PASS();
+}
+
 SUITE(watcher) {
+    RUN_TEST(watcher_unicode_root_is_not_pruned_as_missing);
     RUN_TEST(watcher_pending_mark_during_callback_survives_success);
     RUN_TEST(watcher_prune_lease_preserves_grace_and_retry);
     RUN_TEST(watcher_prune_keeps_colliding_roots_slots);

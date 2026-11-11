@@ -399,8 +399,13 @@ static root_status_t root_status(const char *root_path, int *out_errno) {
     if (!root_path) {
         return ROOT_UNCERTAIN;
     }
-    struct stat st;
-    if (stat(root_path, &st) == 0) {
+    /* cbm_stat, not stat: on Windows the narrow call cannot name a root with
+     * characters outside the ANSI code page (or past MAX_PATH), and its "no
+     * such file" would count a live checkout as missing and prune its cached
+     * graph. cbm_stat reports a path it could not even convert as uncertain
+     * (not ENOENT), so only a confirmed absence counts. */
+    cbm_stat_t st;
+    if (cbm_stat(root_path, &st) == 0) {
         /* Exists but is no longer a directory → the root directory is gone. */
         return S_ISDIR(st.st_mode) ? ROOT_PRESENT : ROOT_MISSING;
     }
@@ -646,8 +651,8 @@ bool cbm_watcher_is_watched(cbm_watcher_t *w, const char *project_name) {
 
 /* Init baseline for a project: check if git, get HEAD, count files */
 static void init_baseline(project_state_t *s) {
-    struct stat st;
-    if (stat(s->root_path, &st) != 0) {
+    cbm_stat_t st; /* UTF-8 path on every platform (see root_status) */
+    if (cbm_stat(s->root_path, &st) != 0) {
         cbm_log_warn("watcher.root_gone", "project", s->project_name, "path", s->root_path);
         s->baseline_done = true;
         s->is_git = false;

@@ -498,7 +498,10 @@ bool cbm_is_link(const char *path) {
 int cbm_stat(const char *path, cbm_stat_t *st) {
     wchar_t *wpath = path ? cbm_utf8_to_wide_path(path) : NULL;
     if (!wpath) {
-        errno = ENOENT;
+        /* Not "no such file": the path was never looked at (no path, or the
+         * wide copy could not be made). A caller that prunes on ENOENT (the
+         * watcher, cache expiry) must read this as could-not-check. */
+        errno = path ? ENOMEM : EINVAL;
         return CBM_NOT_FOUND;
     }
     int ret = _wstat64(wpath, st);

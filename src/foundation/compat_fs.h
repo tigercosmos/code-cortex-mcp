@@ -136,7 +136,9 @@ bool cbm_is_link(const char *path);
 
 /* stat() by UTF-8 path; st_size and st_mtime (Unix seconds) as stat gives
  * them. Windows goes through _wstat64, so non-ASCII paths and paths past
- * MAX_PATH work there; POSIX is plain stat(). */
+ * MAX_PATH work there; POSIX is plain stat(). On Windows a path that cannot
+ * be converted fails with errno ENOMEM/EINVAL, never ENOENT, so "absent"
+ * stays distinct from "could not check". */
 #ifdef _WIN32
 typedef struct _stat64 cbm_stat_t;
 int cbm_stat(const char *path, cbm_stat_t *st);

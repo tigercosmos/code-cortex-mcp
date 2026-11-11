@@ -7,6 +7,7 @@
  */
 #include "test_framework.h"
 #include "cbm.h"
+#include "foundation/platform.h" /* cbm_safe_getenv (Windows marker test) */
 #include "preprocessor.h"
 #include "vendored/simplecpp/simplecpp.h"
 #include "../src/pipeline/result_snapshot.h"
@@ -11628,7 +11629,44 @@ TEST(extract_cpp_rescue_keeps_expanded_class_when_raw_qn_is_taken) {
 }
 
 
+#ifdef _WIN32
+/* Upstream 26e2d0cb: the supervisor sets the marker path through cbm_setenv.
+ * Exercise the actual journal writer, which reads it through cbm_safe_getenv
+ * before calling cbm_fopen. FORK: unverified here (no Windows host in the
+ * port run); see the commit body for the narrow-environment caveat. */
+TEST(extraction_marker_round_trips_non_ascii_environment_path) {
+    char dir[512] = "/tmp/cbm-marker-XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    char marker[640];
+    snprintf(marker, sizeof(marker), "%s/marker-\xce\x94-\xe4\xb8\x81.log", dir);
+    char saved[4096];
+    const char *previous = cbm_safe_getenv("CBM_INDEX_MARKER_FILE", saved, sizeof(saved), NULL);
+    ASSERT_EQ(cbm_setenv("CBM_INDEX_MARKER_FILE", marker, 1), 0);
+    cbm_index_mark_start("synthetic.cpp");
+    cbm_index_mark_done("synthetic.cpp");
+    if (previous) {
+        (void)cbm_setenv("CBM_INDEX_MARKER_FILE", saved, 1);
+    } else {
+        (void)cbm_unsetenv("CBM_INDEX_MARKER_FILE");
+    }
+    FILE *file = cbm_fopen(marker, "rb");
+    char contents[128] = {0};
+    if (file) {
+        (void)fread(contents, 1, sizeof(contents) - 1, file);
+        (void)fclose(file);
+    }
+    (void)cbm_unlink(marker);
+    (void)cbm_rmdir(dir);
+    ASSERT_NOT_NULL(file);
+    ASSERT_STR_EQ(contents, "S synthetic.cpp\nD synthetic.cpp\n");
+    PASS();
+}
+#endif
+
 SUITE(extraction) {
+#ifdef _WIN32
+    RUN_TEST(extraction_marker_round_trips_non_ascii_environment_path);
+#endif
     /* Initialize extraction library */
     cbm_init();
 
