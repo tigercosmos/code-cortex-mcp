@@ -72,6 +72,11 @@ typedef struct {
      * Zero via memset. */
     int walk_depth;
 
+    /* Receiver -> registered-method index used while traits are flattened
+     * (php_lsp.cpp, struct php_trait_index). Owned by the class-field pass,
+     * NULL outside it. Zero via memset. */
+    struct php_trait_index *trait_index;
+
     /* Debug mode (CBM_LSP_DEBUG env). */
     bool debug;
 } PHPLSPContext;
