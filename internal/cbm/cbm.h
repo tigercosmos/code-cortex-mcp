@@ -235,7 +235,18 @@ typedef struct {
      * defined type `type A B` (its method set is its own) and in every other
      * language. Tail field: zero-init stays valid. */
     const char *alias_target;
+    /* A member the compiler writes and the source never spells (a Java
+     * record's implicit accessor: "record"), or NULL. The node carries it as
+     * the `generated` property, and the pipeline registers such a definition
+     * by qualified name only, so no short-name guess can land on it
+     * (pipeline.h cbm_def_generated; upstream 729ce339, where it is an
+     * extra_props pair this fork does not have). Tail field: zero-init stays
+     * valid. */
+    const char *generated;
 } CBMDefinition;
+
+/* Node-properties key of CBMDefinition.generated. */
+#define CBM_PROP_GENERATED "generated"
 
 typedef struct {
     uint32_t byte_offset;

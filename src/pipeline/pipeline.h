@@ -264,6 +264,23 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
 void cbm_registry_add_lang(cbm_registry_t *r, const char *name, const char *qualified_name,
                            const char *label, CBMLanguage lang);
 
+/* Register a symbol for exact (qualified-name) lookups only: it is never
+ * offered to the short-name strategies (unique_name, suffix_match,
+ * field_type_hint, fuzzy). For a generated member (cbm_def_generated), which
+ * the source never spells, so only a type-aware resolver that knows its owner
+ * may bind it. The three graph registration sites route such a symbol here
+ * instead of cbm_registry_add_lang (upstream 729ce339). */
+void cbm_registry_add_qn_only(cbm_registry_t *r, const char *qualified_name, const char *label);
+
+/* True when a definition is a generated member (CBMDefinition.generated, e.g.
+ * a Java record's implicit accessor). Pure; unit-tested in test_registry.cpp. */
+bool cbm_def_generated(const CBMDefinition *def);
+
+/* The stored-node twin of cbm_def_generated, for the incremental registry
+ * seed: true when a node's properties JSON carries the CBM_PROP_GENERATED key
+ * as a string property. Pure; unit-tested in test_registry.cpp. */
+bool cbm_node_props_generated(const char *properties_json);
+
 /* Resolve a callee name using prioritized strategies.
  * import_map: NULL-terminated array of {local_name, resolved_qn} pairs, or NULL.
  * Returns result with qualified_name="" if unresolved. */
@@ -290,6 +307,13 @@ bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target
  * (and C++, which every `.h` is parsed as) reference their own members bare
  * inside method bodies. Pure; unit-tested in test_registry.cpp. */
 bool cbm_suppress_bare_field_ref(CBMLanguage lang, bool is_member_access, const char *target_label);
+
+/* A Java call expression never names data: `p.x()` is a method invocation
+ * whatever `x` spells elsewhere in the project. Drops a CALLS bind whose
+ * target is a Variable or Field. Java only — Kotlin properties and C function
+ * pointers are callable names that are not methods. Pure; unit-tested in
+ * test_registry.cpp (upstream f4c89711). */
+bool cbm_java_suppress_call_to_data_member(bool is_java, const char *target_label);
 
 /* CALLS companion of the above: a Go CALLS edge onto a Field node is kept only
  * when a type-aware lsp_* strategy produced it. Textual registry strategies

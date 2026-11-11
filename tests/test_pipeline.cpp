@@ -11014,6 +11014,430 @@ TEST(pipeline_php_receiver_parallel_suppresses_weak_method_edge) {
     return php_unindexed_receiver_case(52);
 }
 
+/* ── Java record accessors and data-target calls (upstream f4c89711,
+ * 729ce339, 6c52e826, 679d1e1a, 321dcb63). ── */
+
+/* Index the files written into a fresh /tmp dir, padded to > 50 files (and
+ * CBM_WORKERS=4) when `parallel`, and open the store. */
+static cbm_store_t *java_fixture_run(const char *tmp, bool parallel, const char *db_name,
+                                     cbm_pipeline_t **out_p) {
+    if (parallel) {
+        for (int i = 0; i < 52; i++) {
+            char name[64];
+            char body[128];
+            snprintf(name, sizeof(name), "Filler%d.java", i);
+            snprintf(body, sizeof(body),
+                     "package com.example;\nclass Filler%d { int f() { return %d; } }\n", i, i);
+            write_temp_file(tmp, name, body);
+        }
+    }
+    const char *old_workers = getenv("CBM_WORKERS");
+    std::string saved = old_workers ? old_workers : "";
+    bool had = old_workers != NULL;
+    if (parallel) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/%s", tmp, db_name);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    int rc = p ? cbm_pipeline_run(p) : -1;
+    if (parallel) {
+        if (had) {
+            cbm_setenv("CBM_WORKERS", saved.c_str(), 1);
+        } else {
+            cbm_unsetenv("CBM_WORKERS");
+        }
+    }
+    *out_p = p;
+    return rc == 0 ? cbm_store_open_path(db_path) : NULL;
+}
+
+/* CALLS out of `src` into a node with `label` named `tgt` (label NULL: any),
+ * or whose QN ends with `qn_suffix` (when non-NULL). -1 on a failed query. */
+static int java_calls_into(cbm_store_t *s, const char *project, const char *src, const char *label,
+                           const char *tgt, const char *qn_suffix) {
+    cbm_edge_t *edges = NULL;
+    int ec = 0;
+    if (cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &ec) != CBM_STORE_OK) {
+        return -1;
+    }
+    int n = 0;
+    for (int i = 0; i < ec; i++) {
+        cbm_node_t a = {};
+        cbm_node_t b = {};
+        bool ok = cbm_store_find_node_by_id(s, edges[i].source_id, &a) == CBM_STORE_OK &&
+                  cbm_store_find_node_by_id(s, edges[i].target_id, &b) == CBM_STORE_OK;
+        if (ok && a.name && strcmp(a.name, src) == 0 && b.name && b.label && b.qualified_name &&
+            (!label || strcmp(b.label, label) == 0) && (!tgt || strcmp(b.name, tgt) == 0)) {
+            size_t ql = strlen(b.qualified_name);
+            size_t sl = qn_suffix ? strlen(qn_suffix) : 0;
+            if (!qn_suffix || (ql >= sl && strcmp(b.qualified_name + ql - sl, qn_suffix) == 0)) {
+                n++;
+            }
+        }
+        cbm_node_free_fields(&a);
+        cbm_node_free_fields(&b);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, ec);
+    }
+    return n;
+}
+
+/* `record Point(double x, ...)` declares no `x()` in its source. Extraction
+ * emits it, and `other.x()` binds to the record's own accessor -- not the
+ * first `x` in the tree (an unrelated class's private field), while the
+ * builder's real `x(int)` keeps its edge. The builder call sits in its own
+ * method (upstream has both in `first`): this fork joins an LSP row to a call
+ * by caller QN + callee leaf, so two same-leaf calls in one method share one
+ * row (upstream separates them with cbm_pipeline_invocation_site_rank,
+ * 87a0e3f7, never taken). */
+static int java_record_accessor_case(bool parallel) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_java_rec_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "Point.java",
+                    "package com.example;\n"
+                    "public record Point(double x, double y, double z) {\n"
+                    "    public double first(Point other) {\n"
+                    "        return Maths.abs(other.x());\n"
+                    "    }\n"
+                    "    public double second() {\n"
+                    "        return new Builder().x(5).made();\n"
+                    "    }\n"
+                    "}\n");
+    write_temp_file(tmp, "Spring.java",
+                    "package com.example;\n"
+                    "public final class Spring {\n"
+                    "    private double x;\n"
+                    "    public void put(double v) { this.x = v; }\n"
+                    "}\n");
+    write_temp_file(tmp, "Builder.java",
+                    "package com.example;\n"
+                    "public final class Builder {\n"
+                    "    private int x;\n"
+                    "    public Builder x(int v) { this.x = v; return this; }\n"
+                    "    public int made() { return x; }\n"
+                    "}\n");
+    write_temp_file(tmp, "Maths.java",
+                    "package com.example;\n"
+                    "public final class Maths {\n"
+                    "    public static double abs(double v) { return v < 0 ? -v : v; }\n"
+                    "}\n");
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = java_fixture_run(tmp, parallel, "java_rec.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+    int fabricated_field = java_calls_into(s, project, "first", "Field", "x", NULL);
+    int fabricated_var = java_calls_into(s, project, "first", "Variable", "x", NULL);
+    int genuine = java_calls_into(s, project, "first", "Method", "abs", NULL);
+    int accessor = java_calls_into(s, project, "first", NULL, NULL, ".Point.x");
+    int builder = java_calls_into(s, project, "second", NULL, NULL, ".Builder.x");
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    ASSERT_EQ(fabricated_field, 0);
+    ASSERT_EQ(fabricated_var, 0);
+    ASSERT_EQ(genuine, 1);
+    ASSERT_EQ(accessor, 1);
+    ASSERT_EQ(builder, 1);
+    PASS();
+}
+
+TEST(pipeline_java_record_accessor_binds_the_record) {
+    return java_record_accessor_case(false);
+}
+
+TEST(pipeline_java_record_accessor_binds_the_record_parallel) {
+    return java_record_accessor_case(true);
+}
+
+/* A static import of a field reaches the data bind through the LSP path
+ * (upstream 321dcb63): `activeCount()` is no call of Owner.activeCount. */
+static int java_static_import_data_call_case(bool parallel) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_java_static_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    cbm_mkdir((std::string(tmp) + "/example").c_str());
+    write_temp_file(tmp, "example/Owner.java",
+                    "package example;\n"
+                    "public class Owner extends Thread {\n"
+                    "    public static int activeCount;\n"
+                    "}\n");
+    write_temp_file(tmp, "example/Caller.java",
+                    "package example;\n"
+                    "import static example.Owner.activeCount;\n"
+                    "class Caller {\n"
+                    "    int caller() { return activeCount(); }\n"
+                    "}\n");
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = java_fixture_run(tmp, parallel, "java_static.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+    int fields = java_calls_into(s, project, "caller", "Field", "activeCount", NULL);
+    int vars = java_calls_into(s, project, "caller", "Variable", "activeCount", NULL);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    ASSERT_EQ(fields, 0);
+    ASSERT_EQ(vars, 0);
+    PASS();
+}
+
+TEST(pipeline_java_static_import_does_not_call_field) {
+    return java_static_import_data_call_case(false);
+}
+
+TEST(pipeline_java_static_import_does_not_call_field_parallel) {
+    return java_static_import_data_call_case(true);
+}
+
+/* A Java record's implicit accessors are GENERATED members (#2295): Method
+ * nodes marked `generated: record`, registered by qualified name only. The
+ * type-aware resolver binds `p.y()` on a Point to Point.y; no short-name
+ * guess may land on a member the source never spells. `far` calls y() on a
+ * type outside the project, so the project-wide name registry is its only
+ * route to Point.y. `data` calls x(), whose other spelling is Spring's
+ * private field: neither the accessor nor the field is its target. The
+ * record's hand-written z() and norm() carry no mark. `org.external.y.Vector`
+ * is not in the project, and its package segment `y` spells the accessor: the
+ * import's symbol-name fallback must not bind it there (6c52e826). `stat`
+ * calls, and `refs` passes, the JDK's Objects.nonNull: Seen's accessor must
+ * not be taken for it on its leaf name alone (679d1e1a). */
+static const char jgen_point_java[] =
+    "package com.example;\n"
+    "public record Point(double x, double y, double z) {\n"
+    "    public double z() { return z; }\n"
+    "    public double norm() { return Math.sqrt(x * x + y * y + z * z); }\n"
+    "}\n";
+static const char jgen_seen_java[] = "package com.example;\n"
+                                     "record Seen(boolean nonNull) {}\n";
+static const char jgen_spring_java[] = "package com.example;\n"
+                                       "public final class Spring {\n"
+                                       "    private double x;\n"
+                                       "    public void put(double v) { this.x = v; }\n"
+                                       "}\n";
+static const char jgen_caller_java[] =
+    "package com.example;\n"
+    "import java.util.List;\n"
+    "import java.util.Objects;\n"
+    "import org.external.y.Vector;\n"
+    "public final class Caller {\n"
+    "    public double near(Point p) { return p.y(); }\n"
+    "    public double far(Vector v) { return v.y(); }\n"
+    "    public double data(Vector v) { return v.x(); }\n"
+    "    public Object make() { return new Vector(); }\n"
+    "    public boolean stat(Object o) { return Objects.nonNull(o); }\n"
+    "    public long refs(List<Object> xs) {\n"
+    "        return xs.stream().filter(Objects::nonNull).count();\n"
+    "    }\n"
+    "}\n";
+
+/* The id of the one `label` node called `name` in `file_path`; 0 when there is
+ * none or more than one. `generated` (optional) receives whether its
+ * properties carry the `generated: record` mark. */
+static int64_t jgen_node(cbm_store_t *s, const char *project, const char *name, const char *label,
+                         const char *file_path, bool *generated) {
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    int64_t id = 0;
+    int hits = 0;
+    bool marked = false;
+    if (cbm_store_find_nodes_by_name(s, project, name, &nodes, &count) != CBM_STORE_OK) {
+        return 0;
+    }
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].label && strcmp(nodes[i].label, label) == 0 && nodes[i].file_path &&
+            strcmp(nodes[i].file_path, file_path) == 0) {
+            hits++;
+            id = nodes[i].id;
+            marked = nodes[i].properties_json &&
+                     strstr(nodes[i].properties_json, "\"generated\":\"record\"") != NULL;
+        }
+    }
+    cbm_store_free_nodes(nodes, count);
+    if (generated) {
+        *generated = marked;
+    }
+    return hits == 1 ? id : 0;
+}
+
+/* CALLS edges out of `source_id` into `target_id`, or (target_id 0) into any
+ * node called `target_name`. */
+static int jgen_calls(cbm_store_t *s, int64_t source_id, int64_t target_id,
+                      const char *target_name) {
+    cbm_edge_t *edges = NULL;
+    int ec = 0;
+    int n = 0;
+    if (cbm_store_find_edges_by_source_type(s, source_id, "CALLS", &edges, &ec) != CBM_STORE_OK) {
+        return -1;
+    }
+    for (int i = 0; i < ec; i++) {
+        if (target_id) {
+            n += edges[i].target_id == target_id;
+            continue;
+        }
+        cbm_node_t t = {};
+        if (cbm_store_find_node_by_id(s, edges[i].target_id, &t) == CBM_STORE_OK && t.name &&
+            strcmp(t.name, target_name) == 0) {
+            n++;
+        }
+        cbm_node_free_fields(&t);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, ec);
+    }
+    return n;
+}
+
+/* Edges of `type` into `target_id`. */
+static int jgen_edges_into(cbm_store_t *s, int64_t target_id, const char *type) {
+    cbm_edge_t *edges = NULL;
+    int ec = 0;
+    if (cbm_store_find_edges_by_target_type(s, target_id, type, &edges, &ec) != CBM_STORE_OK) {
+        return -1;
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, ec);
+    }
+    return ec;
+}
+
+/* One fact of jgen_check: reported, counted, and the check goes on, so a run
+ * shows every fact that does not hold. */
+#define JGEN_EXPECT(cond)                                            \
+    do {                                                             \
+        if (!(cond)) {                                               \
+            printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+            failed++;                                                \
+        }                                                            \
+    } while (0)
+
+/* Every fact the fixture pins, on one indexed store; the number that fail.
+ * `typed_join`: the store came from a full index, where the Java LSP types
+ * `p` cross-file. An incremental re-resolve in this fork loses that typing for
+ * every Java call (a plain `class Point { double y() }` drops from
+ * lsp_type_dispatch to unique_name there too, on the pre-port binary), so the
+ * positive near -> Point.y bind is only asserted for a full index; every
+ * negative fact holds in all three venues. */
+static int jgen_check(cbm_store_t *s, const char *project, bool typed_join) {
+    int failed = 0;
+    bool gen_x = false;
+    bool gen_y = false;
+    bool gen_z = true;
+    bool gen_norm = true;
+    bool gen_nn = false;
+    int64_t acc_nn = jgen_node(s, project, "nonNull", "Method", "Seen.java", &gen_nn);
+    int64_t acc_x = jgen_node(s, project, "x", "Method", "Point.java", &gen_x);
+    int64_t acc_y = jgen_node(s, project, "y", "Method", "Point.java", &gen_y);
+    int64_t own_z = jgen_node(s, project, "z", "Method", "Point.java", &gen_z);
+    int64_t norm = jgen_node(s, project, "norm", "Method", "Point.java", &gen_norm);
+    int64_t near_m = jgen_node(s, project, "near", "Method", "Caller.java", NULL);
+    int64_t far_m = jgen_node(s, project, "far", "Method", "Caller.java", NULL);
+    int64_t data = jgen_node(s, project, "data", "Method", "Caller.java", NULL);
+    int64_t make = jgen_node(s, project, "make", "Method", "Caller.java", NULL);
+    int64_t stat = jgen_node(s, project, "stat", "Method", "Caller.java", NULL);
+    int64_t refs = jgen_node(s, project, "refs", "Method", "Caller.java", NULL);
+    JGEN_EXPECT(acc_x > 0 && acc_y > 0 && own_z > 0 && norm > 0 && acc_nn > 0);
+    JGEN_EXPECT(near_m > 0 && far_m > 0 && data > 0 && make > 0 && stat > 0 && refs > 0);
+    /* The compiler's members are marked; the hand-written ones are not. */
+    JGEN_EXPECT(gen_x);
+    JGEN_EXPECT(gen_y);
+    JGEN_EXPECT(gen_nn);
+    JGEN_EXPECT(!gen_z);
+    JGEN_EXPECT(!gen_norm);
+    /* Bound by qualified name through the receiver's type ... */
+    JGEN_EXPECT(!typed_join || jgen_calls(s, near_m, acc_y, NULL) == 1);
+    /* ... and never by a short-name guess. */
+    JGEN_EXPECT(jgen_calls(s, far_m, acc_y, NULL) == 0);
+    JGEN_EXPECT(jgen_calls(s, far_m, 0, "y") == 0);
+    /* Neither the accessor nor Spring's field `x`. */
+    JGEN_EXPECT(jgen_calls(s, data, 0, "x") == 0);
+    /* No import names a generated member, so nothing follows one onto it. */
+    JGEN_EXPECT(jgen_edges_into(s, acc_y, "IMPORTS") == 0);
+    JGEN_EXPECT(jgen_calls(s, make, 0, "y") == 0);
+    /* The JDK's Objects.nonNull is not Seen's accessor, called or referenced. */
+    JGEN_EXPECT(jgen_calls(s, stat, acc_nn, NULL) == 0);
+    JGEN_EXPECT(jgen_edges_into(s, acc_nn, "CALL_REFERENCE") == 0);
+    JGEN_EXPECT(jgen_edges_into(s, acc_nn, "USAGE") == 0);
+    return failed;
+}
+#undef JGEN_EXPECT
+
+static void jgen_write_fixture(const char *tmp) {
+    write_temp_file(tmp, "Point.java", jgen_point_java);
+    write_temp_file(tmp, "Seen.java", jgen_seen_java);
+    write_temp_file(tmp, "Spring.java", jgen_spring_java);
+    write_temp_file(tmp, "Caller.java", jgen_caller_java);
+}
+
+static int jgen_case(bool parallel) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_java_gen_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    jgen_write_fixture(tmp);
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = java_fixture_run(tmp, parallel, "java_gen.db", &p);
+    ASSERT_NOT_NULL(s);
+    int rc = jgen_check(s, cbm_pipeline_project_name(p), true);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    ASSERT_EQ(rc, 0);
+    PASS();
+}
+
+TEST(pipeline_java_record_accessors_generated_qn_only) {
+    return jgen_case(false);
+}
+
+/* The same fixture through pass_parallel.cpp: >= 50 files and CBM_WORKERS=4. */
+TEST(pipeline_java_record_accessors_generated_qn_only_parallel) {
+    return jgen_case(true);
+}
+
+/* An incremental re-index seeds its registry from the stored graph: the
+ * untouched Point.java's accessors come back from their nodes, and must stay
+ * out of the short-name index exactly as in the full index while the touched
+ * Caller.java is re-resolved. */
+TEST(pipeline_java_record_accessors_generated_qn_only_after_incremental) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_java_gen_incr_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    jgen_write_fixture(tmp);
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/java_gen_incr.db", tmp);
+    cbm_pipeline_t *p1 = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p1);
+    ASSERT_EQ(cbm_pipeline_run(p1), 0);
+    cbm_pipeline_free(p1);
+
+    char caller_path[512];
+    snprintf(caller_path, sizeof(caller_path), "%s/Caller.java", tmp);
+    ASSERT_EQ(th_append_file(caller_path, "\n// touched: re-resolve Caller.java incrementally\n"),
+              0);
+
+    cbm_pipeline_t *p2 = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p2);
+    ASSERT_EQ(cbm_pipeline_run(p2), 0);
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    int rc = jgen_check(s, cbm_pipeline_project_name(p2), false);
+    cbm_store_close(s);
+    cbm_pipeline_free(p2);
+    th_rmtree(tmp);
+    ASSERT_EQ(rc, 0);
+    PASS();
+}
+
 /* Parallel twin (pass_parallel.cpp resolve_file_usages / resolve_file_rw):
  * upstream's sequential-only fix left 344 Go->C WRITES alive on a ~1150-file
  * repo. >= 50 files forces the parallel pipeline. */
@@ -15774,6 +16198,13 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922_parallel);
     RUN_TEST(pipeline_php_receiver_suppresses_weak_method_edge);
     RUN_TEST(pipeline_php_receiver_parallel_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_java_record_accessor_binds_the_record);
+    RUN_TEST(pipeline_java_record_accessor_binds_the_record_parallel);
+    RUN_TEST(pipeline_java_static_import_does_not_call_field);
+    RUN_TEST(pipeline_java_static_import_does_not_call_field_parallel);
+    RUN_TEST(pipeline_java_record_accessors_generated_qn_only);
+    RUN_TEST(pipeline_java_record_accessors_generated_qn_only_parallel);
+    RUN_TEST(pipeline_java_record_accessors_generated_qn_only_after_incremental);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method_parallel);
     RUN_TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354);

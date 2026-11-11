@@ -687,6 +687,13 @@ static void registry_visitor(const cbm_gbuf_node_t *node, void *userdata) {
     if (!incr_label_is_registry_symbol(node->label)) {
         return;
     }
+    /* A generated member stays out of the short-name index here as in the
+     * full index (pass_definitions.cpp); its stored node carries the mark
+     * (the incremental gbuf is loaded with full properties). */
+    if (cbm_node_props_generated(node->properties_json)) {
+        cbm_registry_add_qn_only(r, node->qualified_name, node->label);
+        return;
+    }
     /* The language matters only to a C# reference-assembly stub (a `.ref.`
      * QN), so only those pay for the filename lookup. */
     CBMLanguage lang = CBM_LANG_COUNT;

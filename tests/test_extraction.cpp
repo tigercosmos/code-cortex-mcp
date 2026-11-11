@@ -5491,6 +5491,136 @@ TEST(extract_java_method_annotations_issue382) {
     PASS();
 }
 
+/* Java records (upstream f4c89711, ee6e78b7, 729ce339, 321dcb63): one generated
+ * Method per component, none for an accessor the record declares itself. */
+TEST(java_record_accessors_are_generated_methods) {
+    CBMFileResult *r = extract("package p;\n"
+                               "public record Point(double x, double y, double z) {\n"
+                               "    public double z() { return z; }\n"
+                               "    public double norm() { return x; }\n"
+                               "}\n",
+                               CBM_LANG_JAVA, "t", "Point.java");
+    ASSERT_NOT_NULL(r);
+    int xs = 0, ys = 0, zs = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (!d->name || strcmp(d->label, "Method") != 0) {
+            continue;
+        }
+        if (strcmp(d->name, "x") == 0) {
+            xs++;
+            ASSERT_NOT_NULL(d->generated);
+            ASSERT_STR_EQ(d->generated, "record");
+            ASSERT_NOT_NULL(d->return_type);
+            ASSERT_STR_EQ(d->return_type, "double");
+        } else if (strcmp(d->name, "y") == 0) {
+            ys++;
+            ASSERT_NOT_NULL(d->generated);
+        } else if (strcmp(d->name, "z") == 0) {
+            zs++;
+            ASSERT_NULL(d->generated); /* hand-written: a source member */
+        } else if (strcmp(d->name, "norm") == 0) {
+            ASSERT_NULL(d->generated);
+        }
+    }
+    ASSERT_EQ(xs, 1);
+    ASSERT_EQ(ys, 1);
+    ASSERT_EQ(zs, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(java_record_varargs_accessor_has_array_return) {
+    static const char *sources[] = {
+        "record Values(String... xs) {}\n", "record Values(String[]... xs) {}\n",
+        "record Values(int... xs) {}\n", "record Values(@Deprecated String... xs) {}\n",
+        "record Values(String... xs) { public String[] xs() { return xs; } }\n"};
+    static const char *return_types[] = {"String[]", "String[][]", "int[]", "String[]", "String[]"};
+    for (int fixture = 0; fixture < 5; fixture++) {
+        CBMFileResult *result = extract(sources[fixture], CBM_LANG_JAVA, "repro", "Values.java");
+        ASSERT_NOT_NULL(result);
+        int accessors = 0;
+        bool array_return = false;
+        for (int i = 0; i < result->defs.count; i++) {
+            CBMDefinition *def = &result->defs.items[i];
+            if (strcmp(def->name, "xs") == 0 && strcmp(def->label, "Method") == 0) {
+                accessors++;
+                array_return =
+                    def->return_type && strcmp(def->return_type, return_types[fixture]) == 0;
+            }
+        }
+        cbm_free_result(result);
+        ASSERT_EQ(accessors, 1);
+        ASSERT_TRUE(array_return);
+    }
+    PASS();
+}
+
+/* Comment extras in an otherwise empty parameter list must not create a
+ * second, implicit accessor at the record component's source location. */
+TEST(java_record_commented_accessor_has_only_explicit_span) {
+    static const char *sources[] = {"record Value(int x) {\n"
+                                    "    public int x(/* explanation */) {\n"
+                                    "        return x;\n"
+                                    "    }\n"
+                                    "}\n",
+                                    "record Value(int x) {\n"
+                                    "    public int x(// explanation\n"
+                                    "    ) {\n"
+                                    "        return x;\n"
+                                    "    }\n"
+                                    "}\n"};
+    static const int end_lines[] = {4, 5};
+    for (int fixture = 0; fixture < 2; fixture++) {
+        CBMFileResult *result = extract(sources[fixture], CBM_LANG_JAVA, "repro", "Value.java");
+        ASSERT_NOT_NULL(result);
+        int accessors = 0;
+        int explicit_spans = 0;
+        for (int i = 0; i < result->defs.count; i++) {
+            CBMDefinition *def = &result->defs.items[i];
+            if (strcmp(def->name, "x") == 0 && strcmp(def->label, "Method") == 0) {
+                accessors++;
+                if (def->start_line == 2 && (int)def->end_line == end_lines[fixture]) {
+                    explicit_spans++;
+                }
+            }
+        }
+        cbm_free_result(result);
+        ASSERT_EQ(accessors, 1);
+        ASSERT_EQ(explicit_spans, 1);
+    }
+    PASS();
+}
+
+TEST(java_record_commented_overload_keeps_implicit_accessor) {
+    static const char source[] =
+        "record Value(int x) {\n"
+        "    public int x(/* explanation */ int scale) { return x * scale; }\n"
+        "}\n";
+    CBMFileResult *result = extract(source, CBM_LANG_JAVA, "repro", "Value.java");
+    ASSERT_NOT_NULL(result);
+    int methods = 0;
+    int implicit_spans = 0;
+    int overload_spans = 0;
+    for (int i = 0; i < result->defs.count; i++) {
+        CBMDefinition *def = &result->defs.items[i];
+        if (strcmp(def->name, "x") == 0 && strcmp(def->label, "Method") == 0) {
+            methods++;
+            if (def->start_line == 1 && def->end_line == 1) {
+                implicit_spans++;
+            }
+            if (def->start_line == 2 && def->end_line == 2) {
+                overload_spans++;
+            }
+        }
+    }
+    cbm_free_result(result);
+    ASSERT_EQ(methods, 2);
+    ASSERT_EQ(implicit_spans, 1);
+    ASSERT_EQ(overload_spans, 1);
+    PASS();
+}
+
 /* Issue #2090: Solidity modifier_invocation tracked as decorator (upstream
  * 6b56d78e / 7036c4d5). */
 TEST(solidity_modifier_decorator) {
@@ -12834,6 +12964,10 @@ SUITE(extraction) {
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);
     RUN_TEST(solidity_modifier_decorator);
+    RUN_TEST(java_record_accessors_are_generated_methods);
+    RUN_TEST(java_record_varargs_accessor_has_array_return);
+    RUN_TEST(java_record_commented_accessor_has_only_explicit_span);
+    RUN_TEST(java_record_commented_overload_keeps_implicit_accessor);
     RUN_TEST(extract_python_mock_patch_is_not_route);
     RUN_TEST(extract_python_bare_decorator_route_rules);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);

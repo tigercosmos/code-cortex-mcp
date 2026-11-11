@@ -2445,6 +2445,15 @@ static const cbm_gbuf_node_t *resolve_import_strategies(
                         strcmp(cand->qualified_name, source_file_qn) == 0) {
                         continue; /* self */
                     }
+                    /* Nor a generated member (a Java record's implicit
+                     * accessor, an instance method no import can name): a
+                     * package segment that merely spells it
+                     * (`javax.crypto.spec` -> spec()) must not bind the
+                     * import, or every use of the imported name, to it
+                     * (upstream 6c52e826). */
+                    if (cbm_node_props_generated(cand->properties_json)) {
+                        continue;
+                    }
                     if (py_external && python_external_hit_rejected(imp, cands[ci], ci > 0, cand)) {
                         continue; /* #2127: not the external module's symbol */
                     }

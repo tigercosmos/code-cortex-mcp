@@ -542,6 +542,9 @@ static void build_def_props(char *buf, size_t bufsize, const CBMDefinition *def)
     /* The buffer is sized for every field below (pp_props_buf), so none can be
      * squeezed out. */
     append_json_raw(buf, bufsize, &pos, "variants", def->variants);
+    /* A generated member's mark (cbm.h CBM_PROP_GENERATED). Early, so it can
+     * never be squeezed out: the incremental registry seed reads it back. */
+    append_json_string(buf, bufsize, &pos, CBM_PROP_GENERATED, def->generated);
     append_json_string(buf, bufsize, &pos, "signature", def->signature);
     append_json_string(buf, bufsize, &pos, "return_type", def->return_type);
     append_json_string(buf, bufsize, &pos, "parent_class", def->parent_class);
@@ -1381,7 +1384,12 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
     /* Registry membership is defined ONCE by cbm_label_is_registry_symbol
      * (helpers.cpp) — see pass_definitions.cpp for the per-label rationale. */
     if (cbm_label_is_registry_symbol(def->label)) {
-        cbm_registry_add_lang(ctx->registry, def->name, def->qualified_name, def->label, lang);
+        /* A generated member: qualified name only (see pass_definitions.cpp). */
+        if (cbm_def_generated(def)) {
+            cbm_registry_add_qn_only(ctx->registry, def->qualified_name, def->label);
+        } else {
+            cbm_registry_add_lang(ctx->registry, def->name, def->qualified_name, def->label, lang);
+        }
         (*reg_entries)++;
     }
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
@@ -2997,6 +3005,13 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                 res.qualified_name = target_node->qualified_name;
                 res.strategy = typed ? "lsp_field_access" : "unique_name";
             }
+        }
+        if (target_node && source_node->id != target_node->id &&
+            cbm_java_suppress_call_to_data_member(lang == CBM_LANG_JAVA, target_node->label)) {
+            /* Same guard as pass_calls.cpp — a Java call never targets a
+             * Variable or a Field, whether the LSP or the registry found it
+             * (upstream f4c89711, 321dcb63). */
+            continue;
         }
         if (!target_node || source_node->id == target_node->id) {
             /* HTTP/ASYNC calls to an EXTERNAL client library (`requests.get(url)`)

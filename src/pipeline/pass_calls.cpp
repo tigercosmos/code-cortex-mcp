@@ -680,6 +680,13 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
         const cbm_gbuf_node_t *target_node =
             cbm_pipeline_lsp_target_node(ctx->gbuf, ctx->project_name, lsp->callee_qn, allow_tail);
         if (target_node && source_node->id != target_node->id) {
+            /* LSP textual fallbacks can also name data (a static import of a
+             * field, `activeCount()`): a Java call never targets a Variable or
+             * a Field (upstream 321dcb63). The parallel twin applies the same
+             * guard to its LSP target in resolve_file_calls. */
+            if (cbm_java_suppress_call_to_data_member(lang == CBM_LANG_JAVA, target_node->label)) {
+                return 0;
+            }
             cbm_resolution_t res = {0};
             /* Use the gbuf node's QN so downstream edge props show the canonical
              * project-qualified form even when fallback prefixed the project. */
@@ -934,6 +941,13 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
      * pass_parallel.cpp exactly. */
     if (cbm_go_suppress_bare_init_bind(lang == CBM_LANG_GO, call->is_method, call->callee_name,
                                        res.strategy, target_node->label)) {
+        return 0;
+    }
+    /* A Java call never targets data — see cbm_java_suppress_call_to_data_member
+     * (upstream f4c89711). The language gate lives here, as with the guards
+     * above, and MUST match pass_parallel.cpp exactly or the two resolvers
+     * diverge. */
+    if (cbm_java_suppress_call_to_data_member(lang == CBM_LANG_JAVA, target_node->label)) {
         return 0;
     }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,

@@ -1208,6 +1208,30 @@ bool cbm_suppress_weak_call(CBMLanguage lang, const CBMCall *call, const char *s
                               local_binding_lang, call->callee_is_locally_bound, strategy);
 }
 
+bool cbm_java_suppress_call_to_data_member(bool is_java, const char *target_label) {
+    /* A Java call expression never names data (upstream f4c89711). `p.x()` is a
+     * method invocation whatever `x` spells elsewhere in the tree, so a CALLS
+     * edge into a Variable or a Field is a spelling collision and not a call.
+     *
+     * The bind is reached when the type-aware resolver finds no method to
+     * return: a record's accessors are implicit, so `record Point(double x,
+     * double y, double z)` declares no `x()`, and every `p.x()` fell through to
+     * the short-name registry -- which matches the first `x` anywhere in the
+     * project, typically an unrelated class's private field (upstream measured
+     * 278 of 2444 CALLS edges on a 600-file Java tree). A static import of a
+     * field (`import static Owner.activeCount; activeCount()`) reaches the
+     * same bind through the LSP path.
+     *
+     * Java-gated, like the Go guard above, because the veto is only sound
+     * where no callable name can be anything but a method: Kotlin properties
+     * hold function values (`val f: () -> Unit; f()`) and C has function
+     * pointers, so both legitimately call through data. */
+    if (!is_java || !target_label) {
+        return false;
+    }
+    return strcmp(target_label, "Variable") == 0 || strcmp(target_label, "Field") == 0;
+}
+
 /* ── Lifecycle ──────────────────────────────────────────────────── */
 
 cbm_registry_t *cbm_registry_new(void) {
@@ -1262,20 +1286,16 @@ void cbm_registry_add(cbm_registry_t *r, const char *name, const char *qualified
     cbm_registry_add_lang(r, name, qualified_name, label, CBM_LANG_COUNT);
 }
 
-void cbm_registry_add_lang(cbm_registry_t *r, const char *name, const char *qualified_name,
-                           const char *label, CBMLanguage lang) {
-    (void)name;
-    if (!r || !qualified_name || !label) {
-        return;
-    }
-    // Name-only resolution can identify a family, not an individual overload.
-    // Type-aware resolution uses its separate registry and retains these QNs.
-    if (strstr(qualified_name, "@overload_"))
-        return;
-
+/* Store `qualified_name` in the exact map (QN -> interned label) and return the
+ * registry's owned copy of the QN, or NULL when it is already present, the
+ * label pool is exhausted, or the copy cannot be allocated. The by-name index
+ * is the caller's business (cbm_registry_add_lang adds it; the qualified-name-
+ * only registration does not). */
+static const char *registry_add_exact(cbm_registry_t *r, const char *qualified_name,
+                                      const char *label) {
     /* Check for duplicate */
     if (cbm_ht_get(r->exact, qualified_name)) {
-        return;
+        return NULL;
     }
 
     /* Intern the label (bounded set; linear scan is fine at this size). */
@@ -1292,14 +1312,35 @@ void cbm_registry_add_lang(cbm_registry_t *r, const char *name, const char *qual
         r->label_pool_n++;
     }
     if (!interned) {
-        return; /* pool exhausted (cannot happen with sane label sets) */
+        return NULL; /* pool exhausted (cannot happen with sane label sets) */
     }
 
     /* Store in exact map: QN → interned label. The key is the registry's ONE
-     * owned copy of the QN; by_name below borrows it (same lifetime) instead
-     * of a second strdup — this pair of copies was ~280 MB on the kernel. */
-    cbm_ht_set(r->exact, strdup(qualified_name), (void *)interned);
-    const char *owned_qn = cbm_ht_get_key(r->exact, qualified_name);
+     * owned copy of the QN; by_name borrows it (same lifetime) instead of a
+     * second strdup — this pair of copies was ~280 MB on the kernel. */
+    char *key = strdup(qualified_name);
+    if (!key) {
+        return NULL;
+    }
+    cbm_ht_set(r->exact, key, (void *)interned);
+    return cbm_ht_get_key(r->exact, qualified_name);
+}
+
+void cbm_registry_add_lang(cbm_registry_t *r, const char *name, const char *qualified_name,
+                           const char *label, CBMLanguage lang) {
+    (void)name;
+    if (!r || !qualified_name || !label) {
+        return;
+    }
+    // Name-only resolution can identify a family, not an individual overload.
+    // Type-aware resolution uses its separate registry and retains these QNs.
+    if (strstr(qualified_name, "@overload_"))
+        return;
+
+    const char *owned_qn = registry_add_exact(r, qualified_name, label);
+    if (!owned_qn) {
+        return;
+    }
 
     /* Index by simple name.
      * No array dedup needed: exact-map check above guarantees uniqueness. */
@@ -1319,6 +1360,27 @@ void cbm_registry_add_lang(cbm_registry_t *r, const char *name, const char *qual
             cbm_ht_set(r->csharp_ref_stubs, owned_qn, (void *)owned_qn);
         }
     }
+}
+
+/* A generated member (a Java record's implicit accessor) is a definition the
+ * source never spells: no call names it except through its owner's type. The
+ * exact map holds it for the LSP targets and the import/same-module lookups;
+ * the by-name index does not, so no unique_name / suffix_match /
+ * field_type_hint / fuzzy guess can land on it (upstream 729ce339). */
+void cbm_registry_add_qn_only(cbm_registry_t *r, const char *qualified_name, const char *label) {
+    if (!r || !qualified_name || !label) {
+        return;
+    }
+    (void)registry_add_exact(r, qualified_name, label);
+}
+
+bool cbm_def_generated(const CBMDefinition *def) {
+    return def && def->generated && def->generated[0];
+}
+
+bool cbm_node_props_generated(const char *properties_json) {
+    /* The key as the definition passes write it: "generated":"<value>". */
+    return properties_json && strstr(properties_json, "\"" CBM_PROP_GENERATED "\":\"") != NULL;
 }
 
 /* ── Lookup ──────────────────────────────────────────────────────── */
