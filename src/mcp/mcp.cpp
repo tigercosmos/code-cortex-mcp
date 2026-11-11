@@ -653,8 +653,9 @@ static const tool_def_t TOOLS[] = {
      "count) are always exact. For an exact identifier you already know, plain grep is just as "
      "good; this tool pays off when you want hits grouped by function and ranked.",
      "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"project\":{\"type\":"
-     "\"string\"},\"file_pattern\":{\"type\":\"string\",\"description\":\"Glob for grep "
-     "--include (e.g. *.go)\"},\"path_filter\":{\"type\":\"string\",\"description\":\"Regex "
+     "\"string\"},\"file_pattern\":{\"type\":\"string\",\"description\":\"Glob on the file "
+     "name (e.g. *.go); with '/', on the repo-relative path (e.g. src/**/*.c, ** = any "
+     "dirs)\"},\"path_filter\":{\"type\":\"string\",\"description\":\"Regex "
      "filter on result file paths (e.g. ^src/ or \\\\.(go|ts)$)\"},\"mode\":{\"type\":\"string\","
      "\"enum\":[\"compact\",\"full\",\"files\"],\"default\":\"compact\",\"description\":\"compact: "
      "signatures+metadata (default). full: with source. files: just file list.\"},"
@@ -9303,12 +9304,19 @@ static yyjson_mut_val *build_dir_distribution(yyjson_mut_doc *doc, search_result
     return dirs;
 }
 
+/* Hint on a search whose '/' file_pattern matched no file (upstream #2836). */
+#define SEARCH_CODE_PATH_HINT                                                            \
+    "no results; a file_pattern with '/' must match the whole repo-relative path (e.g. " \
+    "src/**/*.c); to scope by folder you can also use path_filter (regex on the "        \
+    "repo-relative path, e.g. ^src/cli/)"
+
 /* Phase 4: assemble JSON output from search results */
 static char *assemble_search_output_once(search_result_t *sr, int sr_count, grep_match_t *raw,
                                          int raw_count, int gm_count, int output_count, int mode,
                                          int context_lines, const char *root_path,
-                                         bool warn_literal_pipe, uint64_t elapsed_ms, int requested,
-                                         int max_bytes, bool truncated, int raw_limit) {
+                                         bool warn_literal_pipe, bool hint_path_filter,
+                                         uint64_t elapsed_ms, int requested, int max_bytes,
+                                         bool truncated, int raw_limit) {
     enum { MODE_COMPACT = 0, MODE_FULL = 1, MODE_FILES = 2, SEARCH_SLOW_MS = 5000 };
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
@@ -9402,6 +9410,9 @@ static char *assemble_search_output_once(search_result_t *sr, int sr_count, grep
     if (yyjson_mut_arr_size(warnings) > 0) {
         yyjson_mut_obj_add_val(doc, root_obj, "warnings", warnings);
     }
+    if (hint_path_filter) {
+        yyjson_mut_obj_add_str(doc, root_obj, "hint", SEARCH_CODE_PATH_HINT);
+    }
 
     char *json = yy_doc_to_str(doc);
     if (json) {
@@ -9421,7 +9432,8 @@ static char *assemble_search_output_once(search_result_t *sr, int sr_count, grep
 static char *assemble_search_output(search_result_t *sr, int sr_count, grep_match_t *raw,
                                     int raw_count, int gm_count, int limit, int mode,
                                     int context_lines, const char *root_path,
-                                    bool warn_literal_pipe, uint64_t elapsed_ms, int max_bytes) {
+                                    bool warn_literal_pipe, bool hint_path_filter,
+                                    uint64_t elapsed_ms, int max_bytes) {
     enum { SEARCH_SHRINK_ROUNDS = 12, SEARCH_MAX_RAW = 20 };
     int output_count = std::min(sr_count, limit);
     int raw_limit = SEARCH_MAX_RAW;
@@ -9431,7 +9443,8 @@ static char *assemble_search_output(search_result_t *sr, int sr_count, grep_matc
         free(json);
         json = assemble_search_output_once(sr, sr_count, raw, raw_count, gm_count, output_count,
                                            mode, context_lines, root_path, warn_literal_pipe,
-                                           elapsed_ms, limit, max_bytes, truncated, raw_limit);
+                                           hint_path_filter, elapsed_ms, limit, max_bytes,
+                                           truncated, raw_limit);
         if (!json || max_bytes <= 0 || (int)strlen(json) <= max_bytes) {
             break;
         }
@@ -9669,9 +9682,55 @@ static void classify_all_grep_hits(grep_match_t *gm, int gm_count, cbm_store_t *
  * hits would be dropped anyway — results-preserving by construction.
  * *out_written receives the number of records written (0 = the filter
  * excluded every indexed file). */
+/* A file_pattern containing '/' is matched against the whole repo-relative path, like
+ * search_graph's file_pattern (upstream #2836): '*' and '**' match any run of characters
+ * including '/', a '**' followed by '/' also matches zero directories, '?' matches one
+ * character, and a pattern without wildcards is a substring match. Portable (no fnmatch
+ * on Windows) and linear: every '*' is equivalent, so one backtrack point suffices. */
+static bool search_code_path_glob_match(const char *pat, const char *path) {
+    if (!strpbrk(pat, "*?")) {
+        return strstr(path, pat) != NULL;
+    }
+    const char *star_pat = NULL;
+    const char *star_path = NULL;
+    for (;;) {
+        if (*pat == '*') {
+            const char *run = pat;
+            while (*pat == '*') {
+                pat++;
+            }
+            if (pat - run > SKIP_ONE && *pat == '/') {
+                pat++;
+            }
+            star_pat = pat;
+            star_path = path;
+        } else if (*path && (*pat == '?' || *pat == *path)) {
+            pat++;
+            path++;
+        } else if (!*pat && !*path) {
+            return true;
+        } else if (star_pat && *star_path) {
+            pat = star_pat;
+            path = ++star_path;
+        } else {
+            return false;
+        }
+    }
+}
+
+/* True when search_code matches this file_pattern against the repo-relative path
+ * (it names a directory) instead of the file's base name. */
+static bool search_code_file_pattern_is_path_glob(const char *file_pattern) {
+    return file_pattern && strchr(file_pattern, '/') != NULL;
+}
+
+/* path_glob: a file_pattern with '/' (search_code_file_pattern_is_path_glob), matched
+ * here against each repo-relative path on every platform; NULL when there is none, and
+ * a base-name file_pattern is left to the scanner / grep --include / PowerShell -like. */
 static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, const char *root_path,
                                   const char *filelist, bool has_path_filter,
-                                  cbm_regex_t *path_regex, int *out_written) {
+                                  cbm_regex_t *path_regex, const char *path_glob,
+                                  int *out_written) {
     *out_written = 0;
     cbm_store_t *pre_store = resolve_store(srv, project);
     if (!pre_store) {
@@ -9701,6 +9760,14 @@ static bool write_scoped_filelist(cbm_mcp_server_t *srv, const char *project, co
                 cbm_normalize_path_sep(indexed_files[fi]);
 #endif
                 if (cbm_regexec(path_regex, indexed_files[fi], 0, NULL, 0) != CBM_REG_OK) {
+                    continue;
+                }
+            }
+            if (path_glob) {
+#ifdef _WIN32
+                cbm_normalize_path_sep(indexed_files[fi]);
+#endif
+                if (!search_code_path_glob_match(path_glob, indexed_files[fi])) {
                     continue;
                 }
             }
@@ -10741,8 +10808,15 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     bool scoped = false;
     int scoped_written = 0;
 
+    const bool path_glob = search_code_file_pattern_is_path_glob(file_pattern);
     scoped = write_scoped_filelist(srv, project, root_path, filelist, has_path_filter,
-                                   has_path_filter ? &path_regex : NULL, &scoped_written);
+                                   has_path_filter ? &path_regex : NULL,
+                                   path_glob ? file_pattern : NULL, &scoped_written);
+    /* A path glob already chose the scoped list's files; the scanner, grep --include and
+     * the PowerShell -like post-filter all match base names (or, on Windows, the
+     * backslashed full path), so they must not see it again. The unscoped recursive
+     * fallback (project with no indexed files) keeps the raw pattern. */
+    const char *scan_file_pattern = (scoped && path_glob) ? NULL : file_pattern;
 
     /* Collect grep matches into array */
     int gm_count = 0;
@@ -10761,7 +10835,7 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
      * the recursive fallback for an unindexed root keeps grep. */
     if (!gm && scoped) {
         std::string records;
-        if (search_scan_in_process(filelist, root_path, pattern, use_regex, file_pattern,
+        if (search_scan_in_process(filelist, root_path, pattern, use_regex, scan_file_pattern,
                                    grep_limit, records)) {
             gm = search_scan_collect(records, root_path, has_path_filter, &path_regex, grep_limit,
                                      &gm_count);
@@ -10774,8 +10848,8 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
 #endif
     if (!gm) {
         char cmd[CBM_SZ_4K];
-        cbm_search_code_build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, file_pattern, tmpfile,
-                                       filelist, root_path);
+        cbm_search_code_build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, scan_file_pattern,
+                                       tmpfile, filelist, root_path);
 
         FILE *fp = cbm_popen(cmd, "r");
         if (!fp) {
@@ -10856,9 +10930,11 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
 
     /* ── Phase 4: Context assembly (extracted helper) ─────────── */
 
+    /* A '/' file_pattern that matched nothing: say it is a whole-path match. */
+    const bool hint_path_filter = path_glob && gm_count == 0;
     char *result = assemble_search_output(sr, sr_count, raw, raw_count, gm_count, limit, mode,
                                           context_lines, root_path, pat_has_pipe && !use_regex,
-                                          cbm_now_ms() - search_t0, max_bytes);
+                                          hint_path_filter, cbm_now_ms() - search_t0, max_bytes);
     free(gm);
     free(sr);
     free(raw);
