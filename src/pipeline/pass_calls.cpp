@@ -840,7 +840,13 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
          * registration through a package import still mints its Route.
          * MUST match pass_parallel.cpp exactly. */
         cbm_suppress_external_import_call(lang, call->callee_name, res.strategy, imports, imp_keys,
-                                          imp_count);
+                                          imp_count) ||
+        /* Same-module bound-receiver suppression (#1128): `axios.get()` with
+         * axios imported must not bind the `get` this file happens to define.
+         * The language list is inside the helper -- MUST match pass_parallel.cpp. */
+        cbm_suppress_same_module_bound_receiver(lang, call->is_method, call->callee_name,
+                                                res.qualified_name, res.strategy, imports,
+                                                call->receiver_is_amd_dependency);
 
     /* Service-pattern HTTP/ASYNC calls to an EXTERNAL client library (e.g.
      * `requests.get("/api/orders/{id}")`) resolve to a QN containing the library

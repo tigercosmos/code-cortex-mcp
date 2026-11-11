@@ -281,6 +281,165 @@ TEST(resolve_same_module) {
     PASS();
 }
 
+/* #1128 (upstream 51c57c4e, net of f3bcb254): these cases moved from the strategy chain to the
+ * call-site guard (the review of 2026-10-19). The chain stays unchanged - it also resolves type
+ * references, field types, reads/writes, SQL lineage and the cross-LSP pass for
+ * every language - so it still returns the raw same_module candidate, and
+ * cbm_suppress_same_module_bound_receiver decides whether a JS/TS member call
+ * keeps it: refused only when the receiver is bound to an import, to an AMD
+ * dependency, or is a builtin global. `is_method` is what the extractor sets
+ * (false only for a this/super receiver). */
+TEST(resolve_same_module_only_on_self_receiver) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "get", "proj.pkg.service.get", "Function");
+    const CBMLanguage js = CBM_LANG_JAVASCRIPT;
+    const char *mod = "proj.pkg.service";
+    CBMImport axios_import = {.local_name = "axios", .module_path = "axios"};
+    const CBMImportArray imports = {.items = &axios_import, .count = 1, .cap = 1};
+
+    /* Dotted call with an imported receiver (`import axios from 'axios'`,
+     * "axios.get"): the chain still finds the local get by its member name, and
+     * the guard drops the binding. */
+    cbm_resolution_t res1 = cbm_registry_resolve(r, "axios.get", mod, NULL, NULL, 0);
+    ASSERT_STR_EQ(res1.qualified_name, "proj.pkg.service.get");
+    ASSERT_STR_EQ(res1.strategy, "same_module");
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(js, true, "axios.get", res1.qualified_name,
+                                                        res1.strategy, &imports, false));
+    /* The same receiver with no binding fact is an ordinary variable and keeps
+     * the edge: `context.push()` onto an object-literal method stored at
+     * module level is usually right. */
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(js, true, "axios.get", res1.qualified_name,
+                                                         res1.strategy, NULL, false));
+
+    /* Dotted call with delegation pattern ("_get_store().get"): a call result
+     * carries no binding fact, so it is outside this guard and keeps the edge. */
+    cbm_resolution_t res2 = cbm_registry_resolve(r, "_get_store().get", mod, NULL, NULL, 0);
+    ASSERT_STR_EQ(res2.strategy, "same_module");
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(
+        js, true, "_get_store().get", res2.qualified_name, res2.strategy, &imports, false));
+
+    /* Dotted call with self-receiver ("this.get" in JS): unflagged by the
+     * extractor, so the guard keeps it. */
+    cbm_resolution_t res3 = cbm_registry_resolve(r, "this.get", mod, NULL, NULL, 0);
+    ASSERT_STR_EQ(res3.qualified_name, "proj.pkg.service.get");
+    ASSERT_STR_EQ(res3.strategy, "same_module");
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(js, false, "this.get", res3.qualified_name,
+                                                         res3.strategy, &imports, false));
+
+    /* Dotted call with exact module name prefix ("proj.pkg.service.get"): the
+     * whole callee names the target, kept. */
+    cbm_resolution_t res4 = cbm_registry_resolve(r, "proj.pkg.service.get", mod, NULL, NULL, 0);
+    ASSERT_STR_EQ(res4.qualified_name, "proj.pkg.service.get");
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(
+        js, true, "proj.pkg.service.get", res4.qualified_name, res4.strategy, &imports, false));
+
+    /* Dotted call with namespace/module last segment ("service.get"): the
+     * receiver is bound to nothing, kept. */
+    cbm_resolution_t res5 = cbm_registry_resolve(r, "service.get", mod, NULL, NULL, 0);
+    ASSERT_STR_EQ(res5.qualified_name, "proj.pkg.service.get");
+    ASSERT_STR_EQ(res5.strategy, "same_module");
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(
+        js, true, "service.get", res5.qualified_name, res5.strategy, &imports, false));
+
+    cbm_registry_free(r);
+    PASS();
+}
+
+/* #1128: the guard's binding facts, its keep cases and its language gate. */
+TEST(suppress_same_module_bound_receiver_binding_facts) {
+    const CBMLanguage ts = CBM_LANG_TYPESCRIPT;
+    const char *hit = "proj.src.client.get"; /* <module>.get: the receiver was dropped */
+    CBMImport items[] = {
+        {.local_name = "axios", .module_path = "axios"},
+        {.local_name = "fs", .module_path = "node:fs"},     /* namespace */
+        {.local_name = "http", .module_path = "./client"},  /* named */
+        {.local_name = "db", .module_path = "../database"}, /* require */
+        {.local_name = "stream", .module_path = "node:stream", .local_name_synthesized = true},
+    };
+    const CBMImportArray imports = {.items = items, .count = 5, .cap = 5};
+
+    /* Refused: each binding fact on its own. */
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "axios.get", hit, "same_module",
+                                                        &imports, false));
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "fs.get", hit, "same_module",
+                                                        &imports, false));
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "http.get", hit, "same_module",
+                                                        &imports, false));
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "db.get", hit, "same_module",
+                                                        &imports, false));
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "api.get", hit, "same_module",
+                                                        NULL, true)); /* AMD dependency */
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "console.get", hit, "same_module",
+                                                        NULL, false));
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "Math.get", hit, "same_module",
+                                                        NULL, false));
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "window.get", hit, "same_module",
+                                                        NULL, false));
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "axios?.get", hit, "same_module",
+                                                        &imports, false));
+    ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(ts, true, "axios.defaults.get",
+                                                        "proj.src.client.defaults.get",
+                                                        "same_module", &imports, false));
+
+    /* Kept: a synthesized local (`require('node:stream').Readable` binds no
+     * `stream`), an unbound receiver, CommonJS `exports`/`module`, a near-miss
+     * of a builtin or import name, no identifier receiver. */
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "stream.get", hit, "same_module",
+                                                         &imports, false));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "context.get", hit,
+                                                         "same_module", &imports, false));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "exports.get", hit,
+                                                         "same_module", &imports, false));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "module.exports.get",
+                                                         "proj.src.client.exports.get",
+                                                         "same_module", &imports, false));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "consoles.get", hit,
+                                                         "same_module", &imports, false));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "axio.get", hit, "same_module",
+                                                         &imports, false));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "_store().get", hit,
+                                                         "same_module", &imports, true));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "get", hit, "same_module",
+                                                         &imports, true));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "9x.get", hit, "same_module",
+                                                         &imports, false));
+
+    /* Kept: the whole-callee lookup matched (the receiver is part of the hit),
+     * another strategy, an unflagged call, malformed input. */
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(
+        ts, true, "axios.get", "proj.src.client.axios.get", "same_module", &imports, true));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "axios.get", hit, "unique_name",
+                                                         &imports, true));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "axios.get", hit, "import_map",
+                                                         &imports, true));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "axios.get", hit,
+                                                         "lsp_ts_method", &imports, true));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, false, "axios.get", hit, "same_module",
+                                                         &imports, true));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, NULL, hit, "same_module",
+                                                         &imports, true));
+    ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(ts, true, "axios.get", NULL, "same_module",
+                                                         &imports, true));
+    ASSERT_FALSE(
+        cbm_suppress_same_module_bound_receiver(ts, true, "axios.get", hit, NULL, &imports, true));
+
+    /* Language gate: the JS/TS family and the <script> hosts are in; Go never
+     * (flat receiver-method QNs only this lookup reaches); Python, PHP are not. */
+    static const CBMLanguage in[] = {CBM_LANG_JAVASCRIPT, CBM_LANG_TYPESCRIPT, CBM_LANG_TSX,
+                                     CBM_LANG_HTML,       CBM_LANG_VUE,        CBM_LANG_SVELTE,
+                                     CBM_LANG_ASTRO};
+    for (size_t i = 0; i < sizeof(in) / sizeof(in[0]); i++) {
+        ASSERT_TRUE(cbm_suppress_same_module_bound_receiver(in[i], true, "console.get", hit,
+                                                            "same_module", &imports, false));
+    }
+    static const CBMLanguage out[] = {CBM_LANG_GO, CBM_LANG_PYTHON, CBM_LANG_PHP};
+    for (size_t i = 0; i < sizeof(out) / sizeof(out[0]); i++) {
+        ASSERT_FALSE(cbm_suppress_same_module_bound_receiver(out[i], true, "console.get", hit,
+                                                             "same_module", &imports, true));
+    }
+    PASS();
+}
+
 TEST(resolve_import_map) {
     cbm_registry_t *r = cbm_registry_new();
     cbm_registry_add(r, "Process", "proj.pkg.worker.Process", "Function");
@@ -2098,6 +2257,8 @@ SUITE(registry) {
     RUN_TEST(registry_no_duplicates);
     /* Resolution */
     RUN_TEST(resolve_same_module);
+    RUN_TEST(resolve_same_module_only_on_self_receiver);
+    RUN_TEST(suppress_same_module_bound_receiver_binding_facts);
     RUN_TEST(resolve_import_map);
     RUN_TEST(resolve_import_map_bare_function);
     RUN_TEST(resolve_unique_name);

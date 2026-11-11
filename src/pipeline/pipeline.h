@@ -491,6 +491,23 @@ bool cbm_suppress_external_import_shadow(const char *callee_name, const char *st
                                          const CBMHashTable *indexed_packages,
                                          const CBMHashTable *declared_packages);
 
+/* #1128: true when a JS/TS-family member call resolved by `same_module` only
+ * through the lookup that drops its receiver (`resolved_qn` does not end in the
+ * whole callee), while that receiver is bound to an import of the file
+ * (`file_imports`: ES import or CommonJS require, not a synthesized local), to
+ * an AMD dependency (`receiver_is_amd_dependency`, the extractor's per-call
+ * fact), or is a builtin global of the JS runtime (`console`, `Math`, `JSON`,
+ * ...): `axios.get()` must not bind the `get` this file happens to define. Any
+ * other receiver keeps the edge (`context.push()` onto an object-literal method
+ * stored at module level). The language list is inside the helper, so
+ * pass_calls.cpp and pass_parallel.cpp cannot drift. Only the plain-CALLS
+ * fall-through is dropped. Pure; unit-tested in test_registry.cpp. */
+bool cbm_suppress_same_module_bound_receiver(CBMLanguage lang, bool is_method,
+                                             const char *callee_name, const char *resolved_qn,
+                                             const char *strategy,
+                                             const CBMImportArray *file_imports,
+                                             bool receiver_is_amd_dependency);
+
 /* True if `name` is a method of a Python builtin type (str/bytes/list/dict/set/
  * file) or a builtin function seen as an attribute call. A language fact, kept
  * as a sorted table like the Perl builtins. */

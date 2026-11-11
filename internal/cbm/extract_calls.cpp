@@ -2547,6 +2547,16 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                         const char *ok = ts_node_type(obj);
                         if (strcmp(ok, "this") != 0 && strcmp(ok, "super") != 0) {
                             call.is_method = true;
+                            /* #1128: the receiver's root (`a` in `a.b.c()`) bound
+                             * to an AMD dependency. The loop walks only this
+                             * callee's own member chain, so it stays linear. */
+                            TSNode root = obj;
+                            while (!ts_node_is_null(root) &&
+                                   strcmp(ts_node_type(root), "member_expression") == 0) {
+                                root = ts_node_child_by_field_name(root, TS_FIELD("object"));
+                            }
+                            call.receiver_is_amd_dependency =
+                                cbm_walk_amd_dependency_binds(ctx, state, root);
                         }
                     }
                 }

@@ -290,11 +290,21 @@ typedef struct {
                                      // (self.compiler.apply_converters()). An object the
                                      // class owns, not a parameter: read by the weak-member
                                      // guard's unique-name exemption. Default false.
+    bool receiver_is_amd_dependency; // JS/TS member call x.foo() whose receiver root x is a
+                                     // parameter the factory of an enclosing AMD
+                                     // define([...], fn) / require([...], fn) binds to a
+                                     // dependency (#1128). Not an import (no IMPORTS
+                                     // edge): read by the same-module bound-receiver
+                                     // guard. Default false.
 } CBMCall;
 
 typedef struct {
     const char *local_name;  // local alias or name
     const char *module_path; // resolved module path / QN
+    /* JS/TS: the statement binds no local name (side-effect `import './x'`,
+     * re-export, bare `require('x').y`), so local_name is the path's last
+     * segment, not a binding the file can call through (#1128). Default false. */
+    bool local_name_synthesized;
 } CBMImport;
 
 typedef struct {

@@ -190,15 +190,15 @@ template <class A> void fields(A &a, CBMCallArg &v) {
 template <class A> void fields(A &a, CBMCall &v) {
     auto &[callee_name, enclosing_func_qn, first_string_arg, second_arg_name, args, arg_count,
            loop_depth, branch_depth, start_line, source_byte, requires_typed_resolution, is_method,
-           callee_is_locally_bound, receiver_is_self_attribute] = v;
+           callee_is_locally_bound, receiver_is_self_attribute, receiver_is_amd_dependency] = v;
     a(callee_name, enclosing_func_qn, first_string_arg, second_arg_name, loop_depth, branch_depth,
       start_line, source_byte, requires_typed_resolution, is_method, callee_is_locally_bound,
-      receiver_is_self_attribute);
+      receiver_is_self_attribute, receiver_is_amd_dependency);
     a.array(args, arg_count);
 }
 template <class A> void fields(A &a, CBMImport &v) {
-    auto &[local_name, module_path] = v;
-    a(local_name, module_path);
+    auto &[local_name, module_path, local_name_synthesized] = v;
+    a(local_name, module_path, local_name_synthesized);
 }
 template <class A> void fields(A &a, CBMUsage &v) {
     auto &[ref_name, enclosing_func_qn, is_member_access] = v;
