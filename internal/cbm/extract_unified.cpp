@@ -846,6 +846,20 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const WalkS
     if (!name || !name[0]) {
         return NULL;
     }
+    /* Rust: the impl's type text carries its generic arguments (`impl<T> Gen<T>`,
+     * `impl<'a> Parser<'a>`), which the def side strips before naming the type
+     * (extract_defs.cpp extract_rust_impl: `Buffer<T>` -> `Buffer`). Strip them the
+     * same way, or every method of a generic impl gets a scope QN no node carries
+     * and all its calls fall back to the File node (upstream 09c4885e, fed5cbf9). */
+    if (ctx->language == CBM_LANG_RUST && strcmp(ts_node_type(node), "impl_item") == 0) {
+        char *lt = strchr(name, '<');
+        if (lt == name) {
+            return NULL; /* `<T as Tr>`-style self type: no name to scope by */
+        }
+        if (lt) {
+            *lt = '\0';
+        }
+    }
 
     /* Nested class: prefix with the enclosing class QN (Outer.Inner) so this
      * scope QN matches the def-side class QN (extract_defs.c compute_class_qn /

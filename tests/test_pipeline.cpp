@@ -10475,6 +10475,371 @@ TEST(pipeline_go_rw_usage_never_cross_into_c) {
     PASS();
 }
 
+/* ── Rust registry and call-scope regressions (upstream 2ac9c33e, ec4f0eaa,
+ * 09c4885e/d40f8e6b/f75af00a, 7648e78b). Every case runs on both resolvers:
+ * pad_files > 0 adds Rust filler modules and sets CBM_WORKERS=4, which forces
+ * the parallel pipeline (> 50 files) and its shared all-defs Rust registry. ── */
+
+/* Edges of `type` from a node named `src` into a node named `tgt` whose
+ * file_path is `tgt_file`; -1 on a failed query. */
+static int rs_edge_to_file(cbm_store_t *s, const char *project, const char *type, const char *src,
+                           const char *tgt, const char *tgt_file) {
+    cbm_edge_t *edges = NULL;
+    int ec = 0;
+    if (cbm_store_find_edges_by_type(s, project, type, &edges, &ec) != CBM_STORE_OK) {
+        return -1;
+    }
+    int n = 0;
+    for (int i = 0; i < ec; i++) {
+        cbm_node_t a = {};
+        cbm_node_t b = {};
+        bool ok = cbm_store_find_node_by_id(s, edges[i].source_id, &a) == CBM_STORE_OK &&
+                  cbm_store_find_node_by_id(s, edges[i].target_id, &b) == CBM_STORE_OK;
+        if (ok && a.name && b.name && b.file_path && strcmp(a.name, src) == 0 &&
+            strcmp(b.name, tgt) == 0 && strcmp(b.file_path, tgt_file) == 0) {
+            n++;
+        }
+        cbm_node_free_fields(&a);
+        cbm_node_free_fields(&b);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, ec);
+    }
+    return n;
+}
+
+/* CALLS from a node named `src` into one named `tgt` whose properties contain
+ * `fragment` (NULL: any); -1 on a failed query. */
+static int rs_calls_with(cbm_store_t *s, const char *project, const char *src, const char *tgt,
+                         const char *fragment) {
+    cbm_edge_t *edges = NULL;
+    int ec = 0;
+    if (cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &ec) != CBM_STORE_OK) {
+        return -1;
+    }
+    int n = 0;
+    for (int i = 0; i < ec; i++) {
+        cbm_node_t a = {};
+        cbm_node_t b = {};
+        bool ok = cbm_store_find_node_by_id(s, edges[i].source_id, &a) == CBM_STORE_OK &&
+                  cbm_store_find_node_by_id(s, edges[i].target_id, &b) == CBM_STORE_OK;
+        if (ok && a.name && b.name && strcmp(a.name, src) == 0 && strcmp(b.name, tgt) == 0 &&
+            (!fragment ||
+             (edges[i].properties_json && strstr(edges[i].properties_json, fragment)))) {
+            n++;
+        }
+        cbm_node_free_fields(&a);
+        cbm_node_free_fields(&b);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, ec);
+    }
+    return n;
+}
+
+/* IMPORTS edges out of `file_path` that bind `local_name`; -1 on a failed query. */
+static int rs_imports_binding(cbm_store_t *s, const char *project, const char *file_path,
+                              const char *local_name) {
+    static const char sql[] =
+        "SELECT count(*) FROM edges e JOIN nodes f ON f.id=e.source_id WHERE e.project=?1 "
+        "AND e.type='IMPORTS' AND f.file_path=?2 AND json_extract(e.properties,'$.local_name')=?3";
+    sqlite3 *db = cbm_store_get_db(s);
+    sqlite3_stmt *st = NULL;
+    if (!db || sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        return -1;
+    }
+    int count = -1;
+    if (sqlite3_bind_text(st, 1, project, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(st, 2, file_path, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_text(st, 3, local_name, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        count = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+/* Pads the fixture in `tmp` with pad_files Rust filler modules, runs the full
+ * pipeline into <tmp>/<db_name> (CBM_WORKERS=4 when padded) and opens the
+ * store. NULL store = the run failed; *out_p is the pipeline either way. */
+static cbm_store_t *rust_fixture_run(const char *tmp, int pad_files, const char *db_name,
+                                     cbm_pipeline_t **out_p) {
+    for (int i = 0; i < pad_files; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.rs", i);
+        snprintf(body, sizeof(body), "pub fn filler%d() -> u32 {\n    %d\n}\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+    const char *old_workers = getenv("CBM_WORKERS");
+    std::string saved = old_workers ? old_workers : "";
+    bool had = old_workers != NULL;
+    if (pad_files > 0) {
+        cbm_setenv("CBM_WORKERS", "4", 1);
+    }
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/%s", tmp, db_name);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    int rc = p ? cbm_pipeline_run(p) : -1;
+    if (pad_files > 0) {
+        if (had) {
+            cbm_setenv("CBM_WORKERS", saved.c_str(), 1);
+        } else {
+            cbm_unsetenv("CBM_WORKERS");
+        }
+    }
+    *out_p = p;
+    return rc == 0 ? cbm_store_open_path(db_path) : NULL;
+}
+
+/* 2ac9c33e: both Rust registries were built from the mixed-language def set,
+ * so another language's free `new` became a Rust free function and the
+ * project-wide lsp_short_name_unique fallback bound `Store::new()` to it. A
+ * Rust call never targets another language's definition. (Upstream uses a
+ * Perl `sub new`; this fork carries no Perl, so a Python `def new` stands in.) */
+static int rust_registry_rust_only_case(int pad_files) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_rust_only_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    write_temp_file(tmp, "src/store.rs",
+                    "pub struct Store {\n"
+                    "    n: u32,\n"
+                    "}\n"
+                    "\n"
+                    "impl Store {\n"
+                    "    pub fn new() -> Store {\n"
+                    "        Store { n: 0 }\n"
+                    "    }\n"
+                    "\n"
+                    "    pub fn get(&self, k: u32) -> u32 {\n"
+                    "        self.n + k\n"
+                    "    }\n"
+                    "}\n");
+    write_temp_file(tmp, "src/main.rs",
+                    "mod store;\n"
+                    "\n"
+                    "use crate::store::Store;\n"
+                    "\n"
+                    "fn run() -> u32 {\n"
+                    "    let s = Store::new();\n"
+                    "    s.get(1)\n"
+                    "}\n"
+                    "\n"
+                    "fn main() {\n"
+                    "    run();\n"
+                    "}\n");
+    write_temp_file(tmp, "pysrc/lib.py", "def new():\n    return {}\n");
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = rust_fixture_run(tmp, pad_files, "rust_only.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+    int foreign = rs_edge_to_file(s, project, "CALLS", "run", "new", "pysrc/lib.py");
+    int own = rs_edge_to_file(s, project, "CALLS", "run", "new", "src/store.rs");
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    /* Never onto the other language's function ... */
+    ASSERT_EQ(foreign, 0);
+    /* ... and the Rust call still binds the Rust associated function. */
+    ASSERT_GTE(own, 1);
+    PASS();
+}
+
+TEST(pipeline_rust_call_never_binds_another_language) {
+    return rust_registry_rust_only_case(0);
+}
+
+TEST(pipeline_rust_call_never_binds_another_language_parallel) {
+    return rust_registry_rust_only_case(52);
+}
+
+/* ec4f0eaa: `Opts::write(true)` is an associated function. The LSP's
+ * free-function short-name fallback bound it to the project's only free
+ * `write` (cache.write), and that LSP row pre-empted the registry's right
+ * answer. A type-qualified call never takes that fallback. */
+static int rust_assoc_call_free_namesake_case(int pad_files) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_rust_assoc_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    write_temp_file(tmp, "src/fsx.rs",
+                    "pub struct Opts {\n"
+                    "    pub w: bool,\n"
+                    "}\n"
+                    "\n"
+                    "impl Opts {\n"
+                    "    pub fn write(w: bool) -> Opts {\n"
+                    "        Opts { w }\n"
+                    "    }\n"
+                    "}\n");
+    write_temp_file(tmp, "src/cache.rs",
+                    "pub fn write(p: &str) -> usize {\n"
+                    "    p.len()\n"
+                    "}\n");
+    write_temp_file(tmp, "src/main.rs",
+                    "mod cache;\n"
+                    "mod fsx;\n"
+                    "\n"
+                    "use crate::fsx::Opts;\n"
+                    "\n"
+                    "fn run() -> bool {\n"
+                    "    let o = Opts::write(true);\n"
+                    "    o.w\n"
+                    "}\n"
+                    "\n"
+                    "fn main() {\n"
+                    "    run();\n"
+                    "    cache::write(\"x\");\n"
+                    "}\n");
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = rust_fixture_run(tmp, pad_files, "rust_assoc.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+    int assoc = rs_edge_to_file(s, project, "CALLS", "run", "write", "src/fsx.rs");
+    int hijack = rs_edge_to_file(s, project, "CALLS", "run", "write", "src/cache.rs");
+    int free_call = rs_edge_to_file(s, project, "CALLS", "main", "write", "src/cache.rs");
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    /* The associated function, never the free namesake ... */
+    ASSERT_GTE(assoc, 1);
+    ASSERT_EQ(hijack, 0);
+    /* ... while the module-qualified free call keeps its target. */
+    ASSERT_GTE(free_call, 1);
+    PASS();
+}
+
+TEST(pipeline_rust_assoc_call_never_binds_free_namesake) {
+    return rust_assoc_call_free_namesake_case(0);
+}
+
+TEST(pipeline_rust_assoc_call_never_binds_free_namesake_parallel) {
+    return rust_assoc_call_free_namesake_case(52);
+}
+
+/* 09c4885e / d40f8e6b / f75af00a (#763): calls inside a method of a generic
+ * impl (`impl<T> Gen<T>`, `impl<'a> Life<'a>`) were sourced from the File node:
+ * the call scope kept the generic arguments the def side strips. And the Rust
+ * LSP built its self type from the raw `Gen<T>`, so its rows never joined
+ * those callers and `Self::assoc_g()` had no edge at all. */
+static int rust_generic_impl_attribution_case(int pad_files) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_rust_gimpl_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "Cargo.toml", "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n");
+    write_temp_file(
+        tmp, "src/lib.rs",
+        "pub struct Gen<T> { v: T }\n"
+        "impl<T> Gen<T> {\n"
+        "    pub fn in_generic(&self) -> u32 { helper_a() + self.other_g() + Self::assoc_g() }\n"
+        "    pub fn other_g(&self) -> u32 { 3 }\n"
+        "    pub fn assoc_g() -> u32 { 4 }\n"
+        "}\n"
+        "pub struct Life<'a> { s: &'a str }\n"
+        "impl<'a> Life<'a> {\n"
+        "    pub fn in_lifetime(&self) -> u32 { helper_b() + self.other_l() }\n"
+        "    pub fn other_l(&self) -> u32 { 5 }\n"
+        "}\n"
+        "pub fn helper_a() -> u32 { 1 }\n"
+        "pub fn helper_b() -> u32 { 2 }\n");
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = rust_fixture_run(tmp, pad_files, "rust_gimpl.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+    int gen_a = rs_calls_with(s, project, "in_generic", "helper_a", NULL);
+    int life_b = rs_calls_with(s, project, "in_lifetime", "helper_b", NULL);
+    int file_a = rs_calls_with(s, project, "lib.rs", "helper_a", NULL);
+    int file_b = rs_calls_with(s, project, "lib.rs", "helper_b", NULL);
+    int lsp_a = rs_calls_with(s, project, "in_generic", "helper_a", "\"strategy\":\"lsp_");
+    int lsp_other_g = rs_calls_with(s, project, "in_generic", "other_g", "\"strategy\":\"lsp_");
+    int assoc_g = rs_calls_with(s, project, "in_generic", "assoc_g", NULL);
+    int lsp_other_l = rs_calls_with(s, project, "in_lifetime", "other_l", "\"strategy\":\"lsp_");
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    /* Each method sources its own call ... */
+    ASSERT_GTE(gen_a, 1);
+    ASSERT_GTE(life_b, 1);
+    /* ... and not the file. */
+    ASSERT_EQ(file_a, 0);
+    ASSERT_EQ(file_b, 0);
+    /* The LSP rows join these callers (lsp_*, not a registry fallback), and
+     * `self.` / `Self::` dispatch inside a generic impl resolves. */
+    ASSERT_GTE(lsp_a, 1);
+    ASSERT_GTE(lsp_other_g, 1);
+    ASSERT_GTE(assoc_g, 1);
+    ASSERT_GTE(lsp_other_l, 1);
+    PASS();
+}
+
+TEST(pipeline_rust_generic_impl_method_sources_its_calls) {
+    return rust_generic_impl_attribution_case(0);
+}
+
+TEST(pipeline_rust_generic_impl_method_sources_its_calls_parallel) {
+    return rust_generic_impl_attribution_case(52);
+}
+
+/* 7648e78b (#2922): `use crate::h::{Handler, Other};` was ONE import whose
+ * local name was the brace group, so neither name was bound and
+ * `Handler::new()` had no import to resolve through (a 300-impl `many.rs`
+ * makes `new` ambiguous by name). One import per leaf. */
+static int rust_grouped_import_case(int pad_files) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_rust_grouped_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
+    write_temp_file(tmp, "src/h.rs",
+                    "pub struct Handler { pub n: u32 }\n"
+                    "impl Handler { pub fn new() -> Handler { Handler { n: 1 } } }\n"
+                    "pub struct Other;\n");
+    std::string many;
+    for (int i = 0; i < 300; i++) {
+        std::string n = std::to_string(i);
+        many += "pub struct S" + n + ";\nimpl S" + n + " { pub fn new() -> S" + n + " { S" + n +
+                " } }\n";
+    }
+    write_temp_file(tmp, "src/many.rs", many.c_str());
+    write_temp_file(tmp, "src/main.rs",
+                    "mod h;\n"
+                    "mod many;\n"
+                    "use crate::h::{Handler, Other};\n"
+                    "fn grouped() -> u32 { let _o = Other; Handler::new().n }\n"
+                    "fn main() { grouped(); }\n");
+    cbm_pipeline_t *p = NULL;
+    cbm_store_t *s = rust_fixture_run(tmp, pad_files, "rust_grouped.db", &p);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+    int handler = rs_imports_binding(s, project, "src/main.rs", "Handler");
+    int other = rs_imports_binding(s, project, "src/main.rs", "Other");
+    int call = rs_edge_to_file(s, project, "CALLS", "grouped", "new", "src/h.rs");
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    ASSERT_EQ(handler, 1);
+    ASSERT_EQ(other, 1);
+    ASSERT_GTE(call, 1);
+    PASS();
+}
+
+TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922) {
+    return rust_grouped_import_case(0);
+}
+
+TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922_parallel) {
+    return rust_grouped_import_case(52);
+}
+
 /* Parallel twin (pass_parallel.cpp resolve_file_usages / resolve_file_rw):
  * upstream's sequential-only fix left 344 Go->C WRITES alive on a ~1150-file
  * repo. >= 50 files forces the parallel pipeline. */
@@ -15225,6 +15590,14 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_cross_language_suffix_match_winner_is_dropped_issue725);
     RUN_TEST(pipeline_go_rw_usage_never_cross_into_c);
     RUN_TEST(pipeline_go_rw_usage_never_cross_into_c_parallel);
+    RUN_TEST(pipeline_rust_call_never_binds_another_language);
+    RUN_TEST(pipeline_rust_call_never_binds_another_language_parallel);
+    RUN_TEST(pipeline_rust_assoc_call_never_binds_free_namesake);
+    RUN_TEST(pipeline_rust_assoc_call_never_binds_free_namesake_parallel);
+    RUN_TEST(pipeline_rust_generic_impl_method_sources_its_calls);
+    RUN_TEST(pipeline_rust_generic_impl_method_sources_its_calls_parallel);
+    RUN_TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922);
+    RUN_TEST(pipeline_rust_grouped_import_resolves_assoc_call_issue2922_parallel);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method);
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method_parallel);
     RUN_TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354);

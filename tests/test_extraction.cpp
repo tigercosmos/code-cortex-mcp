@@ -4306,15 +4306,112 @@ TEST(java_imports) {
     PASS();
 }
 
+static const CBMImport *rust_find_import(const CBMFileResult *r, const char *local) {
+    for (int i = 0; i < r->imports.count; i++) {
+        if (r->imports.items[i].local_name && strcmp(r->imports.items[i].local_name, local) == 0) {
+            return &r->imports.items[i];
+        }
+    }
+    return NULL;
+}
+
+/* 0 when `local` is imported with exactly `module_path` (upstream 7648e78b,
+ * 60d9c586). */
+static int rust_import_mismatch(const CBMFileResult *r, const char *local,
+                                const char *module_path) {
+    const CBMImport *imp = rust_find_import(r, local);
+    if (!imp || !imp->module_path) {
+        printf("  rust import '%s' missing\n", local);
+        return 1;
+    }
+    if (strcmp(imp->module_path, module_path) != 0) {
+        printf("  rust import '%s': '%s' != '%s'\n", local, imp->module_path, module_path);
+        return 1;
+    }
+    return 0;
+}
+
+/* A grouped `use a::{b, c::{d as e}, f::*}` is one import per leaf. */
 TEST(rust_imports) {
-    CBMFileResult *r = extract(
-        "use std::collections::HashMap;\nuse std::io::{self, Write};\nuse serde::Serialize;\n"
-        "fn main() {}\n",
-        CBM_LANG_RUST, "t", "main.rs");
+    CBMFileResult *r = extract("use std::collections::HashMap;\n"
+                               "use std::io::{self, Write};\n"
+                               "use serde::Serialize;\n"
+                               "use crate::h::{Handler, Other as O};\n"
+                               "use a::{b::{C, D}, E};\n"
+                               "use crate::ops::*;\n"
+                               "fn main() {}\n",
+                               CBM_LANG_RUST, "t", "main.rs");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
-    ASSERT_GT(r->imports.count, 0);
+    ASSERT_EQ(r->imports.count, 10);
     ASSERT(has_import(r, "std::collections::HashMap"));
+    ASSERT_EQ(rust_import_mismatch(r, "HashMap", "std::collections::HashMap"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "io", "std::io"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "Write", "std::io::Write"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "Serialize", "serde::Serialize"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "Handler", "crate::h::Handler"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "O", "crate::h::Other"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "C", "a::b::C"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "D", "a::b::D"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "E", "a::E"), 0);
+    ASSERT_EQ(rust_import_mismatch(r, "*", "crate::ops::*"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The def QN of `name` and the enclosing-function QN of the call `callee` inside
+ * it, from one extraction result. */
+static void rust_def_and_scope(const CBMFileResult *r, const char *name, const char *callee,
+                               const char **def_qn, const char **scope_qn) {
+    *def_qn = NULL;
+    *scope_qn = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->name && d->qualified_name && strcmp(d->name, name) == 0) {
+            *def_qn = d->qualified_name;
+        }
+    }
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (c->callee_name && strcmp(c->callee_name, callee) == 0 && c->enclosing_func_qn &&
+            strstr(c->enclosing_func_qn, name)) {
+            *scope_qn = c->enclosing_func_qn;
+        }
+    }
+}
+
+/* F-R4: a method of a generic impl (`impl<T> Gen<T>`, `impl<'a> Life<'a>`) got a
+ * call scope that kept the generic arguments ("...Gen<T>.in_generic") while the
+ * def side strips them ("...Gen.in_generic"), so no node carried the scope and
+ * every call in the body fell back to the File node (base census: 84,331 Rust
+ * CALLS sourced from a File although inside a function, 96% of all File-sourced
+ * Rust CALLS). The def QN and the call scope must agree. */
+TEST(extract_rust_generic_impl_call_scope_matches_def) {
+    CBMFileResult *r = extract("pub struct Plain;\n"
+                               "impl Plain {\n"
+                               "    pub fn in_plain(&self) -> u32 { helper() }\n"
+                               "}\n"
+                               "pub struct Gen<T> { v: T }\n"
+                               "impl<T> Gen<T> {\n"
+                               "    pub fn in_generic(&self) -> u32 { helper() }\n"
+                               "}\n"
+                               "pub struct Life<'a> { s: &'a str }\n"
+                               "impl<'a> Life<'a> {\n"
+                               "    pub fn in_lifetime(&self) -> u32 { helper() }\n"
+                               "}\n"
+                               "pub fn helper() -> u32 { 1 }\n",
+                               CBM_LANG_RUST, "t", "src/lib.rs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    static const char *const methods[] = {"in_plain", "in_generic", "in_lifetime", NULL};
+    for (int m = 0; methods[m]; m++) {
+        const char *def_qn = NULL;
+        const char *scope_qn = NULL;
+        rust_def_and_scope(r, methods[m], "helper", &def_qn, &scope_qn);
+        ASSERT_NOT_NULL(def_qn);
+        ASSERT_NOT_NULL(scope_qn);
+        ASSERT_STR_EQ(scope_qn, def_qn);
+    }
     cbm_free_result(r);
     PASS();
 }
@@ -12677,6 +12774,7 @@ SUITE(extraction) {
     RUN_TEST(extract_go_struct_fields_have_nodes);
     RUN_TEST(java_imports);
     RUN_TEST(rust_imports);
+    RUN_TEST(extract_rust_generic_impl_call_scope_matches_def);
     RUN_TEST(c_imports);
     RUN_TEST(ruby_imports);
     RUN_TEST(lua_imports);
