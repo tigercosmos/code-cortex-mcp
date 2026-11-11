@@ -2290,6 +2290,292 @@ TEST(tslsp_crossfile_chain_through_return) {
     PASS();
 }
 
+/* The call target and its return signature must use the same exported name,
+ * even when the module also exports a function named like the local alias
+ * (upstream 2a9796e0). */
+static int ts_renamed_import_return_chain(bool shared_registry) {
+    const char *source = "import { make as alias } from './lib';\n"
+                         "function go() { alias().read(); }\n";
+    CBMLSPDef defs[] = {
+        {.qualified_name = "test.main.go",
+         .short_name = "go",
+         .label = "Function",
+         .def_module_qn = "test.main",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.lib.Good",
+         .short_name = "Good",
+         .label = "Class",
+         .def_module_qn = "test.lib",
+         .method_names_str = "read",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.lib.Good.read",
+         .short_name = "read",
+         .label = "Method",
+         .receiver_type = "test.lib.Good",
+         .def_module_qn = "test.lib",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.lib.Bad",
+         .short_name = "Bad",
+         .label = "Class",
+         .def_module_qn = "test.lib",
+         .method_names_str = "read",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.lib.Bad.read",
+         .short_name = "read",
+         .label = "Method",
+         .receiver_type = "test.lib.Bad",
+         .def_module_qn = "test.lib",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.lib.make",
+         .short_name = "make",
+         .label = "Function",
+         .def_module_qn = "test.lib",
+         .return_types = "test.lib.Good",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.lib.alias",
+         .short_name = "alias",
+         .label = "Function",
+         .def_module_qn = "test.lib",
+         .return_types = "test.lib.Bad",
+         .lang = CBM_LANG_TYPESCRIPT},
+    };
+    enum { NDEFS = (int)(sizeof(defs) / sizeof(defs[0])) };
+    const char *imp_names[] = {"alias"};
+    const char *imp_qns[] = {"test.lib"};
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {};
+    if (shared_registry) {
+        CBMTypeRegistry *reg = cbm_ts_build_cross_registry(&arena, defs, NDEFS);
+        ASSERT_NOT_NULL(reg);
+        cbm_run_ts_lsp_cross_with_registry(&arena, source, (int)strlen(source), "test.main", false,
+                                           false, false, reg, defs, NDEFS, imp_names, imp_qns, 1,
+                                           NULL, &out);
+    } else {
+        cbm_run_ts_lsp_cross(&arena, source, (int)strlen(source), "test.main", false, false, false,
+                             defs, NDEFS, imp_names, imp_qns, 1, NULL, &out);
+    }
+    bool direct = has_exact_resolved(&out, "test.main.go", "test.lib.make", "lsp_import_alias");
+    bool good = has_exact_resolved(&out, "test.main.go", "test.lib.Good.read", "lsp_ts_method");
+    bool bad = has_exact_resolved(&out, "test.main.go", "test.lib.Bad.read", "lsp_ts_method");
+    cbm_arena_destroy(&arena);
+    ASSERT_TRUE(direct);
+    ASSERT_FALSE(bad);
+    ASSERT_TRUE(good);
+    PASS();
+}
+
+TEST(tslsp_crossfile_renamed_import_return_chain) {
+    return ts_renamed_import_return_chain(false);
+}
+
+TEST(tslsp_crossfile_renamed_import_return_chain_shared) {
+    return ts_renamed_import_return_chain(true);
+}
+
+/* Keep the supplied import map at one entry: this measures the AST alias
+ * collector independently of the older import-map insertion path. */
+static size_t ts_import_alias_arena_bytes(int count) {
+    size_t capacity = (size_t)count * 48 + 64;
+    char *source = (char *)malloc(capacity);
+    if (!source)
+        return 0;
+    size_t len = (size_t)snprintf(source, capacity, "import { ");
+    for (int i = 0; i < count; i++) {
+        len += (size_t)snprintf(source + len, capacity - len, "%sf%d as a%d", i ? ", " : "", i, i);
+    }
+    len += (size_t)snprintf(source + len, capacity - len, " } from './lib';\n");
+    const char *imp_names[] = {"a0"};
+    const char *imp_qns[] = {"test.lib"};
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {};
+    cbm_run_ts_lsp_cross(&arena, source, (int)len, "test.main", false, false, false, NULL, 0,
+                         imp_names, imp_qns, 1, NULL, &out);
+    size_t bytes = cbm_arena_total(&arena);
+    cbm_arena_destroy(&arena);
+    free(source);
+    return bytes;
+}
+
+TEST(tslsp_import_alias_arena_growth) {
+    size_t small = ts_import_alias_arena_bytes(1024);
+    size_t large = ts_import_alias_arena_bytes(2048);
+    ASSERT_GT(small, 0);
+    ASSERT_GT(large, small);
+    printf(" aliases arena bytes: 1024=%zu 2048=%zu ", small, large);
+    /* Linear source/AST work plus geometric storage stays below 3x; retaining
+     * two complete arrays at every insertion grows approximately 4x. */
+    ASSERT(large < small * 3);
+    PASS();
+}
+
+/* Upstream #2297: `import { foo as fooShared }` bound only the local alias, and
+ * every import lookup spelled `<module>.<alias>`, which names nothing, so a call
+ * through a renamed import produced no CALLS edge. The binding resolves to the
+ * name the module exports, exactly like a plain named import. Driven through
+ * the production Tier-2 path (shared sealed registry + per-file overlay). */
+TEST(tslsp_crossfile_renamed_import_issue2297) {
+    CBMLSPDef defs[] = {
+        {.qualified_name = "test.lib.foo",
+         .short_name = "foo",
+         .label = "Function",
+         .def_module_qn = "test.lib",
+         .return_types = "number",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.conn.Conn",
+         .short_name = "Conn",
+         .label = "Class",
+         .def_module_qn = "test.conn",
+         .method_names_str = "ping",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.conn.Conn.ping",
+         .short_name = "ping",
+         .label = "Method",
+         .receiver_type = "test.conn.Conn",
+         .def_module_qn = "test.conn",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.main.callsRenamed",
+         .short_name = "callsRenamed",
+         .label = "Function",
+         .def_module_qn = "test.main",
+         .lang = CBM_LANG_TYPESCRIPT},
+        {.qualified_name = "test.main.viaRenamedClass",
+         .short_name = "viaRenamedClass",
+         .label = "Function",
+         .def_module_qn = "test.main",
+         .lang = CBM_LANG_TYPESCRIPT},
+    };
+    enum { NDEFS = (int)(sizeof(defs) / sizeof(defs[0])) };
+    const char *imp_names[] = {"fooShared", "Connection"};
+    const char *imp_qns[] = {"test.lib", "test.conn"};
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMTypeRegistry *reg = cbm_ts_build_cross_registry(&arena, defs, NDEFS);
+    ASSERT_NOT_NULL(reg);
+
+    const char *src =
+        "import { foo as fooShared } from './lib';\n"
+        "import { Conn as Connection } from './conn';\n"
+        "export function callsRenamed() { return fooShared(1); }\n"
+        "export function viaRenamedClass() { const c = new Connection(); c.ping(); }\n";
+    CBMResolvedCallArray out = {};
+    cbm_run_ts_lsp_cross_with_registry(&arena, src, (int)strlen(src), "test.main", false, false,
+                                       false, reg, defs, NDEFS, imp_names, imp_qns, 2, NULL, &out);
+    /* The call site names the alias, so the join reads it from `reason`. */
+    bool renamed =
+        has_exact_resolved(&out, "test.main.callsRenamed", "test.lib.foo", "lsp_import_alias");
+    bool via_class = has_exact_resolved(&out, "test.main.viaRenamedClass", "test.conn.Conn.ping",
+                                        "lsp_ts_method");
+    cbm_arena_destroy(&arena);
+    ASSERT_TRUE(renamed);
+    ASSERT_TRUE(via_class);
+    PASS();
+}
+
+/* The export name is looked up exactly. A renamed import of a name the module
+ * does not export must not fall back to the alias: before #2297 the alias `foo`
+ * spelled `test.lib.foo` and bound this call to an unrelated export. */
+TEST(tslsp_crossfile_renamed_import_missing_export_issue2297) {
+    const char *source = "import { missing as foo } from './lib';\n"
+                         "function go() { foo(1); }\n";
+    CBMLSPDef defs[] = {
+        {.qualified_name = "test.main.go",
+         .short_name = "go",
+         .label = "Function",
+         .def_module_qn = "test.main"},
+        {.qualified_name = "test.lib.foo",
+         .short_name = "foo",
+         .label = "Function",
+         .def_module_qn = "test.lib"},
+    };
+    const char *imp_names[] = {"foo"};
+    const char *imp_qns[] = {"test.lib"};
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {};
+
+    cbm_run_ts_lsp_cross(&arena, source, (int)strlen(source), "test.main", false, false, false,
+                         defs, 2, imp_names, imp_qns, 1, NULL, &out);
+
+    int idx = find_resolved_arr(&out, "go", "test.lib.foo");
+    cbm_arena_destroy(&arena);
+    ASSERT_EQ(idx, -1);
+    PASS();
+}
+
+/* `import { default as greet }` is a default import: it keeps resolving by its
+ * local name, as `import greet from` does. */
+TEST(tslsp_crossfile_default_as_import_issue2297) {
+    const char *source = "import { default as greet } from './greetings';\n"
+                         "function go() { greet('hi'); }\n";
+    CBMLSPDef defs[] = {
+        {.qualified_name = "test.main.go",
+         .short_name = "go",
+         .label = "Function",
+         .def_module_qn = "test.main"},
+        {.qualified_name = "test.greetings.greet",
+         .short_name = "greet",
+         .label = "Function",
+         .def_module_qn = "test.greetings",
+         .return_types = "string"},
+    };
+    const char *imp_names[] = {"greet"};
+    const char *imp_qns[] = {"test.greetings"};
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {};
+
+    cbm_run_ts_lsp_cross(&arena, source, (int)strlen(source), "test.main", false, false, false,
+                         defs, 2, imp_names, imp_qns, 1, NULL, &out);
+
+    int idx = find_resolved_arr(&out, "go", "test.greetings.greet");
+    cbm_arena_destroy(&arena);
+    ASSERT_GTE(idx, 0);
+    PASS();
+}
+
+/* Fork addition: a JSX tag through a renamed component import renders the
+ * exported component and joins by the written tag name. */
+TEST(tslsp_crossfile_renamed_jsx_import) {
+    const char *source = "import { Card as Tile } from './card';\n"
+                         "function App() { return <Tile/>; }\n";
+    CBMLSPDef defs[] = {
+        {.qualified_name = "test.main.App",
+         .short_name = "App",
+         .label = "Function",
+         .def_module_qn = "test.main"},
+        {.qualified_name = "test.card.Card",
+         .short_name = "Card",
+         .label = "Function",
+         .def_module_qn = "test.card"},
+    };
+    const char *imp_names[] = {"Tile"};
+    const char *imp_qns[] = {"test.card"};
+
+    CBMArena arena;
+    cbm_arena_init(&arena);
+    CBMResolvedCallArray out = {};
+
+    cbm_run_ts_lsp_cross(&arena, source, (int)strlen(source), "test.main", false, true, false, defs,
+                         2, imp_names, imp_qns, 1, NULL, &out);
+
+    bool alias = has_exact_resolved(&out, "test.main.App", "test.card.Card", "lsp_import_alias");
+    bool reason_ok = false;
+    for (int i = 0; i < out.count; i++) {
+        if (out.items[i].strategy && strcmp(out.items[i].strategy, "lsp_import_alias") == 0 &&
+            out.items[i].reason && strcmp(out.items[i].reason, "Tile") == 0)
+            reason_ok = true;
+    }
+    cbm_arena_destroy(&arena);
+    ASSERT_TRUE(alias);
+    ASSERT_TRUE(reason_ok);
+    PASS();
+}
+
 TEST(tslsp_crossfile_no_def_match) {
     /* Function that imports a symbol not in the def list — should resolve safely
      * (emit unresolved, no crash). */
@@ -4761,7 +5047,14 @@ SUITE(ts_lsp) {
     RUN_TEST(tslsp_scale_many_defs_no_crash_issue344);
     RUN_TEST(tslsp_crossfile_function_call);
     RUN_TEST(tslsp_crossfile_chain_through_return);
+    RUN_TEST(tslsp_crossfile_renamed_import_return_chain);
+    RUN_TEST(tslsp_crossfile_renamed_import_return_chain_shared);
+    RUN_TEST(tslsp_import_alias_arena_growth);
     RUN_TEST(tslsp_crossfile_no_def_match);
+    RUN_TEST(tslsp_crossfile_renamed_import_issue2297);
+    RUN_TEST(tslsp_crossfile_renamed_import_missing_export_issue2297);
+    RUN_TEST(tslsp_crossfile_default_as_import_issue2297);
+    RUN_TEST(tslsp_crossfile_renamed_jsx_import);
 
     /* More stdlib */
     RUN_TEST(tslsp_stdlib_date_toISOString);

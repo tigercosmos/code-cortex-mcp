@@ -10530,6 +10530,108 @@ TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354_parallel) {
     PASS();
 }
 
+/* Upstream #2297 + 2a9796e0: a call through `import { foo as fooShared }`
+ * produced no CALLS edge, so trace_path(foo, inbound) missed the caller. End to
+ * end through the real pipeline (sequential and parallel twins): the renamed
+ * call, an app-local wrapper that shares the exported name (it must reach
+ * lib's export, not itself), and a method on a renamed class import all reach
+ * the exported member, while the plain named import control keeps
+ * lsp_ts_import. */
+static const char *const k_ts_2297_names[] = {"src/lib.ts", "src/plain.ts", "src/renamed.ts",
+                                              "src/wrapper.ts", "src/klass.ts"};
+static const char *const k_ts_2297_bodies[] = {
+    "export function fooUniqueQrs(x: number): number {\n"
+    "  return x + 1;\n"
+    "}\n"
+    "export function buildHealthUniqueQrs(input: { a: number }): number {\n"
+    "  return input.a;\n"
+    "}\n"
+    "export class ConnUniqueQrs {\n"
+    "  pingUniqueQrs(): number {\n"
+    "    return 1;\n"
+    "  }\n"
+    "}\n",
+    "import { fooUniqueQrs } from './lib';\n"
+    "export function callsPlain(): number {\n"
+    "  return fooUniqueQrs(1);\n"
+    "}\n",
+    "import { fooUniqueQrs as fooShared } from './lib';\n"
+    "export function callsRenamed(): number {\n"
+    "  return fooShared(1);\n"
+    "}\n",
+    "import { buildHealthUniqueQrs as buildShared } from './lib';\n"
+    "export function buildHealthUniqueQrs(input: { a: number }): number {\n"
+    "  return buildShared({ ...input });\n"
+    "}\n",
+    "import { ConnUniqueQrs as Connection } from './lib';\n"
+    "export function viaRenamedClass(): number {\n"
+    "  return new Connection().pingUniqueQrs();\n"
+    "}\n"};
+
+/* 0 = every probe holds; negative = first failing probe. */
+static int ts_2297_probe(int pad) {
+    char db[512];
+    cbm_pipeline_t *p =
+        index_fixture_with_padding(k_ts_2297_names, k_ts_2297_bodies, 5, pad, db, sizeof(db));
+    if (!p) {
+        teardown_lang_repo();
+        return -9;
+    }
+    cbm_store_t *s = cbm_store_open_path(db);
+    const char *proj = cbm_pipeline_project_name(p);
+    int rc = -8;
+    if (s) {
+        int plain = named_edge_strategy_count(s, proj, "CALLS", "callsPlain", "fooUniqueQrs",
+                                              "lsp_ts_import");
+        int renamed = named_edge_strategy_count(s, proj, "CALLS", "callsRenamed", "fooUniqueQrs",
+                                                "lsp_import_alias");
+        int renamed_class = named_edge_strategy_count(s, proj, "CALLS", "viaRenamedClass",
+                                                      "pingUniqueQrs", "lsp_ts_method");
+        char wrapper_qn[512];
+        char exported_qn[512];
+        snprintf(wrapper_qn, sizeof(wrapper_qn), "%s.src.wrapper.buildHealthUniqueQrs", proj);
+        snprintf(exported_qn, sizeof(exported_qn), "%s.src.lib.buildHealthUniqueQrs", proj);
+        cbm_node_t wrapper_node = {};
+        cbm_node_t exported_node = {};
+        bool wrapper = false;
+        bool recursive = false;
+        if (cbm_store_find_node_by_qn(s, proj, wrapper_qn, &wrapper_node) == CBM_STORE_OK &&
+            cbm_store_find_node_by_qn(s, proj, exported_qn, &exported_node) == CBM_STORE_OK) {
+            cbm_edge_t *edges = NULL;
+            int edge_count = 0;
+            cbm_store_find_edges_by_source_type(s, wrapper_node.id, "CALLS", &edges, &edge_count);
+            for (int i = 0; i < edge_count; i++) {
+                if (edges[i].target_id == exported_node.id && edges[i].properties_json &&
+                    strstr(edges[i].properties_json, "lsp_import_alias"))
+                    wrapper = true;
+                if (edges[i].target_id == wrapper_node.id)
+                    recursive = true;
+            }
+            if (edges)
+                cbm_store_free_edges(edges, edge_count);
+        }
+        cbm_node_free_fields(&wrapper_node);
+        cbm_node_free_fields(&exported_node);
+        printf("  ts #2297 probe pad=%d: plain=%d renamed=%d class=%d wrapper=%d recursive=%d\n",
+               pad, plain, renamed, renamed_class, wrapper, recursive);
+        rc = plain != 1           ? -1
+             : renamed != 1       ? -2
+             : !wrapper           ? -3
+             : recursive          ? -4
+             : renamed_class != 1 ? -5
+                                  : 0;
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    return rc;
+}
+
+TEST(pipeline_ts_renamed_import_call_issue2297) {
+    ASSERT_EQ(ts_2297_probe(0), 0);
+    PASS();
+}
+
 /* #2053 Rust std-receiver probes (sequential and parallel twins). The Rust LSP
  * types `root: &Path` and dispatches `root.join(..)` to std's Path::join — a
  * symbol with no graph node. Before the fix the pipeline then fell back to the
@@ -13749,6 +13851,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_rust_std_receiver_never_binds_project_method_parallel);
     RUN_TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354);
     RUN_TEST(pipeline_ts_crossfile_new_instance_method_call_issue1354_parallel);
+    RUN_TEST(pipeline_ts_renamed_import_call_issue2297);
     RUN_TEST(pipeline_go_bare_ref_never_binds_field);
     RUN_TEST(pipeline_go_bare_ref_never_binds_field_parallel);
     RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);

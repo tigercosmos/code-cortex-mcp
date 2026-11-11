@@ -303,6 +303,24 @@ static void ts_emit_resolved_call(TSLSPContext* ctx, const char* callee_qn,
     cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
 }
 
+/* A resolved call whose site names something other than the callee's leaf
+ * (`bar()` through `import { foo as bar }`). `reason` carries the written name:
+ * the pipeline joins lsp_import_alias rows by it (cbm_lsp_strategy_matches_on_reason)
+ * instead of by the callee QN's last segment. */
+static void ts_emit_resolved_call_reason(TSLSPContext *ctx, const char *callee_qn,
+                                         const char *strategy, float confidence,
+                                         const char *reason) {
+    if (!ctx || !ctx->resolved_calls || !callee_qn || !ctx->enclosing_func_qn)
+        return;
+    CBMResolvedCall rc = {};
+    rc.caller_qn = ctx->enclosing_func_qn;
+    rc.callee_qn = callee_qn;
+    rc.strategy = strategy ? strategy : "lsp_ts";
+    rc.confidence = confidence;
+    rc.reason = reason;
+    cbm_resolvedcall_push(ctx->resolved_calls, ctx->arena, rc);
+}
+
 static void ts_emit_unresolved_call(TSLSPContext* ctx, const char* expr_text, const char* reason) {
     if (!ctx || !ctx->resolved_calls || !ctx->enclosing_func_qn) return;
     CBMResolvedCall rc = {};
@@ -1216,6 +1234,20 @@ static const CBMType* simplify_type(TSLSPContext* ctx, const CBMType* t) {
     return t;
 }
 
+/* The member an import binding names in its module: the exported name of a
+ * renamed named import (`foo` for `import { foo as bar }`, upstream #2297), else
+ * the binding itself. Callers have already matched `local` to an import binding.
+ * Pointer identity (result != local) tells a caller the binding was renamed. */
+static const char *ts_import_export_name(const TSLSPContext *ctx, const char *local) {
+    if (!ctx || !local)
+        return local;
+    for (int i = 0; i < ctx->import_alias_count; i++) {
+        if (strcmp(ctx->import_alias_locals[i], local) == 0)
+            return ctx->import_alias_exports[i];
+    }
+    return local;
+}
+
 /* Full QN of an imported symbol. An import value is normally the module QN
  * (symbol = module + "." + name), but may already be the symbol QN. When the
  * module QN ends in ".name" the spelling is ambiguous: `Foo.ts` exporting
@@ -1266,7 +1298,8 @@ static const CBMType* ts_new_bare_class_type(TSLSPContext* ctx, const char* cnam
         import_module = mqn;
     }
     if (import_module) {
-        const char* sym = ts_import_symbol_qn(ctx, import_module, cname);
+        const char *sym =
+            ts_import_symbol_qn(ctx, import_module, ts_import_export_name(ctx, cname));
         if (sym) return cbm_type_named(ctx->arena, sym);
     }
     return cbm_type_named(ctx->arena, local_qn);
@@ -1290,7 +1323,7 @@ static const CBMType* type_of_identifier(TSLSPContext* ctx, const char* name) {
 
         // Construct the full symbol QN (ts_import_symbol_qn: the registry decides
         // the ambiguous `x.Foo` spelling, #1354).
-        const char* full_qn = ts_import_symbol_qn(ctx, mqn, name);
+        const char *full_qn = ts_import_symbol_qn(ctx, mqn, ts_import_export_name(ctx, name));
         if (!full_qn) full_qn = mqn;
 
         // Try the symbol lookup precedence: registered func, then registered type.
@@ -2055,7 +2088,7 @@ static const CBMType* resolve_type_with_imports(TSLSPContext* ctx, const CBMType
             const char* mqn = ctx->import_module_qns ? ctx->import_module_qns[i] : NULL;
             if (!lname || !mqn) continue;
             if (strcmp(lname, bare) != 0) continue;
-            const char* sym = ts_import_symbol_qn(ctx, mqn, bare);
+            const char *sym = ts_import_symbol_qn(ctx, mqn, ts_import_export_name(ctx, bare));
             return cbm_type_named(ctx->arena, sym ? sym : mqn);
         }
         return t;
@@ -2460,14 +2493,23 @@ static void resolve_call_at(TSLSPContext* ctx, TSNode call_node) {
             const char* lname = ctx->import_local_names ? ctx->import_local_names[i] : NULL;
             const char* mqn = ctx->import_module_qns ? ctx->import_module_qns[i] : NULL;
             if (lname && mqn && strcmp(lname, name) == 0) {
-                const CBMRegisteredFunc* f = cbm_registry_lookup_symbol_by_args(
-                    ctx->registry, mqn, name, arg_count);
+                // `import { foo as bar }; bar()` looks up the exported `foo`, exactly:
+                // a renamed import of a name the module does not export resolves to
+                // nothing rather than to a same-named export matching the alias.
+                const char *member = ts_import_export_name(ctx, name);
+                const CBMRegisteredFunc *f =
+                    cbm_registry_lookup_symbol_by_args(ctx->registry, mqn, member, arg_count);
+                if (f && member != name) {
+                    ts_emit_resolved_call_reason(ctx, f->qualified_name, "lsp_import_alias", 0.95f,
+                                                 name);
+                    return;
+                }
                 if (f) {
                     ts_emit_resolved_call(ctx, f->qualified_name, "lsp_ts_import", 0.95f);
                     return;
                 }
                 // Fall through to qualified_name fallback.
-                const char* qn = cbm_arena_sprintf(ctx->arena, "%s.%s", mqn, name);
+                const char *qn = cbm_arena_sprintf(ctx->arena, "%s.%s", mqn, member);
                 ts_emit_unresolved_call(ctx, qn, "import_symbol_not_in_registry");
                 return;
             }
@@ -2775,6 +2817,20 @@ static void resolve_jsx_element(TSLSPContext* ctx, TSNode element_node) {
              * emission for relative specifiers and let that one stand. */
             if (mqn[0] == '.') {
                 ts_emit_unresolved_call(ctx, tag_name, "jsx_import_unresolved_path");
+                return;
+            }
+            // `import { Card as Tile }; <Tile/>` renders the exported `Card`. The
+            // tag does not name the callee's leaf, so the row joins by `reason`;
+            // emit it only for a registered component (the exact lookup).
+            const char *member = ts_import_export_name(ctx, tag_name);
+            if (member != tag_name) {
+                const CBMRegisteredFunc *f = cbm_registry_lookup_symbol(ctx->registry, mqn, member);
+                if (f) {
+                    ts_emit_resolved_call_reason(ctx, f->qualified_name, "lsp_import_alias", 0.95f,
+                                                 tag_name);
+                } else {
+                    ts_emit_unresolved_call(ctx, tag_name, "jsx_import_alias_not_in_registry");
+                }
                 return;
             }
             const char* qn = cbm_arena_sprintf(ctx->arena, "%s.%s", mqn, tag_name);
@@ -3298,6 +3354,68 @@ void ts_lsp_add_import(TSLSPContext* ctx, const char* local_name, const char* mo
     ctx->import_local_names = names;
     ctx->import_module_qns = qns;
     ctx->import_count = new_count;
+}
+
+static void ts_lsp_add_import_alias(TSLSPContext *ctx, const char *local, const char *exported) {
+    if ((size_t)ctx->import_alias_count == ctx->import_alias_capacity) {
+        /* The arena retains old arrays: grow geometrically so collecting A
+         * aliases retains O(A) pointers instead of O(A squared). */
+        size_t capacity = ctx->import_alias_capacity ? ctx->import_alias_capacity * 2 : 8;
+        const char **locals =
+            (const char **)cbm_arena_alloc(ctx->arena, capacity * sizeof(const char *));
+        const char **exports =
+            (const char **)cbm_arena_alloc(ctx->arena, capacity * sizeof(const char *));
+        if (!locals || !exports)
+            return;
+        for (int i = 0; i < ctx->import_alias_count; i++) {
+            locals[i] = ctx->import_alias_locals[i];
+            exports[i] = ctx->import_alias_exports[i];
+        }
+        ctx->import_alias_locals = locals;
+        ctx->import_alias_exports = exports;
+        ctx->import_alias_capacity = capacity;
+    }
+    ctx->import_alias_locals[ctx->import_alias_count] = local;
+    ctx->import_alias_exports[ctx->import_alias_count] = exported;
+    ctx->import_alias_count++;
+}
+
+/* Record each `import { foo as bar }` binding of the file (upstream #2297). The
+ * import map holds only local bindings, so a renamed binding spelled
+ * `<module>.bar`, named nothing, and every call through it lost its CALLS edge.
+ * Reading the file's own import statements serves the per-file and both
+ * cross-file entry points alike. `default as x` keeps the local-name lookup (a
+ * default import binds no exported member name); string export names and
+ * identity aliases need no entry. Must run before the type passes, which
+ * resolve imported type names. */
+static void ts_lsp_collect_import_aliases(TSLSPContext *ctx, TSNode root) {
+    if (!ctx || !ctx->arena || ts_node_is_null(root) || ctx->import_count == 0)
+        return;
+    uint32_t kn = 0;
+    TSNode *kids = collect_children(ctx->arena, root, &kn);
+    for (uint32_t i = 0; i < kn; i++) {
+        if (!node_kind_is(kids[i], "import_statement"))
+            continue;
+        TSNode named = find_first_kind(find_first_kind(kids[i], "import_clause"), "named_imports");
+        if (ts_node_is_null(named))
+            continue;
+        uint32_t sn = 0;
+        TSNode *specs = collect_children(ctx->arena, named, &sn);
+        for (uint32_t j = 0; j < sn; j++) {
+            if (!node_kind_is(specs[j], "import_specifier"))
+                continue;
+            TSNode name = ts_node_child_by_field_name(specs[j], "name", TS_LSP_FIELD_LEN("name"));
+            TSNode alias =
+                ts_node_child_by_field_name(specs[j], "alias", TS_LSP_FIELD_LEN("alias"));
+            if (!node_kind_is(name, "identifier") || !node_kind_is(alias, "identifier"))
+                continue;
+            char *exported = node_text(ctx, name);
+            char *local = node_text(ctx, alias);
+            if (exported && local && strcmp(exported, "default") != 0 &&
+                strcmp(exported, local) != 0)
+                ts_lsp_add_import_alias(ctx, local, exported);
+        }
+    }
 }
 
 // ── Stdlib seeds (Phase 5 will replace with generator) ────────────────────────
@@ -4919,6 +5037,7 @@ void cbm_run_ts_lsp(CBMArena* arena, CBMFileResult* result,
             ts_lsp_add_import(&ctx, imp->local_name, imp->module_path);
         }
     }
+    ts_lsp_collect_import_aliases(&ctx, root);
 
     ast_sweep_shapes(&ctx, root, &reg);
     refine_ast_signatures(&ctx, root, &reg);
@@ -5151,6 +5270,7 @@ void cbm_run_ts_lsp_cross_with_registry(CBMArena* arena,
             ts_lsp_add_import(&ctx, import_names[i], import_qns[i]);
         }
     }
+    ts_lsp_collect_import_aliases(&ctx, root);
 
     ast_sweep_shapes(&ctx, root, &overlay);
     refine_ast_signatures(&ctx, root, &overlay);
@@ -5346,6 +5466,7 @@ void cbm_run_ts_lsp_cross(CBMArena* arena,
             ts_lsp_add_import(&ctx, import_names[i], import_qns[i]);
         }
     }
+    ts_lsp_collect_import_aliases(&ctx, root);
 
     ast_sweep_shapes(&ctx, root, &reg);
     refine_ast_signatures(&ctx, root, &reg);
