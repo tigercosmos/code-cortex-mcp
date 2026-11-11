@@ -17,6 +17,7 @@
 #include "foundation/str_util.h" // cbm_json_escape, CBM_JSON_EMPTY_OBJECT
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
+#include "service_patterns.h" // cbm_service_pattern_http_method (#2768)
 
 #include <sqlite3/sqlite3.h>
 #include <stdint.h>
@@ -647,6 +648,19 @@ static int match_http_routes(cbm_store_t *src_store, const char *src_project,
         char method[CBM_SZ_32] = {0};
         json_str_prop(props, "url_path", url_path, sizeof(url_path));
         json_str_prop(props, "method", method, sizeof(method));
+        /* A client edge stored without a method (an older index, or an emitter
+         * that did not type it) still names its verb in the callee
+         * (`this.http.get`, `api.patch`): infer it, so it binds the server's
+         * verb-specific Route rather than only an ANY one (#2768, upstream
+         * c548d8e4). */
+        if (!method[0]) {
+            char callee[CBM_SZ_256] = {0};
+            json_str_prop(props, "callee", callee, sizeof(callee));
+            const char *m = callee[0] ? cbm_service_pattern_http_method(callee) : NULL;
+            if (m) {
+                snprintf(method, sizeof(method), "%s", m);
+            }
+        }
         if (!url_path[0]) {
             continue;
         }

@@ -2172,22 +2172,36 @@ static void detect_url_in_args(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
         if (!cbm_service_pattern_is_http_route_literal(norm, call->callee_name)) {
             continue;
         }
+        /* A verb-suffix wrapper (`this.api.head('/x')`) names its HTTP method:
+         * type the Route and the edge with it instead of ANY (#2768, upstream
+         * c548d8e4, 6b6213e8). Parallel only: the sequential resolver has no
+         * arg-URL heuristic at all (upstream #2848), so there is no twin. */
+        const char *method = cbm_service_pattern_http_method(call->callee_name);
         char route_qn[CBM_ROUTE_QN_SIZE];
         char cpath[CBM_SZ_256];
-        snprintf(route_qn, sizeof(route_qn), "__route__ANY__%s",
+        snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method ? method : "ANY",
                  cbm_route_canon_path(norm, cpath, sizeof(cpath)));
-        int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", norm, route_qn, "", 0, 0,
-                                                "{\"source\":\"arg_url\"}");
+        char route_props[CBM_SZ_256];
+        int rn = method ? snprintf(route_props, sizeof(route_props),
+                                   "{\"source\":\"arg_url\",\"method\":\"%s\"}", method)
+                        : snprintf(route_props, sizeof(route_props), "{\"source\":\"arg_url\"}");
+        int64_t route_id =
+            cbm_gbuf_upsert_node(gbuf, "Route", norm, route_qn, "", 0, 0,
+                                 cbm_json_props_checked(route_props, rn, sizeof(route_props)));
         char esc_c[CBM_SZ_256];
         char esc_n[CBM_SZ_256];
         cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
         cbm_json_escape(esc_n, sizeof(esc_n), norm);
-        /* Two CBM_SZ_256 escapes + wrapper overflow CBM_SZ_512, and a cut
-         * url_path is exactly what url_path_gen's json_extract chokes on. */
+        /* Two CBM_SZ_256 escapes + wrapper (+ verb) overflow CBM_SZ_512, and a
+         * cut url_path is exactly what url_path_gen's json_extract chokes on. */
         char eprops[CBM_SZ_1K];
-        int en =
-            snprintf(eprops, sizeof(eprops),
-                     "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"arg_url\"}", esc_c, esc_n);
+        int en = method ? snprintf(eprops, sizeof(eprops),
+                                   "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"arg_url\","
+                                   "\"method\":\"%s\"}",
+                                   esc_c, esc_n, method)
+                        : snprintf(eprops, sizeof(eprops),
+                                   "{\"callee\":\"%s\",\"url_path\":\"%s\",\"via\":\"arg_url\"}",
+                                   esc_c, esc_n);
         cbm_gbuf_insert_edge(gbuf, source->id, route_id, "HTTP_CALLS",
                              cbm_json_props_checked(eprops, en, sizeof(eprops)));
         break;
