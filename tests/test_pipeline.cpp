@@ -12629,37 +12629,6 @@ TEST(pipeline_go_multi_return_receiver_is_typed_parallel) {
     PASS();
 }
 
-/* Edges of `edge_type` whose source and target QNs end in the given suffixes. */
-static int edges_by_qn_suffix(cbm_store_t *s, const char *project, const char *edge_type,
-                              const char *caller_suffix, const char *callee_suffix) {
-    cbm_edge_t *edges = NULL;
-    int edge_count = 0;
-    cbm_store_find_edges_by_type(s, project, edge_type, &edges, &edge_count);
-    size_t cs = strlen(caller_suffix);
-    size_t ts = strlen(callee_suffix);
-    int hits = 0;
-    for (int i = 0; i < edge_count; i++) {
-        cbm_node_t src = {0};
-        cbm_node_t tgt = {0};
-        if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
-            cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK &&
-            src.qualified_name && tgt.qualified_name) {
-            size_t sl = strlen(src.qualified_name);
-            size_t tl = strlen(tgt.qualified_name);
-            if (sl >= cs && tl >= ts && strcmp(src.qualified_name + sl - cs, caller_suffix) == 0 &&
-                strcmp(tgt.qualified_name + tl - ts, callee_suffix) == 0) {
-                hits++;
-            }
-        }
-        cbm_node_free_fields(&src);
-        cbm_node_free_fields(&tgt);
-    }
-    if (edges) {
-        cbm_store_free_edges(edges, edge_count);
-    }
-    return hits;
-}
-
 /* Upstream #1910 (adff62e7): two files, one package, one init() each. On the
  * flat QN both collapsed onto one node. */
 static const char *const k_go_multi_init_names[] = {"go.mod", "reg/a.go", "reg/b.go"};

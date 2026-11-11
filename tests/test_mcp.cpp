@@ -8575,7 +8575,7 @@ TEST(search_code_rejects_quote_in_file_pattern) {
 }
 
 /* issue #2836: a file_pattern with '/' matched only the basename (macOS) or a
- * path suffix (Linux), so a directory-scoped glob such as src/cli/*.c silently
+ * path suffix (Linux), so a directory-scoped glob ("*.c" under src/cli) silently
  * returned 0 results while search_graph matches the repo-relative path. */
 TEST(search_code_file_pattern_matches_repo_relative_path_issue2836) {
     char tmp[CBM_SZ_512];
