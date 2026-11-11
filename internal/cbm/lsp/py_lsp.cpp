@@ -3457,15 +3457,25 @@ static void py_exec_class_definition(PyLSPContext* ctx, TSNode class_node) {
     py_scope_restore(ctx, saved_scope);
 }
 
-static void py_process_class(PyLSPContext* ctx, TSNode class_node) {
+/* Walk a class's methods with the class qualified under `outer_qn`: the
+ * module for a top-level class, the enclosing class for a class nested in a
+ * class body (proj.m.Outer.Inner, the QN extraction gives it). Walked under
+ * the module, a nested class's method rows carried callers no node has and
+ * never joined (upstream ace384c9). */
+static void py_process_class_in(PyLSPContext* ctx, TSNode class_node, const char* outer_qn) {
     if (!ctx || ctx->eval_failure) return;
     TSNode name_node = ts_node_child_by_field_name(class_node, "name", 4);
     if (ts_node_is_null(name_node)) return;
     char* cname = py_node_text(ctx, name_node);
     if (!cname || !cname[0]) return;
+    if (!outer_qn) outer_qn = ctx->module_qn;
 
     const char* prev_class = ctx->enclosing_class_qn;
-    ctx->enclosing_class_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, cname);
+    ctx->enclosing_class_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", outer_qn, cname);
+    if (!ctx->enclosing_class_qn) {
+        ctx->enclosing_class_qn = prev_class;
+        return;
+    }
 
     TSNode body = ts_node_child_by_field_name(class_node, "body", 4);
     if (!ts_node_is_null(body)) {
@@ -3530,14 +3540,22 @@ static void py_process_class(PyLSPContext* ctx, TSNode class_node) {
                     strcmp(ts_node_type(def), "function_definition") == 0 &&
                     !py_is_init_method(ctx, def)) {
                     py_process_function(ctx, def, ctx->enclosing_class_qn);
+                } else if (!ts_node_is_null(def) &&
+                           strcmp(ts_node_type(def), "class_definition") == 0) {
+                    py_process_class_in(ctx, def, ctx->enclosing_class_qn);
                 }
             } else if (strcmp(ck, "class_definition") == 0) {
-                py_process_class(ctx, c);
+                /* A class nested in a class is qualified by its outer class. */
+                py_process_class_in(ctx, c, ctx->enclosing_class_qn);
             }
         }
     }
 
     ctx->enclosing_class_qn = prev_class;
+}
+
+static void py_process_class(PyLSPContext* ctx, TSNode class_node) {
+    py_process_class_in(ctx, class_node, NULL);
 }
 
 /* Bind every Class / Type definition from the registry into the root scope

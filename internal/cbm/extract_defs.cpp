@@ -8838,8 +8838,13 @@ static void push_nested_class_nodes(TSNode body, const CBMLangSpec *spec, wd_sta
                     wd_push(s, child, enclosing_qn);
                 } else {
                     const char *ck = ts_node_type(child);
+                    /* A decorated nested class (Python `@dataclass class Meta:` in
+                     * a class body) is still nested here: the decorated_definition
+                     * wraps the class_definition. */
                     if (strcmp(ck, "field_declaration") == 0 ||
-                        strcmp(ck, "template_declaration") == 0 || strcmp(ck, "declaration") == 0) {
+                        strcmp(ck, "template_declaration") == 0 || strcmp(ck, "declaration") == 0 ||
+                        (ctx->language == CBM_LANG_PYTHON &&
+                         strcmp(ck, "decorated_definition") == 0)) {
                         ts_nstack_push(&nc_stack, child);
                     }
                 }
