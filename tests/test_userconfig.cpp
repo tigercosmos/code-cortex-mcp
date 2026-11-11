@@ -38,15 +38,19 @@ TEST(userconfig_project_basic) {
 
     char proj[512];
     snprintf(proj, sizeof(proj), "%s/.code-cortex.json", dir);
-    ASSERT_EQ(
-        write_json(proj, "{\"extra_extensions\":{\".blade.php\":\"php\",\".mjs\":\"javascript\"}}"),
-        0);
+    ASSERT_EQ(write_json(proj,
+                         "{\"extra_extensions\":{\".blade.php\":\"php\",\".mjs\":\"javascript\","
+                         "\".html\":\"jinja2\",\".j2x\":\"jinja\"}}"),
+              0);
 
     cbm_userconfig_t *cfg = cbm_userconfig_load(dir);
     ASSERT_NOT_NULL(cfg);
 
     ASSERT_EQ(cbm_userconfig_lookup(cfg, ".blade.php"), CBM_LANG_PHP);
     ASSERT_EQ(cbm_userconfig_lookup(cfg, ".mjs"), CBM_LANG_JAVASCRIPT);
+    /* jinja2 and its jinja alias name the Jinja2 language (upstream 5c52a004). */
+    ASSERT_EQ(cbm_userconfig_lookup(cfg, ".html"), CBM_LANG_JINJA2);
+    ASSERT_EQ(cbm_userconfig_lookup(cfg, ".j2x"), CBM_LANG_JINJA2);
     ASSERT_EQ(cbm_userconfig_lookup(cfg, ".go"), CBM_LANG_COUNT); /* not in user config */
 
     cbm_userconfig_free(cfg);
