@@ -3663,6 +3663,14 @@ static yyjson_doc *enrich_node_properties_ex(yyjson_mut_doc *doc, yyjson_mut_val
  * the whole text. */
 enum { MCP_SEARCH_DOCSTRING_CAP = 500 };
 
+/* The same for a signature in a listing. The definition property buffer is
+ * now sized for every field (upstream 5992ea61), so a signature that used to
+ * be squeezed out of the properties is stored whole -- and fastapi's
+ * Annotated[..., Doc("""...""")] parameter lists run to kilobytes each: fifty
+ * rows of them took a label listing from 44 KB to 107 KB and doubled its
+ * latency. The single-symbol tools still return the whole signature. */
+enum { MCP_SEARCH_SIGNATURE_CAP = 300 };
+
 /* Emit the cbm_store_search results as a JSON "results" array on the doc.
  * Property docs created via enrich_node_properties are collected in
  * *out_pdocs (count in *out_pdoc_count) and must be freed by the caller
@@ -8438,8 +8446,10 @@ static size_t utf8_prefix_len(const char *s, size_t len, size_t cap) {
     return n;
 }
 
-/* docstring_cap > 0 cuts a longer "docstring" to that many bytes and adds
- * "docstring_truncated": true; 0 keeps it whole. */
+/* docstring_cap > 0 (a search listing) cuts a longer "docstring" to that many
+ * bytes and adds "docstring_truncated": true, and cuts a "signature" longer
+ * than MCP_SEARCH_SIGNATURE_CAP the same way ("signature_truncated": true);
+ * 0 keeps both whole. */
 static yyjson_doc *enrich_node_properties_ex(yyjson_mut_doc *doc, yyjson_mut_val *obj,
                                              const char *properties_json, bool skip_metrics,
                                              size_t docstring_cap) {
@@ -8473,6 +8483,13 @@ static yyjson_doc *enrich_node_properties_ex(yyjson_mut_doc *doc, yyjson_mut_val
             yyjson_mut_obj_add_strn(doc, obj, k, ds,
                                     utf8_prefix_len(ds, yyjson_get_len(val), docstring_cap));
             yyjson_mut_obj_add_bool(doc, obj, "docstring_truncated", true);
+        } else if (yyjson_is_str(val) && docstring_cap > 0 && strcmp(k, "signature") == 0 &&
+                   yyjson_get_len(val) > MCP_SEARCH_SIGNATURE_CAP) {
+            const char *sig = yyjson_get_str(val);
+            yyjson_mut_obj_add_strn(
+                doc, obj, k, sig,
+                utf8_prefix_len(sig, yyjson_get_len(val), MCP_SEARCH_SIGNATURE_CAP));
+            yyjson_mut_obj_add_bool(doc, obj, "signature_truncated", true);
         } else if (yyjson_is_str(val)) {
             yyjson_mut_obj_add_str(doc, obj, k, yyjson_get_str(val));
         } else if (yyjson_is_bool(val)) {
