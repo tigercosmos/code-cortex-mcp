@@ -672,20 +672,17 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
  * and a bare short-name strategy binds it to an arbitrary same-named project
  * symbol (`f.Close()` on an os.File -> a project `Close`, suffix_match over 15
  * candidates). Built on the shared drop-list so "weak" means one thing for
- * every guard; Go narrows it in two places only. */
+ * every guard; Go narrows it in one place only (unique_name below).
+ * field_type_hint stays weak: it is a receiver-NAME match, not a declared-type
+ * lookup (the parallel resolver no longer produces it for Go; a typed field
+ * call such as `s.repo.Find()` resolves through the Go LSP). */
 bool cbm_go_suppress_weak_method_match(bool is_go, bool is_method, const char *strategy,
                                        double confidence) {
     if (!is_go || !is_method || !cbm_weak_short_name_strategy(strategy)) {
         return false;
     }
-    /* field_type_hint is KEPT for Go: a Go struct field carries a declared
-     * type, so the parallel resolver's field-type hint is receiver-aware for
-     * Go (lrp_go_s8_field_type_hint), not a heuristic. */
-    if (strcmp(strategy, "field_type_hint") == 0) {
-        return false;
-    }
     if (strcmp(strategy, "unique_name") != 0) {
-        return true; /* suffix_match, fuzzy */
+        return true; /* suffix_match, field_type_hint, fuzzy */
     }
     /* unique_name is dropped only when PENALIZED: resolve_name_lookup scales
      * CONF_UNIQUE_NAME by DEFAULT_CONFIDENCE exactly when the lone candidate is

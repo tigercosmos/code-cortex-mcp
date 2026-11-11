@@ -1305,11 +1305,12 @@ TEST(weak_call_guards_share_one_drop_list) {
         bool weak = cbm_weak_short_name_strategy(strategies[i]);
         ASSERT_EQ(cbm_suppress_weak_member_match(true, true, strategies[i]), weak);
         ASSERT_EQ(cbm_suppress_weak_local_binding_call(true, true, strategies[i]), weak);
-        /* The Go selector guard builds on the same list and narrows it in
-         * exactly one place at a penalized confidence (0.75 * 0.5): it keeps
-         * field_type_hint. Any other drift from the shared list fails here. */
+        /* The Go selector guard builds on the same list. At a penalized
+         * confidence (0.75 * 0.5) it agrees with it exactly; its one narrowing
+         * (an unpenalized unique_name) does not apply here. Any drift from
+         * the shared list fails here. */
         bool go = cbm_go_suppress_weak_method_match(true, true, strategies[i], 0.375);
-        bool go_expected = weak && strcmp(strategies[i], "field_type_hint") != 0;
+        bool go_expected = weak;
         if (go != go_expected) {
             printf("  Go drop-list divergence on strategy \"%s\": go=%d expected=%d\n",
                    strategies[i], go, go_expected);
@@ -1329,6 +1330,9 @@ TEST(go_suppress_drops_weak_selector_matches) {
     ASSERT_TRUE(cbm_go_suppress_weak_method_match(true, true, "suffix_match", 0.11));
     ASSERT_TRUE(cbm_go_suppress_weak_method_match(true, true, "fuzzy", 0.9));
     ASSERT_TRUE(cbm_go_suppress_weak_method_match(true, true, "unique_name", 0.375));
+    /* field_type_hint is a receiver-NAME match, not type evidence (upstream
+     * e554a2ab): weak for Go like the shared list. */
+    ASSERT_TRUE(cbm_go_suppress_weak_method_match(true, true, "field_type_hint", 0.85));
     PASS();
 }
 
@@ -1336,9 +1340,6 @@ TEST(go_suppress_keeps_typed_and_import_aware_matches) {
     /* Unpenalized unique_name = lone candidate inside the caller's import
      * closure (or an import-free file, e.g. same-package): kept. */
     ASSERT_FALSE(cbm_go_suppress_weak_method_match(true, true, "unique_name", 0.75));
-    /* field_type_hint is receiver-aware for Go (struct fields carry declared
-     * types), so it stays, unlike the TS/JS list. */
-    ASSERT_FALSE(cbm_go_suppress_weak_method_match(true, true, "field_type_hint", 0.85));
     ASSERT_FALSE(cbm_go_suppress_weak_method_match(true, true, "same_module", 0.9));
     ASSERT_FALSE(cbm_go_suppress_weak_method_match(true, true, "import_map", 0.95));
     ASSERT_FALSE(cbm_go_suppress_weak_method_match(true, true, "import_map_suffix", 0.9));

@@ -10416,8 +10416,9 @@ TEST(pipeline_go_rw_usage_never_cross_into_c_parallel) {
  * caller imports util so an unreachable unique_name candidate carries the
  * import penalty. Controls: a typed same-package call, a bare local call and an
  * import-qualified cross-package call keep their edges. */
-static const char *const k_go_recv_names[] = {"go.mod", "storage/storage.go", "util/util.go",
-                                              "hash/hash.go"};
+static const char *const k_go_recv_names[] = {
+    "go.mod",          "storage/storage.go", "util/util.go",     "hash/hash.go",
+    "TBench/bench.go", "worker/worker.go",   "hash/hash_test.go"};
 static const char *const k_go_recv_bodies[] = {
     "module example.com/myapp\n\ngo 1.22\n",
     "package storage\n\ntype Storage struct{ open bool }\n\n"
@@ -10431,13 +10432,23 @@ static const char *const k_go_recv_bodies[] = {
     "\t\treturn 0\n\t}\n\treturn st.Size()\n}\n\n"
     "func localHelper() int { return 1 }\n\n"
     "func CallsLocal() int { return localHelper() }\n\n"
-    "func UsesUtil() string { return util.Tag() }\n"};
+    "func UsesUtil() string { return util.Tag() }\n",
+    /* Upstream e554a2ab: two project methods named Run, one under a directory
+     * whose QN carries an uppercase T. `t.Run` on a *testing.T binds neither;
+     * the parallel field-type hint matched the capitalized receiver variable
+     * ("T") and produced a parallel-only edge. */
+    "package tbench\n\ntype Bench struct{}\n\n"
+    "func (b *Bench) Run(name string) bool { return name != \"\" }\n",
+    "package worker\n\ntype Worker struct{}\n\n"
+    "func (w *Worker) Run(name string) bool { return false }\n",
+    "package hash\n\nimport \"testing\"\n\n"
+    "func TestSubRun(t *testing.T) {\n\tt.Run(\"a\", func(t *testing.T) {})\n}\n"};
 
 /* 0 = the false edge is gone and every control kept; <0 names the failure. */
 static int go_receiver_guard_probe(int pad) {
     char db[512];
     cbm_pipeline_t *p =
-        index_fixture_with_padding(k_go_recv_names, k_go_recv_bodies, 4, pad, db, sizeof(db));
+        index_fixture_with_padding(k_go_recv_names, k_go_recv_bodies, 7, pad, db, sizeof(db));
     if (!p) {
         teardown_lang_repo();
         return -9;
@@ -10450,6 +10461,7 @@ static int go_receiver_guard_probe(int pad) {
         int boot = named_edge_count(s, proj, "CALLS", "Boot", "Close");
         int local = named_edge_count(s, proj, "CALLS", "CallsLocal", "localHelper");
         int util = named_edge_count(s, proj, "CALLS", "UsesUtil", "Tag");
+        bad += named_edge_count(s, proj, "CALLS", "TestSubRun", "Run");
         printf("  go receiver probe pad=%d: false=%d boot=%d local=%d util=%d\n", pad, bad, boot,
                local, util);
         rc = bad != 0 ? -1 : (boot < 1 ? -2 : (local < 1 ? -3 : (util < 1 ? -4 : 0)));
@@ -10469,6 +10481,130 @@ TEST(pipeline_go_receiver_suppresses_weak_method_edge) {
 /* Parallel twin (pass_parallel.cpp, upstream 7528ec06): >= 50 files. */
 TEST(pipeline_go_receiver_parallel_suppresses_weak_method_edge) {
     ASSERT_EQ(go_receiver_guard_probe(52), 0);
+    PASS();
+}
+
+/* CALLS edges whose caller and callee QNs end in the given suffixes and whose
+ * properties contain `fragment` (NULL = every such edge). */
+static int calls_by_qn_suffix(cbm_store_t *s, const char *project, const char *caller_suffix,
+                              const char *callee_suffix, const char *fragment) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &edge_count);
+    int hits = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t src = {0};
+        cbm_node_t tgt = {0};
+        if (cbm_store_find_node_by_id(s, edges[i].source_id, &src) == CBM_STORE_OK &&
+            cbm_store_find_node_by_id(s, edges[i].target_id, &tgt) == CBM_STORE_OK) {
+            size_t sl = strlen(src.qualified_name);
+            size_t tl = strlen(tgt.qualified_name);
+            size_t cs = strlen(caller_suffix);
+            size_t ts = strlen(callee_suffix);
+            if (sl >= cs && tl >= ts && strcmp(src.qualified_name + sl - cs, caller_suffix) == 0 &&
+                strcmp(tgt.qualified_name + tl - ts, callee_suffix) == 0 &&
+                (!fragment ||
+                 (edges[i].properties_json && strstr(edges[i].properties_json, fragment)))) {
+                hits++;
+            }
+        }
+        cbm_node_free_fields(&src);
+        cbm_node_free_fields(&tgt);
+    }
+    if (edges)
+        cbm_store_free_edges(edges, edge_count);
+    return hits;
+}
+
+/* Upstream #1927 (ac46c17f): try_field_type_hint (parallel resolver only)
+ * matched the hinted type name as a raw SUBSTRING of the candidate QN, so a
+ * one-letter receiver (`f.Close()`, hint "F") latched onto `...FileStore.Close`.
+ * Go no longer takes the hint at all (e554a2ab), so here both the stdlib
+ * `f.Close()` and the ambiguous `finder.Find()` are decided by the Go LSP and
+ * the selector guard: no edge onto a project Close, and the typed Find binds. */
+static const char *const k_go_fth_names[] = {
+    "go.mod",           "filestore/filestore.go", "conn/conn.go",
+    "finder/finder.go", "locator/locator.go",     "app/app.go"};
+static const char *const k_go_fth_bodies[] = {
+    "module example.com/fxhint\n\ngo 1.22\n",
+    "package filestore\n\ntype FileStore struct{ open bool }\n\n"
+    "func (fs *FileStore) Close() {\n\tfs.open = false\n}\n",
+    "package conn\n\ntype Conn struct{ live bool }\n\n"
+    "func (cn *Conn) Close() {\n\tcn.live = false\n}\n",
+    "package finder\n\ntype Finder struct{ n int }\n\n"
+    "func NewFinder() *Finder { return &Finder{n: 1} }\n\n"
+    "func (fi *Finder) Find(id int) int {\n\treturn fi.n + id\n}\n",
+    "package locator\n\ntype Locator struct{ n int }\n\n"
+    "func (lo *Locator) Find(id int) int {\n\treturn lo.n - id\n}\n",
+    "package app\n\nimport (\n\t\"os\"\n\n\txf \"example.com/fxhint/finder\"\n)\n\n"
+    "func Lookup(path string) int64 {\n\tf, err := os.Open(path)\n\tif err != nil {\n"
+    "\t\treturn 0\n\t}\n\tdefer f.Close()\n\tst, err := f.Stat()\n\tif err != nil {\n"
+    "\t\treturn 0\n\t}\n\treturn st.Size()\n}\n\n"
+    "func UseFinder(id int) int {\n\tfinder := xf.NewFinder()\n\treturn finder.Find(id)\n}\n"};
+
+TEST(pipeline_go_parallel_field_hint_requires_owner_segment) {
+    char db[512];
+    cbm_pipeline_t *p =
+        index_fixture_with_padding(k_go_fth_names, k_go_fth_bodies, 6, 52, db, sizeof(db));
+    ASSERT_NOT_NULL(p);
+    cbm_store_t *s = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(s);
+    const char *proj = cbm_pipeline_project_name(p);
+    int bad = named_edge_count(s, proj, "CALLS", "Lookup", "Close");
+    int keep = named_edge_count(s, proj, "CALLS", "UseFinder", "Find");
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    ASSERT_EQ(bad, 0);
+    ASSERT_GTE(keep, 1);
+    PASS();
+}
+
+/* Upstream afb499b6: the C# twin of #1927. C# still reaches
+ * try_field_type_hint, and its PascalCase method names put a one-letter
+ * receiver's hint into every candidate QN: `w.Write()` on a StreamWriter was
+ * upgraded to an arbitrary project Write. The positive control pins
+ * `store.Put()` to Store.Put, never FileStore.Put (whose QN also contains
+ * "Store"). >= 50 files forces pass_parallel.cpp, the only path with the
+ * hint. */
+static const char *const k_cs_fth_names[] = {"Storage/FileStore.cs", "Net/Conn.cs", "Repo/Store.cs",
+                                             "App/Worker.cs"};
+static const char *const k_cs_fth_bodies[] = {
+    "namespace Storage {\n    public class FileStore {\n        private int written;\n"
+    "        public void Write(int v) { written += v; }\n"
+    "        public void Put(int v) { written = v; }\n    }\n}\n",
+    "namespace Net {\n    public class Conn {\n        private int sent;\n"
+    "        public void Write(int v) { sent += v; }\n    }\n}\n",
+    "namespace Repo {\n    public class Store {\n        private int held;\n"
+    "        public void Put(int v) { held = v; }\n    }\n}\n",
+    "namespace App {\n    public class Worker {\n"
+    "        public void Log(System.IO.StreamWriter w) {\n            w.Write(1);\n        }\n"
+    "        public void Keep() {\n            var store = Services.Resolve();\n"
+    "            store.Put(2);\n        }\n    }\n}\n"};
+
+static int named_edge_strategy_count(cbm_store_t *s, const char *project, const char *type,
+                                     const char *src, const char *tgt, const char *strategy);
+
+TEST(pipeline_csharp_parallel_field_hint_requires_owner_segment) {
+    char db[512];
+    cbm_pipeline_t *p =
+        index_fixture_with_padding(k_cs_fth_names, k_cs_fth_bodies, 4, 52, db, sizeof(db));
+    ASSERT_NOT_NULL(p);
+    cbm_store_t *s = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(s);
+    const char *proj = cbm_pipeline_project_name(p);
+    /* No owner segment is "W", so the fixed hint must not fire at all. */
+    int bad = named_edge_strategy_count(s, proj, "CALLS", "Log", "Write", "field_type_hint");
+    int store_put = calls_by_qn_suffix(s, proj, ".Keep", ".Store.Put", "field_type_hint");
+    int filestore_put = calls_by_qn_suffix(s, proj, ".Keep", ".FileStore.Put", NULL);
+    printf("  cs field hint: Log->Write fth=%d Keep->Store.Put=%d Keep->FileStore.Put=%d\n", bad,
+           store_put, filestore_put);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    ASSERT_EQ(bad, 0);
+    ASSERT_EQ(store_put, 1);
+    ASSERT_EQ(filestore_put, 0);
     PASS();
 }
 
@@ -13946,6 +14082,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_textual_call_never_binds_field_parallel);
     RUN_TEST(pipeline_go_receiver_suppresses_weak_method_edge);
     RUN_TEST(pipeline_go_receiver_parallel_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_go_parallel_field_hint_requires_owner_segment);
+    RUN_TEST(pipeline_csharp_parallel_field_hint_requires_owner_segment);
     RUN_TEST(pipeline_sql_lineage_and_relation_isolation);
     RUN_TEST(pipeline_cpp_implicit_operators_require_types);
 #ifdef CBM_ENABLE_TEST_SEAMS

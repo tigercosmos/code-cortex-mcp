@@ -433,10 +433,9 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
 
 /* Go analog of the member guard (upstream #1906): a selector call whose
  * receiver the Go LSP could not type must not be bound by a receiver-blind
- * short-name strategy. Drops suffix_match / fuzzy always, and unique_name only
- * when its confidence carries the import-unreachability penalty (the
- * stdlib/vendor hijack shape). field_type_hint is kept: Go struct fields carry
- * declared types, so the hint is receiver-aware there. Composed next to
+ * short-name strategy. Drops suffix_match / field_type_hint / fuzzy always, and
+ * unique_name only when its confidence carries the import-unreachability
+ * penalty (the stdlib/vendor hijack shape). Composed next to
  * cbm_suppress_weak_call at the same seam of BOTH resolvers. Pure;
  * unit-tested in test_registry.cpp. */
 bool cbm_go_suppress_weak_method_match(bool is_go, bool is_method, const char *strategy,
