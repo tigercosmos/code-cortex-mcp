@@ -2134,6 +2134,89 @@ TEST(pylsp_module_named_lambda_keeps_module_owner) {
     PASS();
 }
 
+/* A lambda body is also re-walked for calls made inside another lambda's
+ * re-walk, so a lambda that reaches itself again (directly or through another
+ * lambda) was re-walked once per nesting level until the walk-depth cap. With
+ * two such calls in one body the work doubled per level, and a two-line
+ * `fib = lambda n: fib(n - 1) + fib(n - 2)` drove extraction to many GB. A
+ * lambda already being re-walked must not be re-entered. The recursion here is
+ * linear, so without the guard this stays small and fails the work bound
+ * instead of exhausting memory.
+ *
+ * Fork adaptation: this resolver dedups rows by (caller, callee), and both
+ * helper() sites have the caller `<lambda>`, so the row count cannot show the
+ * re-walks (upstream asserts 2 rows). The LSP work counter does: the recursive
+ * file must cost about what the same file costs with the self-calls replaced
+ * by a call that is no lambda. */
+static uint64_t pylsp_lambda_work(const char *src, int *helper_rows) {
+    (void)cbm_lsp_work_take();
+    CBMFileResult *r = extract_py(src);
+    uint64_t work = cbm_lsp_work_take();
+    *helper_rows = -1;
+    if (r && !r->has_error && !r->parse_incomplete) {
+        *helper_rows = 0;
+        for (int i = 0; i < r->resolved_calls.count; i++) {
+            const CBMResolvedCall *rc = &r->resolved_calls.items[i];
+            if (rc->callee_qn && strstr(rc->callee_qn, ".helper"))
+                (*helper_rows)++;
+        }
+    }
+    if (r)
+        cbm_free_result(r);
+    return work;
+}
+
+TEST(pylsp_recursive_lambda_rewalk_is_bounded) {
+    int rec_rows = 0;
+    int flat_rows = 0;
+    uint64_t rec = pylsp_lambda_work("def helper():\n"
+                                     "    return 0\n"
+                                     "def other(n):\n"
+                                     "    return n\n"
+                                     "count = lambda n: helper() if n == 0 else count(n - 1)\n"
+                                     "even = lambda n: helper() if n == 0 else odd(n - 1)\n"
+                                     "odd = lambda n: even(n - 1)\n"
+                                     "count(3)\n"
+                                     "even(4)\n",
+                                     &rec_rows);
+    uint64_t flat = pylsp_lambda_work("def helper():\n"
+                                      "    return 0\n"
+                                      "def other(n):\n"
+                                      "    return n\n"
+                                      "count = lambda n: helper() if n == 0 else other(n - 1)\n"
+                                      "even = lambda n: helper() if n == 0 else other(n - 1)\n"
+                                      "odd = lambda n: even(n - 1)\n"
+                                      "count(3)\n"
+                                      "even(4)\n",
+                                      &flat_rows);
+    printf("    work: recursive=%llu flat=%llu ", (unsigned long long)rec,
+           (unsigned long long)flat);
+    ASSERT_EQ(rec_rows, 1); /* both sites: one deduped <lambda> -> helper row */
+    ASSERT_EQ(flat_rows, 1);
+    ASSERT_GT(flat, 0);
+    ASSERT(rec < flat * 3);
+    PASS();
+}
+
+/* The re-walk guard is released after each walk, so a later call to the same
+ * lambda still binds its own argument type: both A.m and B.m resolve. */
+TEST(pylsp_lambda_rewalk_guard_released_between_calls) {
+    CBMFileResult *r = extract_py("class A:\n"
+                                  "    def m(self):\n"
+                                  "        return 1\n"
+                                  "class B:\n"
+                                  "    def m(self):\n"
+                                  "        return 2\n"
+                                  "call_m = lambda x: x.m()\n"
+                                  "call_m(A())\n"
+                                  "call_m(B())\n");
+    ASSERT_NOT_NULL(r);
+    ASSERT_GTE(require_resolved(r, "<lambda>", ".A.m"), 0);
+    ASSERT_GTE(require_resolved(r, "<lambda>", ".B.m"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Cross-file entry points: the module caller is an arena copy, so it
  * outlives a temporary module_qn input buffer. */
 TEST(pylsp_module_cross_callers_own_input) {
@@ -2197,6 +2280,8 @@ TEST(pylsp_module_cross_callers_own_input) {
 SUITE(py_lsp) {
     RUN_TEST(pylsp_module_callers_join_exact_raw_occurrences);
     RUN_TEST(pylsp_module_named_lambda_keeps_module_owner);
+    RUN_TEST(pylsp_recursive_lambda_rewalk_is_bounded);
+    RUN_TEST(pylsp_lambda_rewalk_guard_released_between_calls);
     RUN_TEST(pylsp_module_cross_callers_own_input);
     RUN_TEST(pylsp_issue1527_chain_statements_resolve_completely);
     RUN_TEST(pylsp_issue1527_large_module_resolves_every_call);
