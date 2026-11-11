@@ -162,12 +162,61 @@ int cbm_mkstemp(char *tmpl);
 
 /* ── setenv / unsetenv (Windows lacks them) ──────────────────── */
 #ifdef _WIN32
+/* UTF-8 in, UTF-16 out: _putenv_s routes UTF-8 bytes through the active ANSI
+ * code page, which mangles (or rejects) a non-ASCII cache root, and children
+ * inherit the mangled value. _wputenv_s updates the CRT's wide environment,
+ * which also keeps narrow getenv consistent in the ANSI code page, and
+ * SetEnvironmentVariableW updates the process block that children and
+ * cbm_safe_getenv read (#996 Layer 2, upstream 25546312). */
 static inline int cbm_setenv(const char *name, const char *value, int overwrite) {
     (void)overwrite;
-    return _putenv_s(name, value);
+    if (!name || !value) {
+        return EINVAL;
+    }
+    int name_chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, NULL, 0);
+    int value_chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
+    wchar_t *wide_name =
+        name_chars > 0 ? (wchar_t *)malloc((size_t)name_chars * sizeof(*wide_name)) : NULL;
+    wchar_t *wide_value =
+        value_chars > 0 ? (wchar_t *)malloc((size_t)value_chars * sizeof(*wide_value)) : NULL;
+    bool converted =
+        wide_name && wide_value &&
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, wide_name, name_chars) > 0 &&
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide_value, value_chars) > 0;
+    if (!converted) {
+        free(wide_name);
+        free(wide_value);
+        return EINVAL;
+    }
+    int status = _wputenv_s(wide_name, wide_value);
+    if (status == 0 && !SetEnvironmentVariableW(wide_name, wide_value)) {
+        status = EINVAL;
+    }
+    free(wide_name);
+    free(wide_value);
+    return status;
 }
 static inline int cbm_unsetenv(const char *name) {
-    return _putenv_s(name, "");
+    if (!name) {
+        return EINVAL;
+    }
+    int name_chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, NULL, 0);
+    wchar_t *wide_name =
+        name_chars > 0 ? (wchar_t *)malloc((size_t)name_chars * sizeof(*wide_name)) : NULL;
+    if (!wide_name ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, wide_name, name_chars) <= 0) {
+        free(wide_name);
+        return EINVAL;
+    }
+    int status = _wputenv_s(wide_name, L"");
+    if (status == 0) {
+        SetLastError(ERROR_SUCCESS);
+        if (!SetEnvironmentVariableW(wide_name, NULL) && GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
+            status = EINVAL;
+        }
+    }
+    free(wide_name);
+    return status;
 }
 #else
 #define cbm_setenv setenv

@@ -1114,7 +1114,51 @@ TEST(platform_lower_cpu_priority_nices_the_process) {
 #endif
 }
 
+#ifdef _WIN32
+/* cbm_safe_getenv reads Windows' wide environment as UTF-8. Its matching
+ * setter must update that same wide environment; _putenv_s alone interprets
+ * UTF-8 path bytes through the active ANSI code page (upstream 25546312). */
+TEST(platform_setenv_preserves_utf8_in_wide_environment) {
+    static const char utf8[] = "C:/cbm-cache-\xce\x94-\xe6\x97\xa5\xe6\x9c\xac-\xe4\xb8\x81";
+    static const wchar_t wide[] = L"C:/cbm-cache-\u0394-\u65e5\u672c-\u4e01";
+    ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", utf8, 1), 0);
+    wchar_t observed_wide[128];
+    ASSERT_EQ(GetEnvironmentVariableW(L"CBM_CACHE_DIR", observed_wide, 128), (DWORD)(wcslen(wide)));
+    ASSERT_EQ(wcscmp(observed_wide, wide), 0);
+    char observed_utf8[128];
+    ASSERT_NOT_NULL(cbm_safe_getenv("CBM_CACHE_DIR", observed_utf8, sizeof(observed_utf8), NULL));
+    ASSERT_STR_EQ(observed_utf8, utf8);
+    /* Narrow getenv must agree with the CRT's active ANSI code page. */
+    char expected_narrow[128];
+    ASSERT_GT(WideCharToMultiByte(CP_ACP, 0, wide, -1, expected_narrow,
+                                  (int)sizeof(expected_narrow), NULL, NULL),
+              0);
+    const char *observed_narrow = getenv("CBM_CACHE_DIR");
+    ASSERT_NOT_NULL(observed_narrow);
+    ASSERT_STR_EQ(observed_narrow, expected_narrow);
+    (void)cbm_unsetenv("CBM_CACHE_DIR");
+    PASS();
+}
+
+/* Empty and absent variables have different fallback semantics: an explicitly
+ * empty CBM_CACHE_DIR means "use the default" and must not read as a failed
+ * wide-environment read. Unset stays idempotent for cleanup paths. */
+TEST(platform_windows_empty_environment_is_read_and_unset_idempotently) {
+    ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", "", 1), 0);
+    char observed[9] = "sentinel";
+    ASSERT_NOT_NULL(cbm_safe_getenv("CBM_CACHE_DIR", observed, sizeof(observed), "fallback"));
+    ASSERT_STR_EQ(observed, "");
+    ASSERT_EQ(cbm_unsetenv("CBM_CACHE_DIR"), 0);
+    ASSERT_EQ(cbm_unsetenv("CBM_CACHE_DIR"), 0);
+    PASS();
+}
+#endif
+
 SUITE(platform) {
+#ifdef _WIN32
+    RUN_TEST(platform_setenv_preserves_utf8_in_wide_environment);
+    RUN_TEST(platform_windows_empty_environment_is_read_and_unset_idempotently);
+#endif
     RUN_TEST(platform_lower_cpu_priority_nices_the_process);
     RUN_TEST(regex_compile_refuses_oversized_expansion);
     RUN_TEST(regex_compile_accepts_expansion_under_budget);

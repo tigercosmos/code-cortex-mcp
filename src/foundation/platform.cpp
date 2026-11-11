@@ -398,6 +398,58 @@ extern char **environ;
 #endif
 
 const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const char *fallback) {
+#ifdef _WIN32
+    /* #996 Layer 2: _environ holds ANSI-code-page bytes, not UTF-8, so a
+     * non-ASCII value (a CBM_CACHE_DIR or USERPROFILE with Greek/CJK/accented
+     * characters) arrives mojibake'd or with '?' substitutes, which every
+     * downstream UTF-8 file API then rejects. Read the process environment
+     * wide and convert to UTF-8, the convention cbm_fopen / _wmkdir / the
+     * SQLite VFS already assume (upstream 25546312 and its Layer 2 base). */
+    if (!name || !name[0] || !buf || buf_sz == 0) {
+        return NULL;
+    }
+    buf[0] = '\0';
+    wchar_t *wname = cbm_utf8_to_wide(name);
+    if (wname) {
+        SetLastError(ERROR_SUCCESS);
+        DWORD needed = GetEnvironmentVariableW(wname, NULL, 0U);
+        DWORD lookup_error = GetLastError();
+        if (needed == 0U) {
+            free(wname);
+            if (lookup_error == ERROR_ENVVAR_NOT_FOUND) {
+                if (fallback) {
+                    snprintf(buf, buf_sz, "%s", fallback);
+                    return buf;
+                }
+                return NULL;
+            }
+            return buf; /* an existing empty variable is not a missing one */
+        }
+        wchar_t *wval = (wchar_t *)calloc((size_t)needed, sizeof(*wval));
+        if (!wval) {
+            free(wname);
+            return NULL;
+        }
+        SetLastError(ERROR_SUCCESS);
+        DWORD got = GetEnvironmentVariableW(wname, wval, needed);
+        DWORD read_error = GetLastError();
+        free(wname);
+        if (got >= needed || (got == 0U && read_error != ERROR_SUCCESS)) {
+            free(wval);
+            return NULL;
+        }
+        char *utf8 = cbm_wide_to_utf8(wval);
+        free(wval);
+        if (!utf8) {
+            return NULL;
+        }
+        snprintf(buf, buf_sz, "%s", utf8);
+        free(utf8);
+        return buf;
+    }
+    /* A name that is not valid UTF-8 cannot be looked up wide: fall through to
+     * the narrow scan below. */
+#endif
     char **env = CBM_ENVIRON;
     if (env) {
         size_t nlen = strlen(name);
