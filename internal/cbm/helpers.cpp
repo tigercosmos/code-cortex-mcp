@@ -1340,6 +1340,66 @@ const char *cbm_nix_qn_name(CBMArena *a, TSNode func_node, const char *source, c
     return scope ? cbm_arena_sprintf(a, "%s.%s", scope, name) : name;
 }
 
+/* ── Elixir def-head guards (upstream a5a836cf) ─────────────── */
+
+/* The guard sits on the head, not beside it: `def name(args) when guard` parses
+ * as a single `when` binary_operator whose left operand is `name(args)`. The
+ * operator field is an exact anonymous token, so the check is the token type
+ * rather than the node kind — `def a + b` is a binary_operator head too, and
+ * unwrapping it would name the function after its left parameter. */
+bool cbm_elixir_is_when_guard(TSNode node) {
+    if (ts_node_is_null(node) || strcmp(ts_node_type(node), "binary_operator") != 0) {
+        return false;
+    }
+    TSNode op = ts_node_child_by_field_name(node, TS_FIELD("operator"));
+    return !ts_node_is_null(op) && strcmp(ts_node_type(op), "when") == 0;
+}
+
+/* One `when` level off a def's first argument, or the node unchanged. There is
+ * deliberately no named-child fallback for a missing `left`: tree-sitter-elixir
+ * never builds a `when` operator without one (upstream measured 66 unwraps,
+ * error-recovered parses included), and a fallback could hand back the guard
+ * expression and name the function after it. Returning the node unchanged
+ * degrades to the pre-guard behaviour, the safe direction. */
+static TSNode elixir_unwrap_one_guard(TSNode first_arg) {
+    if (!cbm_elixir_is_when_guard(first_arg)) {
+        return first_arg;
+    }
+    TSNode lhs = ts_node_child_by_field_name(first_arg, TS_FIELD("left"));
+    return ts_node_is_null(lhs) ? first_arg : lhs;
+}
+
+/* The head under every guard a def's first argument carries, or first_arg
+ * unchanged when it carries none. tree-sitter-elixir nests multiple guards
+ * right-associatively (`when(f(x), when(is_atom(x), is_binary(x)))`), so one
+ * peel reaches the head; the loop runs to a fixed point so the contract is
+ * "the head under EVERY guard". */
+TSNode cbm_elixir_def_head_unwrap_guard(TSNode first_arg) {
+    for (;;) {
+        TSNode next = elixir_unwrap_one_guard(first_arg);
+        if (ts_node_eq(next, first_arg)) {
+            return first_arg;
+        }
+        first_arg = next;
+    }
+}
+
+/* True when `node` is the head a def declares, or any of the `when` guard
+ * operators wrapping it. A calls walk sees one node per visit: `def f(x) when g`
+ * arrives as the inner `f(x)` call, `def f when g` only as the operator. */
+bool cbm_elixir_def_head_is(TSNode signature, TSNode node) {
+    for (;;) {
+        if (ts_node_eq(signature, node)) {
+            return true;
+        }
+        TSNode next = elixir_unwrap_one_guard(signature);
+        if (ts_node_eq(next, signature)) {
+            return false;
+        }
+        signature = next;
+    }
+}
+
 static const char *func_node_name(CBMArena *a, TSNode func_node, const char *source,
                                   CBMLanguage lang) {
     // Wolfram: set_delayed_top/set_top/set_delayed/set — LHS is apply(user_symbol("f"), ...)

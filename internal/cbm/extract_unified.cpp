@@ -558,7 +558,13 @@ static const char *compute_elixir_func_qn(CBMExtractCtx *ctx, TSNode node) {
     if (ts_node_is_null(args) || ts_node_child_count(args) == 0) {
         return NULL;
     }
-    TSNode first_arg = ts_node_child(args, 0);
+    /* A guarded head (`def f(x) when g`) is a `when` operator around `f(x)`:
+     * unwrap it exactly as the defs walk does (shared helper), or the def QN
+     * the defs walk now mints has no matching call scope -- the head and every
+     * call in the body would source to the Module, and the head itself would
+     * land as a phantom Module -> f CALLS edge. (Upstream closes this in
+     * 198e211c; this is its call-scope half, which the def-head fix needs.) */
+    TSNode first_arg = cbm_elixir_def_head_unwrap_guard(ts_node_child(args, 0));
     if (ts_node_is_null(first_arg)) {
         return NULL;
     }

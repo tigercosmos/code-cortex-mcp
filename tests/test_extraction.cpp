@@ -2183,6 +2183,294 @@ TEST(elixir_function) {
     PASS();
 }
 
+/* ── Elixir def-head guard helpers (internal/cbm/helpers.cpp) ─────────
+ *
+ * `def name(args) when guard` parses its WHOLE head as one `when`
+ * binary_operator whose left operand is the `name(args)` call, and Elixir
+ * admits more than one guard on a clause, which tree-sitter-elixir nests
+ * right-associatively. Four walks read that same first argument and each asks a
+ * different question of it: the defs and call-scope walks want the head UNDER
+ * every guard, the usages walk wants it so that a parameter READ by the guard
+ * stays outside the binding, and the calls walk wants to know whether the node
+ * it is visiting IS that head or one of the guard operators above it.
+ *
+ * That last question is why cbm_elixir_def_head_is exists beside the unwrap,
+ * and it is exercised here on the AST rather than through cbm_extract_file
+ * because the two routes it has to answer for are indistinguishable from
+ * outside: `def f(x) when g` reaches the calls walk as the inner `f(x)` call,
+ * which the unwrap reaches, while `def f when g` has no inner call at all and
+ * reaches it as the `when` operator itself, which the unwrap does not. A test
+ * that only drives one walk sees whichever of the two that walk happens to hit.
+ *
+ * The defs walk and the Phoenix channel walk consume them (upstream a5a836cf,
+ * 630f8515, bd640caa). */
+
+enum { ELIXIR_HEAD_PROBE_MAX = 16, ELIXIR_HEAD_STACK_MAX = 256 };
+
+static bool head_probe_text_is(const char *source, TSNode node, const char *want) {
+    if (ts_node_is_null(node)) {
+        return false;
+    }
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    size_t len = strlen(want);
+    return end >= start && (size_t)(end - start) == len && memcmp(source + start, want, len) == 0;
+}
+
+/* The first argument of every `def`/`defp` call under `root`, in source order.
+ * That argument is what all four walks read, so it is what the helpers take. */
+typedef struct {
+    TSNode signature[ELIXIR_HEAD_PROBE_MAX];
+    int count;
+} elixir_head_probe_t;
+
+static void collect_elixir_def_signatures(TSNode root, const char *source,
+                                          elixir_head_probe_t *out) {
+    TSNode stack[ELIXIR_HEAD_STACK_MAX];
+    int top = 0;
+    stack[top++] = root;
+    while (top > 0) {
+        TSNode cur = stack[--top];
+        uint32_t cc = ts_node_child_count(cur);
+        if (cc > 1 && strcmp(ts_node_type(cur), "call") == 0 &&
+            (head_probe_text_is(source, ts_node_child(cur, 0), "def") ||
+             head_probe_text_is(source, ts_node_child(cur, 0), "defp")) &&
+            out->count < ELIXIR_HEAD_PROBE_MAX) {
+            TSNode args = ts_node_child(cur, 1);
+            if (!ts_node_is_null(args) && ts_node_child_count(args) > 0) {
+                out->signature[out->count++] = ts_node_child(args, 0);
+            }
+        }
+        for (int i = (int)cc - 1; i >= 0 && top < ELIXIR_HEAD_STACK_MAX; i--) {
+            stack[top++] = ts_node_child(cur, (uint32_t)i);
+        }
+    }
+}
+
+TEST(elixir_def_head_is_covers_the_head_and_every_guard_above_it) {
+    const char *source = "defmodule Heads do\n"
+                         "  def plain(x), do: x\n"
+                         "  def guarded(x) when is_binary(x), do: x\n"
+                         "  def bare when true, do: :ok\n"
+                         "  def twice(x) when is_atom(x) when is_binary(x), do: x\n"
+                         "  def a + b, do: {a, b}\n"
+                         "end\n";
+    const TSLanguage *language = cbm_ts_language(CBM_LANG_ELIXIR);
+    ASSERT_NOT_NULL(language);
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    ASSERT_TRUE(ts_parser_set_language(parser, language));
+    TSTree *tree = ts_parser_parse_string(parser, NULL, source, (uint32_t)strlen(source));
+    ASSERT_NOT_NULL(tree);
+
+    elixir_head_probe_t probe;
+    probe.count = 0;
+    collect_elixir_def_signatures(ts_tree_root_node(tree), source, &probe);
+    ASSERT_EQ(5, probe.count);
+
+    /* Unguarded: nothing to peel, and the head is the whole first argument.
+     * The name node inside it is NOT the head -- the calls walk compares the
+     * node it is visiting, and the `plain` identifier is one of those. */
+    TSNode plain = probe.signature[0];
+    ASSERT_FALSE(cbm_elixir_is_when_guard(plain));
+    ASSERT_TRUE(ts_node_eq(cbm_elixir_def_head_unwrap_guard(plain), plain));
+    ASSERT_TRUE(cbm_elixir_def_head_is(plain, plain));
+    ASSERT_FALSE(cbm_elixir_def_head_is(plain, ts_node_child(plain, 0)));
+
+    /* One guard: the first argument is the operator, the head is its left
+     * operand, and BOTH answer true -- the operator is the node the paren-less
+     * route hands the calls walk, the inner call is the node the peel route
+     * hands it. The guard expression answers false, or the walk would suppress
+     * a real call written inside a guard. */
+    TSNode guarded = probe.signature[1];
+    ASSERT_TRUE(cbm_elixir_is_when_guard(guarded));
+    TSNode guarded_head = cbm_elixir_def_head_unwrap_guard(guarded);
+    ASSERT_FALSE(ts_node_eq(guarded_head, guarded));
+    ASSERT_STR_EQ("call", ts_node_type(guarded_head));
+    ASSERT_TRUE(head_probe_text_is(source, guarded_head, "guarded(x)"));
+    ASSERT_TRUE(cbm_elixir_def_head_is(guarded, guarded));
+    ASSERT_TRUE(cbm_elixir_def_head_is(guarded, guarded_head));
+    TSNode guard_expr = ts_node_child_by_field_name(guarded, "right", 5);
+    ASSERT_FALSE(ts_node_is_null(guard_expr));
+    ASSERT_TRUE(head_probe_text_is(source, guard_expr, "is_binary(x)"));
+    ASSERT_FALSE(cbm_elixir_def_head_is(guarded, guard_expr));
+
+    /* Paren-less: the head under the guard is a bare identifier, so there is no
+     * inner call for the peel route to produce. This is the shape that makes
+     * cbm_elixir_def_head_is necessary: the only node the calls walk ever sees
+     * for this clause is the operator. */
+    TSNode bare = probe.signature[2];
+    ASSERT_TRUE(cbm_elixir_is_when_guard(bare));
+    TSNode bare_head = cbm_elixir_def_head_unwrap_guard(bare);
+    ASSERT_STR_EQ("identifier", ts_node_type(bare_head));
+    ASSERT_TRUE(head_probe_text_is(source, bare_head, "bare"));
+    ASSERT_TRUE(cbm_elixir_def_head_is(bare, bare));
+    ASSERT_TRUE(cbm_elixir_def_head_is(bare, bare_head));
+
+    /* Two guards on one clause. tree-sitter-elixir nests them
+     * RIGHT-associatively -- `when(twice(x), when(is_atom(x), is_binary(x)))`,
+     * which is what this asserts -- so the head is still the outer operator's
+     * left operand and the peel reaches it in one step. The repeated peel is
+     * therefore a fixed point rather than a chain walk on this grammar; the
+     * nodes that must answer true are the operator and the head. */
+    TSNode twice = probe.signature[3];
+    ASSERT_TRUE(cbm_elixir_is_when_guard(twice));
+    TSNode second_guard = ts_node_child_by_field_name(twice, "right", 5);
+    ASSERT_TRUE(cbm_elixir_is_when_guard(second_guard));
+    TSNode twice_head = cbm_elixir_def_head_unwrap_guard(twice);
+    ASSERT_TRUE(head_probe_text_is(source, twice_head, "twice(x)"));
+    ASSERT_TRUE(cbm_elixir_def_head_is(twice, twice));
+    ASSERT_TRUE(cbm_elixir_def_head_is(twice, twice_head));
+    /* The second guard is a `when` operator too, and it is NOT on the head
+     * chain: a walk that treated any `when` above the head as a declaration
+     * would suppress the calls written inside it. */
+    ASSERT_FALSE(cbm_elixir_def_head_is(twice, second_guard));
+
+    /* An operator definition's head is a binary_operator too, and unwrapping it
+     * would name the function after its own left parameter. Only the `when`
+     * token admits the peel, so `def a + b` is returned unchanged and its left
+     * operand is not a head. */
+    TSNode op_def = probe.signature[4];
+    ASSERT_STR_EQ("binary_operator", ts_node_type(op_def));
+    ASSERT_FALSE(cbm_elixir_is_when_guard(op_def));
+    ASSERT_TRUE(ts_node_eq(cbm_elixir_def_head_unwrap_guard(op_def), op_def));
+    ASSERT_TRUE(cbm_elixir_def_head_is(op_def, op_def));
+    TSNode op_lhs = ts_node_child_by_field_name(op_def, "left", 4);
+    ASSERT_TRUE(head_probe_text_is(source, op_lhs, "a"));
+    ASSERT_FALSE(cbm_elixir_def_head_is(op_def, op_lhs));
+
+    ts_tree_delete(tree);
+    ts_parser_delete(parser);
+    PASS();
+}
+/* `def name(args) when guard` parses its whole head as a `when`
+ * binary_operator, so the name sits on the operator's left operand rather than
+ * directly under the call. The def extractor accepted only `call` and
+ * `identifier` there, so every guarded clause was dropped -- and a function
+ * whose clauses ALL carry guards never reached the graph at all, silently.
+ * Guards are ordinary Elixir: on one real 2.9k-function codebase this hid 216
+ * of 270 all-guarded functions, and every call edge touching them. */
+TEST(extract_elixir_guarded_def_head) {
+    CBMFileResult *r = extract("defmodule Guarded do\n"
+                               "  def plain(x), do: x\n"
+                               "  def guarded(x) when is_binary(x), do: x\n"
+                               "  def guarded(x) when is_list(x), do: x\n"
+                               "  def multi(x, y) when is_binary(x) and is_integer(y), do: {x, y}\n"
+                               "  defp priv_guarded(x) when is_atom(x), do: x\n"
+                               "  def bare when true, do: :ok\n"
+                               "  def a + b, do: {a, b}\n"
+                               "  def c - d when is_integer(c), do: {c, d}\n"
+                               "  def multi_guard(x) when is_atom(x) when is_binary(x), do: x\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "guarded.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "plain"));
+    ASSERT(has_def(r, "Function", "guarded"));
+    ASSERT(has_def(r, "Function", "multi"));
+    ASSERT(has_def(r, "Function", "priv_guarded"));
+    ASSERT(has_def(r, "Function", "bare"));
+
+    /* Elixir admits more than one guard on a clause. tree-sitter-elixir nests
+     * those `when` operators right-associatively, so the declared head stays
+     * the outermost operator's left operand -- one node either way, and the
+     * peel must not stop short of it or return the guard. */
+    ASSERT(has_def(r, "Function", "multi_guard"));
+    ASSERT_EQ(count_defs_named(r, "Function", "multi_guard"), 1);
+
+    /* An operator definition is a binary_operator head too, but it is not a
+     * guard: unwrapping it names the function after its own LEFT PARAMETER.
+     * `def a + b` must not mint a function called `a`, nor `def c - d when ...`
+     * one called `c` -- the guard's left operand is itself the `c - d`
+     * operator, which names no function either. Neither operator form is
+     * extracted at all, which is what this grammar did before guards were
+     * handled; only the `when` token admits the unwrap. */
+    ASSERT_EQ(count_defs_named(r, "Function", "a"), 0);
+    ASSERT_EQ(count_defs_named(r, "Function", "c"), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The guarded def's node and its call scope must agree: the calls in a guarded
+ * clause's body source to that clause's function, not to the Module (the
+ * unified walk unwraps the guard with the same helper as the defs walk). */
+TEST(extract_elixir_guarded_def_call_scope_matches_def) {
+    CBMFileResult *r = extract("defmodule Scoped do\n"
+                               "  def guarded(x) when is_binary(x) do\n"
+                               "    helper(x)\n"
+                               "  end\n"
+                               "  def helper(x), do: x\n"
+                               "end\n",
+                               CBM_LANG_ELIXIR, "t", "scoped.ex");
+    ASSERT_NOT_NULL(r);
+    const char *def_qn = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, "guarded") == 0) {
+            def_qn = r->defs.items[i].qualified_name;
+        }
+    }
+    ASSERT_NOT_NULL(def_qn);
+    /* The body call `helper(x)` (line 3); `def helper(x)`'s own head is a
+     * call node too, scoped to helper. */
+    const char *scope_qn = NULL;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (c->callee_name && strcmp(c->callee_name, "helper") == 0 && c->start_line == 3) {
+            scope_qn = c->enclosing_func_qn;
+        }
+    }
+    ASSERT_NOT_NULL(scope_qn);
+    ASSERT_STR_EQ(scope_qn, def_qn);
+    cbm_free_result(r);
+    PASS();
+}
+/* True when a channel with this name/transport/direction was extracted. */
+static int has_channel(CBMFileResult *r, const char *name, const char *transport,
+                       CBMChannelDirection dir) {
+    for (int i = 0; i < r->channels.count; i++) {
+        const CBMChannel *c = &r->channels.items[i];
+        if (c->channel_name && strcmp(c->channel_name, name) == 0 && c->transport &&
+            strcmp(c->transport, transport) == 0 && c->direction == dir)
+            return 1;
+    }
+    return 0;
+}
+/* Phoenix pub/sub and channel listeners. Both branches were unreachable: the
+ * emit side looked up an "arguments" FIELD that tree-sitter-elixir does not
+ * define, and the listener side dispatched on a "def" NODE TYPE that does not
+ * exist (Elixir defs are `call` nodes), so a Phoenix app produced no channels
+ * at all. */
+TEST(elixir_channels_pubsub_and_handle_in) {
+    CBMFileResult *r =
+        extract("defmodule Acme.Notifier do\n"
+                "  def announce(p) do\n"
+                "    Phoenix.PubSub.broadcast(Acme.PubSub, \"user:created\", p)\n"
+                "  end\n"
+                "  def watch, do: Phoenix.PubSub.subscribe(Acme.PubSub, \"user:updated\")\n"
+                "end\n"
+                "defmodule AcmeWeb.RoomChannel do\n"
+                "  def handle_in(\"new_msg\", payload, socket) do\n"
+                "    push(socket, \"pong\", %{})\n"
+                "    {:noreply, socket}\n"
+                "  end\n"
+                "  def handle_in(\"ping\", _p, socket) when is_map(socket) do\n"
+                "    {:noreply, socket}\n"
+                "  end\n"
+                "end\n",
+                CBM_LANG_ELIXIR, "t", "chan.ex");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_channel(r, "user:created", "phoenix_pubsub", CBM_CHANNEL_EMIT));
+    ASSERT(has_channel(r, "user:updated", "phoenix_pubsub", CBM_CHANNEL_LISTEN));
+    /* handle_in clauses are listeners — including the guarded one. */
+    ASSERT(has_channel(r, "new_msg", "phoenix_channel", CBM_CHANNEL_LISTEN));
+    ASSERT(has_channel(r, "ping", "phoenix_channel", CBM_CHANNEL_LISTEN));
+    /* A bare push/broadcast inside the channel module is an emit. */
+    ASSERT(has_channel(r, "pong", "phoenix_channel", CBM_CHANNEL_EMIT));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Haskell --- */
 TEST(haskell_function) {
     CBMFileResult *r = extract("add :: Int -> Int -> Int\nadd x y = x + y\n\nmultiply :: Int -> "
@@ -12165,6 +12453,10 @@ SUITE(extraction) {
 
     /* Functional */
     RUN_TEST(elixir_function);
+    RUN_TEST(elixir_def_head_is_covers_the_head_and_every_guard_above_it);
+    RUN_TEST(extract_elixir_guarded_def_head);
+    RUN_TEST(extract_elixir_guarded_def_call_scope_matches_def);
+    RUN_TEST(elixir_channels_pubsub_and_handle_in);
     RUN_TEST(haskell_function);
     RUN_TEST(haskell_infix_definition_name);
     RUN_TEST(ocaml_function);
