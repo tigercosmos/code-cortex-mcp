@@ -201,17 +201,25 @@ static void route_edge_visitor(const cbm_gbuf_edge_t *edge, void *userdata) {
     }
 
     /* Build properties for Route node */
+    /* FORK: method and broker come out of a quote scan, which leaves an
+     * escaped value ending in a backslash; written back raw, that backslash
+     * escaped the closing quote and the Route's properties no longer parsed.
+     * Escape them as every other Route writer does. */
+    char esc_v[CBM_SZ_128];
+    cbm_json_escape(esc_v, sizeof(esc_v), method ? method : (broker ? broker : ""));
     char route_props[CBM_SZ_256];
+    int rn;
     if (method) {
-        snprintf(route_props, sizeof(route_props), "{\"method\":\"%s\"}", method);
+        rn = snprintf(route_props, sizeof(route_props), "{\"method\":\"%s\"}", esc_v);
     } else if (broker) {
-        snprintf(route_props, sizeof(route_props), "{\"broker\":\"%s\"}", broker);
+        rn = snprintf(route_props, sizeof(route_props), "{\"broker\":\"%s\"}", esc_v);
     } else {
-        snprintf(route_props, sizeof(route_props), "{}");
+        rn = snprintf(route_props, sizeof(route_props), "{}");
     }
 
     /* Create or find Route node (deduped by QN) */
-    cbm_gbuf_upsert_node(ctx->gb, "Route", url, route_qn, "", 0, 0, route_props);
+    cbm_gbuf_upsert_node(ctx->gb, "Route", url, route_qn, "", 0, 0,
+                         cbm_json_props_checked(route_props, rn, sizeof(route_props)));
     ctx->created++;
 
     /* Note: we do NOT re-target the edge here because modifying edges during
@@ -447,48 +455,45 @@ static void match_infra_routes(cbm_gbuf_t *gb) {
 /* Phase 2a: Ensure all functions with route_path properties have Route+HANDLES edges.
  * During incremental indexing, only changed files get Route nodes from extraction.
  * This pass scans ALL Function/Method nodes and creates missing Route+HANDLES. */
-/* Extract a JSON string property value into buf. Returns true if found. */
-static bool extract_json_prop(const char *json, const char *key, char *buf, int bufsz) {
-    if (!json) {
+/* Extract the string property `key` of a parsed properties object into buf,
+ * with its escapes decoded. Returns true if found: a non-empty string with no
+ * NUL that fits buf. Nothing is copied otherwise. A quote scan cut an escaped
+ * quote or backslash short, and read a nested or non-string value as a path. */
+static bool extract_json_prop(yyjson_val *root, const char *key, char *buf, size_t bufsz) {
+    yyjson_val *val = yyjson_obj_get(root, key);
+    const char *str = yyjson_get_str(val);
+    size_t len = yyjson_get_len(val);
+    if (!str || len == 0 || len >= bufsz || memchr(str, '\0', len)) {
         return false;
     }
-    char pattern[CBM_SZ_64];
-    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
-    const char *p = strstr(json, pattern);
-    if (!p) {
-        return false;
-    }
-    p += strlen(pattern);
-    const char *end = strchr(p, '"');
-    if (!end || end <= p) {
-        return false;
-    }
-    int len = (int)(end - p);
-    if (len >= bufsz) {
-        return false;
-    }
-    memcpy(buf, p, (size_t)len);
-    buf[len] = '\0';
+    memcpy(buf, str, len + SKIP_ONE);
     return true;
 }
 
 /* Process a single Function/Method node: create Route+HANDLES if it has route_path.
  * Returns 1 if a new HANDLES edge was created, 0 otherwise. */
 static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *func) {
-    if (!func->properties_json) {
+    /* Most nodes carry no route: skip them before parsing their properties. */
+    if (!func->properties_json || !strstr(func->properties_json, "\"route_path\"")) {
         return 0;
     }
 
+    /* Properties hold source text as its bytes, which need not be UTF-8 (a
+     * Latin-1 docstring beside route_path): a strict parse would drop the
+     * whole object and the Route with it. */
+    yyjson_doc *doc = yyjson_read(func->properties_json, strlen(func->properties_json),
+                                  YYJSON_READ_ALLOW_INVALID_UNICODE);
+    yyjson_val *root = yyjson_doc_get_root(doc);
     char path[CBM_SZ_256];
-    if (!extract_json_prop(func->properties_json, "route_path", path, sizeof(path))) {
-        return 0;
-    }
-    if (path[0] != '/') {
-        return 0;
-    }
-
     char method[CBM_SZ_16] = "ANY";
-    extract_json_prop(func->properties_json, "route_method", method, sizeof(method));
+    bool routed = extract_json_prop(root, "route_path", path, sizeof(path)) && path[0] == '/';
+    if (routed) {
+        (void)extract_json_prop(root, "route_method", method, sizeof(method));
+    }
+    yyjson_doc_free(doc);
+    if (!routed) {
+        return 0;
+    }
 
     char route_qn[CBM_ROUTE_QN_SIZE];
     char cpath[CBM_SZ_256];
@@ -496,9 +501,7 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
              cbm_route_canon_path(path, cpath, sizeof(cpath)));
     const cbm_gbuf_node_t *existing = cbm_gbuf_find_by_qn(gb, route_qn);
 
-    /* method is re-read out of the node's own properties by a scanner that stops
-     * at the first '"' — an escaped value comes back with its trailing
-     * backslash, which would open an escape sequence here. */
+    /* method is source text where a DRF @action names it: escape it back. */
     char esc_m[CBM_SZ_64];
     cbm_json_escape(esc_m, sizeof(esc_m), method);
     char rprops[CBM_SZ_256];
