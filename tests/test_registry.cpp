@@ -470,6 +470,24 @@ TEST(cross_language_ref_drops_go_vs_c) {
     PASS();
 }
 
+TEST(cross_language_guards_let_c_family_reach_inc) {
+    /* A C-family .inc is parsed as C++ by content (cbm_disambiguate_inc), but
+     * its basename still maps to BitBake. A C or C++ caller must not read a
+     * .inc target as another language; any other caller still does. */
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_CPP, "runtime/sample.inc"));
+    ASSERT_FALSE(cbm_suppress_cross_language_ref(CBM_LANG_C, "runtime/sample.inc"));
+    ASSERT_FALSE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_CPP, "sample.inc", "suffix_match"));
+    ASSERT_FALSE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_C, "a/sample.inc", "suffix_match"));
+    ASSERT_TRUE(cbm_suppress_cross_language_ref(CBM_LANG_GO, "runtime/sample.inc"));
+    ASSERT_TRUE(
+        cbm_suppress_cross_language_suffix_match(CBM_LANG_PYTHON, "sample.inc", "suffix_match"));
+    /* Only the .inc extension is exempt, not BitBake recipes. */
+    ASSERT_TRUE(cbm_suppress_cross_language_ref(CBM_LANG_CPP, "meta/sample.bb"));
+    PASS();
+}
+
 TEST(go_bare_ref_never_binds_field) {
     /* #1942/#1962: a bare Go identifier can never denote a struct field. The
      * extractor strips the receiver before the resolver runs, so the
@@ -1661,6 +1679,7 @@ SUITE(registry) {
     RUN_TEST(resolve_caps_unresolvably_ambiguous_names);
     RUN_TEST(cross_language_suffix_match_drops_py_vs_js);
     RUN_TEST(cross_language_ref_drops_go_vs_c);
+    RUN_TEST(cross_language_guards_let_c_family_reach_inc);
     RUN_TEST(go_bare_ref_never_binds_field);
     RUN_TEST(c_bare_ref_never_binds_field);
     RUN_TEST(go_textual_call_never_binds_field);

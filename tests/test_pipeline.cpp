@@ -13126,8 +13126,11 @@ TEST(pipeline_inc_c_family_fragments) {
     cpp_recv_write(tmp, "runtime.inc",
                    "#define SAMPLE_CALLBACK(T) T\n"
                    "extern \"C\" int sample_export() { return 0; }\n"
-                   "static SAMPLE_CALLBACK(int) sample_callback() { return sample_export(); }\n");
-    cpp_recv_write(tmp, "main.cpp", "#include \"runtime.inc\"\n");
+                   "static SAMPLE_CALLBACK(int) sample_callback() { return sample_export(); }\n"
+                   "int sample_counter = 0;\n");
+    cpp_recv_write(tmp, "main.cpp",
+                   "#include \"runtime.inc\"\n"
+                   "void bump() { sample_counter = 2; }\n");
     cpp_recv_write(tmp, "meta/base.inc",
                    "SUMMARY = \"sample\"\n"
                    "do_compile() {\n"
@@ -13152,6 +13155,9 @@ TEST(pipeline_inc_c_family_fragments) {
         cbm_store_find_nodes_by_name(store, project, "extern", &externs, &nexterns);
         cbm_store_free_nodes(externs, nexterns);
         ASSERT_EQ(nexterns, 0);
+        /* FORK: the C++ caller's write reaches the .inc global; the reference
+         * guard read the .inc basename as BitBake and dropped it. */
+        ASSERT_GTE(named_edge_count(store, project, "WRITES", "bump", "sample_counter"), 1);
         /* The recipe still parses as BitBake (its task is a Function). */
         ASSERT_EQ(fixture_node_count(store, project, "meta/base.inc", "do_compile", "Function"), 1);
         cbm_store_close(store);

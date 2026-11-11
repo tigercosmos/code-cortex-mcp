@@ -1725,6 +1725,20 @@ static CBMLanguage target_file_language(const char *target_file_path, cbm_lang_m
     return lang;
 }
 
+/* A `.inc` basename maps to BitBake, but discovery parses a C-family `.inc`
+ * fragment as C++ by content (cbm_disambiguate_inc). The basename alone cannot
+ * tell which grammar indexed the target, so a C or C++ caller is not across a
+ * language boundary from a `.inc` target. Fork-side: upstream 51fd445f routes
+ * the file but leaves its guards reading the extension table. */
+static bool c_family_reaches_inc(CBMLanguage caller_lang, CBMLanguage target_lang,
+                                 const char *target_file_path) {
+    if (!cbm_c_cpp_family(caller_lang) || target_lang != CBM_LANG_BITBAKE) {
+        return false;
+    }
+    const char *dot = strrchr(cbm_reg_path_basename(target_file_path), '.');
+    return dot && strcmp(dot, ".inc") == 0;
+}
+
 /* Build and configuration languages have no cross-language call semantics: a
  * Makefile's `$(eval ...)` or a CMake `function(...)` names nothing in a C
  * file, so a bare-name bind into another language is always a collision
@@ -1753,7 +1767,8 @@ bool cbm_suppress_cross_language_suffix_match(CBMLanguage caller_lang, const cha
     }
     CBMLanguage target_lang = target_file_language(target_file_path, NULL);
     return target_lang != CBM_LANG_COUNT &&
-           !same_language_family(caller_lang, target_lang, /*c_cpp_is_one_family=*/false);
+           !same_language_family(caller_lang, target_lang, /*c_cpp_is_one_family=*/false) &&
+           !c_family_reaches_inc(caller_lang, target_lang, target_file_path);
 }
 
 /* #1928: USAGE / WRITES / READS analog of the CALLS guard above. A variable or
@@ -1770,7 +1785,8 @@ static bool cross_language_ref(CBMLanguage caller_lang, const char *target_file_
     }
     CBMLanguage target_lang = target_file_language(target_file_path, memo);
     return target_lang != CBM_LANG_COUNT &&
-           !same_language_family(caller_lang, target_lang, /*c_cpp_is_one_family=*/true);
+           !same_language_family(caller_lang, target_lang, /*c_cpp_is_one_family=*/true) &&
+           !c_family_reaches_inc(caller_lang, target_lang, target_file_path);
 }
 
 bool cbm_suppress_cross_language_ref(CBMLanguage caller_lang, const char *target_file_path) {
