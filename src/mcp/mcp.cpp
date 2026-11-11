@@ -5742,6 +5742,114 @@ static int pick_resolved_node(const cbm_node_t *nodes, int count, bool *ambiguou
     return best;
 }
 
+static bool node_is_class_like(const cbm_node_t *n) {
+    return n->label && (strcmp(n->label, "Class") == 0 || strcmp(n->label, "Struct") == 0 ||
+                        strcmp(n->label, "Interface") == 0 || strcmp(n->label, "Trait") == 0);
+}
+
+static bool path_is_python_source(const char *path) {
+    const char *dot = path ? strrchr(path, '.') : nullptr;
+    return dot && (strcmp(dot, ".py") == 0 || strcmp(dot, ".pyi") == 0 || strcmp(dot, ".pyw") == 0);
+}
+
+/* A Python ClassName() call binds to the class's own __init__ (upstream
+ * lsp_constructor_init); only a class without one keeps the edge on the Class.
+ * The graph keeps that shape, so caller queries on a Python class bridge here:
+ * seeds holds the candidates (shallow copies, borrowed) followed by each Python
+ * class-like candidate's own <qn>.__init__ Method (owned from init_start on).
+ * Empty when nothing bridges or an allocation fails; callers then use the
+ * candidates unchanged. Outbound queries never use the bridged seeds. */
+typedef struct {
+    cbm_node_t *seeds;
+    int seed_count;
+    int init_start;
+} py_ctor_bridge_t;
+
+static void py_ctor_bridge_free(py_ctor_bridge_t *b) {
+    for (int i = b->init_start; i < b->seed_count; i++) {
+        free_node_contents(&b->seeds[i]);
+    }
+    free(b->seeds);
+    memset(b, 0, sizeof(*b));
+}
+
+static void py_ctor_bridge_build(cbm_store_t *store, const char *project, const cbm_node_t *nodes,
+                                 int count, py_ctor_bridge_t *out) {
+    memset(out, 0, sizeof(*out));
+    int classes = 0;
+    for (int i = 0; i < count; i++) {
+        if (node_is_class_like(&nodes[i]) && nodes[i].qualified_name &&
+            path_is_python_source(nodes[i].file_path)) {
+            classes++;
+        }
+    }
+    if (classes == 0) {
+        return;
+    }
+    cbm_node_t *seeds = (cbm_node_t *)malloc((size_t)(count + classes) * sizeof(cbm_node_t));
+    if (!seeds) {
+        return;
+    }
+    memcpy(seeds, nodes, (size_t)count * sizeof(cbm_node_t));
+    int n = count;
+    for (int i = 0; i < count; i++) {
+        if (!node_is_class_like(&nodes[i]) || !nodes[i].qualified_name ||
+            !path_is_python_source(nodes[i].file_path)) {
+            continue;
+        }
+        size_t len = strlen(nodes[i].qualified_name) + sizeof(".__init__");
+        char *init_qn = (char *)malloc(len);
+        if (!init_qn) {
+            continue;
+        }
+        snprintf(init_qn, len, "%s.__init__", nodes[i].qualified_name);
+        cbm_node_t init = {0};
+        if (cbm_store_find_node_by_qn(store, project, init_qn, &init) == CBM_STORE_OK) {
+            bool keep = init.label && strcmp(init.label, "Method") == 0;
+            for (int j = 0; keep && j < n; j++) {
+                keep = seeds[j].id != init.id;
+            }
+            if (keep) {
+                seeds[n++] = init;
+            } else {
+                free_node_contents(&init);
+            }
+        }
+        free(init_qn);
+    }
+    if (n == count) {
+        free(seeds);
+        return;
+    }
+    out->seeds = seeds;
+    out->seed_count = n;
+    out->init_start = count;
+}
+
+/* Name the __init__ whose callers were merged in: one string, or an array when
+ * several same-named Python classes were unioned. */
+static void py_ctor_bridge_add_marker(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                      const py_ctor_bridge_t *b) {
+    int bridged = b->seed_count - b->init_start;
+    if (bridged <= 0) {
+        return;
+    }
+    if (bridged == 1) {
+        const char *qn = b->seeds[b->init_start].qualified_name;
+        yyjson_mut_obj_add_strcpy(doc, root, "constructor_callers_via", qn ? qn : "");
+    } else {
+        yyjson_mut_val *via = yyjson_mut_arr(doc);
+        for (int i = b->init_start; i < b->seed_count; i++) {
+            const char *qn = b->seeds[i].qualified_name;
+            yyjson_mut_arr_add_strcpy(doc, via, qn ? qn : "");
+        }
+        yyjson_mut_obj_add_val(doc, root, "constructor_callers_via", via);
+    }
+    yyjson_mut_obj_add_str(doc, root, "constructor_callers_note",
+                           "Python binds ClassName() calls to the class's own __init__; its "
+                           "callers are included as callers of the class.");
+}
+
 static bool trace_accept_production_file(const char *file_path, void *) {
     return !is_test_file(file_path);
 }
@@ -6533,13 +6641,20 @@ static char *handle_trace_call_path_impl(cbm_mcp_server_t *srv, const char *args
         }
     }
 
+    /* Inbound only: a Python class's construction callers sit on its own
+     * __init__ (see py_ctor_bridge_build). */
+    py_ctor_bridge_t ctor_bridge = {0};
     if (do_inbound && !traversal_error) {
+        py_ctor_bridge_build(store, project, nodes, node_count, &ctor_bridge);
+        const cbm_node_t *in_seeds = ctor_bridge.seeds ? ctor_bridge.seeds : nodes;
+        int in_seed_count = ctor_bridge.seeds ? ctor_bridge.seed_count : node_count;
+        py_ctor_bridge_add_marker(doc, root, &ctor_bridge);
         if (entry) {
-            (void)trace_direct_path_to_json(store, project, entry, nodes, node_count, depth,
+            (void)trace_direct_path_to_json(store, project, entry, in_seeds, in_seed_count, depth,
                                             max_work, min_confidence, include_tests, risk_labels,
                                             freshness_mode, doc, root);
         } else {
-            if (bfs_union_same_name(store, nodes, node_count, "inbound", edge_types,
+            if (bfs_union_same_name(store, in_seeds, in_seed_count, "inbound", edge_types,
                                     edge_type_count, depth, include_tests,
                                     &tr_in) != CBM_STORE_OK) {
                 yyjson_mut_obj_add_strcpy(doc, root, "error", cbm_store_error(store));
@@ -6596,6 +6711,7 @@ static char *handle_trace_call_path_impl(cbm_mcp_server_t *srv, const char *args
     if (do_inbound) {
         cbm_store_traverse_free(&tr_in);
     }
+    py_ctor_bridge_free(&ctor_bridge);
 
     cbm_store_free_nodes(nodes, node_count);
     free(func_name);
@@ -12212,6 +12328,7 @@ typedef struct {
     int caller_file_count;
     int caller_files_offset;
     bool overload_family;
+    py_ctor_bridge_t ctor_bridge; /* inbound seeds for a Python class */
 } inspect_ctx_t;
 
 static bool node_is_declaration(const cbm_node_t *node) {
@@ -12643,6 +12760,7 @@ static char *inspect_build_json(inspect_ctx_t *c, int callers_limit, int callees
     }
     yyjson_mut_obj_add_val(doc, root, "callers", callers);
     yyjson_mut_obj_add_int(doc, root, "callers_total", c->callers.count);
+    py_ctor_bridge_add_marker(doc, root, &c->ctor_bridge);
     yyjson_mut_obj_add_int(doc, root, "callers_offset", c->callers_offset);
     yyjson_mut_obj_add_bool(doc, root, "callers_has_more",
                             c->callers_offset + shown < c->callers.count);
@@ -12750,11 +12868,6 @@ static char *inspect_build_json(inspect_ctx_t *c, int callers_limit, int callees
     char *json = yy_doc_to_str(doc);
     yyjson_mut_doc_free(doc);
     return json;
-}
-
-static bool node_is_class_like(const cbm_node_t *n) {
-    return n->label && (strcmp(n->label, "Class") == 0 || strcmp(n->label, "Struct") == 0 ||
-                        strcmp(n->label, "Interface") == 0 || strcmp(n->label, "Trait") == 0);
 }
 
 static char *handle_inspect_symbol_impl(cbm_mcp_server_t *srv, const char *args) {
@@ -12966,10 +13079,18 @@ static char *handle_inspect_symbol_impl(cbm_mcp_server_t *srv, const char *args)
 
     /* Callers of every candidate (a header declaration and its .cpp
      * definition are separate nodes and calls may attach to either), split
-     * into production callers and tests. */
+     * into production callers and tests. A Python class adds its own
+     * __init__, where ClassName() calls bind; neighbors dedupe by caller id,
+     * so totals, pages and the file rollup all see one merged set. */
+    py_ctor_bridge_build(store, project, nodes, node_count, &c.ctor_bridge);
     inspect_neighbors_t all_in;
     memset(&all_in, 0, sizeof(all_in));
-    inspect_collect_neighbors(store, nodes, node_count, true, "CALLS", &all_in);
+    if (c.ctor_bridge.seeds) {
+        inspect_collect_neighbors(store, c.ctor_bridge.seeds, c.ctor_bridge.seed_count, true,
+                                  "CALLS", &all_in);
+    } else {
+        inspect_collect_neighbors(store, nodes, node_count, true, "CALLS", &all_in);
+    }
     for (int i = 0; i < all_in.count; i++) {
         inspect_neighbors_t *dst =
             is_test_file(all_in.items[i].node.file_path) ? &c.tests : &c.callers;
@@ -13051,6 +13172,7 @@ static char *handle_inspect_symbol_impl(cbm_mcp_server_t *srv, const char *args)
     free(c.decls);
     cbm_store_free_nodes(c.declaration_nodes, c.declaration_node_count);
     free(c.caller_files);
+    py_ctor_bridge_free(&c.ctor_bridge);
     cbm_store_free_nodes(nodes, node_count);
     free(symbol);
     free(project);

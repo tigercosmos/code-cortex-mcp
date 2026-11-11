@@ -6253,6 +6253,187 @@ TEST(tool_inspect_symbol_ambiguous_returns_suggestions) {
     PASS();
 }
 
+/* Upstream binds a Python ClassName() call to the class's own __init__; the
+ * fork keeps that graph shape and bridges caller queries on the class. */
+static void ctor_bridge_call(cbm_store_t *store, int64_t source, int64_t target, int line,
+                             const char *strategy) {
+    char props[128];
+    snprintf(props, sizeof(props), "{\"line\":%d,\"confidence\":0.86,\"strategy\":\"%s\"}", line,
+             strategy);
+    cbm_edge_t edge = {.project = "test-project",
+                       .source_id = source,
+                       .target_id = target,
+                       .type = "CALLS",
+                       .properties_json = props};
+    cbm_store_insert_edge(store, &edge);
+}
+
+static void ctor_bridge_fixture(cbm_store_t *store) {
+    // Python class with its own __init__: construction calls bind to __init__.
+    int64_t service = inspect_test_node(store, "Class", "Service", "test-project.pkg.mod.Service",
+                                        "pkg/mod.py", 3, "{}");
+    int64_t init = inspect_test_node(store, "Method", "__init__",
+                                     "test-project.pkg.mod.Service.__init__", "pkg/mod.py", 4, "{}");
+    int64_t configure = inspect_test_node(store, "Function", "configure",
+                                          "test-project.pkg.mod.configure", "pkg/mod.py", 1, "{}");
+    int64_t build = inspect_test_node(store, "Function", "build", "test-project.pkg.mod.build",
+                                      "pkg/mod.py", 10, "{}");
+    int64_t make = inspect_test_node(store, "Function", "make_service",
+                                     "test-project.app.main.make_service", "app/main.py", 5, "{}");
+    int64_t legacy = inspect_test_node(store, "Function", "legacy", "test-project.app.old.legacy",
+                                       "app/old.py", 2, "{}");
+    ctor_bridge_call(store, init, configure, 5, "lsp_direct");
+    ctor_bridge_call(store, build, init, 11, "lsp_constructor_init");
+    ctor_bridge_call(store, make, init, 6, "lsp_constructor_init");
+    // One caller reaching both nodes stays one caller.
+    ctor_bridge_call(store, make, service, 7, "lsp_constructor");
+    ctor_bridge_call(store, legacy, service, 3, "lsp_constructor");
+
+    // Python class without its own __init__: the edge stays on the Class.
+    int64_t plain = inspect_test_node(store, "Class", "Plain", "test-project.pkg.plain.Plain",
+                                      "pkg/plain.py", 1, "{}");
+    int64_t use_plain = inspect_test_node(store, "Function", "use_plain",
+                                          "test-project.pkg.plain.use_plain", "pkg/plain.py", 5,
+                                          "{}");
+    ctor_bridge_call(store, use_plain, plain, 6, "lsp_constructor");
+
+    // A TypeScript class with a method spelled __init__ is not bridged.
+    inspect_test_node(store, "Class", "Widget", "test-project.ui.widget.Widget", "ui/widget.ts", 1,
+                      "{}");
+    int64_t ts_init = inspect_test_node(store, "Method", "__init__",
+                                        "test-project.ui.widget.Widget.__init__", "ui/widget.ts",
+                                        2, "{}");
+    int64_t render = inspect_test_node(store, "Function", "render", "test-project.ui.app.render",
+                                       "ui/app.ts", 3, "{}");
+    ctor_bridge_call(store, render, ts_init, 4, "lsp_direct");
+}
+
+static char *ctor_bridge_trace(cbm_mcp_server_t *srv, const char *name, const char *direction) {
+    char request[1024];
+    snprintf(request, sizeof(request),
+             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{"
+             "\"name\":\"trace_path\",\"arguments\":{\"project\":\"test-project\","
+             "\"function_name\":\"%s\",\"direction\":\"%s\",\"depth\":1}}}",
+             name, direction);
+    char *response = cbm_mcp_server_handle(srv, request);
+    char *text = response ? extract_text_content(response) : nullptr;
+    free(response);
+    return text;
+}
+
+TEST(tool_trace_path_python_class_includes_own_init_callers) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    ctor_bridge_fixture(cbm_mcp_server_store(srv));
+    char *text = ctor_bridge_trace(srv, "Service", "inbound");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NULL(strstr(text, "\"error\""));
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"build\""));
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"make_service\""));
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"legacy\""));
+    ASSERT_NOT_NULL(strstr(text, "\"file\":\"app/main.py\""));
+    ASSERT_NOT_NULL(
+        strstr(text, "\"constructor_callers_via\":\"test-project.pkg.mod.Service.__init__\""));
+    // make_service reaches both nodes but is listed once.
+    const char *first = strstr(text, "\"name\":\"make_service\"");
+    ASSERT_NULL(strstr(first + 1, "\"name\":\"make_service\""));
+    free(text);
+
+    // Both directions: callers bridge, callees do not walk the __init__ body.
+    text = ctor_bridge_trace(srv, "Service", "both");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"build\""));
+    ASSERT_NOT_NULL(strstr(text, "\"constructor_callers_via\""));
+    ASSERT_NULL(strstr(text, "configure"));
+    free(text);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_trace_path_constructor_bridge_scope) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    ctor_bridge_fixture(cbm_mcp_server_store(srv));
+    // Outbound is unchanged: no marker, no __init__ callees.
+    char *text = ctor_bridge_trace(srv, "Service", "outbound");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NULL(strstr(text, "constructor_callers_via"));
+    ASSERT_NULL(strstr(text, "configure"));
+    free(text);
+    // No own __init__: the Class edge alone, no marker.
+    text = ctor_bridge_trace(srv, "Plain", "inbound");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"name\":\"use_plain\""));
+    ASSERT_NULL(strstr(text, "constructor_callers_via"));
+    free(text);
+    // Not Python: the __init__ method's callers stay its own.
+    text = ctor_bridge_trace(srv, "Widget", "inbound");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NULL(strstr(text, "render"));
+    ASSERT_NULL(strstr(text, "constructor_callers_via"));
+    free(text);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_inspect_symbol_python_class_includes_own_init_callers) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    ctor_bridge_fixture(cbm_mcp_server_store(srv));
+    char *text = inspect_test_call(
+        srv, "{\"project\":\"test-project\",\"symbol\":\"Service\",\"source_lines\":0}");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NULL(strstr(text, "\"error\""));
+    ASSERT_NOT_NULL(strstr(text, "\"label\":\"Class\""));
+    ASSERT_NOT_NULL(strstr(text, "\"callers_total\":3"));
+    ASSERT_NOT_NULL(strstr(text, "\"caller_files_total\":3"));
+    ASSERT_NOT_NULL(strstr(text, "\"file\":\"app/main.py\",\"call_sites\":2"));
+    ASSERT_NOT_NULL(strstr(text, "\"file\":\"pkg/mod.py\",\"call_sites\":1"));
+    ASSERT_NOT_NULL(
+        strstr(text, "\"constructor_callers_via\":\"test-project.pkg.mod.Service.__init__\""));
+    ASSERT_NOT_NULL(strstr(text, "\"callees_total\":0"));
+    free(text);
+    // Pages walk the merged set: callers sort by file, so offset 2 is pkg/mod.py.
+    text = inspect_test_call(srv, "{\"project\":\"test-project\",\"symbol\":\"Service\","
+                                  "\"source_lines\":0,\"callers_limit\":1,\"callers_offset\":2}");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"callers_total\":3"));
+    ASSERT_NOT_NULL(strstr(text, "\"qualified_name\":\"test-project.pkg.mod.build\""));
+    ASSERT_NOT_NULL(strstr(text, "\"callers_has_more\":false"));
+    free(text);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_inspect_symbol_constructor_bridge_scope) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    ctor_bridge_fixture(cbm_mcp_server_store(srv));
+    char *text = inspect_test_call(
+        srv, "{\"project\":\"test-project\",\"symbol\":\"Plain\",\"source_lines\":0}");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"callers_total\":1"));
+    ASSERT_NULL(strstr(text, "constructor_callers_via"));
+    free(text);
+    text = inspect_test_call(
+        srv, "{\"project\":\"test-project\",\"symbol\":\"Widget\",\"source_lines\":0}");
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"callers_total\":0"));
+    ASSERT_NULL(strstr(text, "render"));
+    ASSERT_NULL(strstr(text, "constructor_callers_via"));
+    free(text);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
 TEST(tool_search_code_max_bytes_truncates_with_continuation) {
     char tmp[256];
     cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
@@ -8953,6 +9134,10 @@ SUITE(mcp) {
     RUN_TEST(tool_inspect_symbol_reports_bounded_distinct_call_lines);
     RUN_TEST(tool_inspect_symbol_accepts_scoped_name);
     RUN_TEST(tool_inspect_symbol_ambiguous_returns_suggestions);
+    RUN_TEST(tool_trace_path_python_class_includes_own_init_callers);
+    RUN_TEST(tool_trace_path_constructor_bridge_scope);
+    RUN_TEST(tool_inspect_symbol_python_class_includes_own_init_callers);
+    RUN_TEST(tool_inspect_symbol_constructor_bridge_scope);
     RUN_TEST(tool_search_code_max_bytes_truncates_with_continuation);
     RUN_TEST(tool_project_resolves_from_cwd);
 #ifndef _WIN32
