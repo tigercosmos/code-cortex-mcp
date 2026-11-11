@@ -119,6 +119,12 @@ TSNode cbm_c_macro_wrapped_name_node(TSNode decl);
 // language for that reason; every caller must pass ctx->language.
 char *cbm_func_name_node_text(CBMArena *a, TSNode name_node, const char *source, CBMLanguage lang);
 
+// Haskell: an infix-form operator definition (`a <+> b = …`) resolves to a bare
+// `operator` node; returns `(<+>)`, the name the prefix form already gets.
+// Returns `text` unchanged for any other node. Shared by the defs and unified
+// extractors so the def name and call-scope QN agree (#2440).
+char *cbm_haskell_operator_def_name(CBMArena *a, TSNode name_node, char *text);
+
 // ── Nix attrpath helpers ──
 // A Nix binding's name is a PATH (`a.b.c = …`) whose segments may be quoted or
 // interpolated. Shared by the defs and unified (call-scope) extractors so both

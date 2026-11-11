@@ -2144,6 +2144,54 @@ TEST(haskell_function) {
     PASS();
 }
 
+/* #2440 (upstream 72dc59fe): an infix-form definition (`a <+> b = ...`,
+ * ``x `plus` y = ...``) has no `name` field; its first named child is an
+ * `infix` node whose first child is the LEFT OPERAND, so the def was named
+ * `a` / `x`. It must be named after the operator, consistent with the prefix
+ * form `(<+>) a b = ...`; and the call scope must agree with the def QN. */
+TEST(haskell_infix_definition_name) {
+    CBMFileResult *r = extract("module M where\n"
+                               "\n"
+                               "(<+>) :: Int -> Int -> Int\n"
+                               "a <+> b = a + b\n"
+                               "\n"
+                               "plus :: Int -> Int -> Int\n"
+                               "x `plus` y = x + y\n"
+                               "\n"
+                               "f :: Int\n"
+                               "f = 1 <+> 2\n"
+                               "\n"
+                               "g :: Int -> Int -> Int\n"
+                               "a `g` b = negate a\n",
+                               CBM_LANG_HASKELL, "t", "M.hs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Function", "f"));
+    ASSERT(has_def(r, "Function", "plus"));
+    ASSERT(has_def(r, "Function", "(<+>)"));
+    ASSERT_FALSE(has_def(r, "Function", "a"));
+    ASSERT_FALSE(has_def(r, "Function", "x"));
+    /* The call inside the infix-form `g` is scoped to g's def QN. */
+    const char *g_qn = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, "g") == 0) {
+            g_qn = r->defs.items[i].qualified_name;
+        }
+    }
+    ASSERT_NOT_NULL(g_qn);
+    int scoped = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        if (c->callee_name && strcmp(c->callee_name, "negate") == 0 && c->enclosing_func_qn &&
+            strcmp(c->enclosing_func_qn, g_qn) == 0) {
+            scoped = 1;
+        }
+    }
+    ASSERT(scoped);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- OCaml --- */
 TEST(ocaml_function) {
     CBMFileResult *r =
@@ -4925,6 +4973,25 @@ TEST(extract_java_method_annotations_issue382) {
     PASS();
 }
 
+/* Issue #2090: Solidity modifier_invocation tracked as decorator (upstream
+ * 6b56d78e / 7036c4d5). */
+TEST(solidity_modifier_decorator) {
+    CBMFileResult *r = extract("pragma solidity ^0.8.0;\n"
+                               "contract Vault {\n"
+                               "    modifier onlyOwner() { _; }\n"
+                               "    function withdraw() public onlyOwner {\n"
+                               "    }\n"
+                               "}\n",
+                               CBM_LANG_SOLIDITY, "t", "Vault.sol");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *m = find_def_by_name(r, "withdraw");
+    ASSERT_NOT_NULL(m);
+    ASSERT(decorators_contain(m, "onlyOwner"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Distilled from PR #1245 (Andrew Hundt): unittest.mock's `@patch("x")` is a
  * bare decorator whose name collides with the HTTP verb, and its only argument
  * is a dotted target, not a path. The "/" fallback then minted a Route handler
@@ -4973,25 +5040,6 @@ TEST(extract_python_bare_decorator_route_rules) {
                                "@app.route()\n"
                                "def index():\n"
                                "    pass\n",
-/* Issue #2090: Solidity modifier_invocation tracked as decorator (upstream
- * 6b56d78e / 7036c4d5). */
-TEST(solidity_modifier_decorator) {
-    CBMFileResult *r = extract("pragma solidity ^0.8.0;\n"
-                               "contract Vault {\n"
-                               "    modifier onlyOwner() { _; }\n"
-                               "    function withdraw() public onlyOwner {\n"
-                               "    }\n"
-                               "}\n",
-                               CBM_LANG_SOLIDITY, "t", "Vault.sol");
-    ASSERT_NOT_NULL(r);
-    ASSERT_FALSE(r->has_error);
-    const CBMDefinition *m = find_def_by_name(r, "withdraw");
-    ASSERT_NOT_NULL(m);
-    ASSERT(decorators_contain(m, "onlyOwner"));
-    cbm_free_result(r);
-    PASS();
-}
-
                                CBM_LANG_PYTHON, "t", "routes.py");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
@@ -12066,6 +12114,7 @@ SUITE(extraction) {
     /* Functional */
     RUN_TEST(elixir_function);
     RUN_TEST(haskell_function);
+    RUN_TEST(haskell_infix_definition_name);
     RUN_TEST(ocaml_function);
     RUN_TEST(erlang_function);
 
@@ -12256,6 +12305,7 @@ SUITE(extraction) {
     RUN_TEST(js_index_module_qn_not_collide_with_folder);
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);
+    RUN_TEST(solidity_modifier_decorator);
     RUN_TEST(extract_python_mock_patch_is_not_route);
     RUN_TEST(extract_python_bare_decorator_route_rules);
     RUN_TEST(extract_ts_decorators_survive_interleaved_comment);
@@ -12305,7 +12355,6 @@ SUITE(extraction) {
     RUN_TEST(extract_ts_url_builder_issue1009);
     RUN_TEST(extract_ts_await_generic_call_issue2210);
     RUN_TEST(extract_ts_route_handler_after_named_middleware);
-    RUN_TEST(solidity_modifier_decorator);
     RUN_TEST(extract_ts_route_handler_after_inline_middleware);
     RUN_TEST(extract_ts_url_builder_composed_issue1009);
     RUN_TEST(extract_c_url_builder_gated_issue1009);

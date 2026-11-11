@@ -413,6 +413,33 @@ static TSNode resolve_lean_func_name(TSNode node, TSNode name) {
     return cbm_find_child_by_kind(node, "ident");
 }
 
+// Haskell infix-form definition head (`a <+> b`, ``x `plus` y``): the defined
+// name is the operator, not the left operand that is the head's first child. A
+// backticked `infix_id` yields its inner variable (`plus`); a symbolic `operator`
+// is returned as-is and parenthesised by cbm_haskell_operator_def_name, matching
+// the prefix form `(<+>) a b = ...` (#2440, upstream 72dc59fe).
+static TSNode resolve_haskell_infix_head_name(TSNode head) {
+    enum { INFIX_MIN_CHILDREN = 3, INFIX_OP_IDX = 1 };
+    TSNode op = ts_node_child_by_field_name(head, TS_FIELD("operator"));
+    if (ts_node_is_null(op) && ts_node_child_count(head) >= INFIX_MIN_CHILDREN) {
+        op = ts_node_child(head, INFIX_OP_IDX);
+    }
+    if (!ts_node_is_null(op)) {
+        const char *ok = ts_node_type(op);
+        if (strcmp(ok, "operator") == 0) {
+            return op;
+        }
+        if (strcmp(ok, "infix_id") == 0) {
+            TSNode v = cbm_find_child_by_kind(op, "variable");
+            if (!ts_node_is_null(v)) {
+                return v;
+            }
+        }
+    }
+    TSNode null_node = {0};
+    return null_node;
+}
+
 // Haskell: resolve function name from first named child (variable/name).
 static TSNode resolve_haskell_func_name(TSNode node) {
     if (ts_node_named_child_count(node) > 0) {
@@ -420,6 +447,9 @@ static TSNode resolve_haskell_func_name(TSNode node) {
         const char *hk = ts_node_type(head);
         if (strcmp(hk, "variable") == 0 || strcmp(hk, "name") == 0) {
             return head;
+        }
+        if (strcmp(hk, "infix") == 0) {
+            return resolve_haskell_infix_head_name(head);
         }
         if (ts_node_named_child_count(head) > 0) {
             TSNode v = ts_node_named_child(head, 0);
@@ -4886,6 +4916,13 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     }
 
     char *name = cbm_node_text(a, name_node, ctx->source);
+    /* Haskell infix-form operator definition (`a <+> b = ...`): the resolver
+     * hands back the bare `operator` node; name it `(<+>)` like the prefix form
+     * (#2440). Same shared helper as cbm_func_name_node_text, the call-scope
+     * side, so the def name and the scope QN cannot disagree. */
+    if (name && ctx->language == CBM_LANG_HASKELL) {
+        name = cbm_haskell_operator_def_name(a, name_node, name);
+    }
     /* Nix quoted attrpath segment (`"kebab-case" = a: a;`): the node text carries
      * the delimiters, so strip them here — the same normalization the call-scope
      * side gets from cbm_func_name_node_text, via the same shared helper, so the
